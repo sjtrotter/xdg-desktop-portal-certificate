@@ -1,49 +1,63 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
-# dev-stack.sh -- run the experimental Certificate portal end to end on a
-# PRIVATE session bus: a development xdg-desktop-portal frontend, this
-# repository's backend, and then tools/trigger-certificate.sh against them.
+# dev-stack.sh -- run the experimental Certificate portal end to end: a
+# development xdg-desktop-portal frontend from the branch
+# experimental/certificate-webauthentication, this repository's backend, and
+# then tools/certificate-e2e.py against the PUBLIC interface.
 #
-# Nothing here touches the user's real session bus. Everything runs inside
-# `dbus-run-session`, which is why the script re-executes itself: the outer
-# invocation starts a private bus, the inner one is the payload.
+# Two modes.
 #
-#     tools/dev-stack.sh                  # build dir found via $XDP_BUILD
-#     XDP_BUILD=/path/to/xdp/build tools/dev-stack.sh
+#   PRIVATE BUS (the default). Everything runs inside `dbus-run-session`, so
+#   nothing touches the user's real session bus. This is the mode to use for
+#   everything except a run that has to show windows on the real desktop.
+#
+#   --live. Uses the real session bus and starts the frontend with --replace,
+#   taking org.freedesktop.portal.Desktop away from the system one for the
+#   duration. THE SYSTEM PORTAL COMES BACK BY D-BUS ACTIVATION as soon as this
+#   script's frontend exits and something asks for the name again; see
+#   docs/TESTING.md for how to check that it did. Use this when the chooser and
+#   the PIN prompt have to appear on the real display, which is what a run
+#   against a real card needs.
+#
+#     tools/dev-stack.sh                          # private bus, no card expected
+#     tools/dev-stack.sh -- --expect-no-certificate
+#     tools/dev-stack.sh --keep                   # leave it up for manual gdbus
+#     tools/dev-stack.sh --live -- --purpose client_auth
+#     tools/dev-stack.sh --softhsm                # against a SoftHSM fixture token
 #
 # WHAT IT NEEDS
 #
-#   $XDP_BUILD          a built xdg-desktop-portal from the branch
-#                       experimental/certificate-webauthentication.
-#                       Default: ../xdg-desktop-portal/build, relative to this
-#                       repository. It must contain
-#                       desktop-portal/xdg-desktop-portal and
-#                       document-portal/xdg-permission-store.
-#   $BACKEND            this repository's backend binary.
-#                       Default: ./build/xdg-desktop-portal-certificate
-#   $XDP_ENV            optional file to source first, for a scratch-prefix
-#                       build (LD_LIBRARY_PATH, PKG_CONFIG_PATH, PATH...).
+#   $XDP_BUILD   a built xdg-desktop-portal from the branch
+#                experimental/certificate-webauthentication. Default:
+#                ../xdg-desktop-portal/build relative to this repository. It
+#                must contain desktop-portal/xdg-desktop-portal and
+#                document-portal/xdg-permission-store.
+#   $BACKEND     this repository's backend binary. Default:
+#                ./build/src/xdg-desktop-portal-certificate
+#   $XDP_ENV     a file to source first, for a frontend built against a scratch
+#                prefix -- LD_LIBRARY_PATH for libdex, PKG_CONFIG_PATH,
+#                GI_TYPELIB_PATH. Default: .xdp-env in this repository if it
+#                exists. The frontend branch's libdex is usually not installed
+#                system wide; see docs/TESTING.md.
 #
 # WHAT IT DOES
 #
-#   1. writes a throwaway $XDG_DESKTOP_PORTAL_DIR containing this repository's
-#      certificate.portal (rewritten to point at whatever backend binary is
-#      being tested) and a portals.conf selecting it. Setting
+#   1. writes a throwaway $XDG_DESKTOP_PORTAL_DIR holding this repository's
+#      certificate.portal and a portals.conf that routes
+#      org.freedesktop.impl.portal.experimental.Certificate to it. Setting
 #      XDG_DESKTOP_PORTAL_DIR makes the frontend ignore every other .portal and
 #      portals.conf directory on the machine
 #      (desktop-portal/xdp-portal-config.c, lines 340-344 and 508-516), so
-#      nothing installed system-wide can interfere.
+#      nothing installed system wide can interfere.
 #   2. starts xdg-permission-store -- xdg-desktop-portal refuses to start
-#      without it.
-#   3. starts this repository's backend on the private bus.
+#      without it -- on the private bus. In --live mode the session's own is
+#      used.
+#   3. starts this repository's backend, so that its stderr is visible rather
+#      than being swallowed by D-Bus activation.
 #   4. starts the frontend with
 #      XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate.
-#   5. runs tools/trigger-certificate.sh.
-#
-# THE BACKEND IS A STUB THAT EXITS 70, so step 5 will not get a credential. What
-# it does show is the wiring: that the frontend finds the .portal file, matches
-# the impl interface, exports the public one, and activates the backend.
+#   5. runs tools/certificate-e2e.py with whatever came after `--`.
 
 set -u
 
@@ -51,68 +65,145 @@ here() { cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd; }
 REPO="$(here)"
 
 XDP_BUILD="${XDP_BUILD:-$REPO/../xdg-desktop-portal/build}"
-BACKEND="${BACKEND:-$REPO/build/xdg-desktop-portal-certificate}"
-XDP_ENV="${XDP_ENV:-}"
+BACKEND="${BACKEND:-$REPO/build/src/xdg-desktop-portal-certificate}"
+XDP_ENV="${XDP_ENV:-$REPO/.xdp-env}"
 DEVDIR="${DEVDIR:-${TMPDIR:-/tmp}/xdp-certificate-dev.$$}"
 
 FRONTEND_BIN="$XDP_BUILD/desktop-portal/xdg-desktop-portal"
 PERMSTORE_BIN="$XDP_BUILD/document-portal/xdg-permission-store"
+
+MODE=private
+KEEP=0
+RUN_E2E=1
+SOFTHSM=0
+E2E_ARGS=()
 
 die() {
 	echo "${0##*/}: $*" >&2
 	exit 40
 }
 
+usage() {
+	sed -n '3,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	exit 0
+}
+
+parse_args() {
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--keep) KEEP=1 ;;
+		--live) MODE=live ;;
+		--no-e2e) RUN_E2E=0 ;;
+		--softhsm) SOFTHSM=1 ;;
+		-h | --help) usage ;;
+		--)
+			shift
+			E2E_ARGS=("$@")
+			return
+			;;
+		*) die "unknown option '$1'; try --help" ;;
+		esac
+		shift
+	done
+}
+
 preflight() {
+	# shellcheck disable=SC1090
 	[ -n "$XDP_ENV" ] && [ -f "$XDP_ENV" ] && . "$XDP_ENV"
+
 	command -v dbus-run-session >/dev/null || die "dbus-run-session not found (dbus-daemon package)"
-	command -v gdbus >/dev/null || die "gdbus not found (glib2 tools)"
+	command -v python3 >/dev/null || die "python3 not found"
+	python3 -c 'import gi' 2>/dev/null || die "python3-gobject not found (the e2e client needs it)"
+
 	[ -x "$FRONTEND_BIN" ] || die "no frontend at $FRONTEND_BIN; set XDP_BUILD"
-	[ -x "$PERMSTORE_BIN" ] || die "no permission store at $PERMSTORE_BIN; set XDP_BUILD"
 	[ -x "$BACKEND" ] || die "no backend at $BACKEND; run 'meson setup build && ninja -C build' or set BACKEND"
+
+	if ldd "$FRONTEND_BIN" 2>/dev/null | grep -q 'not found'; then
+		echo "${0##*/}: the frontend cannot resolve its libraries:" >&2
+		ldd "$FRONTEND_BIN" | grep 'not found' >&2
+		echo >&2
+		echo "The branch needs libdex, which Fedora does not install by default." >&2
+		echo "Point XDP_ENV at a file that sets LD_LIBRARY_PATH for the scratch" >&2
+		echo "prefix it was built against, or put one at $REPO/.xdp-env." >&2
+		echo "docs/TESTING.md has the recipe." >&2
+		exit 40
+	fi
 }
 
 write_devdir() {
 	mkdir -p "$DEVDIR"
-	# The installed .portal file names the installed binary. Here we want the
-	# one just built, so the D-Bus service file is written against $BACKEND.
+
+	# The comments are stripped so the file is readable in the log below; the
+	# installed one keeps them.
 	sed -e '/^#/d' -e '/^$/d' "$REPO/data/certificate.portal.in" >"$DEVDIR/certificate.portal"
+
+	# Named explicitly rather than with default=certificate, so that the log
+	# line the frontend prints names the interface this backend implements.
 	cat >"$DEVDIR/portals.conf" <<-EOF
 		[preferred]
-		default=certificate;
+		default=none;
+		org.freedesktop.impl.portal.experimental.Certificate=certificate;
 	EOF
-	mkdir -p "$DEVDIR/services"
-	cat >"$DEVDIR/services/org.freedesktop.impl.portal.desktop.certificate.service" <<-EOF
-		[D-BUS Service]
-		Name=org.freedesktop.impl.portal.desktop.certificate
-		Exec=$BACKEND
-	EOF
+
 	echo "${0##*/}: dev portal dir $DEVDIR"
 	echo "--- certificate.portal"
-	cat "$DEVDIR/certificate.portal"
+	sed 's/^/    /' "$DEVDIR/certificate.portal"
 	echo "--- portals.conf"
-	cat "$DEVDIR/portals.conf"
+	sed 's/^/    /' "$DEVDIR/portals.conf"
+	echo
+}
+
+softhsm_env() {
+	# A software token, for proving the whole path -- chooser, PIN prompt,
+	# C_Login, C_Sign, verification -- without a card. tools/softhsm-fixture.sh
+	# creates it. A test that has only been run against a software token has
+	# not been run; this is the rehearsal, not the performance.
+	[ "$SOFTHSM" = 1 ] || return 0
+
+	: "${SOFTHSM_DIR:=${TMPDIR:-/tmp}/xdp-certificate-softhsm}"
+	[ -f "$SOFTHSM_DIR/softhsm2.conf" ] ||
+		die "no SoftHSM fixture at $SOFTHSM_DIR; run tools/softhsm-fixture.sh first"
+
+	export SOFTHSM2_CONF="$SOFTHSM_DIR/softhsm2.conf"
+	BACKEND_ARGS+=(--module "$(cat "$SOFTHSM_DIR/module-path")")
+	echo "${0##*/}: using the SoftHSM fixture in $SOFTHSM_DIR"
+}
+
+start_stack() {
+	export XDG_DESKTOP_PORTAL_DIR="$DEVDIR"
+	export XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate
+
+	if [ "$MODE" = private ]; then
+		export XDG_CURRENT_DESKTOP=dev
+		"$PERMSTORE_BIN" &
+		PERM_PID=$!
+		sleep 1
+	else
+		PERM_PID=""
+	fi
+
+	"$BACKEND" "${BACKEND_ARGS[@]}" &
+	BACKEND_PID=$!
+
+	if [ "$MODE" = live ]; then
+		"$FRONTEND_BIN" -r -v &
+	else
+		"$FRONTEND_BIN" -v &
+	fi
+	FRONTEND_PID=$!
+
+	sleep 2
+}
+
+stop_stack() {
+	kill "$FRONTEND_PID" "$BACKEND_PID" ${PERM_PID:+"$PERM_PID"} 2>/dev/null
+	wait 2>/dev/null
 }
 
 inner() {
-	# Everything from here runs on the private bus dbus-run-session made.
-	export XDG_DESKTOP_PORTAL_DIR="$DEVDIR"
-	export XDG_CURRENT_DESKTOP=dev
-	export XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate
-
-	"$PERMSTORE_BIN" &
-	PERM_PID=$!
-	sleep 1
-
-	# Started explicitly rather than by activation, so its stderr is visible.
-	"$BACKEND" &
-	BACKEND_PID=$!
-
-	"$FRONTEND_BIN" -v &
-	FRONTEND_PID=$!
-	sleep 2
-
-	trap 'kill $FRONTEND_PID $BACKEND_PID $PERM_PID 2>/dev/null; wait 2>/dev/null' EXIT
+	BACKEND_ARGS=(--verbose)
+	softhsm_env
+	start_stack
 
 	echo
 	echo "=== expected in the frontend log above:"
@@ -120,24 +211,62 @@ inner() {
 	echo "===   Providing portal org.freedesktop.portal.experimental.Certificate"
 	echo
 
-	"$REPO/tools/trigger-certificate.sh" all
-	rc=$?
+	rc=0
+	if [ "$RUN_E2E" = 1 ]; then
+		python3 "$REPO/tools/certificate-e2e.py" "${E2E_ARGS[@]}"
+		rc=$?
+		echo
+		echo "${0##*/}: certificate-e2e.py exited $rc"
+	fi
 
-	echo
-	echo "${0##*/}: trigger exited $rc (the backend is a stub; a non-zero result here is expected)"
-	return 0
+	if [ "$KEEP" = 1 ]; then
+		echo
+		echo "${0##*/}: --keep: the stack is up."
+		echo "  DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+		echo "  XDG_DESKTOP_PORTAL_DIR=$XDG_DESKTOP_PORTAL_DIR"
+		echo "  run tools/certificate-e2e.py from another shell with that address,"
+		echo "  or gdbus introspect --session --dest org.freedesktop.portal.Desktop \\"
+		echo "      --object-path /org/freedesktop/portal/desktop"
+		echo "  Ctrl-C to tear it down."
+		wait "$FRONTEND_PID"
+	fi
+
+	stop_stack
+	return "$rc"
 }
 
 main() {
+	parse_args "$@"
+
 	if [ "${DEV_STACK_INNER:-0}" = "1" ]; then
+		trap stop_stack EXIT
 		inner
 		return
 	fi
+
 	preflight
 	write_devdir
+
+	if [ "$MODE" = live ]; then
+		echo "${0##*/}: --live: taking org.freedesktop.portal.Desktop on the REAL session bus."
+		echo "${0##*/}: the system portal returns by activation when this exits; see docs/TESTING.md."
+		echo
+		trap 'rm -rf -- "$DEVDIR"' EXIT
+		DEV_STACK_INNER=1 DEVDIR="$DEVDIR" XDP_BUILD="$XDP_BUILD" BACKEND="$BACKEND" \
+			XDP_ENV="$XDP_ENV" SOFTHSM="$SOFTHSM" \
+			"${BASH_SOURCE[0]}" $([ "$KEEP" = 1 ] && echo --keep) \
+			$([ "$RUN_E2E" = 0 ] && echo --no-e2e) --live \
+			$([ "$SOFTHSM" = 1 ] && echo --softhsm) -- "${E2E_ARGS[@]}"
+		return $?
+	fi
+
 	trap 'rm -rf -- "$DEVDIR"' EXIT
 	DEV_STACK_INNER=1 DEVDIR="$DEVDIR" XDP_BUILD="$XDP_BUILD" BACKEND="$BACKEND" \
-		dbus-run-session -- "${BASH_SOURCE[0]}"
+		XDP_ENV="$XDP_ENV" SOFTHSM="$SOFTHSM" \
+		dbus-run-session -- "${BASH_SOURCE[0]}" \
+		$([ "$KEEP" = 1 ] && echo --keep) \
+		$([ "$RUN_E2E" = 0 ] && echo --no-e2e) \
+		$([ "$SOFTHSM" = 1 ] && echo --softhsm) -- "${E2E_ARGS[@]}"
 }
 
 main "$@"

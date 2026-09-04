@@ -20,3 +20,6 @@ compile_commands.json
 # Nothing in this repository should ever contain a PIN, a PKCS#11 URI, a card serial or
 # a certificate from a real card. If a file like that appears here, the fix is to delete
 # it and rotate the credential, not to ignore it.
+
+# The local scratch-prefix environment tools/dev-stack.sh sources; see docs/TESTING.md.
+.xdp-env

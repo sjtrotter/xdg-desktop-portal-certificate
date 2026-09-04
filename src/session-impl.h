@@ -13,6 +13,7 @@
 #include <glib.h>
 
 #include "certificate.h"
+#include "broker/device.h"
 #include "tokens/discovery.h"
 #include "xdp-impl-dbus.h"
 
@@ -70,10 +71,7 @@ struct _CertificateImplSession
 	/* Device state. Touched from worker threads, so it has its own lock; the
 	 * GObject itself is only ever created and destroyed on the main thread. */
 	GMutex device_lock;
-	CK_FUNCTION_LIST* module;
-	CK_SESSION_HANDLE pkcs11_session;
-	CK_OBJECT_HANDLE private_key;
-	gboolean logged_in;
+	CertificateDevice device;
 };
 
 CertificateImplSession* certificate_impl_session_new(const char* session_handle,

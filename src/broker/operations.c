@@ -56,49 +56,13 @@ static void operation_succeed(Operation* operation, GBytes* result)
 
 /* ------------------------------------------------- opening the card session */
 
-/* Runs on a worker thread. Opens this backend's OWN PKCS#11 session on the
- * token that backs the grant, re-resolved by identity rather than by the slot
- * number it was found at, and locates the private key by CKA_ID. */
+/* Runs on a worker thread, under the session's device lock. */
 static gboolean ensure_session_locked(Operation* operation, GError** error)
 {
 	CertificateImplSession* session = operation->session;
-	CertificateCandidate* candidate = session->candidate;
-	CK_FUNCTION_LIST* module = NULL;
-	CK_SESSION_HANDLE handle = CK_INVALID_HANDLE;
-	CK_OBJECT_CLASS private_class = CKO_PRIVATE_KEY;
-	CK_ATTRIBUTE template_[2];
-	g_autoptr(GArray) keys = NULL;
 
-	if (session->module != NULL && session->pkcs11_session != CK_INVALID_HANDLE &&
-	    session->private_key != CK_INVALID_HANDLE)
-		return TRUE;
-
-	if (session->module == NULL)
-	{
-		if (!certificate_tokens_open_session(operation->tokens, candidate->token, &module, &handle,
-		                                     error))
-			return FALSE;
-
-		session->module = module;
-		session->pkcs11_session = handle;
-		session->logged_in = FALSE;
-	}
-
-	/* The private key may be invisible until the login: on such tokens this
-	 * runs again after C_Login. */
-	template_[0].type = CKA_CLASS;
-	template_[0].pValue = &private_class;
-	template_[0].ulValueLen = sizeof(private_class);
-	template_[1].type = CKA_ID;
-	template_[1].pValue = candidate->cka_id->data;
-	template_[1].ulValueLen = candidate->cka_id->len;
-
-	keys = certificate_pkcs11_find_objects(session->module, session->pkcs11_session, template_, 2,
-	                                       NULL);
-	if (keys != NULL && keys->len > 0)
-		session->private_key = g_array_index(keys, CK_OBJECT_HANDLE, 0);
-
-	return TRUE;
+	return certificate_device_open(&session->device, operation->tokens, session->candidate,
+	                               error);
 }
 
 /* ------------------------------------------------------------------- login */
@@ -109,53 +73,13 @@ static gboolean do_login(const char* pin, gpointer user_data, GError** error)
 {
 	Operation* operation = user_data;
 	CertificateImplSession* session = operation->session;
-	CK_RV rv;
+	gboolean ok;
 
 	g_mutex_lock(&session->device_lock);
-
-	if (session->module == NULL || session->pkcs11_session == CK_INVALID_HANDLE)
-	{
-		g_mutex_unlock(&session->device_lock);
-		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR,
-		                    CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
-		                    "The security token is no longer present");
-		return FALSE;
-	}
-
-	/* A protected authentication path gets a NULL PIN: the token or the reader
-	 * collects the secret and this process never sees it. */
-	rv = session->module->C_Login(session->pkcs11_session, CKU_USER,
-	                              pin != NULL ? (CK_UTF8CHAR_PTR) pin : NULL,
-	                              pin != NULL ? (CK_ULONG) strlen(pin) : 0);
-
-	if (rv == CKR_USER_ALREADY_LOGGED_IN)
-		rv = CKR_OK;
-
-	if (rv != CKR_OK)
-	{
-		g_mutex_unlock(&session->device_lock);
-		certificate_pkcs11_set_error(error, rv, "C_Login");
-		return FALSE;
-	}
-
-	session->logged_in = TRUE;
-
-	/* Some tokens only reveal the private key object once the session is
-	 * authenticated, so this is the second and decisive attempt to find it. */
-	if (session->private_key == CK_INVALID_HANDLE)
-	{
-		g_autoptr(GError) local_error = NULL;
-
-		if (!ensure_session_locked(operation, &local_error))
-		{
-			g_mutex_unlock(&session->device_lock);
-			g_propagate_error(error, g_steal_pointer(&local_error));
-			return FALSE;
-		}
-	}
-
+	ok = certificate_device_login(&session->device, session->candidate, pin, error);
 	g_mutex_unlock(&session->device_lock);
-	return TRUE;
+
+	return ok;
 }
 
 /* ------------------------------------------------------- the operation itself */
@@ -166,78 +90,17 @@ static void sign_thread(GTask* task, gpointer source, gpointer task_data,
 	Operation* operation = task_data;
 	CertificateImplSession* session = operation->session;
 	g_autoptr(GError) error = NULL;
-	CK_MECHANISM ck_mechanism;
-	gsize payload_size = 0;
-	const guint8* payload = g_bytes_get_data(operation->payload, &payload_size);
-	g_autofree CK_BYTE* buffer = NULL;
-	CK_ULONG length = 0;
-	CK_RV rv;
+	GBytes* result = NULL;
 
 	g_mutex_lock(&session->device_lock);
-
-	if (session->module == NULL || session->private_key == CK_INVALID_HANDLE)
-	{
-		g_mutex_unlock(&session->device_lock);
-		g_task_return_new_error(task, CERTIFICATE_PKCS11_ERROR,
-		                        CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
-		                        "No private key is available on this token");
-		return;
-	}
-
-	certificate_mechanism_to_ck(&operation->mechanism, &ck_mechanism);
-
-	if (operation->decrypt)
-		rv = session->module->C_DecryptInit(session->pkcs11_session, &ck_mechanism,
-		                                    session->private_key);
-	else
-		rv = session->module->C_SignInit(session->pkcs11_session, &ck_mechanism,
-		                                 session->private_key);
-
-	if (rv != CKR_OK)
-	{
-		g_mutex_unlock(&session->device_lock);
-		certificate_pkcs11_set_error(&error, rv, operation->decrypt ? "C_DecryptInit" : "C_SignInit");
-		g_task_return_error(task, g_steal_pointer(&error));
-		return;
-	}
-
-	/* Length first, then the value: the module is the authority on how big its
-	 * answer is, and a fixed buffer here would be a truncation bug on the first
-	 * key size nobody thought of. */
-	if (operation->decrypt)
-		rv = session->module->C_Decrypt(session->pkcs11_session, (CK_BYTE_PTR) payload,
-		                                (CK_ULONG) payload_size, NULL, &length);
-	else
-		rv = session->module->C_Sign(session->pkcs11_session, (CK_BYTE_PTR) payload,
-		                             (CK_ULONG) payload_size, NULL, &length);
-
-	if (rv != CKR_OK)
-	{
-		g_mutex_unlock(&session->device_lock);
-		certificate_pkcs11_set_error(&error, rv, operation->decrypt ? "C_Decrypt" : "C_Sign");
-		g_task_return_error(task, g_steal_pointer(&error));
-		return;
-	}
-
-	buffer = g_malloc0(length);
-
-	if (operation->decrypt)
-		rv = session->module->C_Decrypt(session->pkcs11_session, (CK_BYTE_PTR) payload,
-		                                (CK_ULONG) payload_size, buffer, &length);
-	else
-		rv = session->module->C_Sign(session->pkcs11_session, (CK_BYTE_PTR) payload,
-		                             (CK_ULONG) payload_size, buffer, &length);
-
+	result = certificate_device_perform(&session->device, operation->decrypt,
+	                                    &operation->mechanism, operation->payload, &error);
 	g_mutex_unlock(&session->device_lock);
 
-	if (rv != CKR_OK)
-	{
-		certificate_pkcs11_set_error(&error, rv, operation->decrypt ? "C_Decrypt" : "C_Sign");
+	if (result == NULL)
 		g_task_return_error(task, g_steal_pointer(&error));
-		return;
-	}
-
-	g_task_return_pointer(task, g_bytes_new(buffer, length), (GDestroyNotify) g_bytes_unref);
+	else
+		g_task_return_pointer(task, result, (GDestroyNotify) g_bytes_unref);
 }
 
 static void on_signed(GObject* source, GAsyncResult* result, gpointer user_data)
@@ -369,9 +232,9 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 
 	/* THE LOGIN IS LAZY: it happens at first private-key use, not at grant
 	 * time. Logging in early spends the user's presence before it is needed. */
-	needs_login = !session->logged_in &&
+	needs_login = !session->device.logged_in &&
 	              (session->candidate->token->login_required ||
-	               session->private_key == CK_INVALID_HANDLE);
+	               session->device.private_key == CK_INVALID_HANDLE);
 
 	if (!needs_login)
 	{

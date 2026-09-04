@@ -59,6 +59,13 @@ static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen, gbool
 	if (chosen != NULL)
 		certificate_candidate_ref(chosen);
 
+	/* Disconnected BEFORE the destroy, not after: gtk_window_destroy() runs the
+	 * whole widget tree's dispose, and a list box being emptied emits
+	 * row-selected at a point where the buttons those handlers touch have
+	 * already gone. */
+	if (chooser->list != NULL)
+		g_signal_handlers_disconnect_by_data(chooser->list, chooser);
+
 	if (chooser->window != NULL)
 	{
 		gtk_window_destroy(chooser->window);
@@ -140,12 +147,23 @@ static void on_row_selected(GtkListBox* list, GtkListBoxRow* row, gpointer user_
 {
 	Chooser* chooser = user_data;
 
+	/* Tearing the window down empties the list box, which emits row-selected
+	 * with NULL after the buttons have already been disposed. Nothing in here
+	 * may touch a widget once the answer has been given. */
+	if (chooser->finished)
+		return;
+
 	gtk_widget_set_sensitive(chooser->use_button, row != NULL);
 }
 
 static void on_row_activated(GtkListBox* list, GtkListBoxRow* row, gpointer user_data)
 {
-	on_use(NULL, user_data);
+	Chooser* chooser = user_data;
+
+	if (chooser->finished)
+		return;
+
+	on_use(NULL, chooser);
 }
 
 /* ------------------------------------------------------------- the chrome */

@@ -13,6 +13,10 @@ test_cases = {
   'filter': 'test-filter.c',
   'mechanism': 'test-mechanism.c',
   'redact': 'test-redact.c',
+  # Skips itself when tools/softhsm-fixture.sh has not been run. It is the only
+  # automated coverage C_Sign can have; the card path is the author's, in
+  # docs/TESTING.md.
+  'broker-device': 'test-broker-device.c',
 }
 
 foreach name, source : test_cases

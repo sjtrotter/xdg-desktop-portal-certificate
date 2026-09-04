@@ -169,6 +169,14 @@ static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
 	if (prompt->buffer != NULL)
 		pin_buffer_wipe(prompt->buffer);
 
+	/* Disconnected before the destroy, for the same reason the chooser does it:
+	 * tearing a window down emits signals at a point where the widgets those
+	 * handlers touch have already been disposed. */
+	if (prompt->entry != NULL)
+		g_signal_handlers_disconnect_by_data(prompt->entry, prompt);
+	if (prompt->window != NULL)
+		g_signal_handlers_disconnect_by_data(prompt->window, prompt);
+
 	if (prompt->window != NULL)
 	{
 		gtk_window_destroy(prompt->window);

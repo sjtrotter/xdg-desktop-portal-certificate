@@ -75,8 +75,8 @@ static void certificate_impl_session_class_init(CertificateImplSessionClass* kla
 static void certificate_impl_session_init(CertificateImplSession* session)
 {
 	g_mutex_init(&session->device_lock);
-	session->pkcs11_session = CK_INVALID_HANDLE;
-	session->private_key = CK_INVALID_HANDLE;
+	session->device.session = CK_INVALID_HANDLE;
+	session->device.private_key = CK_INVALID_HANDLE;
 	xdp_impl_session_set_version(XDP_IMPL_SESSION(session), 1);
 }
 
@@ -163,23 +163,7 @@ gboolean certificate_impl_session_is_expired(CertificateImplSession* session)
 void certificate_impl_session_release_device(CertificateImplSession* session)
 {
 	g_mutex_lock(&session->device_lock);
-
-	if (session->module != NULL && session->pkcs11_session != CK_INVALID_HANDLE)
-	{
-		/* C_Logout is issued because the token may honour it. NOTHING HERE MAY
-		 * CLAIM THE CARD HAS FORGOTTEN: some tokens and middleware cache
-		 * authentication at a level this process does not control. */
-		if (session->logged_in)
-			session->module->C_Logout(session->pkcs11_session);
-
-		session->module->C_CloseSession(session->pkcs11_session);
-	}
-
-	session->module = NULL;
-	session->pkcs11_session = CK_INVALID_HANDLE;
-	session->private_key = CK_INVALID_HANDLE;
-	session->logged_in = FALSE;
-
+	certificate_device_close(&session->device);
 	g_mutex_unlock(&session->device_lock);
 }
 

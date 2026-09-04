@@ -25,6 +25,7 @@ certificate_core_sources = files(
   'tokens/discovery.c',
   'tokens/filter.c',
   'tokens/pkcs11-util.c',
+  'broker/device.c',
   'broker/mechanism.c',
 )
 
