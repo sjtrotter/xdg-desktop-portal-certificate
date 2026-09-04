@@ -124,6 +124,72 @@ are the core contract, and any PKCS#11 surface must be a **synthetic facade the 
 not the real token forwarded. The frontend branch has taken that to its conclusion for now by
 shipping the brokered half and deferring the facade half entirely.
 
+### Two layers, and the one this adds
+
+The clearest existing statement of the layering is Frank Morgner's, in
+[xdg-desktop-portal#662](https://github.com/flatpak/xdg-desktop-portal/issues/662#issuecomment-1479992623)
+(2023-03-22), and it is worth using his vocabulary rather than inventing one. There are two things
+a sandbox can be given a remote copy of, and they are not the same thing:
+
+```
+┌──────────────┐              ┌────────────────┐              ┌──────────────────┐
+│  smart card  │◄── PC/SC ────┤    PKCS#11     │◄── PKCS#11 ──┤  Firefox         │
+│              │              │   middleware   │              │  Thunderbird     │
+└──────────────┘              └────────────────┘              │  ssh, OpenSSL    │
+       ▲                              ▲                       └──────────────────┘
+       │ exposed by vicc / vpcd       │ exposed by pkcs11-proxy
+       │ = the TOKEN, over PC/SC      │ = the MIDDLEWARE, over PKCS#11
+```
+
+`vicc`/`vpcd` (vsmartcard) separate the **middleware from the hardware**; `pkcs11-proxy`, and
+`p11-kit server` with `p11-kit-client.so`, separate the **application from the middleware**. Very
+few applications want the first. Every application in the box on the right wants the second, which
+is why every proposal in that thread is a variation on it.
+
+This project is a **third** layer, above both:
+
+```
+┌──────────────┐        ┌──────────────┐        ┌──────────────────┐        ┌───────────────┐
+│  smart card  │◄ PC/SC ┤   PKCS#11    │◄ PKCS11┤  this backend +  │◄ D-Bus ┤  sandboxed    │
+│              │        │  middleware  │        │  xdg-desktop-    │        │  application  │
+└──────────────┘        └──────────────┘        │  portal          │        └───────────────┘
+                                                └──────────────────┘
+                                                  exposes ONE CERTIFICATE
+                                                  and Sign / Decrypt on its key
+```
+
+The unit is neither the token nor the module: it is **one certificate and its key**, with the
+operations and mechanisms the grant permits, for as long as the grant lives. The application holds
+no PKCS#11 anything — no module, no session, no object handle, no token URI — so the questions the
+lower two layers have to answer do not arise for it. What it holds is the answer to "may this
+application use this credential, for this, for this long", which is the only question the user was
+actually asked.
+
+### Why the transport cannot be the policy
+
+Failure mode 4 in [0006](decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) — *a transport
+does not impose policy* — is the one people reasonably doubt, because `p11-kit server` and
+`p11-kit-client.so` are shipped, supported and in production use. The evidence is in p11-kit's own
+wire format. In
+[`p11-kit/rpc-message.h`](https://github.com/p11-glue/p11-kit/blob/master/p11-kit/rpc-message.h),
+the call enumeration carries `P11_RPC_CALL_C_InitToken` (line 53), `P11_RPC_CALL_C_InitPIN`
+(line 54) and `P11_RPC_CALL_C_SetPIN` (line 55) alongside `P11_RPC_CALL_C_Login` (line 58) and
+`P11_RPC_CALL_C_LoginUser` (line 75), and the signature table spells their arguments out:
+
+```
+line 142   { P11_RPC_CALL_C_InitToken,  "C_InitToken",  "uayz",  "" },
+line 144   { P11_RPC_CALL_C_SetPIN,     "C_SetPIN",     "uayay", "" },
+line 148   { P11_RPC_CALL_C_Login,      "C_Login",      "uuay",  "" },
+```
+
+`ay` is a plain byte array: the PIN crosses the socket as a buffer like any other argument, and
+card administration is a call away for anyone holding the far end. That is not a criticism of
+p11-kit — the protocol is a faithful PKCS#11 pass-through and is documented as one. It is the point:
+**a faithful pass-through cannot be the place a policy lives.** Any filtering has to be a separate
+component in front of it, which is exactly what Daiki Ueno's 2023 design concedes when it requires
+two new wrapper modules, one inside the sandbox and one outside, to do the filtering the transport
+will not do.
+
 ## Components
 
 Everything below is in this repository. The frontend's components are upstream's and are
