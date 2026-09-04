@@ -56,12 +56,21 @@
  *  Request.Close() and Session.Close() on the objects this one exports --
  *  compares the sender against the unique name that currently owns
  *  org.freedesktop.portal.Desktop, and refuses anything else with
- *  AccessDenied, logged by reason code. The owner is resolved from the bus
- *  rather than taken from a watcher's cache, because NameOwnerChanged is not
- *  ordered against the messages of the process that lost the name. That check
- *  is cheap, and the failure it prevents -- an application handing itself an
- *  app id -- destroys the entire consent model. See docs/IMPL-INTERFACE.md,
- *  "Why an application cannot call this".
+ *  AccessDenied, logged by reason code.
+ *
+ *  A CACHED OWNER MAY ONLY SAY NO. Every ACCEPT resolves the owner from the bus
+ *  with GetNameOwner, because NameOwnerChanged is not ordered against the
+ *  messages of the process that lost the name and a remembered "yes" is exactly
+ *  the answer that admits a replaced frontend which is still connected. Every
+ *  REFUSAL is decided from the cached owner with no bus call at all: anything on
+ *  the session bus can send this backend a message, and a synchronous round trip
+ *  per stranger's message is a main-thread stall an open PIN window feels. A
+ *  stranger's unique name can never equal the cached owner's, so a stranger
+ *  never reaches the bus call.
+ *
+ *  The failure the check prevents -- an application handing itself an app id --
+ *  destroys the entire consent model. See docs/IMPL-INTERFACE.md, "Why an
+ *  application cannot call this".
  */
 
 typedef struct CertificateImpl CertificateImpl;
