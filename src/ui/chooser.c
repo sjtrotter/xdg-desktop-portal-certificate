@@ -564,9 +564,10 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 		    "%s\n\nThis grant lasts %s. %s You will be asked for your PIN the first time the "
 		    "key is used.",
 		    certificate_purpose_detail(request->purpose), lifetime,
-		    request->may_decrypt
-		        ? "It allows signing and decryption."
-		        : (request->may_sign ? "It allows signing only." : "It allows no operations."));
+		    request->may_sign && request->may_decrypt ? "It allows signing and decryption."
+		    : request->may_decrypt                    ? "It allows decryption only."
+		    : request->may_sign                       ? "It allows signing only."
+		                                              : "It allows no operations.");
 		GtkWidget* label = gtk_label_new(text);
 
 		gtk_label_set_xalign(GTK_LABEL(label), 0.0f);

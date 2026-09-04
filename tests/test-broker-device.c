@@ -625,7 +625,8 @@ static void test_discovery_without_login(Fixture* fixture, gconstpointer user_da
 		g_assert_nonnull(candidate->certificate_id);
 		g_assert_nonnull(candidate->subject_display);
 		g_assert_nonnull(candidate->supported_mechanisms);
-		g_assert_true(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH));
+		g_assert_true(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+		                                          CERTIFICATE_OPERATION_SIGN));
 
 		if (g_strcmp0(candidate->key_type, "RSA") == 0)
 			saw_rsa = TRUE;

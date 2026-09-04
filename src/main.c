@@ -430,9 +430,27 @@ static int list_tokens(void)
 
 			for (int p = CERTIFICATE_PURPOSE_CLIENT_AUTH; p <= CERTIFICATE_PURPOSE_SSH; p++)
 			{
-				if (certificate_purpose_matches(candidate, (CertificatePurpose) p))
-					g_strv_builder_add(purpose_builder,
-					                   certificate_purpose_to_string((CertificatePurpose) p));
+				CertificateOperations operations =
+				    certificate_purpose_operations(candidate, (CertificatePurpose) p);
+				const char* name = certificate_purpose_to_string((CertificatePurpose) p);
+
+				if (operations == CERTIFICATE_OPERATION_NONE)
+					continue;
+
+				/* A key-management certificate is a real credential for mail
+				 * and no use at all for signing one, and the listing has to
+				 * say which, or a card with one on it reads as a card with a
+				 * certificate that does not work. */
+				if (operations == CERTIFICATE_OPERATION_DECRYPT)
+				{
+					g_autofree char* text = g_strdup_printf("%s (decrypt only)", name);
+
+					g_strv_builder_add(purpose_builder, text);
+				}
+				else
+				{
+					g_strv_builder_add(purpose_builder, name);
+				}
 			}
 			purpose_list = g_strv_builder_end(purpose_builder);
 			purposes = g_strjoinv(", ", purpose_list);

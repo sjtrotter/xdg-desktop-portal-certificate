@@ -863,10 +863,16 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 		}
 		else
 		{
-			candidate->can_sign = TRUE;
-			candidate->can_decrypt = candidate->key_usage != NULL &&
-			                         g_strv_contains((const char* const*) candidate->key_usage,
-			                                         "key_encipherment");
+			const char* const* usage = (const char* const*) candidate->key_usage;
+
+			/* No key usage extension means the key is restricted by none, so
+			 * both answers are yes. Where there is one it decides both: a
+			 * keyEncipherment-only key-management certificate must not come
+			 * out of here claiming it will sign. */
+			candidate->can_sign = usage == NULL || g_strv_contains(usage, "digital_signature") ||
+			                      g_strv_contains(usage, "content_commitment");
+			candidate->can_decrypt = usage == NULL || g_strv_contains(usage, "key_encipherment") ||
+			                         g_strv_contains(usage, "data_encipherment");
 		}
 
 		candidate->supported_mechanisms = mechanisms_for(module, token->slot, candidate->key_type);

@@ -24,6 +24,7 @@ typedef struct
 	gboolean ssh;
 } PurposeCase;
 
+/* The ordinary request: operation_policy defaults to {'sign': true}. */
 static void test_purposes(void)
 {
 	static const PurposeCase cases[] = {
@@ -41,6 +42,13 @@ static void test_purposes(void)
 		/* keyEncipherment only, no EKU: the key usage rules out signing, and
 		 * ssh still matches because SSH never looks at the certificate. */
 		{ "encipherment-only.pem", FALSE, FALSE, FALSE, TRUE },
+		/* emailProtection EKU, keyEncipherment only -- the S/MIME decryption
+		 * half of a PIV card. Nothing here matches, because this candidate is
+		 * asked about with a sign-only policy. */
+		{ "email-encipherment-only.pem", FALSE, FALSE, FALSE, TRUE },
+		/* emailProtection EKU with both bits set: the ordinary single-
+		 * certificate S/MIME setup, which signs as well as decrypts. */
+		{ "email-sign-and-encipher.pem", FALSE, TRUE, TRUE, TRUE },
 		/* Expired is STILL A MATCH. It is offered and marked, never hidden. */
 		{ "expired-client-auth.pem", TRUE, TRUE, FALSE, TRUE },
 	};
@@ -51,14 +59,18 @@ static void test_purposes(void)
 		    certificate_test_candidate(cases[i].fixture, TRUE, FALSE);
 
 		g_test_message("%s", cases[i].fixture);
-		g_assert_cmpint(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH),
+		g_assert_cmpint(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+		                                           CERTIFICATE_OPERATION_SIGN),
 		                ==, cases[i].client_auth);
-		g_assert_cmpint(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SIGNING), ==,
-		                cases[i].signing);
-		g_assert_cmpint(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_EMAIL), ==,
-		                cases[i].email);
-		g_assert_cmpint(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SSH), ==,
-		                cases[i].ssh);
+		g_assert_cmpint(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SIGNING,
+		                                           CERTIFICATE_OPERATION_SIGN),
+		                ==, cases[i].signing);
+		g_assert_cmpint(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_EMAIL,
+		                                           CERTIFICATE_OPERATION_SIGN),
+		                ==, cases[i].email);
+		g_assert_cmpint(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SSH,
+		                                           CERTIFICATE_OPERATION_SIGN),
+		                ==, cases[i].ssh);
 	}
 }
 
@@ -69,8 +81,146 @@ static void test_key_that_will_not_sign(void)
 	g_autoptr(CertificateCandidate) candidate =
 	    certificate_test_candidate("client-auth-rsa.pem", FALSE, TRUE);
 
-	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH));
-	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SSH));
+	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+	                                          CERTIFICATE_OPERATION_SIGN));
+	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SSH,
+	                                          CERTIFICATE_OPERATION_SIGN));
+
+	/* Not even when the caller would take a decryption: none of the three
+	 * signing purposes has a decryption to offer. */
+	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+	                                          CERTIFICATE_OPERATION_SIGN |
+	                                              CERTIFICATE_OPERATION_DECRYPT));
+	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SIGNING,
+	                                          CERTIFICATE_OPERATION_SIGN |
+	                                              CERTIFICATE_OPERATION_DECRYPT));
+	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SSH,
+	                                          CERTIFICATE_OPERATION_SIGN |
+	                                              CERTIFICATE_OPERATION_DECRYPT));
+}
+
+/* THE S/MIME DECRYPTION HALF. A PIV key-management certificate is
+ * keyEncipherment with no digitalSignature, behind a key that will decrypt and
+ * never sign. It used to match no purpose at all, which made brokered Decrypt
+ * unreachable for the case it exists for. */
+static void test_decryption_only_certificate(void)
+{
+	static const char* const fixtures[] = { "email-encipherment-only.pem",
+		                                    "encipherment-only.pem", NULL };
+
+	for (gsize i = 0; fixtures[i] != NULL; i++)
+	{
+		g_autoptr(CertificateCandidate) candidate =
+		    certificate_test_candidate(fixtures[i], FALSE, TRUE);
+
+		g_test_message("%s", fixtures[i]);
+
+		g_assert_cmpint(certificate_purpose_operations(candidate, CERTIFICATE_PURPOSE_EMAIL), ==,
+		                CERTIFICATE_OPERATION_DECRYPT);
+
+		/* Offered for email ONLY when the request said it would decrypt. */
+		g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_EMAIL,
+		                                          CERTIFICATE_OPERATION_SIGN));
+		g_assert_true(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_EMAIL,
+		                                         CERTIFICATE_OPERATION_DECRYPT));
+		g_assert_true(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_EMAIL,
+		                                         CERTIFICATE_OPERATION_SIGN |
+		                                             CERTIFICATE_OPERATION_DECRYPT));
+
+		/* And for nothing else, however much the caller would accept: a key
+		 * that will not sign cannot authenticate, sign or serve ssh. */
+		g_assert_cmpint(certificate_purpose_operations(candidate,
+		                                              CERTIFICATE_PURPOSE_CLIENT_AUTH),
+		                ==, CERTIFICATE_OPERATION_NONE);
+		g_assert_cmpint(certificate_purpose_operations(candidate, CERTIFICATE_PURPOSE_SIGNING),
+		                ==, CERTIFICATE_OPERATION_NONE);
+		g_assert_cmpint(certificate_purpose_operations(candidate, CERTIFICATE_PURPOSE_SSH), ==,
+		                CERTIFICATE_OPERATION_NONE);
+	}
+}
+
+/* The S/MIME SIGNING half is not a decryption credential either, and a mail
+ * client asking only to decrypt must not be offered it. */
+static void test_signing_email_certificate_is_not_offered_for_decryption(void)
+{
+	g_autoptr(CertificateCandidate) candidate =
+	    certificate_test_candidate("email-ec.pem", TRUE, FALSE);
+
+	g_assert_cmpint(certificate_purpose_operations(candidate, CERTIFICATE_PURPOSE_EMAIL), ==,
+	                CERTIFICATE_OPERATION_SIGN);
+	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_EMAIL,
+	                                          CERTIFICATE_OPERATION_DECRYPT));
+}
+
+/* A certificate whose key does both, with the key usage to match, is offered
+ * for either half -- and the operations it is offered for are the ones the
+ * request permits, not everything the key can do. */
+static void test_certificate_that_signs_and_decrypts(void)
+{
+	g_autoptr(CertificateCandidate) both =
+	    certificate_test_candidate("email-sign-and-encipher.pem", TRUE, TRUE);
+	g_autoptr(CertificateCandidate) signing_key_only =
+	    certificate_test_candidate("email-sign-and-encipher.pem", TRUE, FALSE);
+
+	g_assert_cmpint(certificate_purpose_operations(both, CERTIFICATE_PURPOSE_EMAIL), ==,
+	                CERTIFICATE_OPERATION_SIGN | CERTIFICATE_OPERATION_DECRYPT);
+	g_assert_cmpint(certificate_purpose_operations(both, CERTIFICATE_PURPOSE_CLIENT_AUTH), ==,
+	                CERTIFICATE_OPERATION_NONE);
+
+	/* The card is still the authority on what the key will do: a certificate
+	 * whose key usage permits both, on a key whose CKA_DECRYPT is clear, is a
+	 * signing credential only. */
+	g_assert_cmpint(certificate_purpose_operations(signing_key_only, CERTIFICATE_PURPOSE_EMAIL),
+	                ==, CERTIFICATE_OPERATION_SIGN);
+}
+
+/* THE KEY USAGE RESTRICTS THE CARD, TOO. A token that sets CKA_SIGN on every
+ * key it has -- some do -- must not turn a key-management certificate into a
+ * signing credential, or the grant would carry an operation the certificate
+ * itself forbids. */
+static void test_key_usage_restricts_a_token_that_claims_everything(void)
+{
+	g_autoptr(CertificateCandidate) candidate =
+	    certificate_test_candidate("email-encipherment-only.pem", TRUE, TRUE);
+
+	g_assert_cmpint(certificate_purpose_operations(candidate, CERTIFICATE_PURPOSE_EMAIL), ==,
+	                CERTIFICATE_OPERATION_DECRYPT);
+	g_assert_cmpint(certificate_purpose_operations(candidate, CERTIFICATE_PURPOSE_SIGNING), ==,
+	                CERTIFICATE_OPERATION_NONE);
+}
+
+/* End to end through the filter: a decrypt-only request offers the
+ * key-management certificate and nothing else on the card. */
+static void test_filter_offers_decryption_certificate_for_email(void)
+{
+	static const char* const fixtures[] = { "client-auth-rsa.pem", "email-ec.pem",
+		                                    "email-encipherment-only.pem", NULL };
+	g_autoptr(GPtrArray) candidates =
+	    g_ptr_array_new_with_free_func((GDestroyNotify) certificate_candidate_unref);
+	CertificateFilter filter = { 0 };
+	g_autoptr(GPtrArray) decrypting = NULL;
+	g_autoptr(GPtrArray) signing = NULL;
+
+	for (gsize i = 0; fixtures[i] != NULL; i++)
+	{
+		gboolean encipherment = g_str_has_prefix(fixtures[i], "email-encipherment");
+
+		g_ptr_array_add(candidates,
+		                certificate_test_candidate(fixtures[i], !encipherment, encipherment));
+	}
+
+	filter.purpose = CERTIFICATE_PURPOSE_EMAIL;
+	filter.operations = CERTIFICATE_OPERATION_DECRYPT;
+	decrypting = certificate_filter_apply(candidates, &filter);
+	g_assert_cmpuint(decrypting->len, ==, 1);
+	g_assert_cmpstr(((CertificateCandidate*) g_ptr_array_index(decrypting, 0))->subject_display,
+	                ==, "Ada Lovelace (key management)");
+
+	filter.operations = CERTIFICATE_OPERATION_SIGN;
+	signing = certificate_filter_apply(candidates, &filter);
+	g_assert_cmpuint(signing->len, ==, 1);
+	g_assert_cmpstr(((CertificateCandidate*) g_ptr_array_index(signing, 0))->subject_display, !=,
+	                "Ada Lovelace (key management)");
 }
 
 static void test_expiry_flags(void)
@@ -117,6 +267,7 @@ static void test_expired_is_offered_but_sorts_last(void)
 	CertificateCandidate* first = NULL;
 
 	filter.purpose = CERTIFICATE_PURPOSE_CLIENT_AUTH;
+	filter.operations = CERTIFICATE_OPERATION_SIGN;
 	matching = certificate_filter_apply(candidates, &filter);
 
 	g_assert_cmpuint(matching->len, ==, 2);
@@ -135,6 +286,7 @@ static void test_filter_token_label(void)
 	g_autoptr(GPtrArray) miss = NULL;
 
 	filter.purpose = CERTIFICATE_PURPOSE_CLIENT_AUTH;
+	filter.operations = CERTIFICATE_OPERATION_SIGN;
 
 	filter.token_label = (char*) "Test Token";
 	hit = certificate_filter_apply(candidates, &filter);
@@ -157,6 +309,7 @@ static void test_filter_piv_slot(void)
 	g_autoptr(GPtrArray) other = NULL;
 
 	filter.purpose = CERTIFICATE_PURPOSE_CLIENT_AUTH;
+	filter.operations = CERTIFICATE_OPERATION_SIGN;
 	filter.piv_slot = (char*) "authentication";
 
 	unknown_slot = certificate_filter_apply(candidates, &filter);
@@ -183,6 +336,7 @@ static void test_filter_key_algorithms(void)
 	g_autoptr(GPtrArray) only_ec = NULL;
 
 	filter.purpose = CERTIFICATE_PURPOSE_SIGNING;
+	filter.operations = CERTIFICATE_OPERATION_SIGN;
 
 	filter.key_algorithms = rsa;
 	only_rsa = certificate_filter_apply(candidates, &filter);
@@ -209,6 +363,7 @@ static void test_filter_eku_and_key_usage(void)
 	g_autoptr(GPtrArray) by_impossible = NULL;
 
 	filter.purpose = CERTIFICATE_PURPOSE_SIGNING;
+	filter.operations = CERTIFICATE_OPERATION_SIGN;
 
 	filter.eku_oids = email_eku;
 	by_eku = certificate_filter_apply(candidates, &filter);
@@ -236,6 +391,7 @@ static void test_filter_issuer_dn(void)
 	g_ptr_array_add(issuers, g_bytes_new(first->issuer_der->data, first->issuer_der->len));
 
 	filter.purpose = CERTIFICATE_PURPOSE_SIGNING;
+	filter.operations = CERTIFICATE_OPERATION_SIGN;
 	filter.issuers = issuers;
 
 	matching = certificate_filter_apply(candidates, &filter);
@@ -267,8 +423,8 @@ static void test_filter_parse_rejects_malformed(void)
 
 		g_assert_nonnull(options);
 		g_test_message("%s", bad[i]);
-		g_assert_false(certificate_filter_parse(options, CERTIFICATE_PURPOSE_SIGNING, &filter,
-		                                        &error));
+		g_assert_false(certificate_filter_parse(options, CERTIFICATE_PURPOSE_SIGNING,
+		                                        CERTIFICATE_OPERATION_SIGN, &filter, &error));
 		g_assert_nonnull(error);
 		certificate_filter_clear(&filter);
 	}
@@ -287,8 +443,8 @@ static void test_filter_parse_accepts_wellformed(void)
 	g_autoptr(GError) error = NULL;
 
 	g_assert_nonnull(options);
-	g_assert_true(
-	    certificate_filter_parse(options, CERTIFICATE_PURPOSE_CLIENT_AUTH, &filter, &error));
+	g_assert_true(certificate_filter_parse(options, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+	                                       CERTIFICATE_OPERATION_SIGN, &filter, &error));
 	g_assert_no_error(error);
 	g_assert_cmpint(filter.purpose, ==, CERTIFICATE_PURPOSE_CLIENT_AUTH);
 	g_assert_cmpstr(filter.token_label, ==, "Test Token");
@@ -306,9 +462,11 @@ static void test_filter_parse_absent(void)
 	CertificateFilter filter = { 0 };
 	g_autoptr(GError) error = NULL;
 
-	g_assert_true(certificate_filter_parse(options, CERTIFICATE_PURPOSE_SSH, &filter, &error));
+	g_assert_true(certificate_filter_parse(options, CERTIFICATE_PURPOSE_SSH,
+	                                       CERTIFICATE_OPERATION_SIGN, &filter, &error));
 	g_assert_no_error(error);
 	g_assert_cmpint(filter.purpose, ==, CERTIFICATE_PURPOSE_SSH);
+	g_assert_cmpint(filter.operations, ==, CERTIFICATE_OPERATION_SIGN);
 	g_assert_null(filter.token_label);
 	certificate_filter_clear(&filter);
 }
@@ -319,6 +477,15 @@ int main(int argc, char** argv)
 
 	g_test_add_func("/filter/purposes", test_purposes);
 	g_test_add_func("/filter/key-that-will-not-sign", test_key_that_will_not_sign);
+	g_test_add_func("/filter/decryption-only-certificate", test_decryption_only_certificate);
+	g_test_add_func("/filter/signing-email-certificate-is-not-a-decryption-one",
+	                test_signing_email_certificate_is_not_offered_for_decryption);
+	g_test_add_func("/filter/certificate-that-signs-and-decrypts",
+	                test_certificate_that_signs_and_decrypts);
+	g_test_add_func("/filter/key-usage-restricts-a-token-that-claims-everything",
+	                test_key_usage_restricts_a_token_that_claims_everything);
+	g_test_add_func("/filter/offers-decryption-certificate-for-email",
+	                test_filter_offers_decryption_certificate_for_email);
 	g_test_add_func("/filter/expiry-flags", test_expiry_flags);
 	g_test_add_func("/filter/expired-is-offered-but-sorts-last",
 	                test_expired_is_offered_but_sorts_last);

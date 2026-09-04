@@ -15,7 +15,7 @@ selected — here, `xdg-desktop-portal-certificate` on bus name
 is a **verbatim copy**, apart from a header comment saying so, of
 
 ```
-xdg-desktop-portal, branch experimental/certificate-webauthentication, commit 703fb22
+xdg-desktop-portal, branch experimental/certificate-webauthentication, commit 7635aa8
 data/org.freedesktop.impl.portal.experimental.Certificate.xml
 ```
 
@@ -284,28 +284,39 @@ asserted against `CK_RSA_PKCS_OAEP_PARAMS` in `tests/test-mechanism.c` instead, 
 half of the round trip skips itself with a message. A real card is
 [TESTING.md](TESTING.md) tier 3.
 
-### Open question: a decryption-only certificate matches no purpose
+### `email` is the one purpose that does not end in a signature
 
-`certificate_purpose_matches()` in `src/tokens/filter.c` requires `can_sign` for **every**
+`certificate_purpose_matches()` in `src/tokens/filter.c` used to require `can_sign` for **every**
 purpose, `email` included, on the reasoning that every purpose here ends in a signature. That is
-true for `client_auth`, `signing` and `ssh`, but not for a certificate whose only role is
-unwrapping mail: a PIV "key management" certificate, `keyEncipherment` with no
-`digitalSignature`, backed by a private key that will decrypt and never sign. Such a certificate
-matches **no purpose today**, so an email client asking for `email` in order to decrypt an
-incoming message can never be offered it — even though brokered `Decrypt` (`RSA_OAEP`, above) is
-exactly the operation it would need.
+true for `client_auth`, `signing` and `ssh`, and false for a certificate whose only role is
+unwrapping mail: a PIV "key management" certificate, `keyEncipherment` with no `digitalSignature`,
+backed by a private key that will decrypt and never sign. Such a certificate matched **no purpose
+at all**, so an email client asking for `email` in order to decrypt an incoming message could
+never be offered it — even though brokered `Decrypt` (`RSA_OAEP`, above) is exactly the operation
+it would need. Belgian and Estonian eID cards are laid out the same way as PIV here.
 
-Two ways to close this, neither chosen yet:
+**The rule now**, settled on the frontend branch's public XML first
+(`7635aa8 certificate: Let email cover a decryption-only certificate`) and implemented here:
 
-- a new purpose (`decrypt`, or `email_decrypt`) that a certificate can match on `keyEncipherment`
-  alone, independent of `can_sign`; or
-- let `email` match a `keyEncipherment` certificate when the caller's `operation_policy` is
-  decrypt-only, so one purpose still covers both signing and decrypting mail and the split matters
-  only to the policy, not to discovery.
+- a certificate matches `email` when its extended key usage permits `emailProtection` — or it
+  carries no extended key usage extension at all — **and** its key usage permits either
+  `digitalSignature` or `keyEncipherment`;
+- which of the two it matched decides which operations it can serve: signing, decryption, or both;
+- it is offered only if one of those operations is one the request's `operation_policy` permits,
+  so a decrypt-only certificate reaches an application that asked to decrypt and nobody else;
+- and because such a certificate's key will not sign, the grant's `permitted_operations` holds
+  `decrypt` alone.
 
-Either changes what a value in `purposes` can mean, which is public XML, not this repository's
-internal filter — it has to be settled on the frontend branch's copy first, the same way every
-other interface change here does. Tracked in [ROADMAP.md](ROADMAP.md).
+`client_auth`, `signing` and `ssh` are unchanged and still require a key that will sign.
+
+The purpose vocabulary was kept at four rather than gaining `decrypt` or `email_decrypt`: the
+consent sentence the user reads is "use a certificate for mail" either way, and the sign/decrypt
+split already exists in `operation_policy`, which is where an application states it.
+
+Two consequences inside this repository. `certificate_purpose_operations()` returns the set rather
+than a yes/no, which is what lets `--list-tokens` print `email (decrypt only)`. And the key usage
+now restricts what the *card* claims: a token that sets `CKA_SIGN` on every key it holds cannot
+turn a key-management certificate into a signing credential.
 
 ### The token signals carry presence, not identity
 

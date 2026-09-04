@@ -52,6 +52,18 @@
  * which means the same thing as clientAuth for this backend's purposes. */
 #define CERTIFICATE_EKU_SMARTCARD_LOGON "1.3.6.1.4.1.311.20.2.2"
 
+/** The operations a candidate can serve, as a set. A purpose is matched when
+ *  the operations the candidate could serve it with overlap the ones the
+ *  request's operation_policy permits -- which is how a certificate that will
+ *  only decrypt is offered for `email` to a mail client asking to decrypt, and
+ *  to nobody else. */
+typedef enum
+{
+	CERTIFICATE_OPERATION_NONE = 0,
+	CERTIFICATE_OPERATION_SIGN = 1 << 0,
+	CERTIFICATE_OPERATION_DECRYPT = 1 << 1
+} CertificateOperations;
+
 /** All fields optional, all AND-ed. Supplied by the caller and therefore
  *  untrusted as to INTENT -- but harmless, because narrowing the offered set
  *  can only reduce what the user is asked to consent to. A filter matching
@@ -60,6 +72,7 @@
 typedef struct
 {
 	CertificatePurpose purpose;
+	CertificateOperations operations; /**< what the caller's operation_policy permits */
 	GPtrArray* issuers;    /**< GBytes, DER issuer DNs as a TLS CertificateRequest supplies them */
 	char** key_usage;      /**< X.509 key-usage bits that must be present */
 	char** eku_oids;       /**< explicit OIDs, where the purpose shorthand is not enough */
@@ -68,10 +81,28 @@ typedef struct
 	char* piv_slot;
 } CertificateFilter;
 
-/** Does @candidate fit @purpose? Exported for the unit tests, which run it
- *  against fixture certificates with no token in sight. */
+/** Which operations could @candidate serve @purpose with, ignoring what the
+ *  caller asked for?
+ *
+ *  `client_auth`, `signing` and `ssh` are signing purposes and yield at most
+ *  CERTIFICATE_OPERATION_SIGN. `email` is not: S/MIME splits mail between a
+ *  signing certificate and a decryption certificate, and on a card those are
+ *  separate keys -- a PIV key-management certificate is `keyEncipherment` with
+ *  no `digitalSignature`, and the key behind it will decrypt and never sign.
+ *  So `email` yields SIGN, DECRYPT, or both, and a certificate that yields
+ *  only DECRYPT is a credential a mail client can still use.
+ *
+ *  Exported for `--list-tokens`, which prints what each certificate is good
+ *  for, and for the unit tests. */
+CertificateOperations certificate_purpose_operations(const CertificateCandidate* candidate,
+                                                     CertificatePurpose purpose);
+
+/** Does @candidate fit @purpose for at least one of the @permitted operations?
+ *  Exported for the unit tests, which run it against fixture certificates with
+ *  no token in sight. */
 gboolean certificate_purpose_matches(const CertificateCandidate* candidate,
-                                     CertificatePurpose purpose);
+                                     CertificatePurpose purpose,
+                                     CertificateOperations permitted);
 
 /** Does @candidate satisfy every field of @filter, including the purpose? */
 gboolean certificate_filter_matches(const CertificateCandidate* candidate,
@@ -90,7 +121,8 @@ GPtrArray* certificate_filter_apply(GPtrArray* candidates, const CertificateFilt
  *  ignoring the parts it did not understand -- a filter that half-applied would
  *  offer credentials the caller said it could not use. */
 gboolean certificate_filter_parse(GVariant* options, CertificatePurpose purpose,
-                                  CertificateFilter* out, GError** error);
+                                  CertificateOperations operations, CertificateFilter* out,
+                                  GError** error);
 
 void certificate_filter_clear(CertificateFilter* filter);
 

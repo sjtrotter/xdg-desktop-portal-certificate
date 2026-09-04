@@ -59,59 +59,110 @@ static gboolean key_usage_allows_signing(const CertificateCandidate* candidate)
 	       strv_has(candidate->key_usage, "content_commitment");
 }
 
-gboolean certificate_purpose_matches(const CertificateCandidate* candidate,
-                                     CertificatePurpose purpose)
+/* The other half of an S/MIME pair. dataEncipherment is included because a few
+ * issuers set it instead of keyEncipherment on a key-transport certificate. */
+static gboolean key_usage_allows_decryption(const CertificateCandidate* candidate)
 {
-	/* Whatever the purpose, a certificate whose private key will not sign is
-	 * not a candidate for any of them: every purpose here ends in a signature.
-	 * The card is the authority on that, not the certificate's key usage. */
-	if (!candidate->can_sign)
-		return FALSE;
+	if (candidate->key_usage == NULL)
+		return TRUE;
 
+	return strv_has(candidate->key_usage, "key_encipherment") ||
+	       strv_has(candidate->key_usage, "data_encipherment");
+}
+
+/* Can this candidate sign at all? The card is the authority on that, not the
+ * certificate's key usage -- but the key usage still restricts what the
+ * signature may be for. */
+static gboolean candidate_signs(const CertificateCandidate* candidate)
+{
+	return candidate->can_sign && key_usage_allows_signing(candidate);
+}
+
+static gboolean candidate_decrypts(const CertificateCandidate* candidate)
+{
+	return candidate->can_decrypt && key_usage_allows_decryption(candidate);
+}
+
+CertificateOperations certificate_purpose_operations(const CertificateCandidate* candidate,
+                                                     CertificatePurpose purpose)
+{
 	switch (purpose)
 	{
 		case CERTIFICATE_PURPOSE_CLIENT_AUTH:
 			/* clientAuth, or the Microsoft smart-card logon OID that PIV
 			 * authentication certificates carry, or no EKU restriction at all
 			 * together with a key usage that permits signing. */
-			if (!key_usage_allows_signing(candidate))
-				return FALSE;
-			if (eku_unrestricted(candidate))
-				return TRUE;
-			return eku_allows(candidate, CERTIFICATE_EKU_CLIENT_AUTH) ||
-			       strv_has(candidate->eku_oids, CERTIFICATE_EKU_SMARTCARD_LOGON);
+			if (!candidate_signs(candidate))
+				return CERTIFICATE_OPERATION_NONE;
+			if (eku_unrestricted(candidate) ||
+			    eku_allows(candidate, CERTIFICATE_EKU_CLIENT_AUTH) ||
+			    strv_has(candidate->eku_oids, CERTIFICATE_EKU_SMARTCARD_LOGON))
+				return CERTIFICATE_OPERATION_SIGN;
+			return CERTIFICATE_OPERATION_NONE;
 
 		case CERTIFICATE_PURPOSE_SIGNING:
-			if (!key_usage_allows_signing(candidate))
-				return FALSE;
+			if (!candidate_signs(candidate))
+				return CERTIFICATE_OPERATION_NONE;
 			if (eku_unrestricted(candidate))
-				return TRUE;
+				return CERTIFICATE_OPERATION_SIGN;
 			/* A certificate marked ONLY for server authentication is not a
 			 * signing credential the user should be offered here. */
-			return strv_has(candidate->eku_oids, CERTIFICATE_EKU_ANY) ||
-			       strv_has(candidate->eku_oids, CERTIFICATE_EKU_CODE_SIGNING) ||
-			       strv_has(candidate->eku_oids, CERTIFICATE_EKU_EMAIL_PROTECTION) ||
-			       strv_has(candidate->eku_oids, CERTIFICATE_EKU_CLIENT_AUTH) ||
-			       strv_has(candidate->eku_oids, CERTIFICATE_EKU_SMARTCARD_LOGON);
+			if (strv_has(candidate->eku_oids, CERTIFICATE_EKU_ANY) ||
+			    strv_has(candidate->eku_oids, CERTIFICATE_EKU_CODE_SIGNING) ||
+			    strv_has(candidate->eku_oids, CERTIFICATE_EKU_EMAIL_PROTECTION) ||
+			    strv_has(candidate->eku_oids, CERTIFICATE_EKU_CLIENT_AUTH) ||
+			    strv_has(candidate->eku_oids, CERTIFICATE_EKU_SMARTCARD_LOGON))
+				return CERTIFICATE_OPERATION_SIGN;
+			return CERTIFICATE_OPERATION_NONE;
 
 		case CERTIFICATE_PURPOSE_EMAIL:
+		{
 			/* Email is the one purpose with a specific EKU, and a certificate
 			 * with no EKU at all does qualify -- but one restricted to
-			 * something else does not. */
-			if (!key_usage_allows_signing(candidate))
-				return FALSE;
-			return eku_allows(candidate, CERTIFICATE_EKU_EMAIL_PROTECTION);
+			 * something else does not.
+			 *
+			 * It is also the one purpose that does not end in a signature.
+			 * S/MIME uses one certificate to sign a message and another to
+			 * unwrap a received one, and on a card those are separate keys in
+			 * separate slots: a PIV key-management certificate is
+			 * keyEncipherment with no digitalSignature, and the key behind it
+			 * will decrypt and never sign. Requiring can_sign here made that
+			 * certificate match nothing at all. */
+			CertificateOperations operations = CERTIFICATE_OPERATION_NONE;
+
+			if (!eku_allows(candidate, CERTIFICATE_EKU_EMAIL_PROTECTION))
+				return CERTIFICATE_OPERATION_NONE;
+
+			if (candidate_signs(candidate))
+				operations |= CERTIFICATE_OPERATION_SIGN;
+			if (candidate_decrypts(candidate))
+				operations |= CERTIFICATE_OPERATION_DECRYPT;
+
+			return operations;
+		}
 
 		case CERTIFICATE_PURPOSE_SSH:
 			/* SSH does not look at X.509 extensions at all: it uses the raw
 			 * key. Any RSA or EC key that will sign qualifies, which is why
-			 * this is its own purpose rather than "signing with extra steps". */
-			return g_strcmp0(candidate->key_type, "RSA") == 0 ||
-			       g_strcmp0(candidate->key_type, "EC") == 0;
+			 * this is its own purpose rather than "signing with extra steps".
+			 * The key usage is not consulted for the same reason. */
+			if (!candidate->can_sign)
+				return CERTIFICATE_OPERATION_NONE;
+			if (g_strcmp0(candidate->key_type, "RSA") == 0 ||
+			    g_strcmp0(candidate->key_type, "EC") == 0)
+				return CERTIFICATE_OPERATION_SIGN;
+			return CERTIFICATE_OPERATION_NONE;
 
 		default:
-			return FALSE;
+			return CERTIFICATE_OPERATION_NONE;
 	}
+}
+
+gboolean certificate_purpose_matches(const CertificateCandidate* candidate,
+                                     CertificatePurpose purpose,
+                                     CertificateOperations permitted)
+{
+	return (certificate_purpose_operations(candidate, purpose) & permitted) != 0;
 }
 
 static gboolean issuer_matches(const CertificateCandidate* candidate, GPtrArray* issuers)
@@ -172,7 +223,7 @@ static gboolean key_algorithm_matches(const CertificateCandidate* candidate, cha
 gboolean certificate_filter_matches(const CertificateCandidate* candidate,
                                     const CertificateFilter* filter)
 {
-	if (!certificate_purpose_matches(candidate, filter->purpose))
+	if (!certificate_purpose_matches(candidate, filter->purpose, filter->operations))
 		return FALSE;
 
 	if (!issuer_matches(candidate, filter->issuers))
@@ -267,7 +318,8 @@ static char** strv_from_variant(GVariant* dict, const char* key, GError** error)
 }
 
 gboolean certificate_filter_parse(GVariant* options, CertificatePurpose purpose,
-                                  CertificateFilter* out, GError** error)
+                                  CertificateOperations operations, CertificateFilter* out,
+                                  GError** error)
 {
 	g_autoptr(GVariant) filter = NULL;
 	g_autoptr(GVariant) issuers = NULL;
@@ -276,6 +328,7 @@ gboolean certificate_filter_parse(GVariant* options, CertificatePurpose purpose,
 
 	memset(out, 0, sizeof(*out));
 	out->purpose = purpose;
+	out->operations = operations;
 
 	if (options == NULL)
 		return TRUE;

@@ -7,7 +7,7 @@
       data/org.freedesktop.impl.portal.experimental.Certificate.xml
 
   on the xdg-desktop-portal branch experimental/certificate-webauthentication,
-  at commit 4276b90 "certificate: Say how PSS spells its mask generation function".
+  at commit 7635aa8 "certificate: Let email cover a decryption-only certificate".
 
   IT MUST TRACK THAT FILE. The interface is defined by the portal frontend, not
   by this backend; a divergence here is a backend that no longer implements the
@@ -89,6 +89,16 @@
           As on :ref:`org.freedesktop.portal.experimental.Certificate.AcquireCredential`.
           They have been validated by the frontend; an unknown value never
           reaches the backend.
+
+          ``purpose`` and ``operation_policy`` are read together. A
+          certificate matches ``client_auth``, ``signing`` or ``ssh`` only if
+          its key will sign; ``email`` covers both halves of S/MIME and is
+          matched by a certificate whose key usage permits
+          ``digitalSignature`` **or** ``keyEncipherment``. A backend must
+          offer a certificate that can only decrypt — a PIV "key management"
+          certificate, ``keyEncipherment`` with no ``digitalSignature`` — for
+          ``email`` only when ``operation_policy`` permits ``decrypt``, and
+          must then report ``decrypt`` alone in ``permitted_operations``.
 
         * ``lifetime`` (``u``)
 

@@ -1207,7 +1207,12 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object
 
 	transaction->caller.app_display_name = certificate_app_display_name(arg_app_id);
 
-	if (!certificate_filter_parse(arg_options, purpose, &transaction->filter, &error))
+	if (!certificate_filter_parse(arg_options,
+	                              purpose,
+	                              (transaction->may_sign ? CERTIFICATE_OPERATION_SIGN : 0) |
+	                                  (transaction->may_decrypt ? CERTIFICATE_OPERATION_DECRYPT
+	                                                            : 0),
+	                              &transaction->filter, &error))
 	{
 		certificate_log_debug(CERTIFICATE_REASON_OPERATION_REFUSED, "malformed-filter");
 		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
