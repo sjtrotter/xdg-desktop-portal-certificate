@@ -5,17 +5,18 @@ public interface, and no application talks to it. It draws a certificate chooser
 prompt, discovers PKCS#11 tokens, and performs private-key operations when
 xdg-desktop-portal asks it to.
 
-**Status: EXPERIMENTAL, and now implemented — against a software token.** It builds, it
-runs, it finds PKCS#11 tokens, it draws a chooser and a PIN prompt, and it signs. Driven by
-the frontend branch it has completed `CreateSession` → `AcquireCredential` → `Sign` end to
-end, with the signature verified against the certificate it returned, for RSA PKCS#1 v1.5,
-RSA-PSS and ECDSA.
+**Status: EXPERIMENTAL, implemented, run against one real card.** It builds, it runs, it
+finds PKCS#11 tokens, it draws a chooser and a PIN prompt, and it signs. Driven by the
+frontend branch it has completed `CreateSession` → `AcquireCredential` → `Sign` end to end,
+with the signature verified against the certificate it returned: RSA PKCS#1 v1.5, RSA-PSS
+and ECDSA signatures and RSA-OAEP decryption against a SoftHSM fixture token, and RSA
+PKCS#1 v1.5 signatures against a PIV card.
 
-**Real hardware has now been read by this code, once.** Everything in the paragraph above
-happened against a SoftHSM fixture token; [docs/TESTING.md](docs/TESTING.md) tier 3 is the run
-against a real card, and tiers 3.1–3.4 have passed once, on 2026-09-04, against one PIV card in
-one reader — one card, one reader, not yet a claim about PIV hardware in general, and the rest of
-tier 3 is still the author's to make. The PKCS#11 compatibility facade is still not
+**The real-hardware claim is narrow.** [docs/TESTING.md](docs/TESTING.md) tier 3 is the run
+against a real card; tiers 3.1–3.4 passed once, on 2026-09-04, with one PIV card in one reader,
+on a GNOME Wayland session, through both PIN paths (this backend's window and gnome-shell's
+system prompter). That is one card and one reader, not a claim about PIV hardware in general,
+and the rest of tier 3 is still the author's to run. The PKCS#11 compatibility facade is not
 reachable — `OpenPkcs11Endpoint` is on neither interface — and the two spikes that decide
 whether it can exist at all are still unrun ([docs/SPIKES.md](docs/SPIKES.md)).
 
@@ -62,9 +63,9 @@ copied from xdg-desktop-portal any more — it *is* xdg-desktop-portal: `app_id`
 by the frontend and passed to this backend as an argument, so the process drawing the
 window that names an application never had to guess which application it was.
 
-The frontend is a local-only branch, `experimental/certificate-webauthentication`, commits
-`3f46e3c..661e441`. It has been built and tested (40 pytest cases for this portal, all
-green, against a python-dbusmock backend) and **has not been proposed to anyone**. Its
+The frontend is a local-only branch, `experimental/certificate-webauthentication`, twelve
+commits `3f46e3c..7635aa8`. It has been built and tested (84 pytest cases for this portal,
+all green, against a python-dbusmock backend) and **has not been proposed to anyone**. Its
 interfaces live in the `org.freedesktop.portal.experimental.*` namespace, which is what
 upstream set aside for portals that are not finished — not a claim that this one has been
 accepted. [docs/UPSTREAMING.md](docs/UPSTREAMING.md) has the whole picture, including what
@@ -93,8 +94,9 @@ to use it has exactly two options, and both are bad.
 **Do it yourself.** Enumerate the PKCS#11 tokens, filter the certificates, draw a chooser, draw a
 PIN dialog, handle a card pulled out mid-flow, handle p11-kit's trust tokens that hold no client
 certificates, handle a token that reports empty by failing, handle the PIN retry counter you must
-not spend. Almost nobody does this. It is why smart-card sign-in works in Firefox and in
-approximately nothing else on the desktop.
+not spend. Almost nobody does this. It is why smart-card sign-in works in the applications
+that embed NSS or load a PKCS#11 module themselves — Firefox, Thunderbird, Chromium,
+LibreOffice, Evolution — and in approximately nothing else on the desktop.
 
 **Get blanket access.** A Flatpak asks for [`--socket=pcsc`](https://docs.flatpak.org/en/latest/sandbox-permissions.html)
 and is then talking to `pcscd` directly: every card, every reader, every slot, every APDU, for the
@@ -351,10 +353,12 @@ docs/         architecture, both interfaces, security, testing, spikes, roadmap,
 
 ## License
 
-GPL-2.0-or-later. The chooser and PIN handling this project intends to build on is derived from
-Remmina's RDP plugin, which is GPL-2.0-or-later; the reasoning, and the Apache-2.0 alternative that
-would require a clean-room rewrite, are in [docs/decisions/0004-license.md](docs/decisions/0004-license.md).
-Consumers only speak D-Bus, so the licence places no constraint on them.
+GPL-2.0-or-later. No code was copied from Remmina's RDP plugin; the hardware edge cases its
+smart-card path uncovered informed the discovery code, and the licence was chosen so that lifting
+code from it later would be possible — the reasoning, and the Apache-2.0 alternative, are in
+[docs/decisions/0004-license.md](docs/decisions/0004-license.md). The one piece of derived code
+is `src/ui/external-window.c`, adapted from libgxdp (LGPL-2.1-or-later, Red Hat) with its
+attribution kept. Consumers only speak D-Bus, so the licence places no constraint on them.
 
 ## AI assistance
 
