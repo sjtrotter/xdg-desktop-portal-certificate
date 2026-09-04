@@ -342,6 +342,25 @@ path every time. A closed entry left in the table therefore made every later `Cr
 that application fail for the life of the backend process. A **closed** session at a path is now
 replaced; a **live** one is still refused.
 
+### A second `AcquireCredential` on a live session rebinds the device
+
+The interface does not forbid it and the frontend does not refuse it: an application may ask again
+on a session handle it already holds, and the user may choose a different certificate. The backend
+therefore has to treat the grant, not the session, as what the open token session belongs to.
+
+It does: the open `CertificateDevice` remembers the candidate it was opened for, and the next
+operation that finds a different one **logs out, closes the PKCS#11 session and opens a new one** —
+so the login does not carry over, the private key handle does not carry over, and the first
+operation after the re-grant shows a PIN window again. That is not a nicety. Reusing the open
+session meant the frontend was handed certificate B's DER and the next `Sign` went to certificate
+A's key, with no prompt: a signature that does not verify against the certificate the portal
+returned, produced silently. If the new grant is on a *different token*, the operation would have
+been submitted to the first token's session entirely.
+
+`remember_selection` and the decryption budget are reset by the re-grant, and the lifetime timer
+restarts. `tools/certificate-e2e.py --regrant <key algorithm>` drives the whole thing and checks
+the second signature against the second certificate; `tools/ui-smoke.sh` runs it with the windows.
+
 ### Selection memory is offered only where it cannot lie
 
 The frontend stores a remembered selection only when the application passed
@@ -400,7 +419,7 @@ whether to insert a card or to talk to whoever issued the one they have.
 On a response of 2, this backend adds `error` to `results`: `no_token`,
 `no_matching_certificate`, `no_such_session`, `invalid_purpose`, `invalid_filter`,
 `interaction_required`, `no_display`, `device_error`, `token_removed`, `pin_locked`,
-`invalid_request`, `cancelled`. **The frontend drops it**, because it passes through only the keys
+`invalid_request`, `cancelled`, `owner_gone`, `backend_gone`. **The frontend drops it**, because it passes through only the keys
 it knows. It is a diagnostic for a direct impl call and for the journal, not a channel to the
 application, and it must not become one: an error string is caller-visible text and the frontend is
 the side that decides what applications learn.
@@ -444,13 +463,22 @@ unique name that currently owns `org.freedesktop.portal.Desktop`, and refuses an
 paths are guessable, and a `Session.Close()` from a stranger logs the card out and destroys a
 grant.
 
-The owner is **resolved from the bus** with `GetNameOwner`, not taken from the name watcher's
-cache: D-Bus does not order `NameOwnerChanged` against the messages of the process that lost the
-name, so a former frontend that is still connected could otherwise be compared equal to a stale
-cached owner. An answer is reused for 100 ms so that a burst of calls inside one transaction is one
-round trip rather than five, and a **refusal** is always decided on a fresh answer. The watcher is
-kept for what it is good at: when the name changes hands or goes away, every session belonging to
-the old owner is invalidated before the new owner is accepted.
+The owner is **resolved from the bus** with `GetNameOwner` before any sender is *accepted*, never
+taken from the name watcher's cache: D-Bus does not order `NameOwnerChanged` against the messages of
+the process that lost the name, so a former frontend that is still connected would otherwise be
+compared equal to a stale cached owner and admitted.
+
+A **refusal** is the other way round: it is decided from the cached owner, with no bus call at all.
+The asymmetry is deliberate. Anything on the session bus can send this backend a message, and a
+synchronous `GetNameOwner` per stranger's message is a main-thread stall that an open PIN window
+feels — a denial of service reached by a different door. A stranger's unique name can never equal
+the cached owner's, because the bus assigns unique names and never reuses one, so a stranger never
+reaches the bus call. What it costs is one refused call at the moment a replacement portal takes the
+name over before this process has processed the change; the frontend retries.
+
+The watcher is kept for what it is good at: when the name changes hands or goes away, every session
+belonging to the old owner is invalidated, and every chooser and PIN window that old owner asked for
+is cancelled, before the new owner is accepted.
 
 What that still does not provide is atomicity: the answer is a snapshot, and the name can change
 hands between the check and the work the call authorises. That is the ordinary check-then-use
@@ -475,13 +503,20 @@ A deployment that wants more can add a D-Bus policy rule denying this backend's 
 but the portal's uid. That is not in v1; it is recorded here so that "we could tighten this" is
 written down rather than assumed.
 
-**The bus name is not offered for replacement unless `--replace` was passed.** Every other backend
-sets `ALLOW_REPLACEMENT` unconditionally, and for a file chooser that is reasonable; here it meant
-any process running as the user could take
+**The bus name is not offered for replacement unless `--allow-replacement` was passed.** Every other
+backend sets `ALLOW_REPLACEMENT` unconditionally, and for a file chooser that is reasonable; here it
+meant any process running as the user could take
 `org.freedesktop.impl.portal.desktop.certificate` with one call and become the thing the portal
 calls — receiving `AcquireCredential` and `Sign` with a real app id and identity level, and drawing
-the window that asks for the PIN. `--replace` both allows replacement and asks to be one, so an
-operator can still upgrade in place; an arbitrary peer cannot simply ask.
+the window that asks for the PIN.
+
+D-Bus cannot authenticate a replacement. `ALLOW_REPLACEMENT` is not "let the package manager replace
+me"; it is "let whoever asks next replace me", and the bus offers the current owner no way to
+inspect who is asking. So the two halves are separate flags — `--allow-replacement` to be
+replaceable, `--replace` to ask to replace — and **the installed `.service` file passes neither**.
+An upgrade is therefore a restart: stop the old process and let D-Bus activation start the new one.
+`tools/dev-stack.sh --live` passes both, which is a development loop and not a deployment recipe.
+[TESTING.md](TESTING.md) §3.5 has the commands.
 
 ## What the backend must never do
 

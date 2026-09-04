@@ -16,17 +16,19 @@ $ ninja -C build
 $ meson test -C build
 ```
 
-Six suites:
+Nine suites:
 
 | Suite | Needs | What it covers |
 |---|---|---|
 | `filter` | nothing | purpose and `certificate_filter` matching against fixture certificates |
-| `mechanism` | nothing | the mechanism mapping, the digest-length rule, the PSS parameters and the `MGF1-<hash>` spelling, the OAEP parameters and `CK_RSA_PKCS_OAEP_PARAMS`, **that only `RSA_OAEP` may decrypt and only the three signing mechanisms may sign** |
+| `mechanism` | nothing | the mechanism mapping, the digest-length rule, the PSS parameters and the `MGF1-<hash>` spelling **including a mismatched hash and a wrong-typed one**, the OAEP parameters and `CK_RSA_PKCS_OAEP_PARAMS`, **that only `RSA_OAEP` may decrypt and only the three signing mechanisms may sign**, and that a present-but-mistyped `signature_encoding`, `mgf` or `mgf1_hash` is an error rather than a default |
 | `redact` | nothing | the redactor, the display-text sanitiser, that a newline in an app id cannot forge a journal line |
-| `broker-device` | a SoftHSM fixture, and `openssl(1)` for the OAEP half | `C_Login`, `C_Sign`, signature verification, and an **RSA-OAEP round trip** against a ciphertext `openssl pkeyutl` produced. **Skips itself** without one; see tier 2 |
+| `chooser` | nothing | the consent window's display helpers: that a desktop file's `Name=` or a card's token label cannot add a line, an ANSI escape or a direction override to the window, that both are capped, and that "expired" is a **word** |
+| `broker-device` | a SoftHSM fixture, and `openssl(1)` for the OAEP half | `C_Login`, `C_Sign`, signature verification, an **RSA-OAEP round trip** against a ciphertext `openssl pkeyutl` produced, and that opening the device for a **different** candidate throws away the previous grant's login and key handle. **Skips itself** without one; see tier 2 |
 | `broker-decrypt` | a SoftHSM fixture | the two properties that make `Decrypt` safe to offer: **one indistinguishable error** for every failure, and the **per-grant budget**. **Skips itself** without one |
-| `impl-dbus` | nothing (it stands up its own `GTestDBus`) | the D-Bus boundary: a stranger calling every method including both `Close()`s, cross-`app_id` session use, session-path reuse, strict option validation, the results vardict's types |
-| `cancellation` | a display for two of three, a SoftHSM fixture for the third | cancelling while `C_Login` is in flight, cancelling before the window is up, cancelling a signature |
+| `broker-regrant` | a SoftHSM fixture with both an RSA and an EC key | a second `AcquireCredential` on a live session, end to end: the signature after the re-grant **verifies against the new certificate**, and the operation in between is refused rather than signed with the old grant's key. **Skips itself** without one |
+| `impl-dbus` | nothing (it stands up its own `GTestDBus`) | the D-Bus boundary: a stranger calling every method including both `Close()`s, cross-`app_id` session use, session-path reuse, strict option validation, the results vardict's types, a frontend **replaced while its call is already in the backend's queue**, and the frontend vanishing while a call is in flight |
+| `cancellation` | a display for four of six, a SoftHSM fixture for two | cancelling while `C_Login` is in flight, cancelling before the window is up, cancelling **while the device call is in progress**, a cancelled login that succeeded anyway being logged out again (and a normal one not being), and one of two callers sharing a PIN window cancelling **on its own** |
 
 ### Under a sanitizer, which is where the cancellation tests earn their keep
 
@@ -51,8 +53,10 @@ $ LD_LIBRARY_PATH=~/scratch/asan-rt/usr/lib64 meson test -C build-asan
 ```
 
 `tests/lsan.supp` suppresses the one-time allocations GTK, GnuTLS and p11-kit keep for the life of
-the process. **Nothing under `src/` is suppressed**: a leak reported against this backend's own
-code is a defect.
+the process. **Nothing under `src/` is suppressed, and nothing broad enough to cover it either**: it
+used to contain `leak:libglib-2.0`, `leak:libgio-2.0` and `leak:libgobject-2.0`, and because LSan
+matches a suppression against *any* frame of the allocation stack, those hid almost every leak this
+backend can have. A leak reported against this backend's own code is a defect.
 
 To check that the cancellation tests still fail when the bug is put back, make
 `pin_prompt_finish()` answer immediately while a login is in flight and hand the worker the
@@ -255,6 +259,11 @@ reader or the card, not this backend.
 $ ./build/src/xdg-desktop-portal-certificate --list-tokens
 ```
 
+Every card-supplied string it prints — the label, manufacturer, model, reader name, certificate
+subject and issuer — goes through the same sanitiser the chooser uses, so a card carrying ANSI
+escapes or a right-to-left override cannot rewrite this output. It is still someone else's card:
+`| cat -v` if you want to see the bytes rather than the reading.
+
 and, if p11-kit is not configured for OpenSC on this machine:
 
 ```console
@@ -368,6 +377,29 @@ system portal** for as long as it runs.
 ```console
 $ tools/dev-stack.sh --live -- --purpose client_auth
 ```
+
+**There is no in-place upgrade of this backend, and `--replace` on its own is not one.**
+`G_BUS_NAME_OWNER_FLAGS_REPLACE` only succeeds if the instance that currently owns the name asked
+to be replaceable, and the D-Bus-activated one deliberately does not: `ALLOW_REPLACEMENT` is not
+"let the package manager replace me", it is "let whoever asks next replace me", and what would be
+taken over is the window that asks for a PIN. The two halves are separate flags:
+
+| | |
+|---|---|
+| `--allow-replacement` | this instance may be replaced later. Not the default, and **not in the installed `.service` file** |
+| `--replace` | this instance asks to replace the current owner — which works only if that owner was started with `--allow-replacement` |
+
+So the way to move to a new build is to **stop the old process and let D-Bus activation start the
+new one**:
+
+```console
+$ pkill -f xdg-desktop-portal-certificate     # or systemctl --user stop, where it is a unit
+# ...the next AcquireCredential activates the new binary
+```
+
+`tools/dev-stack.sh --live` starts its backend with `--replace --allow-replacement` so that
+re-running it takes the name off the instance the previous run left behind. That is a development
+loop, not a deployment recipe.
 
 Afterwards, check the system portal came back:
 
