@@ -195,6 +195,98 @@ static void harden(void)
 		g_message("process-not-hardened detail=rlimit-core-failed");
 }
 
+/* THE WINDOWS FOLLOW THE SESSION'S LIGHT/DARK SETTING, AND THEY HAVE TO BE TOLD
+ * IT DIRECTLY. This is a consequence of harden(), and it was a visible bug: the
+ * chooser and the PIN prompt came up light on a dark desktop.
+ *
+ * WHY. libadwaita takes the colour scheme from the SETTINGS PORTAL. Asking the
+ * portal makes it look the caller up by /proc/<pid>, and PR_SET_DUMPABLE(0)
+ * makes this process's /proc entries root-owned on purpose, so the portal
+ * answers AccessDenied ("Unable to open /proc/<pid>/root") and GDK says so in a
+ * warning. libadwaita's remaining fallbacks did not recover the setting here:
+ * measured on Fedora 44 with the session set to prefer-dark, this process came
+ * up LIGHT with the hardening on and DARK with --debug-allow-core.
+ *
+ * THE CHOICE, recorded because both options were real:
+ *
+ *   drop PR_SET_DUMPABLE(0) and rely on RLIMIT_CORE 0, MADV_DONTDUMP and Yama
+ *     -- which would trade a same-uid ptrace defence for a theme. Yama's
+ *     ptrace_scope is not guaranteed to be set, and the thing a tracer would
+ *     read is the page a PIN is in.
+ *
+ *   read the setting ourselves, which is this. GSettings talks to dconf over
+ *     D-Bus and does not look anybody up by pid, so it works in a process the
+ *     portal cannot identify.
+ *
+ * The schema is looked up rather than assumed: org.gnome.desktop.interface is
+ * not present on every desktop, and a missing schema aborts in g_settings_new().
+ * Where it is absent, libadwaita's own answer stands. */
+static void on_dark_changed(GObject* manager, GParamSpec* spec, gpointer user_data)
+{
+	certificate_log_debug(CERTIFICATE_REASON_REQUEST_RECEIVED,
+	                      adw_style_manager_get_dark(ADW_STYLE_MANAGER(manager))
+	                          ? "colour-scheme-dark"
+	                          : "colour-scheme-light");
+}
+
+static void apply_colour_scheme(GSettings* settings, const char* key, gpointer user_data)
+{
+	g_autofree char* scheme = g_settings_get_string(settings, "color-scheme");
+	AdwColorScheme wanted = ADW_COLOR_SCHEME_DEFAULT;
+
+	if (g_strcmp0(scheme, "prefer-dark") == 0)
+		wanted = ADW_COLOR_SCHEME_PREFER_DARK;
+	else if (g_strcmp0(scheme, "prefer-light") == 0)
+		wanted = ADW_COLOR_SCHEME_PREFER_LIGHT;
+
+	adw_style_manager_set_color_scheme(adw_style_manager_get_default(), wanted);
+}
+
+static void follow_colour_scheme(void)
+{
+	GSettingsSchemaSource* source = g_settings_schema_source_get_default();
+	g_autoptr(GSettingsSchema) schema = NULL;
+	AdwStyleManager* manager = adw_style_manager_get_default();
+
+	g_signal_connect(manager, "notify::dark", G_CALLBACK(on_dark_changed), NULL);
+
+	/* libadwaita's own override wins, because it exists to be able to. It is
+	 * how tools/ui-smoke.sh checks that a dark scheme actually reaches the
+	 * windows without depending on what the machine running the test has its
+	 * desktop set to. */
+	{
+		const char* forced = g_getenv("ADW_DEBUG_COLOR_SCHEME");
+
+		if (forced != NULL && *forced != '\0')
+		{
+			certificate_log_debug(CERTIFICATE_REASON_REQUEST_RECEIVED, "colour-scheme-forced");
+			on_dark_changed(G_OBJECT(manager), NULL, NULL);
+			return;
+		}
+	}
+
+	if (source != NULL)
+		schema = g_settings_schema_source_lookup(source, "org.gnome.desktop.interface", TRUE);
+
+	if (schema != NULL && g_settings_schema_has_key(schema, "color-scheme"))
+	{
+		/* Leaked on purpose: it lives for the life of the process and the
+		 * "changed" handler is what keeps the windows following the session. */
+		GSettings* settings = g_settings_new("org.gnome.desktop.interface");
+
+		g_signal_connect(settings, "changed::color-scheme", G_CALLBACK(apply_colour_scheme),
+		                 NULL);
+		apply_colour_scheme(settings, "color-scheme", NULL);
+	}
+	else
+	{
+		certificate_log_debug(CERTIFICATE_REASON_REQUEST_RECEIVED, "colour-scheme-no-schema");
+	}
+
+	on_dark_changed(G_OBJECT(manager), NULL, NULL);
+}
+
+
 static gboolean on_signal(gpointer user_data)
 {
 	g_debug("terminating on a signal");
@@ -397,8 +489,22 @@ int main(int argc, char** argv)
 	}
 
 	certificate_log_set_verbose(opt_verbose);
-	if (!opt_verbose)
+
+	/* --verbose PROMISES BREADCRUMBS, so it has to turn the debug level on as
+	 * well: every certificate_log_debug() is a g_debug(), and GLib's default
+	 * writer drops those unless a domain is enabled. Without this the flag
+	 * enabled the calls and then threw away what they printed, which is how the
+	 * colour-scheme line below was invisible in a log that had asked for it. */
+	if (opt_verbose)
+	{
+		const char* domains[] = { "all", NULL };
+
+		g_log_writer_default_set_debug_domains(domains);
+	}
+	else
+	{
 		g_log_writer_default_set_debug_domains(NULL);
+	}
 
 	/* WHERE THE PIN IS TYPED. The module default is the in-process window; the
 	 * PROGRAM default is auto, which is the system prompter when the session
@@ -439,6 +545,7 @@ int main(int argc, char** argv)
 	{
 		adw_init();
 		certificate_ui_set_has_display(TRUE);
+		follow_colour_scheme();
 	}
 	else
 	{

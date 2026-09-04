@@ -65,6 +65,20 @@ typedef struct
 	                                             token or reader collects the PIN, and
 	                                             ui/pin.h must NOT draw a PIN field */
 	gboolean login_required;
+	/** CKF_HW_SLOT on the token's SLOT: the module says this is a hardware
+	 *  device. PKCS#11 has no such flag on CK_TOKEN_INFO, and the constant
+	 *  spelled CKF_HW is a MECHANISM flag whose value collides with CKF_RNG in
+	 *  the token flags -- so this comes from CK_SLOT_INFO and nowhere else.
+	 *  Used by the default token policy; see --allow-software-tokens. A claim by
+	 *  the module, not a fact anything can check. */
+	gboolean hardware;
+	/** Reached through a module the operator named with --module, rather than
+	 *  through p11-kit's configured set. */
+	gboolean module_named_explicitly;
+	/** Why this token is not offered, or NULL when it is. A static string, set
+	 *  by the listing functions; only certificate_tokens_list_all() ever
+	 *  RETURNS a token that has one. */
+	const char* skip_reason;
 	gboolean pin_count_low;
 	gboolean pin_final_try;
 	gboolean pin_locked;
@@ -164,9 +178,25 @@ void certificate_tokens_enumerate_async(CertificateTokens* tokens, GCancellable*
 GPtrArray* certificate_tokens_enumerate_finish(CertificateTokens* tokens, GAsyncResult* result,
                                                GError** error);
 
-/** The tokens currently present, without reading any certificate off them.
- *  Used by --list-tokens and by the presence watcher. */
+/** The tokens currently present AND USABLE, without reading any certificate off
+ *  them. Used by the presence watcher. */
 GPtrArray* certificate_tokens_list(CertificateTokens* tokens, GError** error);
+
+/** The same, plus the ones the token policy skipped, each carrying its
+ *  @skip_reason. --list-tokens and NOTHING ELSE: an operator deciding whether
+ *  this backend can see their card has to be told about a token that is there
+ *  and is not being offered, and everything that DECIDES anything uses the
+ *  filtered list above. */
+GPtrArray* certificate_tokens_list_all(CertificateTokens* tokens, GError** error);
+
+/** Offer tokens whose slot does not set CKF_HW_SLOT. Off by default: p11-kit on
+ *  an ordinary desktop presents software key stores as tokens, and a window
+ *  headed "security token" that offers keys from the user's home directory is a
+ *  window saying something untrue about where the key is. A module named with
+ *  --module is exempt already -- naming it is the same act. NOT A SECURITY
+ *  BOUNDARY: the flag is a claim by a module that is already loaded into this
+ *  process. */
+void certificate_tokens_set_allow_software(CertificateTokens* tokens, gboolean allow);
 
 /** Re-resolve @token to a slot that currently holds it and open a read-only
  *  session on it. Fails with CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED when the

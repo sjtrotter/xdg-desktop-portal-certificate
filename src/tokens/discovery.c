@@ -27,6 +27,8 @@ struct CertificateTokens
 	CK_FUNCTION_LIST** modules; /* p11-kit owned, NULL terminated */
 	GPtrArray* explicit_modules; /* CK_FUNCTION_LIST*, loaded from --module */
 	GHashTable* module_names;    /* CK_FUNCTION_LIST* -> char* (owned), for --module */
+	/* THE DEFAULT IS HARDWARE ONLY. See token_skip_reason(). */
+	gboolean allow_software;
 	GMutex lock;
 
 	/* presence watching */
@@ -524,6 +526,13 @@ void certificate_tokens_free(CertificateTokens* tokens)
 	g_free(tokens);
 }
 
+void certificate_tokens_set_allow_software(CertificateTokens* tokens, gboolean allow)
+{
+	g_mutex_lock(&tokens->lock);
+	tokens->allow_software = allow;
+	g_mutex_unlock(&tokens->lock);
+}
+
 /* Every module this backend should look at, explicit or configured. */
 static GPtrArray* module_list(CertificateTokens* tokens)
 {
@@ -584,10 +593,27 @@ static CertificateToken* token_from_slot(CertificateTokens* tokens, CK_FUNCTION_
 	}
 
 	if (module->C_GetSlotInfo(slot, &slot_info) == CKR_OK)
+	{
 		token->reader_name =
 		    certificate_pkcs11_string(slot_info.slotDescription, sizeof(slot_info.slotDescription));
+
+		/* CKF_HW_SLOT, ON THE *SLOT*, is PKCS#11's only answer to "is this a
+		 * hardware device". It is worth naming the trap: CK_TOKEN_INFO has no
+		 * such flag, and the constant called CKF_HW is (1<<0) in the MECHANISM
+		 * flags -- the same bit that means CKF_RNG in CK_TOKEN_INFO.flags.
+		 * Testing token_info.flags & CKF_HW therefore asks "does this token
+		 * have a random number generator", which SoftHSM answers yes to. This
+		 * code asked exactly that question for one draft; see
+		 * token_skip_reason(). */
+		token->hardware = (slot_info.flags & CKF_HW_SLOT) != 0;
+	}
 	else
+	{
 		token->reader_name = g_strdup("");
+	}
+
+	token->module_named_explicitly =
+	    tokens != NULL && g_hash_table_contains(tokens->module_names, module);
 
 	token->protected_authentication_path =
 	    (token_info.flags & CKF_PROTECTED_AUTHENTICATION_PATH) != 0;
@@ -599,12 +625,47 @@ static CertificateToken* token_from_slot(CertificateTokens* tokens, CK_FUNCTION_
 	return token;
 }
 
-/* p11-kit's trust module is skipped by name above; this catches a trust token
- * reached through an explicit --module, and any other module that decided to
- * present itself with that model string. */
-static gboolean token_is_trust_store(const CertificateToken* token)
+/* WHY THIS TOKEN IS NOT OFFERED, or NULL when it is. One predicate, used by
+ * every enumeration in this file, so that a token can never be listed by one
+ * path and refused by another.
+ *
+ * THE DEFAULT IS HARDWARE ONLY, and it is a default about HONESTY rather than
+ * about strength. p11-kit on an ordinary GNOME machine presents software key
+ * stores as tokens -- gnome-keyring's module is the one that started this --
+ * and a window headed "security token" that offers keys sitting in the user's
+ * home directory is a window telling the user something untrue about where
+ * their key is. CKF_HW is the only bit PKCS#11 has on the question. It is a
+ * claim by the module, not a fact anything can check, so this is a default and
+ * NOT a security boundary: a module that lies about CKF_HW is a module that was
+ * already loaded into this process.
+ *
+ * TWO WAYS PAST IT, both deliberate acts:
+ *
+ *   --allow-software-tokens   offer them anyway, everywhere.
+ *   --module PATH             the operator named this module. Naming a module
+ *                             is already saying "use this one", and the tests
+ *                             and tools/ point --module at SoftHSM; making them
+ *                             say it twice would add a flag and no decision.
+ *                             p11-kit's CONFIGURED set is "whatever this machine
+ *                             happens to have", which is the set the default is
+ *                             about. */
+static const char* token_skip_reason(const CertificateTokens* tokens,
+                                     const CertificateToken* token)
 {
-	return g_strcmp0(token->model, CERTIFICATE_P11_KIT_TRUST_MODEL) == 0;
+	/* p11-kit's trust module is skipped by name in module_is_interesting();
+	 * this catches a trust token reached through an explicit --module, and any
+	 * other module that decided to present itself with that model string. */
+	if (g_strcmp0(token->model, CERTIFICATE_P11_KIT_TRUST_MODEL) == 0)
+		return "trust store: it holds CA certificates, never a private key";
+
+	if (token->hardware || token->module_named_explicitly)
+		return NULL;
+
+	if (tokens != NULL && tokens->allow_software)
+		return NULL;
+
+	return "not a hardware token (the slot does not set CKF_HW_SLOT); pass "
+	       "--allow-software-tokens or --module to use it";
 }
 
 static GPtrArray* slots_with_token(CK_FUNCTION_LIST* module)
@@ -854,7 +915,7 @@ GPtrArray* certificate_tokens_enumerate(CertificateTokens* tokens, GCancellable*
 			if (token == NULL)
 				continue;
 
-			if (token_is_trust_store(token))
+			if (token_skip_reason(tokens, token) != NULL)
 				continue;
 
 			token_count++;
@@ -908,7 +969,12 @@ GPtrArray* certificate_tokens_enumerate_finish(CertificateTokens* tokens, GAsync
 	return g_task_propagate_pointer(G_TASK(result), error);
 }
 
-GPtrArray* certificate_tokens_list(CertificateTokens* tokens, GError** error)
+/* @include_skipped is TRUE only for --list-tokens, which has to be able to say
+ * "there IS a token here and this is why it is not being offered". Everything
+ * else -- the presence watcher included -- gets the tokens this backend will
+ * actually use, because a TokenAdded for a token no grant could ever name is a
+ * signal about nothing. */
+static GPtrArray* list_tokens(CertificateTokens* tokens, gboolean include_skipped)
 {
 	GPtrArray* list = g_ptr_array_new_with_free_func((GDestroyNotify) certificate_token_unref);
 	g_autoptr(GPtrArray) modules = NULL;
@@ -929,7 +995,9 @@ GPtrArray* certificate_tokens_list(CertificateTokens* tokens, GError** error)
 			if (token == NULL)
 				continue;
 
-			if (token_is_trust_store(token))
+			token->skip_reason = token_skip_reason(tokens, token);
+
+			if (token->skip_reason != NULL && !include_skipped)
 			{
 				certificate_token_unref(token);
 				continue;
@@ -941,6 +1009,16 @@ GPtrArray* certificate_tokens_list(CertificateTokens* tokens, GError** error)
 	g_mutex_unlock(&tokens->lock);
 
 	return list;
+}
+
+GPtrArray* certificate_tokens_list(CertificateTokens* tokens, GError** error)
+{
+	return list_tokens(tokens, FALSE);
+}
+
+GPtrArray* certificate_tokens_list_all(CertificateTokens* tokens, GError** error)
+{
+	return list_tokens(tokens, TRUE);
 }
 
 gboolean certificate_tokens_open_session(CertificateTokens* tokens, const CertificateToken* token,
@@ -968,6 +1046,12 @@ gboolean certificate_tokens_open_session(CertificateTokens* tokens, const Certif
 			/* The slot number the token was FOUND at is not how it is looked up
 			 * again. A different card in the same slot is a different token. */
 			if (present == NULL || !certificate_token_same(present, token))
+				continue;
+
+			/* BELT TO THE BRACES. Nothing can hold a grant on a token that was
+			 * never enumerated, so this cannot fire today; it is here so that
+			 * "which tokens may be used" has exactly one answer in this file. */
+			if (token_skip_reason(tokens, present) != NULL)
 				continue;
 
 			rv = module->C_OpenSession(slot, CKF_SERIAL_SESSION, NULL, NULL, &session);
@@ -1061,7 +1145,7 @@ void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanism
 			CK_SLOT_ID slot = (CK_SLOT_ID) GPOINTER_TO_SIZE(g_ptr_array_index(slots, s));
 			g_autoptr(CertificateToken) token = token_from_slot(tokens, module, slot);
 
-			if (token == NULL || token_is_trust_store(token))
+			if (token == NULL || token_skip_reason(tokens, token) != NULL)
 				continue;
 
 			any_token = TRUE;
