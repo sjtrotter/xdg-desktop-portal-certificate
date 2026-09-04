@@ -147,6 +147,31 @@ static void settle(guint milliseconds)
 	g_main_loop_run(loop);
 }
 
+/* Poll the main loop until @rounds password rounds have STARTED. The counter is
+ * incremented on the way in, before the prompter's answer delay, so this says
+ * "a round is outstanding" rather than "a round finished". */
+static void wait_for_password_round(guint rounds, guint timeout_ms)
+{
+	gint64 deadline = g_get_monotonic_time() + (gint64) timeout_ms * 1000;
+
+	while (certificate_test_prompter_password_rounds() < rounds &&
+	       g_get_monotonic_time() < deadline)
+		settle(20);
+
+	g_assert_cmpuint(certificate_test_prompter_password_rounds(), >=, rounds);
+}
+
+static void wait_for_confirm_round(guint rounds, guint timeout_ms)
+{
+	gint64 deadline = g_get_monotonic_time() + (gint64) timeout_ms * 1000;
+
+	while (certificate_test_prompter_confirm_rounds() < rounds &&
+	       g_get_monotonic_time() < deadline)
+		settle(20);
+
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), >=, rounds);
+}
+
 static void script_clear(LoginScript* script)
 {
 	g_clear_pointer(&script->token, certificate_token_unref);
@@ -520,6 +545,373 @@ static void test_protected_path_asks_for_nothing(Fixture* fixture, gconstpointer
 	script_clear(&script);
 }
 
+/* AN EMPTY ANSWER IS NOT AN ATTEMPT. A stray Return in the shell's field used
+ * to arrive here as "", be copied into the locked page, and be handed to
+ * C_Login -- spending one of the three the card has on a string PKCS#11 says
+ * nothing about. The rule lives in ui/pin.c so that BOTH implementations obey
+ * it; what the prompter sees is the same prompt, asked again. */
+static void test_empty_answer_never_reaches_the_card(Fixture* fixture, gconstpointer user_data)
+{
+	LoginScript script = { 0 };
+	const char* answers[] = { "ok" };
+	g_autofree char* warning = NULL;
+
+	script.token = make_token();
+	script.answers = answers;
+
+	certificate_test_prompter_expect_password("");
+	certificate_test_prompter_expect_password(GOOD_PIN);
+
+	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
+	                      script_login, NULL, script_abandon, &script, NULL, script_done,
+	                      &script);
+	run_until_done(&script, 10000);
+
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_OK);
+	/* THE POINT OF THE WHOLE THING: one login, not two. */
+	g_assert_cmpuint(script.attempts, ==, 1);
+	g_assert_cmpstr(script.last_pin, ==, GOOD_PIN);
+
+	/* And it was re-asked on the prompt that was already up, with a warning. */
+	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 2);
+	g_assert_cmpuint(certificate_test_prompter_prompts_created(), ==, 1);
+
+	warning = certificate_test_prompter_last_warning();
+	g_assert_nonnull(warning);
+	g_assert_nonnull(strstr(warning, "Enter the PIN"));
+
+	script_clear(&script);
+}
+
+/* A PROTECTED AUTHENTICATION PATH ON ITS LAST ATTEMPT IS STILL ON ITS LAST
+ * ATTEMPT. The reader collects the digits, so there is no field to type into --
+ * but the NULL-PIN login still spends the try that locks the card, and it used
+ * to go out the instant the prompt appeared, with the confirmation running
+ * beside it rather than in front of it. */
+static void test_protected_path_final_try_refused(Fixture* fixture, gconstpointer user_data)
+{
+	LoginScript script = { 0 };
+	const char* answers[] = { "ok" };
+	g_autofree char* warning = NULL;
+
+	script.token = make_token();
+	script.token->protected_authentication_path = TRUE;
+	script.token->pin_final_try = TRUE;
+	script.answers = answers;
+
+	certificate_test_prompter_expect_confirm(FALSE);
+
+	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
+	                      script_login, NULL, script_abandon, &script, NULL, script_done,
+	                      &script);
+	run_until_done(&script, 10000);
+
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_CANCELLED);
+	/* THE CARD WAS NEVER ASKED. */
+	g_assert_cmpuint(script.attempts, ==, 0);
+	g_assert_cmpuint(script.abandons, ==, 0);
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 1);
+	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 0);
+
+	warning = certificate_test_prompter_last_warning();
+	g_assert_nonnull(warning);
+	g_assert_nonnull(strstr(warning, "LAST attempt"));
+
+	script_clear(&script);
+}
+
+static void test_protected_path_final_try_confirmed(Fixture* fixture, gconstpointer user_data)
+{
+	LoginScript script = { 0 };
+	const char* answers[] = { "ok" };
+
+	script.token = make_token();
+	script.token->protected_authentication_path = TRUE;
+	script.token->pin_final_try = TRUE;
+	script.answers = answers;
+
+	certificate_test_prompter_expect_confirm(TRUE);
+
+	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
+	                      script_login, NULL, NULL, &script, NULL, script_done, &script);
+	run_until_done(&script, 10000);
+
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_OK);
+	g_assert_cmpuint(script.attempts, ==, 1);
+	/* The reader collected it: nothing on screen was sent to the token. */
+	g_assert_null(script.last_pin);
+	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 0);
+
+	script_clear(&script);
+}
+
+/* CANCEL IN THE SHELL AFTER THE PIN HAS GONE TO THE CARD. No round is
+ * outstanding by then, so nothing this backend was waiting on ever comes back
+ * -- gnome-shell simply stops prompting and gcr's prompt emits prompt-close.
+ * Before that signal was connected the interaction carried on to PIN_OK and the
+ * grant would sign, for a request the user had just refused.
+ *
+ * What must happen instead is ui/pin.c's round-2 path: the answer is CANCELLED,
+ * the login that nonetheless succeeded is logged, and it is ABANDONED so the
+ * token is not left authenticated. */
+static void test_shell_cancel_after_the_pin_was_submitted(Fixture* fixture,
+                                                          gconstpointer user_data)
+{
+	LoginScript script = { 0 };
+	const char* answers[] = { "ok" };
+
+	script.token = make_token();
+	script.answers = answers;
+	/* Long enough that the dismissal lands while C_Login is still running. */
+	script.block_ms = 1500;
+
+	certificate_test_prompter_expect_password(GOOD_PIN);
+
+	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
+	                      script_login, NULL, script_abandon, &script, NULL, script_done,
+	                      &script);
+
+	wait_for_password_round(1, 5000);
+	settle(400); /* the answer, the submit, and the worker started */
+	g_assert_cmpuint(script.attempts, ==, 1);
+	g_assert_false(script.done_called);
+
+	certificate_test_prompter_dismiss();
+
+	run_until_done(&script, 20000);
+	settle(300);
+
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_CANCELLED);
+	g_assert_cmpuint(script.attempts, ==, 1);
+	/* The login landed after the cancel, so it is undone. */
+	g_assert_cmpuint(script.abandons, ==, 1);
+
+	script_clear(&script);
+}
+
+/* THE PROMPTER DISAPPEARING IS NOT A REASON TO WAIT FOR EVER. gcr makes a
+ * cancellation of its own when the prompter's bus name vanishes
+ * (gcr/gcr-system-prompt.c, on_prompter_vanished), and G_IO_ERROR_CANCELLED
+ * used to be swallowed on every one of these paths -- which left the caller
+ * unanswered and ui/pin.c's single prompt slot occupied for the life of the
+ * process, so no later request could ever put a prompt up either. */
+static void test_prompter_vanishes_during_password(Fixture* fixture, gconstpointer user_data)
+{
+	LoginScript script = { 0 };
+	LoginScript second = { 0 };
+	const char* answers[] = { "ok" };
+
+	script.token = make_token();
+	script.answers = answers;
+	second.token = make_token();
+	second.answers = answers;
+
+	certificate_test_prompter_set_delay(5000);
+	certificate_test_prompter_expect_password(GOOD_PIN);
+
+	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
+	                      script_login, NULL, NULL, &script, NULL, script_done, &script);
+
+	wait_for_password_round(1, 5000);
+	settle(200);
+	certificate_test_prompter_vanish(fixture->prompter);
+
+	run_until_done(&script, 15000);
+
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_DEVICE_ERROR);
+	g_assert_cmpuint(script.attempts, ==, 0);
+
+	/* AND THE SLOT IS FREE. A second request must still be able to try; before
+	 * the fix it was queued behind a prompt that would never be answered. */
+	certificate_pin_login(second.token, NULL, "Test application", "prove who you are",
+	                      script_login, NULL, NULL, &second, NULL, script_done, &second);
+	run_until_done(&second, 15000);
+	g_assert_cmpuint(second.attempts, ==, 0);
+
+	certificate_test_prompter_set_delay(40);
+	script_clear(&script);
+	script_clear(&second);
+}
+
+static void test_prompter_vanishes_during_confirm(Fixture* fixture, gconstpointer user_data)
+{
+	LoginScript script = { 0 };
+	const char* answers[] = { "ok" };
+
+	script.token = make_token();
+	script.token->pin_final_try = TRUE;
+	script.answers = answers;
+
+	/* The password round is answered after this long; the confirmation round it
+	 * arms is then left outstanding for the same again, which is the window the
+	 * prompter is made to vanish in. */
+	certificate_test_prompter_set_delay(300);
+	certificate_test_prompter_expect_password(GOOD_PIN);
+	certificate_test_prompter_expect_confirm(TRUE);
+
+	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
+	                      script_login, NULL, NULL, &script, NULL, script_done, &script);
+
+	wait_for_confirm_round(1, 10000);
+	certificate_test_prompter_vanish(fixture->prompter);
+
+	run_until_done(&script, 15000);
+
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_DEVICE_ERROR);
+	/* The confirmation never came back, so the last attempt was not spent. */
+	g_assert_cmpuint(script.attempts, ==, 0);
+
+	certificate_test_prompter_set_delay(40);
+	script_clear(&script);
+}
+
+/* ------------------------------------------- against a prompter that answers nothing */
+
+typedef struct
+{
+	GTestDBus* bus;
+	GDBusConnection* connection;
+	CertificateTestStallingPrompter* prompter;
+	gboolean send_ready;
+} StallFixture;
+
+static void stall_set_up_common(StallFixture* fixture, gboolean send_ready)
+{
+	g_autoptr(GError) error = NULL;
+
+	fixture->bus = g_test_dbus_new(G_TEST_DBUS_NONE);
+	g_test_dbus_up(fixture->bus);
+
+	fixture->connection = g_dbus_connection_new_for_address_sync(
+	    g_test_dbus_get_bus_address(fixture->bus),
+	    G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT | G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION,
+	    NULL, NULL, &error);
+	g_assert_no_error(error);
+
+	fixture->prompter = certificate_test_stalling_prompter_start(
+	    fixture->connection, "org.gnome.keyring.SystemPrompter", send_ready);
+
+	g_assert_true(certificate_pin_set_prompt_kind("system", NULL));
+	certificate_ui_set_has_display(FALSE);
+	certificate_pin_set_login_timeout(60);
+}
+
+static void stall_set_up(StallFixture* fixture, gconstpointer user_data)
+{
+	stall_set_up_common(fixture, TRUE);
+}
+
+static void stall_set_up_no_ready(StallFixture* fixture, gconstpointer user_data)
+{
+	stall_set_up_common(fixture, FALSE);
+}
+
+static void stall_tear_down(StallFixture* fixture, gconstpointer user_data)
+{
+	certificate_test_stalling_prompter_stop(fixture->prompter);
+	g_clear_object(&fixture->connection);
+	g_test_dbus_down(fixture->bus);
+	g_clear_object(&fixture->bus);
+
+	g_assert_true(certificate_pin_set_prompt_kind("gtk", NULL));
+	certificate_pin_set_login_timeout(60);
+}
+
+/* THE ROUND THAT COMES BACK TWICE, which is the whole reason every gcr callback
+ * in src/ui/pin-system.c claims its result before it touches anything.
+ *
+ * gcr 4.4, gcr/gcr-system-prompt.c:
+ *
+ *   perform_prompt_async() puts the PerformPrompt result in ->pending.
+ *   perform_close() -- which gcr_prompt_close() reaches -- takes ->pending and
+ *   completes it from an idle. That is completion one, and it is the one that
+ *   drops the reference the round held; here it is the LAST reference, so the
+ *   PinPrompt and its SystemPinPrompt are freed inside it.
+ *   on_perform_prompt_complete() then lands with the transport error and calls
+ *   g_simple_async_result_complete() on the same result. That is completion
+ *   two, on freed memory.
+ *
+ * Passing no GCancellable does not help: nothing here cancelled anything. The
+ * prompter simply failed a call that was still on the wire when the prompt was
+ * closed. Under -Db_sanitize=address this test is a heap-use-after-free without
+ * the guard, and a pair of quiet returns with it. */
+static void test_close_racing_a_transport_error(StallFixture* fixture, gconstpointer user_data)
+{
+	LoginScript script = { 0 };
+	const char* answers[] = { "ok" };
+	g_autoptr(GCancellable) cancellable = g_cancellable_new();
+
+	script.token = make_token();
+	script.answers = answers;
+
+	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
+	                      script_login, NULL, NULL, &script, cancellable, script_done, &script);
+
+	/* The open has completed and the password round is on the wire, unanswered. */
+	for (guint i = 0; i < 100 && !certificate_test_stalling_prompter_is_performing(
+	                                 fixture->prompter);
+	     i++)
+		settle(20);
+	g_assert_true(certificate_test_stalling_prompter_is_performing(fixture->prompter));
+
+	/* Request.Close(): the prompt is closed, gcr completes the round in flight
+	 * as a dismissal, and this backend answers and lets go of everything. */
+	g_cancellable_cancel(cancellable);
+	run_until_done(&script, 10000);
+	settle(300);
+
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_CANCELLED);
+	g_assert_cmpuint(script.attempts, ==, 0);
+
+	/* And NOW the call that was left on the wire fails, which is gcr's second
+	 * completion of the round this backend has already finished with.
+	 *
+	 * THE MESSAGE IS THE ASSERTION. What the second run would do without the
+	 * guard is read freed memory, and a read of freed memory is not observable
+	 * from a test unless the test is running under a sanitizer -- so the guard
+	 * says so in the journal, and this insists on hearing it. Remove
+	 * round_claim()'s check and g_test_assert_expected_messages() fails here. */
+	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
+	                      "pin-prompt-round-completed-twice*");
+	certificate_test_stalling_prompter_fail_perform(fixture->prompter);
+	settle(500);
+	g_test_assert_expected_messages();
+
+	/* Nothing more happened: the second completion was ignored, not acted on. */
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_CANCELLED);
+	g_assert_cmpuint(script.attempts, ==, 0);
+
+	script_clear(&script);
+}
+
+/* THE PROMPTER VANISHING WHILE THE OPEN IS STILL WAITING. gcr answers the open
+ * with G_IO_ERROR_CANCELLED, which this file used to return quietly on -- and
+ * before any login has been submitted the login timeout cannot rescue it, so
+ * the caller waited for ever and so did everything queued behind it. */
+static void test_prompter_vanishes_during_open(StallFixture* fixture, gconstpointer user_data)
+{
+	LoginScript script = { 0 };
+	const char* answers[] = { "ok" };
+
+	script.token = make_token();
+	script.answers = answers;
+
+	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
+	                      script_login, NULL, NULL, &script, NULL, script_done, &script);
+
+	settle(400);
+	g_assert_false(script.done_called);
+
+	certificate_test_stalling_prompter_vanish(fixture->prompter);
+
+	run_until_done(&script, 15000);
+
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_NO_DISPLAY);
+	g_assert_cmpuint(script.attempts, ==, 0);
+
+	script_clear(&script);
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -539,8 +931,25 @@ int main(int argc, char** argv)
 	ADD("/pin-system/warning-carries-the-token-flags", test_warning_carries_the_token_flags);
 	ADD("/pin-system/login-timeout", test_login_timeout);
 	ADD("/pin-system/protected-path-asks-for-nothing", test_protected_path_asks_for_nothing);
+	ADD("/pin-system/empty-answer-never-reaches-the-card", test_empty_answer_never_reaches_the_card);
+	ADD("/pin-system/protected-path-final-try-refused", test_protected_path_final_try_refused);
+	ADD("/pin-system/protected-path-final-try-confirmed", test_protected_path_final_try_confirmed);
+	ADD("/pin-system/shell-cancel-after-the-pin-was-submitted",
+	    test_shell_cancel_after_the_pin_was_submitted);
+	ADD("/pin-system/prompter-vanishes-during-password", test_prompter_vanishes_during_password);
+	ADD("/pin-system/prompter-vanishes-during-confirm", test_prompter_vanishes_during_confirm);
 
 #undef ADD
+
+#define ADD_STALL(path, setup, function) \
+	g_test_add(path, StallFixture, NULL, setup, function, stall_tear_down)
+
+	ADD_STALL("/pin-system/close-racing-a-transport-error", stall_set_up,
+	          test_close_racing_a_transport_error);
+	ADD_STALL("/pin-system/prompter-vanishes-during-open", stall_set_up_no_ready,
+	          test_prompter_vanishes_during_open);
+
+#undef ADD_STALL
 
 	return g_test_run();
 }

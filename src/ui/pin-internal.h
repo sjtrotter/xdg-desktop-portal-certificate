@@ -149,9 +149,11 @@ struct _PinPrompt
  *  storage is not referenced after this returns and the implementation is
  *  expected to drop or clear its own copy immediately.
  *
- *  Returns FALSE, having said so through @impl->retry, when the PIN is longer
- *  than this backend will send to a token. Never called for a protected
- *  authentication path. */
+ *  Returns FALSE, having said so through @impl->retry, when the PIN is EMPTY --
+ *  which is never an attempt, in either implementation, because a token that
+ *  counts a zero-length PIN as a failure would spend a retry on a stray Return
+ *  -- or when it is longer than this backend will send to a token. Never called
+ *  for a protected authentication path. */
 gboolean certificate_pin_prompt_hold(PinPrompt* prompt, const char* pin);
 
 /** Spend an attempt: hand the worker a private copy of what

@@ -167,8 +167,8 @@ static PinBuffer* pin_buffer_new(void)
 	if (!buffer->locked && !pin_mlock_warned)
 	{
 		pin_mlock_warned = TRUE;
-		g_message("pin-buffer-unlocked detail=mlock-failed: the PIN page could not be "
-		          "pinned in memory; it is still wiped and excluded from core dumps");
+		/* The page is still wiped and still excluded from core dumps. */
+		g_message("pin-buffer-unlocked detail=mlock-failed");
 	}
 
 	/* Best effort and unchecked on purpose: an older kernel that does not know
@@ -646,6 +646,22 @@ gboolean certificate_pin_prompt_hold(PinPrompt* prompt, const char* pin)
 {
 	if (prompt->finished || prompt->login_in_flight)
 		return FALSE;
+
+	/* AN EMPTY PIN NEVER REACHES C_Login, AND THE RULE IS HERE so that both
+	 * implementations obey it. A stray Return in the shell's prompt used to
+	 * arrive as "", be held, be submitted, and SPEND AN ATTEMPT: PKCS#11 says
+	 * nothing about how a token counts a zero-length PIN, and the ones that
+	 * count it as a failure are the ones where the counter matters. The window
+	 * had its own check for this and the prompter path did not, which is
+	 * exactly the shape of bug a shared rule in a shared place prevents.
+	 *
+	 * It is not a refusal of the interaction: the implementation is asked
+	 * again, with a warning, on the prompt that is already up. */
+	if (pin == NULL || *pin == '\0')
+	{
+		prompt->impl->retry(prompt, "Enter the PIN for this token.");
+		return FALSE;
+	}
 
 	if (!pin_buffer_set(prompt->buffer_opaque, pin))
 	{

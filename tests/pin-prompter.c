@@ -205,14 +205,23 @@ enum
 	PROP_CANCEL_LABEL
 };
 
+/* The prompt the prompter is serving right now, so that a test can dismiss it
+ * the way a person would. GcrSystemPrompter instantiates the type itself and
+ * the script is process-wide already, so there is nowhere else to keep it. */
+static TestPrompt* current_prompt = NULL;
+
 static void test_prompt_init(TestPrompt* self)
 {
 	prompts_created++;
+	current_prompt = self;
 }
 
 static void test_prompt_finalize(GObject* object)
 {
 	TestPrompt* self = TEST_PROMPT(object);
+
+	if (current_prompt == self)
+		current_prompt = NULL;
 
 	if (self->pending_source != 0)
 		g_source_remove(self->pending_source);
@@ -561,6 +570,29 @@ CertificateTestPrompter* certificate_test_prompter_start(GDBusConnection* connec
 	return self;
 }
 
+void certificate_test_prompter_dismiss(void)
+{
+	/* gcr's prompter is connected to this signal on the prompt it created; its
+	 * handler stops prompting and calls PromptDone on the client, which is what
+	 * gnome-shell does when Cancel is pressed on a prompt with nothing pending.
+	 * The client's own GcrPrompt then emits prompt-close. */
+	if (current_prompt != NULL)
+		gcr_prompt_close(GCR_PROMPT(current_prompt));
+}
+
+void certificate_test_prompter_vanish(CertificateTestPrompter* self)
+{
+	if (self == NULL || self->owner_id == 0)
+		return;
+
+	/* THE NAME AND NOTHING ELSE. gcr_system_prompter_unregister() would send
+	 * PromptDone to every caller, which is the polite shutdown and not what
+	 * this is for: a prompter that is killed says nothing at all, and what the
+	 * client has to survive is its own name watch firing. */
+	g_bus_unown_name(self->owner_id);
+	self->owner_id = 0;
+}
+
 void certificate_test_prompter_stop(CertificateTestPrompter* self)
 {
 	if (self == NULL)
@@ -571,6 +603,176 @@ void certificate_test_prompter_stop(CertificateTestPrompter* self)
 
 	gcr_system_prompter_unregister(self->prompter, TRUE);
 	g_clear_object(&self->prompter);
+	g_clear_object(&self->connection);
+	g_free(self);
+}
+
+/* -------------------------------------------- the prompter that answers nothing */
+
+/* THE PROTOCOL BY HAND, because GcrSystemPrompter is too well behaved to
+ * reproduce the bug. See pin-prompter.h for what this is for. The three method
+ * names, the two callback method names and the argument types are gcr's, from
+ * gcr/gcr-dbus-constants.h and gcr/gcr-system-prompter.c. */
+#define PROMPTER_OBJECT_PATH "/org/gnome/keyring/Prompter"
+#define PROMPTER_INTERFACE "org.gnome.keyring.internal.Prompter"
+#define CALLBACK_INTERFACE "org.gnome.keyring.internal.Prompter.Callback"
+
+static const char stalling_prompter_xml[] =
+    "<node>"
+    "  <interface name='org.gnome.keyring.internal.Prompter'>"
+    "    <method name='BeginPrompting'>"
+    "      <arg type='o' name='callback' direction='in'/>"
+    "    </method>"
+    "    <method name='PerformPrompt'>"
+    "      <arg type='o' name='callback' direction='in'/>"
+    "      <arg type='s' name='type' direction='in'/>"
+    "      <arg type='a{sv}' name='properties' direction='in'/>"
+    "      <arg type='s' name='exchange' direction='in'/>"
+    "    </method>"
+    "    <method name='StopPrompting'>"
+    "      <arg type='o' name='callback' direction='in'/>"
+    "    </method>"
+    "  </interface>"
+    "</node>";
+
+struct _CertificateTestStallingPrompter
+{
+	GDBusConnection* connection;
+	GDBusNodeInfo* node;
+	GcrSecretExchange* exchange;
+
+	guint owner_id;
+	guint object_id;
+
+	gboolean send_ready;
+
+	/* Held and never answered until a test says so. The vtable hands this
+	 * function ownership of the invocation and one of the return_*() calls is
+	 * what releases it, so stop() answers anything still outstanding. */
+	GDBusMethodInvocation* performing;
+};
+
+static void stalling_send_ready(CertificateTestStallingPrompter* self, const char* sender,
+                                const char* path)
+{
+	g_autofree char* begun = gcr_secret_exchange_begin(self->exchange);
+	GVariantBuilder properties;
+
+	g_variant_builder_init(&properties, G_VARIANT_TYPE("a{sv}"));
+
+	/* An empty response, which is gcr's "nothing has been answered yet"; the
+	 * secret exchange has to be a real one or the client warns, and a warning
+	 * is fatal under g_test_init(). */
+	g_dbus_connection_call(self->connection, sender, path, CALLBACK_INTERFACE, "PromptReady",
+	                       g_variant_new("(sa{sv}s)", "", &properties, begun),
+	                       G_VARIANT_TYPE("()"), G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, NULL, NULL,
+	                       NULL);
+}
+
+static void stalling_method_call(GDBusConnection* connection, const char* sender,
+                                 const char* object_path, const char* interface_name,
+                                 const char* method_name, GVariant* parameters,
+                                 GDBusMethodInvocation* invocation, gpointer user_data)
+{
+	CertificateTestStallingPrompter* self = user_data;
+
+	if (g_strcmp0(method_name, "BeginPrompting") == 0)
+	{
+		const char* path = NULL;
+
+		g_variant_get(parameters, "(&o)", &path);
+		g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
+
+		if (self->send_ready)
+			stalling_send_ready(self, sender, path);
+
+		return;
+	}
+
+	if (g_strcmp0(method_name, "PerformPrompt") == 0)
+	{
+		/* NOT ANSWERED. This is the call gcr leaves in ->pending, and leaving
+		 * it on the wire is the whole point of this object. */
+		self->performing = invocation;
+		return;
+	}
+
+	if (g_strcmp0(method_name, "StopPrompting") == 0)
+	{
+		g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
+		return;
+	}
+
+	g_dbus_method_invocation_return_error_literal(invocation, G_DBUS_ERROR, G_DBUS_ERROR_FAILED,
+	                                             "no such method");
+}
+
+static const GDBusInterfaceVTable stalling_vtable = { stalling_method_call, NULL, NULL, { NULL } };
+
+CertificateTestStallingPrompter*
+certificate_test_stalling_prompter_start(GDBusConnection* connection, const char* bus_name,
+                                         gboolean send_ready)
+{
+	CertificateTestStallingPrompter* self = g_new0(CertificateTestStallingPrompter, 1);
+	g_autoptr(GError) error = NULL;
+
+	self->connection = g_object_ref(connection);
+	self->send_ready = send_ready;
+	self->exchange = gcr_secret_exchange_new(NULL);
+	self->node = g_dbus_node_info_new_for_xml(stalling_prompter_xml, &error);
+	g_assert_no_error(error);
+
+	self->object_id = g_dbus_connection_register_object(
+	    connection, PROMPTER_OBJECT_PATH, self->node->interfaces[0], &stalling_vtable, self, NULL,
+	    &error);
+	g_assert_no_error(error);
+
+	self->owner_id = g_bus_own_name_on_connection(connection, bus_name,
+	                                              G_BUS_NAME_OWNER_FLAGS_NONE, NULL, NULL, NULL,
+	                                              NULL);
+
+	return self;
+}
+
+gboolean certificate_test_stalling_prompter_is_performing(CertificateTestStallingPrompter* self)
+{
+	return self != NULL && self->performing != NULL;
+}
+
+void certificate_test_stalling_prompter_fail_perform(CertificateTestStallingPrompter* self)
+{
+	GDBusMethodInvocation* invocation = NULL;
+
+	if (self == NULL || self->performing == NULL)
+		return;
+
+	invocation = g_steal_pointer(&self->performing);
+	g_dbus_method_invocation_return_error_literal(invocation, G_DBUS_ERROR, G_DBUS_ERROR_FAILED,
+	                                             "the prompter is not answering");
+}
+
+void certificate_test_stalling_prompter_vanish(CertificateTestStallingPrompter* self)
+{
+	if (self == NULL || self->owner_id == 0)
+		return;
+
+	g_bus_unown_name(self->owner_id);
+	self->owner_id = 0;
+}
+
+void certificate_test_stalling_prompter_stop(CertificateTestStallingPrompter* self)
+{
+	if (self == NULL)
+		return;
+
+	certificate_test_stalling_prompter_fail_perform(self);
+	certificate_test_stalling_prompter_vanish(self);
+
+	if (self->object_id != 0)
+		g_dbus_connection_unregister_object(self->connection, self->object_id);
+
+	g_clear_pointer(&self->node, g_dbus_node_info_unref);
+	g_clear_object(&self->exchange);
 	g_clear_object(&self->connection);
 	g_free(self);
 }

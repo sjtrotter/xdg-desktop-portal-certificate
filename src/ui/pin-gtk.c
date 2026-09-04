@@ -23,6 +23,7 @@ typedef struct
 	GtkWindow* window;
 	GtkWidget* entry;
 	GtkWidget* unlock_button;
+	GtkWidget* confirm_button;
 	GtkWidget* cancel_button;
 	GtkEventController* keys;
 	GtkWidget* status;
@@ -86,40 +87,55 @@ static void on_unlock(GtkWidget* widget, gpointer user_data)
 	if (prompt->busy || prompt->finished || prompt->login_in_flight)
 		return;
 
+	/* AN EMPTY FIELD IS NOT AN ATTEMPT, and that rule is no longer written
+	 * here: it is certificate_pin_prompt_hold()'s, so that the shell's prompter
+	 * obeys the same one. What comes back is FALSE and a retry with a warning.
+	 *
+	 * GTK's own storage is a GtkPasswordEntryBuffer, which GTK allocates from
+	 * its secure-memory pool and zeroes when it frees it -- but GTK guarantees
+	 * nothing about the intermediate copies a text widget, an input method or a
+	 * Pango layout may have made, so this backend does not claim the PIN
+	 * existed in exactly one place. It claims what is true: ui/pin.c holds it
+	 * in one wiped, locked, non-dumpable page. */
 	text = gtk_editable_get_text(GTK_EDITABLE(ui->entry));
-	if (text == NULL || *text == '\0')
-	{
-		set_status(prompt, "Enter the PIN for this token.", FALSE);
+	set_status(prompt, NULL, FALSE);
+
+	if (!certificate_pin_prompt_hold(prompt, text))
 		return;
-	}
 
 	/* THE LAST ATTEMPT IS NOT SPENT ON A SINGLE CLICK. When the token says
 	 * CKF_USER_PIN_FINAL_TRY, the next refusal locks the card, so the window
 	 * says so and requires the user to press Unlock a second time -- with what
 	 * they already typed still in the field, so the confirmation is a decision
-	 * rather than a retype. */
+	 * rather than a retype. The value is already in the locked page by then;
+	 * the second press spends the attempt, exactly as the confirmation round
+	 * does on the shell's prompt. */
 	if (certificate_pin_prompt_needs_final_confirm(prompt))
 	{
 		set_status(prompt, certificate_pin_prompt_final_try_warning(), TRUE);
 		return;
 	}
 
-	/* The entry is cleared the moment the value is in the locked buffer. GTK's
-	 * own storage is a GtkPasswordEntryBuffer, which GTK allocates from its
-	 * secure-memory pool and zeroes when it frees it -- but GTK guarantees
-	 * nothing about the intermediate copies a text widget, an input method or a
-	 * Pango layout may have made, so this backend does not claim the PIN
-	 * existed in exactly one place. It claims what is true: ui/pin.c holds it
-	 * in one wiped, locked, non-dumpable page. */
-	set_status(prompt, NULL, FALSE);
-
-	if (!certificate_pin_prompt_hold(prompt, text))
-		return;
-
 	/* Cleared the moment the value is in the locked buffer, and before the
 	 * worker starts, so the field is empty for the whole time the card is
 	 * busy. */
 	gtk_editable_set_text(GTK_EDITABLE(ui->entry), "");
+	certificate_pin_prompt_submit(prompt);
+}
+
+/* THE LAST ATTEMPT ON A PIN PAD IS STILL THE LAST ATTEMPT. A protected
+ * authentication path has no field in this window, so the second press that
+ * confirms CKF_USER_PIN_FINAL_TRY is a button of its own -- without it the
+ * NULL-PIN login went out the moment the window appeared, which made the
+ * "unconditional" in docs/SECURITY.md untrue for exactly the tokens whose
+ * counter cannot be seen. */
+static void on_protected_confirm(GtkWidget* widget, gpointer user_data)
+{
+	PinPrompt* prompt = user_data;
+
+	if (prompt->busy || prompt->finished || prompt->login_in_flight)
+		return;
+
 	certificate_pin_prompt_submit(prompt);
 }
 
@@ -288,6 +304,19 @@ static void gtk_pin_start(PinPrompt* prompt)
 		g_signal_connect(ui->unlock_button, "clicked", G_CALLBACK(on_unlock), prompt);
 		gtk_box_append(GTK_BOX(buttons), ui->unlock_button);
 	}
+	else if (certificate_pin_prompt_needs_final_confirm(prompt))
+	{
+		/* The reader will collect the PIN, but the attempt this window is about
+		 * to spend is the last one the token has -- so it is asked for, here,
+		 * before the NULL-PIN login goes out. Calling
+		 * certificate_pin_prompt_needs_final_confirm() has already RECORDED the
+		 * confirmation, so the button below is the second press. */
+		ui->confirm_button = gtk_button_new_with_mnemonic("Use the _last attempt");
+		gtk_widget_add_css_class(ui->confirm_button, "destructive-action");
+		g_signal_connect(ui->confirm_button, "clicked", G_CALLBACK(on_protected_confirm),
+		                 prompt);
+		gtk_box_append(GTK_BOX(buttons), ui->confirm_button);
+	}
 
 	gtk_box_append(GTK_BOX(content), buttons);
 
@@ -306,9 +335,21 @@ static void gtk_pin_start(PinPrompt* prompt)
 	certificate_external_window_present(GTK_WINDOW(window), prompt->parent_window, NULL);
 
 	if (ui->entry != NULL)
+	{
 		gtk_widget_grab_focus(ui->entry);
+	}
+	else if (ui->confirm_button != NULL)
+	{
+		/* NOTHING IS SUBMITTED YET. The reader is not asked for anything until
+		 * the last attempt has been confirmed; Cancel keeps the focus so that a
+		 * stray Return does not spend it. */
+		set_status(prompt, certificate_pin_prompt_final_try_warning(), TRUE);
+		gtk_widget_grab_focus(ui->cancel_button);
+	}
 	else
+	{
 		certificate_pin_prompt_submit(prompt);
+	}
 }
 
 static void gtk_pin_busy(PinPrompt* prompt, gboolean busy)
@@ -367,6 +408,8 @@ static void gtk_pin_close(PinPrompt* prompt)
 		g_signal_handlers_disconnect_by_data(ui->window, prompt);
 	if (ui->unlock_button != NULL)
 		g_signal_handlers_disconnect_by_data(ui->unlock_button, prompt);
+	if (ui->confirm_button != NULL)
+		g_signal_handlers_disconnect_by_data(ui->confirm_button, prompt);
 	if (ui->cancel_button != NULL)
 		g_signal_handlers_disconnect_by_data(ui->cancel_button, prompt);
 	if (ui->keys != NULL)
@@ -380,6 +423,7 @@ static void gtk_pin_close(PinPrompt* prompt)
 
 	ui->entry = NULL;
 	ui->unlock_button = NULL;
+	ui->confirm_button = NULL;
 	ui->cancel_button = NULL;
 	ui->keys = NULL;
 	ui->status = NULL;

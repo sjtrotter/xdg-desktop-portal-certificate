@@ -25,8 +25,8 @@
  * to arrive here. It comes over gcr's secret exchange (an ephemeral
  * Diffie-Hellman over the bus, so the plaintext is not in a D-Bus message),
  * lands in gcr's own secure memory, is copied into the same locked, wiped,
- * non-dumpable page ui/pin.c uses for the GTK path, and gcr's copy is released
- * when the prompt is closed. docs/SECURITY.md says this in the same words.
+ * non-dumpable page ui/pin.c uses for the GTK path, and gcr's copy goes when
+ * the GcrPrompt is released. docs/SECURITY.md says this in the same words.
  *
  * WHAT WE DO NOT ASK THE PROMPTER FOR: "remember", ever. GcrPrompt's
  * choice-label is never given text, which is what makes the shell draw no
@@ -64,8 +64,24 @@ typedef struct
 	PinPrompt* prompt; /* borrowed: the prompt owns this struct */
 
 	GcrPrompt* gcr;
+
+	/** GcrPrompt::prompt-close, so that the shell taking the dialog away is
+	 *  something this file hears about. Disconnected before @gcr is released. */
+	gulong close_id;
+
+	/** TRUE only for the duration of a close THIS file asked for, so that the
+	 *  signal that close emits is not read as the user's. */
+	gboolean closing;
+
+	/** The dialog is off the screen: nothing may be drawn on it again. */
 	gboolean closed;
-	gboolean asking;
+
+	/** Queued by an unsolicited prompt-close; see settle_dismissal(). */
+	guint dismiss_idle;
+
+	/** The protected-authentication-path notice: a confirmation round that is
+	 *  a message and a Cancel, not a decision that spends an attempt. */
+	gboolean passive_confirm;
 } SystemPinPrompt;
 
 /* NOT ONE gcr CALL IS MADE WITH A GCANCELLABLE, and that is the opposite of
@@ -80,23 +96,83 @@ typedef struct
  *
  * So the interaction is ended the one way gcr has that is not racy: close the
  * prompt. A round in flight then comes back once, as a dismissal, which is what
- * every path here already knows how to read. The cost is that a prompt whose
- * open() is still waiting for a busy prompter keeps this object alive until
- * that open returns -- the caller has already been answered, so what is held is
- * memory and not the user's attention -- and that the open, when it lands, is
- * closed immediately by handle_prompt_opened(). */
+ * every path here already knows how to read.
+ *
+ * NOT PASSING A CANCELLABLE IS NOT ENOUGH, and round_claim() below is why. */
 
-static void system_pin_free(gpointer data)
+/* ------------------------------------------------------ one completion only */
+
+/* EVERY gcr CALLBACK IN THIS FILE MAY RUN TWICE FOR ONE ROUND, and the second
+ * run must touch nothing but the GAsyncResult it was handed.
+ *
+ * gcr 4.4, gcr/gcr-system-prompt.c, verbatim behaviour:
+ *
+ *   perform_prompt_async() issues PerformPrompt with on_perform_prompt_complete
+ *   as its callback and stores the round's GSimpleAsyncResult in ->pending.
+ *
+ *   perform_close() -- reached by gcr_prompt_close(), by PromptDone from the
+ *   prompter, by the prompter's name vanishing, and by dispose -- takes
+ *   ->pending, clears it, and calls g_simple_async_result_complete_in_idle().
+ *   THAT IS COMPLETION NUMBER ONE, from an idle.
+ *
+ *   on_perform_prompt_complete() then lands with a transport error -- the
+ *   prompter answered the method call with an error, or dropped off the bus
+ *   before answering -- and calls g_simple_async_result_complete() on the SAME
+ *   result. THAT IS COMPLETION NUMBER TWO, synchronously.
+ *
+ *   on_call_timeout() on the open path does both in one function, in that
+ *   order, on purpose.
+ *
+ * There is no single-completion guarantee to rely on, so this file provides
+ * one. The flag lives ON THE RESULT OBJECT rather than in SystemPinPrompt,
+ * and that placement is the whole point: the first run drops the reference the
+ * round held, which may be the last one, so by the time the second run happens
+ * the PinPrompt and this struct can both be freed -- reading a flag out of them
+ * would be the use-after-free it is meant to prevent. gcr holds a reference to
+ * the result across both completions, so the result is the one thing that is
+ * certainly alive in both.
+ *
+ * Returns TRUE exactly once per result: to the run that owns the reference and
+ * may do the work. */
+#define ROUND_SETTLED_KEY "certificate-pin-round-settled"
+
+static gboolean round_claim(GAsyncResult* result)
 {
-	SystemPinPrompt* ui = data;
+	if (g_object_get_data(G_OBJECT(result), ROUND_SETTLED_KEY) != NULL)
+	{
+		/* SAID OUT LOUD, because it is a library beneath this one doing
+		 * something that cannot be right, and because it is the only trace the
+		 * ignored run leaves: everything else about it is a read of memory that
+		 * may already be freed. tests/test-pin-system.c asserts this line,
+		 * which is how the guard is testable without a sanitizer. */
+		g_message("pin-prompt-round-completed-twice detail=system-prompter");
+		return FALSE;
+	}
 
-	g_clear_object(&ui->gcr);
-	g_free(ui);
+	g_object_set_data(G_OBJECT(result), ROUND_SETTLED_KEY, GINT_TO_POINTER(1));
+	return TRUE;
 }
 
 static SystemPinPrompt* system_pin(PinPrompt* prompt)
 {
 	return prompt->impl_data;
+}
+
+static void system_pin_free(gpointer data)
+{
+	SystemPinPrompt* ui = data;
+
+	/* The idle below holds a reference of its own, so it cannot still be
+	 * queued here; the source is dropped for the same reason the signal is
+	 * disconnected -- "cannot be called" beats "returns early". */
+	if (ui->dismiss_idle != 0)
+		g_source_remove(ui->dismiss_idle);
+
+	if (ui->gcr != NULL && ui->close_id != 0)
+		g_signal_handler_disconnect(ui->gcr, ui->close_id);
+
+	g_clear_object(&ui->gcr);
+	g_free(ui);
 }
 
 /* --------------------------------------------------------- is one reachable */
@@ -114,9 +190,15 @@ gboolean certificate_pin_impl_system_available(void)
 
 	/* ACTIVATABLE COUNTS. The prompter is a session service and may not be
 	 * running when the first AcquireCredential arrives; refusing to use it
-	 * because nothing has needed a password yet would pick the wrong prompt for
+	 * because nobody has needed a password yet would pick the wrong prompt for
 	 * the whole life of the process. ListActivatableNames is asked only if
-	 * nobody owns the name. */
+	 * nobody owns the name.
+	 *
+	 * IT ALSO COUNTS ON A PRIVATE BUS, which is why tools/ never leaves the
+	 * choice at "auto": dbus-run-session reads the same service directories the
+	 * session bus does, so org.gnome.keyring.SystemPrompter.service activating
+	 * /usr/libexec/gcr-prompter is reachable there too. "No shell" does not
+	 * mean "no prompter". tools/dev-stack.sh says the same. */
 	reply = g_dbus_connection_call_sync(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
 	                                    "org.freedesktop.DBus", "NameHasOwner",
 	                                    g_variant_new("(s)", SYSTEM_PROMPTER_NAME),
@@ -231,7 +313,8 @@ static void set_prompt_text(PinPrompt* prompt)
 
 static void ask_for_password(PinPrompt* prompt);
 
-/* EVERY CALLBACK BELOW OWNS A REFERENCE, taken by the call that armed it.
+/* EVERY CALLBACK BELOW OWNS A REFERENCE, taken by the call that armed it and
+ * dropped by the ONE run of the callback that round_claim() lets through.
  * gcr answers a password or confirmation round from an idle, and the core drops
  * its own reference the moment the answer is settled -- so a prompt that was
  * cancelled, or answered by another round, is freed before the prompter's reply
@@ -240,9 +323,10 @@ static void handle_confirmed(PinPrompt* prompt, GObject* source, GAsyncResult* r
 {
 	SystemPinPrompt* ui = system_pin(prompt);
 	g_autoptr(GError) error = NULL;
+	gboolean passive = ui->passive_confirm;
 	GcrPromptReply reply;
 
-	ui->asking = FALSE;
+	ui->passive_confirm = FALSE;
 	reply = gcr_prompt_confirm_finish(GCR_PROMPT(source), result, &error);
 
 	if (prompt->finished)
@@ -250,11 +334,15 @@ static void handle_confirmed(PinPrompt* prompt, GObject* source, GAsyncResult* r
 
 	if (error != NULL)
 	{
-		/* Nothing here passes a GCancellable to gcr any more (see the note on
-		 * SystemPinPrompt), so this is defensive rather than expected. */
-		if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-			return;
+		/* EVERY ERROR SETTLES THIS INTERACTION, G_IO_ERROR_CANCELLED INCLUDED.
+		 * Nothing here passes a GCancellable to gcr, but gcr makes a
+		 * cancellation of its own when the prompter's bus name vanishes
+		 * (gcr/gcr-system-prompt.c, on_prompter_vanished). Returning quietly on
+		 * that error left the prompt unanswered, the caller waiting, and
+		 * ui/pin.c's single-prompt slot occupied for the life of the process. */
+		g_autofree char* text = certificate_redact_error_text(error->message);
 
+		g_message("pin-prompt-failed detail=system-prompter: %s", text);
 		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_DEVICE_ERROR);
 		return;
 	}
@@ -264,6 +352,12 @@ static void handle_confirmed(PinPrompt* prompt, GObject* source, GAsyncResult* r
 		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_CANCELLED);
 		return;
 	}
+
+	/* THE PROTECTED-PATH NOTICE IS NOT A DECISION. It has no field, its
+	 * continue button dismisses a message, and the login it belongs to is
+	 * already in flight; pressing it must not look like a second submission. */
+	if (passive)
+		return;
 
 	/* The second, explicit confirmation the GTK window gets from a second press
 	 * of Unlock. certificate_pin_prompt_needs_final_confirm() has already
@@ -275,6 +369,10 @@ static void on_confirmed(GObject* source, GAsyncResult* result, gpointer user_da
 {
 	PinPrompt* prompt = user_data;
 
+	/* Checked before @prompt is touched at all: see round_claim(). */
+	if (!round_claim(result))
+		return;
+
 	handle_confirmed(prompt, source, result);
 	certificate_pin_prompt_unref(prompt);
 }
@@ -285,11 +383,10 @@ static void handle_password(PinPrompt* prompt, GObject* source, GAsyncResult* re
 	g_autoptr(GError) error = NULL;
 	const char* password = NULL;
 
-	ui->asking = FALSE;
-
 	/* OWNED BY THE PROMPT, IN GCR'S SECURE MEMORY. It is valid until the next
-	 * call on this GcrPrompt or until the prompt is closed, and it is never
-	 * copied anywhere but into ui/pin.c's locked page by the submit() below. */
+	 * call on this GcrPrompt or until the prompt object is released, and it is
+	 * never copied anywhere but into ui/pin.c's locked page by the hold()
+	 * below. */
 	password = gcr_prompt_password_finish(GCR_PROMPT(source), result, &error);
 
 	if (prompt->finished)
@@ -304,9 +401,7 @@ static void handle_password(PinPrompt* prompt, GObject* source, GAsyncResult* re
 			return;
 		}
 
-		if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-			return;
-
+		/* Including G_IO_ERROR_CANCELLED; see handle_confirmed(). */
 		{
 			g_autofree char* text = certificate_redact_error_text(error->message);
 
@@ -317,18 +412,25 @@ static void handle_password(PinPrompt* prompt, GObject* source, GAsyncResult* re
 		return;
 	}
 
-	/* THE LAST ATTEMPT IS NOT SPENT ON A SINGLE ANSWER, exactly as in the GTK
-	 * window. The PIN goes into the locked page first so that gcr's copy can be
-	 * released on the next call, and the confirmation round runs on the same
-	 * open prompt. */
+	/* AN EMPTY ANSWER IS NOT AN ATTEMPT. certificate_pin_prompt_hold() refuses
+	 * it for both implementations and asks again through retry(); nothing here
+	 * has to know that rule, only that a FALSE means the round was re-armed. */
 	if (!certificate_pin_prompt_hold(prompt, password))
 		return;
 
+	/* THE LAST ATTEMPT IS NOT SPENT ON A SINGLE ANSWER, exactly as in the GTK
+	 * window. The PIN is already in the locked page, and the confirmation round
+	 * runs on the same open prompt. */
 	if (certificate_pin_prompt_needs_final_confirm(prompt))
 	{
+		if (ui->gcr == NULL || ui->closed)
+		{
+			certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_CANCELLED);
+			return;
+		}
+
 		gcr_prompt_set_warning(ui->gcr, certificate_pin_prompt_final_try_warning());
 		gcr_prompt_set_continue_label(ui->gcr, "Use the last attempt");
-		ui->asking = TRUE;
 		gcr_prompt_confirm_async(ui->gcr, NULL, on_confirmed,
 		                         certificate_pin_prompt_ref(prompt));
 		return;
@@ -341,6 +443,10 @@ static void on_password(GObject* source, GAsyncResult* result, gpointer user_dat
 {
 	PinPrompt* prompt = user_data;
 
+	/* Checked before @prompt is touched at all: see round_claim(). */
+	if (!round_claim(result))
+		return;
+
 	handle_password(prompt, source, result);
 	certificate_pin_prompt_unref(prompt);
 }
@@ -352,9 +458,78 @@ static void ask_for_password(PinPrompt* prompt)
 	if (ui->gcr == NULL || ui->closed || prompt->finished)
 		return;
 
-	ui->asking = TRUE;
 	gcr_prompt_password_async(ui->gcr, NULL, on_password, certificate_pin_prompt_ref(prompt));
 }
+
+/* ------------------------------------------- the shell taking the prompt away */
+
+/* SETTLED FROM AN IDLE, AND AT A LOWER PRIORITY THAN GCR'S OWN.
+ *
+ * gcr's perform_close() completes a round that was in flight with
+ * g_simple_async_result_complete_in_idle() -- G_PRIORITY_DEFAULT -- and THEN
+ * emits prompt-close. So when the close arrives with a round outstanding, the
+ * round has a better answer than "cancelled" waiting behind this source: a
+ * dismissal, or the G_IO_ERROR_CANCELLED gcr raises when the prompter's name
+ * vanishes. Running at G_PRIORITY_DEFAULT_IDLE lets that answer land first and
+ * makes this the backstop rather than the winner.
+ *
+ * When no round is outstanding -- which is the whole of the case this exists
+ * for, a Cancel in the shell AFTER the PIN was submitted -- nothing else is
+ * coming and this is the only thing that will ever answer. */
+static gboolean settle_dismissal(gpointer user_data)
+{
+	PinPrompt* prompt = user_data;
+	SystemPinPrompt* ui = system_pin(prompt);
+
+	ui->dismiss_idle = 0;
+
+	if (prompt->finished)
+		return G_SOURCE_REMOVE;
+
+	g_message("pin-prompt-dismissed detail=system-prompter");
+	certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_CANCELLED);
+	return G_SOURCE_REMOVE;
+}
+
+/* THE SHELL CAN END THIS INTERACTION AT ANY POINT, INCLUDING AFTER THE PIN HAS
+ * GONE TO THE CARD, and before this signal was connected that ending was
+ * invisible here.
+ *
+ * The path: the user presses Cancel on a GNOME prompt with no round in flight,
+ * gnome-shell stops prompting, gcr's prompter sends PromptDone, and
+ * gcr/gcr-system-prompt.c's prompt_method_done() calls perform_close(), which
+ * emits GcrPrompt::prompt-close. Without a handler the interaction simply
+ * carried on: C_Login came back, the answer was PIN_OK, and the grant signed --
+ * for a request the user had just refused.
+ *
+ * Answering CANCELLED here puts it back on ui/pin.c's round-2 path: a login
+ * that lands after the cancel is logged and ABANDONED, so the token is not left
+ * authenticated for a request nobody agreed to.
+ *
+ * A CLOSE THIS FILE ASKED FOR IS NOT THE USER'S. gcr_prompt_close() emits the
+ * same signal, so system_pin_release() raises ->closing around it. */
+static void on_gcr_prompt_close(GcrPrompt* gcr, gpointer user_data)
+{
+	PinPrompt* prompt = user_data;
+	SystemPinPrompt* ui = system_pin(prompt);
+
+	if (ui->closing || ui->closed)
+		return;
+
+	/* Off the screen: nothing may draw on it again, whatever settles it. */
+	ui->closed = TRUE;
+
+	if (prompt->finished || ui->dismiss_idle != 0)
+		return;
+
+	ui->dismiss_idle = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, settle_dismissal,
+	                                   certificate_pin_prompt_ref(prompt),
+	                                   (GDestroyNotify) certificate_pin_prompt_unref);
+}
+
+/* ----------------------------------------------------------- opening the prompt */
+
+static void system_pin_release(PinPrompt* prompt);
 
 static void handle_prompt_opened(PinPrompt* prompt, GAsyncResult* result)
 {
@@ -368,51 +543,64 @@ static void handle_prompt_opened(PinPrompt* prompt, GAsyncResult* result)
 	 * shell is left holding a dialog for a request that has been answered. */
 	if (prompt->finished)
 	{
-		if (ui->gcr != NULL && !ui->closed)
-		{
-			ui->closed = TRUE;
-			gcr_prompt_close(ui->gcr);
-			gcr_system_prompt_close(GCR_SYSTEM_PROMPT(ui->gcr), NULL, NULL);
-			g_clear_object(&ui->gcr);
-		}
-
+		system_pin_release(prompt);
 		return;
 	}
 
 	if (ui->gcr == NULL)
 	{
-		if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-			return;
+		g_autofree char* text = certificate_redact_error_text(
+		    error != NULL ? error->message : "the prompter withdrew the prompt");
 
-		{
-			g_autofree char* text = certificate_redact_error_text(error->message);
-
-			/* NO SILENT FALLBACK TO THE IN-PROCESS WINDOW. Which process asked
-			 * for the PIN is a fact about the interaction, and swapping it
-			 * under the user because a bus call failed would make that fact
-			 * depend on timing. The caller is told the prompt failed and can
-			 * ask again. */
-			g_message("pin-prompt-failed detail=system-prompter-unreachable: %s", text);
-		}
-
+		/* EVERY FAILURE SETTLES, INCLUDING G_IO_ERROR_CANCELLED, which is what
+		 * gcr raises when the prompter's name vanishes while the open is
+		 * waiting. Returning quietly here left ui/pin.c holding the process's
+		 * one prompt slot with nothing on screen and no answer coming, and the
+		 * login timeout does not cover this half: no login was ever started.
+		 *
+		 * NO SILENT FALLBACK TO THE IN-PROCESS WINDOW. Which process asked for
+		 * the PIN is a fact about the interaction, and swapping it under the
+		 * user because a bus call failed would make that fact depend on timing.
+		 * The caller is told the prompt failed and can ask again. */
+		g_message("pin-prompt-failed detail=system-prompter-unreachable: %s", text);
 		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_NO_DISPLAY);
 		return;
 	}
+
+	ui->close_id =
+	    g_signal_connect(ui->gcr, "prompt-close", G_CALLBACK(on_gcr_prompt_close), prompt);
 
 	set_prompt_text(prompt);
 
 	/* A PROTECTED AUTHENTICATION PATH HAS NO FIELD ANYWHERE. The reader
 	 * collects the secret, so the prompter is shown a message and a Cancel and
-	 * is never asked for a password; the login goes out with a NULL PIN at
-	 * once. gcr has no "notification only" round, so what the user gets is the
-	 * confirm form: the instruction, Cancel, and a continue button that does
-	 * nothing but dismiss it. */
+	 * is never asked for a password. gcr has no "notification only" round, so
+	 * what the user gets is the confirm form: the instruction, Cancel, and a
+	 * continue button that does nothing but dismiss it.
+	 *
+	 * EXCEPT ON THE LAST ATTEMPT. CKF_USER_PIN_FINAL_TRY means the next refusal
+	 * locks the card, and that is true whether the digits are typed on a screen
+	 * or on a pin pad -- so the confirmation is a real one here too, and the
+	 * NULL-PIN login does not go out until it comes back Continue. There is no
+	 * "the reader is the exception" case any more; docs/SECURITY.md says the
+	 * confirmation is unconditional and now it is. */
 	if (prompt->protected_path)
 	{
-		ui->asking = TRUE;
+		gboolean confirm = certificate_pin_prompt_needs_final_confirm(prompt);
+
+		if (confirm)
+		{
+			gcr_prompt_set_warning(ui->gcr, certificate_pin_prompt_final_try_warning());
+			gcr_prompt_set_continue_label(ui->gcr, "Use the last attempt");
+		}
+
+		ui->passive_confirm = !confirm;
 		gcr_prompt_confirm_async(ui->gcr, NULL, on_confirmed,
 		                         certificate_pin_prompt_ref(prompt));
-		certificate_pin_prompt_submit(prompt);
+
+		if (!confirm)
+			certificate_pin_prompt_submit(prompt);
+
 		return;
 	}
 
@@ -422,6 +610,12 @@ static void handle_prompt_opened(PinPrompt* prompt, GAsyncResult* result)
 static void on_prompt_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 {
 	PinPrompt* prompt = user_data;
+
+	/* Checked before @prompt is touched at all: gcr's on_call_timeout() on the
+	 * open path completes this result twice by construction. See
+	 * round_claim(). */
+	if (!round_claim(result))
+		return;
 
 	handle_prompt_opened(prompt, result);
 	certificate_pin_prompt_unref(prompt);
@@ -447,7 +641,7 @@ static void system_pin_retry(PinPrompt* prompt, const char* status)
 	const char* hint = certificate_pin_prompt_retry_hint(prompt);
 	g_autofree char* warning = NULL;
 
-	if (ui->gcr == NULL)
+	if (ui->gcr == NULL || ui->closed)
 		return;
 
 	/* THE SAME PROMPT, ASKED AGAIN. gcr keeps the dialog up between rounds on
@@ -459,20 +653,6 @@ static void system_pin_retry(PinPrompt* prompt, const char* status)
 	gcr_prompt_set_continue_label(ui->gcr, "Unlock");
 
 	ask_for_password(prompt);
-}
-
-static void system_pin_hide(PinPrompt* prompt)
-{
-	SystemPinPrompt* ui = system_pin(prompt);
-
-	/* The prompter's dialog goes away at once; the answer still waits for the
-	 * worker. gcr_prompt_close() is the "take it off the screen" call and does
-	 * not release the object. */
-	if (ui->gcr != NULL && !ui->closed)
-	{
-		ui->closed = TRUE;
-		gcr_prompt_close(ui->gcr);
-	}
 }
 
 /* The reference the close held; dropped when the prompter has acknowledged. */
@@ -489,34 +669,77 @@ static void on_system_prompt_closed(GObject* source, GAsyncResult* result, gpoin
 	}
 }
 
-static void system_pin_close(PinPrompt* prompt)
+/* TAKE THE DIALOG DOWN AND LET GO OF THE OBJECT, in that order, and this is the
+ * whole of the teardown for both hide() and close().
+ *
+ * CLOSING THE SYSTEM PROMPT IS WHAT WIPES GCR'S COPY of the last password it
+ * handed us: the string belongs to the prompt and gcr frees it, from its own
+ * secure memory, when the prompt is closed and released. Releasing it here is
+ * therefore part of the PIN's exit path, not bookkeeping -- and it is why hide()
+ * releases as well. hide() is reached by a cancel or a login timeout that
+ * arrived while C_Login was in flight, and the answer to the CALLER then waits
+ * for the worker, which can be a wedged middleware daemon and therefore
+ * forever. The worker has had its own private page since submit(); nothing in
+ * this file is needed for it to finish, so gcr's copy has no reason to outlive
+ * the dialog.
+ *
+ * THE CALLBACKS STILL OWN WHAT THEY NEED. A round in flight holds a reference
+ * to the GcrPrompt through gcr's own result object, so releasing this file's
+ * reference cannot pull the object out from under a completion that has not run
+ * yet -- and round_claim() covers the completion that runs twice.
+ *
+ * THE CLOSE ROUND TRIP IS ASYNCHRONOUS, for two reasons. It is a D-Bus round
+ * trip and this runs on the main thread inside the answer path, where a stall
+ * is a window that stops redrawing. And gcr_system_prompt_close() -- the
+ * synchronous one -- spins a nested GMainContext that it never frees:
+ * LeakSanitizer reports it against this call site, once per prompt, on gcr 4.4. */
+static void system_pin_release(PinPrompt* prompt)
 {
 	SystemPinPrompt* ui = system_pin(prompt);
 
-	if (ui == NULL || ui->gcr == NULL)
+	if (ui == NULL)
 		return;
+
+	if (ui->dismiss_idle != 0)
+	{
+		g_source_remove(ui->dismiss_idle);
+		ui->dismiss_idle = 0;
+	}
+
+	if (ui->gcr == NULL)
+		return;
+
+	/* Disconnected first: gcr_prompt_close() emits prompt-close, and a close
+	 * this file asked for is not the user dismissing anything. */
+	if (ui->close_id != 0)
+	{
+		g_signal_handler_disconnect(ui->gcr, ui->close_id);
+		ui->close_id = 0;
+	}
 
 	if (!ui->closed)
 	{
 		ui->closed = TRUE;
+		ui->closing = TRUE;
 		gcr_prompt_close(ui->gcr);
+		ui->closing = FALSE;
 	}
 
-	/* CLOSING THE SYSTEM PROMPT IS WHAT WIPES GCR'S COPY of the last password
-	 * it handed us: the string belongs to the prompt and gcr frees it, from its
-	 * own secure memory, when the prompt goes. Releasing it here is therefore
-	 * part of the PIN's exit path, not bookkeeping.
-	 *
-	 * ASYNCHRONOUSLY, for two reasons. It is a D-Bus round trip and this runs on
-	 * the main thread inside the answer path, where a stall is a window that
-	 * stops redrawing. And gcr_system_prompt_close() -- the synchronous one --
-	 * spins a nested GMainContext that it never frees: LeakSanitizer reports it
-	 * against this call site, once per prompt, on gcr 4.4. */
 	if (GCR_IS_SYSTEM_PROMPT(ui->gcr))
 		gcr_system_prompt_close_async(GCR_SYSTEM_PROMPT(ui->gcr), NULL, on_system_prompt_closed,
 		                              g_object_ref(ui->gcr));
 
 	g_clear_object(&ui->gcr);
+}
+
+static void system_pin_hide(PinPrompt* prompt)
+{
+	system_pin_release(prompt);
+}
+
+static void system_pin_close(PinPrompt* prompt)
+{
+	system_pin_release(prompt);
 }
 
 const PinPromptImpl* certificate_pin_impl_system(void)
