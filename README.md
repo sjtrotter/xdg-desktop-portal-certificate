@@ -197,6 +197,16 @@ $ ./build/src/xdg-desktop-portal-certificate --help
 Dependencies: GLib/GIO, GTK 4, libadwaita, p11-kit and GnuTLS. **Not libdex** — that is the
 frontend branch's dependency, not a backend's.
 
+**gcr-4 is optional** (`-Dgcr=auto`). With it, the PIN can be asked for by the desktop
+shell's own system prompter instead of by a window this backend draws:
+`--pin-prompt=auto|gtk|system`, where `auto` — the default — means the system prompter when
+`org.gnome.keyring.SystemPrompter` is on the session bus. Without gcr-4 the option does not
+exist and the in-process window is the only prompt. **What that moves is where the PIN is
+typed, not whether this process holds one**: `C_Login` takes a PIN, so it still arrives
+here, into the same locked, wiped, non-dumpable page.
+[docs/SECURITY.md](docs/SECURITY.md#where-the-field-is-drawn-and-what-that-moves) is the
+table of what changes and what does not.
+
 ### Is there a card, and what is on it
 
 ```console
@@ -204,11 +214,19 @@ $ ./build/src/xdg-desktop-portal-certificate --list-tokens
 ```
 
 prints one block per security token — label, manufacturer, model, a truncated serial,
-reader, module, whether login is required and whether the reader has a PIN pad — and then
-one entry per **usable** certificate: subject, issuer, expiry (marked when expired), key
-type and size, the mechanisms the token advertises for it, the purposes it fits, the PIV
-slot where that could be determined, and its stable id. Nothing is logged in for this and no
-PIN is asked for.
+reader, module, whether the slot says it is hardware, whether login is required and whether
+the reader has a PIN pad — and then one entry per **usable** certificate: subject, issuer,
+expiry (marked when expired), key type and size, the mechanisms the token advertises for it,
+the purposes it fits, the PIV slot where that could be determined, and its stable id.
+Nothing is logged in for this and no PIN is asked for.
+
+**Only hardware tokens are offered by default.** p11-kit on an ordinary desktop presents
+software key stores as tokens — the GNOME keyring's module is the usual one — and a window
+headed "security token" that offers keys out of the user's home directory says something
+untrue about where the key is. A token whose slot does not set `CKF_HW_SLOT` is skipped, and
+`--list-tokens` prints it anyway with a `SKIPPED` line saying why. `--allow-software-tokens`
+turns the default off. It is a default and **not a security boundary**: the flag is a claim
+by a module that is already loaded into this process.
 
 If p11-kit is not configured for your card's module, name it:
 
@@ -217,7 +235,8 @@ $ ./build/src/xdg-desktop-portal-certificate \
       --module /usr/lib64/pkcs11/opensc-pkcs11.so --list-tokens
 ```
 
-`--module` is repeatable, and when it is given **nothing else is loaded**.
+`--module` is repeatable, when it is given **nothing else is loaded**, and naming a module
+also lifts the hardware-only default for it — naming it is already the deliberate act.
 
 ### The whole stack, on a private bus
 
@@ -228,8 +247,11 @@ $ tools/dev-stack.sh -- --expect-no-certificate
 starts, inside `dbus-run-session`: `xdg-permission-store` (the portal refuses to start
 without it), this backend, and a development xdg-desktop-portal from the branch with
 `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate` and an `XDG_DESKTOP_PORTAL_DIR`
-pointing at a throwaway directory holding this repository's `.portal` file and a
-`portals.conf` selecting it. Then it runs the end-to-end client. Point it at your frontend
+pointing at a throwaway copy of the machine's portal configuration — a symlink to every
+`.portal` installed here, this repository's, and the machine's effective `portals.conf` with
+one line added — because setting that variable makes the frontend ignore every other portal
+directory *and* every other `portals.conf`, so a directory holding only ours leaves the
+stack with no settings portal and no file chooser. Then it runs the end-to-end client. Point it at your frontend
 build with `XDP_BUILD=/path/to/xdg-desktop-portal/build`, and put the `LD_LIBRARY_PATH` its
 libdex needs in `.xdp-env`.
 
@@ -268,10 +290,17 @@ the frontend.
 
 **The PIN prompt** — *Unlock Security Token* — appears at the **first signature**, not when
 the grant is made, and names the application, the purpose, the token and the reader. A
-reader with a PIN pad gets an instruction window with no editable field. A wrong PIN clears
-the field and says so; nothing retries on its own. The PIN is copied into a locked buffer,
-wiped on every exit path, and never crosses D-Bus in either direction — there is no field on
-either interface it could travel in.
+reader with a PIN pad gets an instruction with no editable field. A wrong PIN clears the
+field and says so; nothing retries on its own, one prompt offers at most three attempts, and
+once the token says this is the last one it takes a second, explicit confirmation to spend
+it. The PIN is copied into a locked buffer, wiped on every exit path, and never crosses the
+portal interfaces in either direction — there is no field on either one it could travel in.
+
+On a GNOME session that prompt is **drawn by the shell**, not by this backend: the field
+belongs to gnome-shell's system prompter and the typed characters reach this process through
+gcr's secret exchange. `--pin-prompt=gtk` asks for the in-process window instead, and the
+journal records which was used. The chooser is always this backend's own window; only the
+PIN request moves.
 
 Installed files: `$libexecdir/xdg-desktop-portal-certificate`,
 `$datadir/xdg-desktop-portal/portals/certificate.portal` (the real directory — that is where
@@ -291,7 +320,8 @@ Layout:
 src/          main.c, the impl interface, the impl Request and Session,
               tokens/    module loading, discovery, X.509 parsing, the filter
               broker/    the mechanism mapping, the device calls, the operation
-              ui/        the chooser, the PIN prompt, window parenting
+              ui/        the chooser; the PIN prompt (pin.c decides, pin-gtk.c and
+                         pin-system.c draw), window parenting
               export/    the facade's requirements; nothing can reach it yet
               redact.h   what may be logged, enforced by there being no other way
 data/         the impl interface XML (verbatim copies of the branch's), certificate.portal,

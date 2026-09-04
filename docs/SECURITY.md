@@ -49,6 +49,10 @@ such throughout the rest of this document.
 | A second `AcquireCredential` on a live session **rebinds the device**: the old token session is logged out and closed, and the next operation asks for the PIN again and signs with the new certificate's key | `src/broker/device.c`, `certificate_device_open()` | the open device remembers the candidate it was opened for. It used to return early on "a module is loaded", so the application was handed certificate B and got a signature made by certificate A's key, with no prompt. `tests/test-broker-regrant.c` verifies the signature against certificate B; `tests/test-broker-device.c` checks the login and the key handle are both thrown away |
 | The frontend leaving the bus **cancels every chooser and PIN window**, and the pending calls are answered `owner_gone` rather than "cancelled" | `src/certificate-impl.c`, `cancel_transactions()` | a trusted window outliving the process that asked for it is the single thing this repository exists to make impossible. `tests/test-impl-dbus.c` |
 | The PIN never leaves the process, never enters a GVariant, a GError or a log line | `src/ui/pin.c` | there is no entry point that returns a PIN; the caller passes a login function |
+| **Which process draws the PIN field is a choice, and it is recorded**: `gtk` (this backend's window) or `system` (the desktop shell's prompter, over `GcrSystemPrompt`). `--pin-prompt=auto|gtk|system`; auto picks `system` when `org.gnome.keyring.SystemPrompter` has an owner or is activatable | `src/ui/pin.c`, `pin_impl()`; `src/ui/pin-gtk.c`; `src/ui/pin-system.c` | every rule in this section holds for both, and the journal says which was used (`pin-prompt-selected detail=...`). `tests/test-pin-system.c` drives the system path end to end against gcr's own prompter on a private bus; `tools/ui-smoke.sh --pin-prompt=system` runs the whole stack through it |
+| The system prompter is **never chosen by default by anything but `main()`** | `src/ui/pin.c`, `pin_prompt_kind` | the module default is `gtk`. Linking this code must not be enough to start putting prompts on a session's shell because a name happened to be on the bus, and a test that reached the operator's own prompter would be a test that spends a PIN attempt |
+| No prompt this backend opens ever offers "remember" | `src/ui/pin-gtk.c` (no such control); `src/ui/pin-system.c`, `gcr_prompt_set_choice_label(NULL)` | `tests/test-pin-system.c` asserts the choice label reaching the prompter is empty and that `password-new` is false |
+| A **login timeout**: a `C_Login` that has not returned after `--login-timeout` seconds (60 by default, 0 disables) takes the prompt down, fails the interaction with its own reason, and abandons the login if it lands afterwards | `src/ui/pin.c`, `on_login_timeout()`; `src/broker/operations.c`, `CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT` | `tests/test-pin-system.c` `/pin-system/login-timeout`. **The residual is stated below**: the module call itself cannot be interrupted, so the caller is still answered only when it returns |
 | The PIN buffer is page-aligned, `mlock()`ed where the rlimit allows, `MADV_DONTDUMP`ed, and `explicit_bzero()`ed on every exit path | `src/ui/pin.c`, `PinBuffer` | wiped before the callback runs, on success, failure, cancel and window destroy; an `mlock()` failure is warned about once and does not refuse the login |
 | The login worker gets a **private copy** of the PIN that it owns and wipes itself | `src/ui/pin.c`, `pin_buffer_dup()` | `tests/test-cancellation.c` asserts the worker still sees the whole PIN after the window was cancelled |
 | Cancelling while `C_Login` is in flight hides the window, defers the answer, and frees nothing until the worker returns | `src/ui/pin.c`, `pin_prompt_finish()` | `tests/test-cancellation.c`, under ASan |
@@ -56,10 +60,10 @@ such throughout the rest of this document.
 | Core dumps are disabled and `ptrace` attach is blocked for this process | `src/main.c`, `harden()` | `PR_SET_DUMPABLE(0)` plus `RLIMIT_CORE 0`, before anything can fault. `--debug-allow-core` turns it off for development and is never in an installed service file |
 | The bus name is only offered for replacement under `--allow-replacement`, which the installed `.service` file does not pass | `src/main.c`, `data/org.freedesktop.impl.portal.desktop.certificate.service.in` | otherwise any process running as the user could take the name and draw the PIN window. `--replace` (ask to replace) and `--allow-replacement` (permit being replaced) are separate flags because D-Bus lets the current owner authenticate neither: an upgrade is a restart, not a `--replace`. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) and [TESTING.md](TESTING.md) §3.5 |
 | Nothing persists a PIN | — | there is no option, no keyring call and no configuration key |
-| Protected authentication path draws **no PIN field** and logs in with a NULL PIN | `src/ui/pin.c` | — |
-| Retry state is shown only from `CKF_USER_PIN_COUNT_LOW` / `FINAL_TRY` / `LOCKED`, never as an invented number, and is **re-read after every refusal** | `src/ui/pin.c`, `retry_hint()`; `src/tokens/discovery.c`, `certificate_tokens_refresh_flags()` | `FINAL_TRY` is normally set by the attempt that just failed |
-| Once `FINAL_TRY` is set the window requires a second, explicit Unlock before the attempt is spent | `src/ui/pin.c`, `on_unlock()` | — |
-| One window offers at most three attempts | `src/ui/pin.c`, `PIN_MAX_ATTEMPTS` | it is not a rate limit (see below); it is a bound on one prompt |
+| Protected authentication path draws **no PIN field** and logs in with a NULL PIN | `src/ui/pin-gtk.c`, `src/ui/pin-system.c` | in the shell's prompter that is a message and a Cancel and no password round at all. `tests/test-pin-system.c` asserts zero password rounds and a NULL PIN |
+| Retry state is shown only from `CKF_USER_PIN_COUNT_LOW` / `FINAL_TRY` / `LOCKED`, never as an invented number, and is **re-read after every refusal** | `src/ui/pin.c`, `certificate_pin_prompt_retry_hint()`; `src/tokens/discovery.c`, `certificate_tokens_refresh_flags()` | `FINAL_TRY` is normally set by the attempt that just failed. `tests/test-pin-system.c` asserts the wording reaches the prompter and carries no number |
+| Once `FINAL_TRY` is set the prompt requires a second, explicit confirmation before the attempt is spent | `src/ui/pin.c`, `certificate_pin_prompt_needs_final_confirm()` | a second Unlock in the window; a confirmation round on the same open system prompt. `tests/test-pin-system.c` asserts that refusing it leaves the card **unasked** |
+| One prompt offers at most three attempts | `src/ui/pin.c`, `PIN_MAX_ATTEMPTS` | it is not a rate limit (see below); it is a bound on one prompt. `tests/test-pin-system.c` `/pin-system/attempt-cap` |
 | Retries are user-initiated; nothing retries on its own | `src/ui/pin.c` | `tests/test-broker-device.c` checks the wrong PIN is reported as `PIN_INCORRECT` and not collapsed |
 | PIN prompts are serialised process-wide, and two operations on one session share **one** prompt | `src/ui/pin.c`, the prompt queue; `src/broker/operations.c`, the waiter list | two concurrent `Sign` calls on a logged-out grant produce one window, not two |
 | The shared prompt belongs to the **session**, not to the operation that opened it: cancelling one caller answers that caller and leaves the window up for the others, and the window closes when the last live waiter goes | `src/broker/operations.c`, `waiter_cancelled_idle()`; `src/session-impl.h`, `login_cancellable` | closing the first request used to close the shared window and tell every caller behind it that the *user* had cancelled. `tests/test-cancellation.c` |
@@ -82,6 +86,10 @@ such throughout the rest of this document.
 | Every PKCS#11 call runs off the main thread, `GetCapabilities` and the closing `C_Logout`/`C_CloseSession` included — **with one deliberate exception, at shutdown** | `src/broker/`, `src/tokens/discovery.c`, `src/certificate-impl.c`, `src/session-impl.c` | `GetCapabilities` used to enumerate every slot from the method handler, and `Close()`, expiry, token removal and frontend loss used to close the card from the main thread — under a lock a worker holds for the whole of a `C_Login`, so the PIN window stopped redrawing while it happened. Both now run on workers (`certificate_impl_session_release_device_async()`). The exception is `certificate_impl_shutdown()`, which waits **up to two seconds** for those workers so that `C_Logout` is issued before the process exits; when the wait runs out it says so in the journal and exits anyway. Session finalize also closes synchronously, and cannot race a worker: the asynchronous close holds a reference for its whole life, so by then there is nothing left to close |
 | Every request is tied to one `GCancellable` that `Close()` cancels, and a cancelled operation answers 1 rather than 2 | `src/request-impl.c`, `src/certificate-impl.c` | `tests/test-cancellation.c` |
 | Discovery does not log in | `src/tokens/discovery.c` | `tests/test-broker-device.c` |
+| **Only hardware tokens are offered by default.** A token whose slot does not set `CKF_HW_SLOT` is skipped unless `--allow-software-tokens` is given or the module was named with `--module` | `src/tokens/discovery.c`, `token_skip_reason()` | p11-kit on an ordinary desktop presents software key stores as tokens, and a window headed "security token" offering keys from the user's home directory says something untrue about where the key is. `--list-tokens` prints the skipped tokens and the reason. **Not a security boundary**: the flag is a claim by a module already loaded into this process |
+| The chooser and the PIN window follow the session's light/dark setting | `src/main.c`, `follow_colour_scheme()` | read from GSettings rather than from the settings portal, because `PR_SET_DUMPABLE(0)` makes the portal unable to identify this process. Measured, both ways; the decision is recorded under **PIN handling** below |
+| The reference counts on the objects a worker thread can outlive are atomic | `src/ui/pin.c`, `src/ui/chooser.c`, `src/broker/operations.c` | `g_atomic_int_inc` / `g_atomic_int_dec_and_test`. They were plain `int`s defended by a comment about which callbacks happen to be on the main thread today |
+| The scratch directories `tools/` writes into and `rm -rf`s must be under `$TMPDIR` **and** carry this project's marker file | `tools/lib.sh`, `fixture_check()` | the previous check was ownership only, which a mistyped `SOFTHSM_DIR` pointing at `$HOME` passes. A directory that exists without the marker is refused, not emptied |
 
 ### Not implemented
 
@@ -91,7 +99,9 @@ such throughout the rest of this document.
 | Rate limiting | neither side does it. The frontend is the right place; it is on that branch's open-items list. The three-attempt cap on one PIN window is a bound on one prompt, not a rate limit: nothing counts requests per caller or per hour |
 | Chain building | `chain_status` is always `leaf_only`, honestly |
 | A D-Bus policy denying this backend's name to everything but the portal's uid | recorded in [IMPL-INTERFACE.md](IMPL-INTERFACE.md) as a deployment option, not shipped |
-| A wipeable GTK entry buffer | `GtkPasswordEntry` is backed by a `GtkPasswordEntryBuffer`, which GTK allocates from its secure-memory pool and zeroes when it frees it, and GTK places the text in non-pageable memory "if the underlying platform allows it". GTK guarantees nothing about the intermediate copies a text widget, an input method or a Pango layout may have made, so **this project does not claim the PIN existed in exactly one place** — only that its own copy is in one wiped, locked, non-dumpable page |
+| A wipeable GTK entry buffer | `GtkPasswordEntry` is backed by a `GtkPasswordEntryBuffer`, which GTK allocates from its secure-memory pool and zeroes when it frees it, and GTK places the text in non-pageable memory "if the underlying platform allows it". GTK guarantees nothing about the intermediate copies a text widget, an input method or a Pango layout may have made, so **this project does not claim the PIN existed in exactly one place** — only that its own copy is in one wiped, locked, non-dumpable page. `--pin-prompt=system` moves that entry out of this process entirely, and moves the same question to the shell |
+| Any claim that `--pin-prompt=system` keeps the PIN out of this process | it does not, and the section below says so: `C_Login` takes a PIN. What it moves is where the PIN is **typed** |
+| Interrupting a `C_Login` | PKCS#11 has no way to. `--login-timeout` gives up on the interaction; the module call runs to completion and the attempt is spent |
 | Decryption with anything but `RSA_OAEP` | and it never will be. PKCS#1 v1.5 decryption is a padding oracle over the card's key, and the interface refuses it on both sides |
 | Any hardware assurance at all | **no real smart card has ever been read by this code.** [TESTING.md](TESTING.md) tier 3 is the run that would change that |
 
@@ -258,11 +268,57 @@ satisfy them.
 
 ## PIN handling
 
-- **The PIN is collected only in a backend-owned window** and exists only inside the backend
-  process. It never crosses D-Bus in either direction — not on the public interface and **not on the
-  impl interface either** — never enters a `GVariant`, a `GError` message, a URI, or a log line. The
-  frontend cannot see a PIN: not as a rule it obeys, but because it has no window and no token
-  session, and because neither interface has a field one could travel in.
+- **The PIN is collected only in a prompt this backend controls, and it exists only inside the
+  backend process.** It never crosses the portal interfaces in either direction — not the public one
+  and **not the impl one either** — never enters a `GVariant`, a `GError` message, a URI, or a log
+  line. The frontend cannot see a PIN: not as a rule it obeys, but because it has no window and no
+  token session, and because neither interface has a field one could travel in.
+
+### Where the field is drawn, and what that moves
+
+There are two implementations of the prompt and `--pin-prompt` chooses between them. `auto`, the
+default, means the system prompter when `org.gnome.keyring.SystemPrompter` has an owner on the
+session bus or is activatable, and the in-process window otherwise. The journal records which was
+used, once, as `pin-prompt-selected detail=gtk|system`.
+
+| | `gtk` | `system` |
+|---|---|---|
+| Who draws the field | this backend | the desktop shell (gnome-shell), over `GcrSystemPrompt` |
+| Where the typed characters first land | a `GtkPasswordEntry` in this process | the shell's own entry, in the shell |
+| How the PIN reaches `C_Login` | already here | gcr's secret exchange — an ephemeral Diffie–Hellman over D-Bus, so the plaintext is not in a bus message — into gcr's secure memory, then copied into the same locked page |
+| Parented to the requesting application's window | yes, through `xdg_foreign` or an X11 XID | **no**, in practice: `GcrPrompt:caller-window` is sent with the portal's scheme stripped, and gnome-shell's prompter ignores it and draws a session-modal dialog of its own |
+| Needs a display in *this* process | yes | no |
+
+**What moves out of this process with `system`**: the entry widget and its buffer, the input method,
+and every intermediate copy a text widget or a Pango layout might make. That is the honest gain, and
+it is a real one — the thing users have been taught to recognise as a password request on GNOME is
+the shell's dialog, and a window a backend draws itself can be covered or imitated by another
+client. This project no longer has to reason about GTK's secure-memory pool at all on that path.
+
+**What does not move**: *we still hold a copy.* `C_Login` takes a PIN, so the PIN has to arrive
+here. It lands in gcr's secure memory, is copied into the same page-aligned, `mlock()`ed,
+`MADV_DONTDUMP`ed, `explicit_bzero()`ed buffer the GTK path uses, and the login worker still gets a
+private copy of its own. gcr's copy belongs to the prompt and is released when the prompt is closed,
+which is why closing it is part of the PIN's exit path in `src/ui/pin-system.c` rather than
+bookkeeping. **`system` is not "the PIN never enters this process"; it is "the PIN is not typed into
+this process".**
+
+Everything else is identical, because everything else is in `src/ui/pin.c` and neither
+implementation can reach it: the attempt cap, the `FINAL_TRY` second confirmation, the flag re-read,
+the serialisation queue, the deferred cancel, the login timeout, and the abandon path. An
+implementation collects characters and draws warnings; it never decides whether an attempt is spent.
+
+**Nothing about `system` is offered where it cannot be delivered.** If the prompter cannot be
+reached the interaction fails with `no_display` and says so in the journal — there is no silent
+fallback to the in-process window, because which process asked for the PIN is a fact about the
+interaction and must not depend on timing.
+
+**One gcr defect is worked around here and is worth knowing about.** gcr 4.4 completes a prompt
+round *twice* when the round is cancelled and the prompter answers it — once from the cancellation
+and once from the reply. The second completion ran on a prompt whose last reference the first had
+dropped. Nothing in `src/ui/pin-system.c` passes a `GCancellable` to gcr for that reason; the
+interaction is ended by closing the prompt, which comes back exactly once. It was found by
+`tests/test-pin-system.c` crashing, which is the argument for the test existing.
 - **No `pin-value` and no `pin-source` in any PKCS#11 URI this service emits**, ever. Any URI
   arriving from elsewhere carrying one is truncated before it can be logged.
 - **The buffer is wiped on every exit path** — success, failure, cancel, timeout, window destroyed
@@ -271,12 +327,30 @@ satisfy them.
   before anything else in `main()`. `PR_SET_DUMPABLE(0)` also makes `/proc/self/*` root-owned,
   which blocks a same-uid `ptrace` attach — a partial mitigation of an open problem below rather
   than a fix for it, since it does nothing about a tracer that attached first.
-  - **What it costs, honestly.** A non-dumpable process cannot be attached to by `gdb` either, and
-    xdg-desktop-portal's own settings portal cannot read `/proc/$pid/root` to identify this
-    process, so GDK logs a warning and falls back to GSettings for the colour scheme.
+  - **What it costs, honestly, and what was done about it.** A non-dumpable process cannot be
+    attached to by `gdb` either, and xdg-desktop-portal's own settings portal cannot read
+    `/proc/$pid/root` to identify this process, so GDK logs
+    `Failed to read portal settings: ... Unable to open /proc/<pid>/root`.
     `--debug-allow-core` turns the hardening off for development and must never appear in an
     installed service file.
-  - **What GTK's copy is.** The PIN is typed into a `GtkPasswordEntry`, which GTK backs with a
+
+    **That warning was not cosmetic.** libadwaita takes the colour scheme from the settings portal,
+    and the fallbacks did not recover it: measured on Fedora 44 with the session set to
+    `prefer-dark`, this backend came up **light** with the hardening on and **dark** with
+    `--debug-allow-core`. The chooser and the PIN prompt were the wrong colour on a dark desktop,
+    for this reason.
+
+    **The decision, recorded because both options were real.** Dropping `PR_SET_DUMPABLE(0)` and
+    relying on `RLIMIT_CORE 0`, `MADV_DONTDUMP` and Yama's `ptrace_scope` would trade a same-uid
+    `ptrace` defence for a theme — and `ptrace_scope` is not guaranteed to be set, while the thing a
+    tracer would read is the page a PIN is in. So the hardening stays and the backend reads the
+    setting itself: `org.gnome.desktop.interface color-scheme` through GSettings, which talks to
+    dconf over D-Bus and looks nobody up by pid, fed to `adw_style_manager_set_color_scheme()` and
+    followed for changes (`src/main.c`, `follow_colour_scheme()`). Where the schema is absent —
+    this is not a GNOME-only backend — libadwaita's own answer stands. `ADW_DEBUG_COLOR_SCHEME`
+    still wins, so that `tools/ui-smoke.sh` can check a dark scheme actually reaches the windows.
+    `--verbose` logs the outcome as `colour-scheme-dark` / `colour-scheme-light`.
+  - **What GTK's copy is** (the `gtk` prompt only; with `system` the entry is the shell's). The PIN is typed into a `GtkPasswordEntry`, which GTK backs with a
     `GtkPasswordEntryBuffer` allocated from its secure-memory pool and zeroed when freed, and which
     GTK places in non-pageable memory "if the underlying platform allows it". GTK promises nothing
     about intermediate copies made by the text widget, an input method or a Pango layout. **This
@@ -312,6 +386,18 @@ satisfy them.
 - **Headless: never read a PIN from stdin.** With no display, or with `interaction_mode: forbidden`,
   the call returns `no_display` or `interaction_required`. A trusted agent protocol for headless use
   would be a separate, separately configured and separately reviewed mechanism.
+- **A login that never returns is given up on, and the residual is stated.** A `C_Login` that has
+  not come back after `--login-timeout` seconds (60 by default; `0` disables it) takes the prompt
+  down at a known moment, logs `pin-timeout`, and fails the interaction with a reason of its own —
+  `CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT`, not a generic failure. **What it does not do is
+  interrupt the module**, because PKCS#11 offers no way to withdraw a submitted `C_Login`: the
+  attempt is spent whatever happens, and *the caller is still answered only when the module
+  returns*. Answering earlier would mean freeing, on the main thread, an interaction a worker thread
+  is still reading through — which is the exact use-after-free the deferred-cancel machinery exists
+  to prevent. What the timeout buys is that the prompt does not sit there with a spinner in it
+  forever, that the failure is distinguishable in the journal, and that a login which lands
+  afterwards is **abandoned** — the token is logged out again on a worker — rather than being handed
+  to whoever was still waiting.
 - **We cannot force forgetting.** Some tokens and middleware cache authentication internally, at the
   device or driver level, for a duration this service does not control. `C_Logout` is issued when a
   grant ends, and the design must never promise that the card, the reader firmware or the middleware
