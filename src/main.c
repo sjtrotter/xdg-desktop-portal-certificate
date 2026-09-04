@@ -64,6 +64,7 @@ static gboolean opt_version = FALSE;
 static gboolean opt_list_tokens = FALSE;
 static gboolean opt_no_activate = FALSE;
 static gboolean opt_allow_core = FALSE;
+static gboolean opt_allow_software_tokens = FALSE;
 static char** opt_modules = NULL;
 static char* opt_pin_prompt = NULL;
 static int opt_login_timeout = -1;
@@ -77,6 +78,8 @@ static const GOptionEntry entries[] = {
 	  NULL },
 	{ "module", 'm', 0, G_OPTION_ARG_FILENAME_ARRAY, &opt_modules,
 	  "Use only this PKCS#11 module; repeatable", "PATH" },
+	{ "allow-software-tokens", 0, 0, G_OPTION_ARG_NONE, &opt_allow_software_tokens,
+	  "Also offer tokens whose slot does not set CKF_HW_SLOT", NULL },
 	{ "login-timeout", 0, 0, G_OPTION_ARG_INT, &opt_login_timeout,
 	  "Give up on a C_Login that has not returned after N seconds (0 disables)", "N" },
 	{ "list-tokens", 0, 0, G_OPTION_ARG_NONE, &opt_list_tokens,
@@ -143,6 +146,18 @@ static const char* description =
     "  its own window, logs into its OWN PKCS#11 session, and signs.\n"
     "\n"
     "  The PIN never leaves this process. The private key never leaves the token.\n"
+    "\n"
+    "WHICH TOKENS ARE OFFERED\n"
+    "  By default only tokens in a slot the module reports as HARDWARE\n"
+    "  (CKF_HW_SLOT). p11-kit on an ordinary desktop also presents software key\n"
+    "  stores as tokens -- the GNOME keyring's module is the usual one -- and a\n"
+    "  window headed \"security token\" that offers keys from the user's home\n"
+    "  directory says something untrue about where the key is.\n"
+    "  --allow-software-tokens turns the default off; a module named with\n"
+    "  --module is exempt already, because naming it is the same act.\n"
+    "  --list-tokens says which tokens were skipped and why.\n"
+    "  CKF_HW_SLOT is a claim by a module already loaded here, so this is a\n"
+    "  default and NOT a security boundary.\n"
     "\n"
     "EXIT CODES\n"
     "   0 clean shutdown        40 unavailable (no bus, no p11-kit, no module)\n"
@@ -325,7 +340,10 @@ static int list_tokens(void)
 	g_autoptr(GError) error = NULL;
 	g_autoptr(GPtrArray) present = NULL;
 
-	present = certificate_tokens_list(tokens, &error);
+	/* THE LIST THAT REPORTS RATHER THAN FILTERS. An operator working out
+	 * whether this backend can see their card has to be told about a token that
+	 * is present and is not being offered, and why. */
+	present = certificate_tokens_list_all(tokens, &error);
 	if (present == NULL)
 	{
 		g_printerr("xdg-desktop-portal-certificate: %s\n", error->message);
@@ -367,10 +385,14 @@ static int list_tokens(void)
 		g_print("  serial        %s\n", serial);
 		g_print("  reader        %s\n", reader);
 		g_print("  module        %s\n", token->module_name != NULL ? token->module_name : "?");
+		g_print("  hardware      %s\n",
+		        token->hardware ? "yes (CKF_HW_SLOT)" : "no (CKF_HW_SLOT clear)");
 		g_print("  login         %s\n", token->login_required ? "required" : "not required");
 		g_print("  PIN entry     %s\n",
 		        token->protected_authentication_path ? "on the reader (protected path)"
 		                                             : "on screen");
+		if (token->skip_reason != NULL)
+			g_print("  SKIPPED       %s\n", token->skip_reason);
 		if (token->pin_locked)
 			g_print("  PIN state     LOCKED\n");
 		else if (token->pin_final_try)
@@ -389,7 +411,10 @@ static int list_tokens(void)
 			return CERTIFICATE_EXIT_UNAVAILABLE;
 		}
 
-		g_print("%u usable certificate%s\n", candidates->len, candidates->len == 1 ? "" : "s");
+		g_print("%u usable certificate%s", candidates->len, candidates->len == 1 ? "" : "s");
+		if (opt_allow_software_tokens)
+			g_print("  (software tokens allowed)");
+		g_print("\n");
 
 		for (guint i = 0; i < candidates->len; i++)
 		{
@@ -524,6 +549,8 @@ int main(int argc, char** argv)
 		g_printerr("xdg-desktop-portal-certificate: %s\n", error->message);
 		return CERTIFICATE_EXIT_UNAVAILABLE;
 	}
+
+	certificate_tokens_set_allow_software(tokens, opt_allow_software_tokens);
 
 	/* Negative means "not given", which is how a default of 60 and an explicit
 	 * 0 stay different things. */
