@@ -116,8 +116,33 @@ void certificate_impl_session_grant(CertificateImplSession* session,
 
 /** Close the PKCS#11 session, logging out where the token permits. Idempotent,
  *  and safe to call from any thread. Does NOT emit anything: closing is what
- *  the caller asked for. */
+ *  the caller asked for.
+ *
+ *  IT BLOCKS, TWICE OVER: on device_lock, which a worker holds for the whole of
+ *  a C_Login or a C_Sign, and then on C_Logout and C_CloseSession themselves.
+ *  CALL IT ON A WORKER THREAD. Everything on the main thread wants
+ *  certificate_impl_session_release_device_async(). */
 void certificate_impl_session_release_device(CertificateImplSession* session);
+
+/** The same close, moved off the main thread. The session is referenced for as
+ *  long as the worker needs it, so the caller may drop its own reference (and
+ *  the sessions table may drop the last one) the moment this returns.
+ *
+ *  WHY THIS EXISTS: Close(), lifetime expiry, token removal and the frontend
+ *  going away all arrive on the main thread, and all of them used to close the
+ *  card there -- which meant the main loop stalled for the duration of whatever
+ *  a worker was holding device_lock for. A PIN window that stops redrawing
+ *  while the card is being logged out from under it is the visible half; the
+ *  D-Bus connection not being serviced is the other. */
+void certificate_impl_session_release_device_async(CertificateImplSession* session);
+
+/** Wait for the workers started by certificate_impl_session_release_device_async()
+ *  to finish, for at most @timeout_ms. SHUTDOWN ONLY, and the one place this
+ *  backend blocks its main thread on the card on purpose: a process that exits
+ *  before C_Logout has been issued leaves the token's login state to the
+ *  module's own teardown. The wait is BOUNDED because a wedged reader must not
+ *  turn "quit" into "hang" -- when it runs out, the message says so. */
+void certificate_impl_session_drain_releases(guint timeout_ms);
 
 /** Tear the device state down and mark the session closed. Idempotent, and it
  *  leaves the skeleton EXPORTED so that a Close() arriving afterwards is

@@ -1641,6 +1641,13 @@ void certificate_impl_shutdown(CertificateImpl* impl)
 	cancel_transactions(impl, NULL, "backend_gone");
 
 	certificate_tokens_stop_watch(impl->tokens);
+
+	/* THE ONE PLACE THIS PROCESS BLOCKS ITS MAIN THREAD ON THE CARD, and it is
+	 * bounded: the closes above run on workers, and exiting before they have
+	 * issued C_Logout would leave the token's login state to the module. Two
+	 * seconds is far longer than a logout takes and far shorter than a wedged
+	 * reader makes a user wait for a process to quit. */
+	certificate_impl_session_drain_releases(2000);
 }
 
 void certificate_impl_free(CertificateImpl* impl)

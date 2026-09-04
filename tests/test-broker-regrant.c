@@ -225,6 +225,8 @@ static void test_regrant_signs_with_the_new_certificate(void)
 
 	g_clear_pointer(&probe.signature, g_bytes_unref);
 	certificate_impl_session_close(session);
+	/* The close runs on a worker; the module must not be finalised under it. */
+	certificate_impl_session_drain_releases(2000);
 	g_object_unref(session);
 }
 

@@ -149,6 +149,11 @@ static void fixture_tear_down(Fixture* fixture, gconstpointer user_data)
 		g_clear_object(&fixture->session);
 	}
 
+	/* THE CLOSE RUNS ON A WORKER. C_Logout and C_CloseSession no longer happen
+	 * on the calling thread, so the module below must not be finalised until
+	 * they have finished -- which is what src/main.c does at shutdown too. */
+	certificate_impl_session_drain_releases(2000);
+
 	g_clear_pointer(&fixture->candidates, g_ptr_array_unref);
 	g_clear_pointer(&fixture->tokens, certificate_tokens_free);
 }
@@ -158,8 +163,10 @@ static void fixture_tear_down(Fixture* fixture, gconstpointer user_data)
 static void decrypt(Fixture* fixture, const char* parameters_text, GBytes* ciphertext,
                     Answer* answer)
 {
-	g_autoptr(GVariant) parameters = g_variant_ref_sink(
-	    g_variant_parse(G_VARIANT_TYPE_VARDICT, parameters_text, NULL, NULL, NULL));
+	/* g_variant_parse() already returns a FULL reference; ref_sink()ing it adds
+	 * a second one nothing ever drops. */
+	g_autoptr(GVariant) parameters =
+	    g_variant_parse(G_VARIANT_TYPE_VARDICT, parameters_text, NULL, NULL, NULL);
 	gint64 deadline;
 
 	g_assert_nonnull(parameters);

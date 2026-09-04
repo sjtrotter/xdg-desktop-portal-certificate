@@ -71,6 +71,13 @@ static void certificate_impl_session_finalize(GObject* object)
 {
 	CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(object);
 
+	/* SYNCHRONOUS, AND THE ONE PLACE THAT IS RIGHT. There is no object left to
+	 * hand a worker, and there cannot be one running: the asynchronous close
+	 * holds a reference for its whole life, so finalize cannot be reached until
+	 * it has finished -- which means that by the time this runs the device is
+	 * already closed and this is a mutex acquisition and a NULL check. It is
+	 * still called, because a session that was never closed (a test, an early
+	 * error path) must not leak a logged-in card session. */
 	certificate_impl_session_release_device(session);
 
 	if (session->expiry_source != 0)
@@ -175,7 +182,21 @@ void certificate_impl_session_grant(CertificateImplSession* session,
 	session->purpose = purpose;
 	session->may_sign = may_sign;
 	session->may_decrypt = may_decrypt;
+
+	/* THE DEVICE IS NOT TOUCHED HERE, and it is not left alone either: the
+	 * candidate this session now carries is a different one, and
+	 * certificate_device_open() compares what it was opened for against what it
+	 * is asked for and re-opens when they differ. Doing it there rather than
+	 * here is what keeps it race-free -- the comparison, the close and the
+	 * re-open all happen on the worker under device_lock, so a Sign that
+	 * arrives in the same turn as the re-grant cannot slip between them.
+	 *
+	 * The budget is charged and reset under the same lock the workers read it
+	 * under. */
+	g_mutex_lock(&session->device_lock);
 	session->decrypt_count = 0;
+	g_mutex_unlock(&session->device_lock);
+
 	session->lifetime = lifetime;
 	session->expires_at = (g_get_real_time() / G_USEC_PER_SEC) + lifetime;
 	session->granted = TRUE;
@@ -201,6 +222,69 @@ void certificate_impl_session_release_device(CertificateImplSession* session)
 	g_mutex_unlock(&session->device_lock);
 }
 
+/* Outstanding asynchronous closes, process-wide. Only certificate_impl_shutdown()
+ * reads it, and only to know whether there is anything left to wait for. */
+static gint certificate_release_pending = 0;
+
+static void release_thread(GTask* task, gpointer source, gpointer task_data,
+                           GCancellable* cancellable)
+{
+	certificate_impl_session_release_device(CERTIFICATE_IMPL_SESSION(task_data));
+	g_task_return_boolean(task, TRUE);
+}
+
+static void on_device_released(GObject* source, GAsyncResult* result, gpointer user_data)
+{
+	g_atomic_int_add(&certificate_release_pending, -1);
+}
+
+void certificate_impl_session_release_device_async(CertificateImplSession* session)
+{
+	g_autoptr(GTask) task = NULL;
+
+	/* THE COMMON CASE COSTS NOTHING. Most sessions are closed without ever
+	 * having opened a token session, and a thread spent discovering that is a
+	 * thread spent for nothing. trylock rather than lock, because the whole
+	 * point of this function is that it does not block the main thread: a
+	 * contended lock means a worker is busy, which means there is something to
+	 * close. */
+	if (g_mutex_trylock(&session->device_lock))
+	{
+		gboolean idle = session->device.module == NULL;
+
+		g_mutex_unlock(&session->device_lock);
+
+		if (idle)
+			return;
+	}
+
+	g_atomic_int_add(&certificate_release_pending, 1);
+
+	task = g_task_new(NULL, NULL, on_device_released, NULL);
+	g_task_set_task_data(task, g_object_ref(session), g_object_unref);
+	g_task_run_in_thread(task, release_thread);
+}
+
+void certificate_impl_session_drain_releases(guint timeout_ms)
+{
+	gint64 deadline = g_get_monotonic_time() + (gint64) timeout_ms * 1000;
+
+	while (g_atomic_int_get(&certificate_release_pending) > 0)
+	{
+		if (g_get_monotonic_time() >= deadline)
+		{
+			g_message("device-close-unfinished detail=shutdown-timeout: a token session "
+			          "could not be closed within %u ms, so C_Logout is left to the "
+			          "module's own teardown",
+			          timeout_ms);
+			return;
+		}
+
+		g_main_context_iteration(NULL, FALSE);
+		g_usleep(1000);
+	}
+}
+
 void certificate_impl_session_close(CertificateImplSession* session)
 {
 	if (session->closed)
@@ -214,7 +298,12 @@ void certificate_impl_session_close(CertificateImplSession* session)
 		session->expiry_source = 0;
 	}
 
-	certificate_impl_session_release_device(session);
+	/* OFF THE MAIN THREAD. Every caller of this function -- Close(), lifetime
+	 * expiry, token removal, the frontend going away, shutdown -- is on the
+	 * main thread, and C_Logout plus C_CloseSession behind a lock a worker may
+	 * hold for the length of a C_Login is not something the main loop can wait
+	 * for. The session is kept alive by the worker's own reference. */
+	certificate_impl_session_release_device_async(session);
 
 	/* THE SKELETON STAYS ON THE BUS. Unexporting here is what made the
 	 * frontend's own Close() -- which it sends in answer to
