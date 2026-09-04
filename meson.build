@@ -9,9 +9,9 @@
 #
 # TWO BINARIES, because there are two processes:
 #
-#   smartcard-portal-frontend   frontend/    the part that would move INTO
+#   certificate-portal-frontend   frontend/    the part that would move INTO
 #                                            xdg-desktop-portal when accepted
-#   smartcard-portal-gtk        backends/gtk the part that would live in or beside
+#   certificate-portal-gtk        backends/gtk the part that would live in or beside
 #                                            xdg-desktop-portal-gtk
 #
 # The umbrella exists because they are developed together and the impl interface
@@ -56,7 +56,7 @@ dbus_interfaces_dir = datadir / 'dbus-1' / 'interfaces'
 # Where *.portal files and portals.conf live. Our-namespace equivalent of
 # ${datadir}/xdg-desktop-portal/portals; see frontend/src/portal-impl.h and
 # https://flatpak.github.io/xdg-desktop-portal/docs/portals.conf.html
-portal_subdir = 'smartcard-portal'
+portal_subdir = 'certificate-portal'
 portal_dir = datadir / portal_subdir / 'portals'
 
 # shared/ is header-only for now and is compiled into both binaries, exactly as
@@ -104,11 +104,11 @@ summary(
 
 summary(
   {
-    'frontend bus name': 'io.github.sjtrotter.portal.Desktop',
-    'public interface': 'io.github.sjtrotter.portal.Smartcard1 (EXPERIMENTAL)',
-    'backend bus name': 'io.github.sjtrotter.impl.portal.desktop.gtk',
-    'impl interface': 'io.github.sjtrotter.impl.portal.Smartcard1 (private)',
-    'object path (both)': '/io/github/sjtrotter/portal/desktop',
+    'frontend bus name': 'io.github.sjtrotter.portal.Certificate',
+    'public interface': 'io.github.sjtrotter.portal.Certificate1 (EXPERIMENTAL)',
+    'backend bus name': 'io.github.sjtrotter.impl.portal.Certificate.gtk',
+    'impl interface': 'io.github.sjtrotter.impl.portal.Certificate1 (private)',
+    'object path (both)': '/io/github/sjtrotter/portal/Certificate',
     'portal files': portal_dir,
     'core contract': 'credential selection + brokered Sign',
     'PKCS#11 facade': 'experimental, opt-in, milestone 2, backend-side',

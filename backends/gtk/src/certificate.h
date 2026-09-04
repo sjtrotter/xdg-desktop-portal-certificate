@@ -1,15 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_IMPL_SMARTCARD_H
-#define SMARTCARD_IMPL_SMARTCARD_H
+#ifndef CERTIFICATE_IMPL_CERTIFICATE_H
+#define CERTIFICATE_IMPL_CERTIFICATE_H
 
 #include <glib.h>
 
 /** @file
- *  The BACKEND's implementation of io.github.sjtrotter.impl.portal.Smartcard1.
+ *  The BACKEND's implementation of io.github.sjtrotter.impl.portal.Certificate1.
  *
  *  One file per portal, exactly as xdg-desktop-portal-gtk does it (src/filechooser.c,
  *  src/account.c, ...). At upstreaming this file becomes
- *  xdg-desktop-portal-gtk/src/smartcard.c, or the same file in a backend package of its
+ *  xdg-desktop-portal-gtk/src/certificate.c, or the same file in a backend package of its
  *  own; see docs/UPSTREAMING.md.
  *
  *  WHAT THE BACKEND OWNS: the UI and the device. The chooser (ui/chooser.h), the PIN
@@ -46,19 +46,19 @@
  *  Sketch only; nothing here is implemented.
  */
 
-#define SMARTCARD_IMPL_BUS_NAME "io.github.sjtrotter.impl.portal.desktop.gtk"
-#define SMARTCARD_IMPL_OBJECT_PATH "/io/github/sjtrotter/portal/desktop"
-#define SMARTCARD_IMPL_INTERFACE "io.github.sjtrotter.impl.portal.Smartcard1"
-#define SMARTCARD_IMPL_INTERFACE_VERSION 1u
+#define CERTIFICATE_IMPL_BUS_NAME "io.github.sjtrotter.impl.portal.Certificate.gtk"
+#define CERTIFICATE_IMPL_OBJECT_PATH "/io/github/sjtrotter/portal/Certificate"
+#define CERTIFICATE_IMPL_INTERFACE "io.github.sjtrotter.impl.portal.Certificate1"
+#define CERTIFICATE_IMPL_INTERFACE_VERSION 1u
 
 /** The only bus name whose owner may call this backend. */
-#define SMARTCARD_FRONTEND_BUS_NAME "io.github.sjtrotter.portal.Desktop"
+#define CERTIFICATE_FRONTEND_BUS_NAME "io.github.sjtrotter.portal.Certificate"
 
 /** How well the frontend knows the caller, as it arrives on the wire. The backend does
  *  not compute this and cannot improve it; it DISPLAYS it. */
-#define SMARTCARD_IDENTITY_LEVEL_VERIFIED "verified_sandboxed"
-#define SMARTCARD_IDENTITY_LEVEL_DERIVED "derived_host"
-#define SMARTCARD_IDENTITY_LEVEL_UNKNOWN "unidentified"
+#define CERTIFICATE_IDENTITY_LEVEL_VERIFIED "verified_sandboxed"
+#define CERTIFICATE_IDENTITY_LEVEL_DERIVED "derived_host"
+#define CERTIFICATE_IDENTITY_LEVEL_UNKNOWN "unidentified"
 
 /** The four purposes, parsed from the string the frontend sent. The frontend has already
  *  validated it -- an unknown purpose never reaches a backend -- and the backend parses
@@ -67,40 +67,40 @@
  *  consent policy; see broker/operations.h. There is no "any". */
 typedef enum
 {
-	SMARTCARD_PURPOSE_CLIENT_AUTH, /**< one consent per short grant, bound to app+cert+context */
-	SMARTCARD_PURPOSE_SIGNING,     /**< per-operation consent by default, digest shown */
-	SMARTCARD_PURPOSE_EMAIL,       /**< session grant defensible; bulk behaviour must be explicit */
-	SMARTCARD_PURPOSE_SSH          /**< its own policy; NOT "signing with extra steps" */
-} SmartcardPurpose;
+	CERTIFICATE_PURPOSE_CLIENT_AUTH, /**< one consent per short grant, bound to app+cert+context */
+	CERTIFICATE_PURPOSE_SIGNING,     /**< per-operation consent by default, digest shown */
+	CERTIFICATE_PURPOSE_EMAIL,       /**< session grant defensible; bulk behaviour must be explicit */
+	CERTIFICATE_PURPOSE_SSH          /**< its own policy; NOT "signing with extra steps" */
+} CertificatePurpose;
 
-gboolean smartcard_impl_purpose_parse(const char* text, SmartcardPurpose* out);
+gboolean certificate_impl_purpose_parse(const char* text, CertificatePurpose* out);
 
 /** The purpose IN THIS BACKEND'S OWN WORDS, for the chooser and the PIN window: "sign in
  *  to a website", "sign a document". Never the caller's words, and never the frontend's
  *  either -- the words belong to whoever draws the window. Translatable. */
-const char* smartcard_impl_purpose_display(SmartcardPurpose purpose);
+const char* certificate_impl_purpose_display(CertificatePurpose purpose);
 
-typedef struct SmartcardImpl SmartcardImpl;
+typedef struct CertificateImpl CertificateImpl;
 
 /** Claim the impl bus name and export the impl interface plus the impl Request and
  *  Session objects. Fails with exit code 40 when there is no session bus, no p11-kit, or
  *  no usable module configuration -- checked at startup so the frontend gets
  *  BackendUnavailable early and clearly rather than mid-handshake. */
-SmartcardImpl* smartcard_impl_new(gboolean replace, GError** error);
+CertificateImpl* certificate_impl_new(gboolean replace, GError** error);
 
-/** True if @sender currently owns SMARTCARD_FRONTEND_BUS_NAME. Every method calls this
+/** True if @sender currently owns CERTIFICATE_FRONTEND_BUS_NAME. Every method calls this
  *  first. A refusal is logged as a reason code and never explains itself to the caller
  *  beyond NotPermitted. */
-gboolean smartcard_impl_sender_is_frontend(SmartcardImpl* impl, const char* sender);
+gboolean certificate_impl_sender_is_frontend(CertificateImpl* impl, const char* sender);
 
 /** Run the GTK main loop. Exits when idle with no live sessions: a backend that never
  *  exits is a backend holding a card session nobody asked it to hold. */
-int smartcard_impl_run(SmartcardImpl* impl);
+int certificate_impl_run(CertificateImpl* impl);
 
 /** Shut down: close every token session, log out where the token permits, poison every
  *  facade endpoint, reap every helper, and emit SessionInvalidated with
  *  "backend_shutdown" for each session so the frontend can tell its callers the truth
  *  rather than letting them discover it at the next Sign. */
-void smartcard_impl_shutdown(SmartcardImpl* impl);
+void certificate_impl_shutdown(CertificateImpl* impl);
 
-#endif /* SMARTCARD_IMPL_SMARTCARD_H */
+#endif /* CERTIFICATE_IMPL_CERTIFICATE_H */

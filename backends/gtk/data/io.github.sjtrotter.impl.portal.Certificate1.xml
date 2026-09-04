@@ -34,12 +34,12 @@
 <node name="/" xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
 
   <!--
-      io.github.sjtrotter.impl.portal.Smartcard1:
-      @short_description: Smartcard portal backend interface
+      io.github.sjtrotter.impl.portal.Certificate1:
+      @short_description: Certificate portal backend interface
 
-      Implemented by a backend and exported at /io/github/sjtrotter/portal/desktop
+      Implemented by a backend and exported at /io/github/sjtrotter/portal/Certificate
       on the backend's own bus name - for the reference backend in this
-      repository, io.github.sjtrotter.impl.portal.desktop.gtk.
+      repository, io.github.sjtrotter.impl.portal.Certificate.gtk.
 
       WHAT THE BACKEND OWNS: the UI (the chooser and the PIN prompt), the device
       (PKCS#11 module loading, slot and token discovery, certificate reading),
@@ -58,7 +58,7 @@
 
       This documentation describes version 1 of this interface.
   -->
-  <interface name="io.github.sjtrotter.impl.portal.Smartcard1">
+  <interface name="io.github.sjtrotter.impl.portal.Certificate1">
 
     <!--
         CreateSession:

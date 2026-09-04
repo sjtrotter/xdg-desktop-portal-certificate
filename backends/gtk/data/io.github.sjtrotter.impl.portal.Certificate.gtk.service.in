@@ -10,5 +10,5 @@
 # EXPERIMENTAL. The binary this points at is a design-sketch stub that exits 70.
 
 [D-BUS Service]
-Name=io.github.sjtrotter.impl.portal.desktop.gtk
-Exec=@libexecdir@/smartcard-portal-gtk
+Name=io.github.sjtrotter.impl.portal.Certificate.gtk
+Exec=@libexecdir@/certificate-portal-gtk

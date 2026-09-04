@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_IMPL_REQUEST_H
-#define SMARTCARD_IMPL_REQUEST_H
+#ifndef CERTIFICATE_IMPL_REQUEST_H
+#define CERTIFICATE_IMPL_REQUEST_H
 
 #include <glib.h>
 
@@ -32,18 +32,18 @@
  *  Sketch only; nothing here is implemented.
  */
 
-typedef struct SmartcardImplRequest SmartcardImplRequest;
+typedef struct CertificateImplRequest CertificateImplRequest;
 
 /** Export a Request object at @handle for the duration of one impl call. */
-SmartcardImplRequest* smartcard_impl_request_new(const char* handle, const char* app_id,
+CertificateImplRequest* certificate_impl_request_new(const char* handle, const char* app_id,
                                                  GError** error);
 
 /** Close(): tear down every window and cancellable this transaction owns. Idempotent.
  *  After this the impl method returns response 1 (cancelled) if it has not already
  *  returned. */
-void smartcard_impl_request_close(SmartcardImplRequest* request);
+void certificate_impl_request_close(CertificateImplRequest* request);
 
 /** Unexport and free. The response has already been returned by the method call. */
-void smartcard_impl_request_finish(SmartcardImplRequest* request);
+void certificate_impl_request_finish(CertificateImplRequest* request);
 
-#endif /* SMARTCARD_IMPL_REQUEST_H */
+#endif /* CERTIFICATE_IMPL_REQUEST_H */

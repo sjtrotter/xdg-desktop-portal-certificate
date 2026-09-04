@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_FRONTEND_APP_INFO_H
-#define SMARTCARD_FRONTEND_APP_INFO_H
+#ifndef CERTIFICATE_FRONTEND_APP_INFO_H
+#define CERTIFICATE_FRONTEND_APP_INFO_H
 
 #include <glib.h>
 
@@ -44,47 +44,47 @@
  *  by omission. See docs/SECURITY.md. */
 typedef enum
 {
-	SMARTCARD_IDENTITY_VERIFIED_SANDBOXED, /**< Flatpak/Snap identity via the containment
+	CERTIFICATE_IDENTITY_VERIFIED_SANDBOXED, /**< Flatpak/Snap identity via the containment
 	                                            framework's mediation: authenticated metadata */
-	SMARTCARD_IDENTITY_DERIVED_HOST,       /**< cgroup-derived desktop label, possibly with a
+	CERTIFICATE_IDENTITY_DERIVED_HOST,       /**< cgroup-derived desktop label, possibly with a
 	                                            Registry-style claim: a useful label, NOT a
 	                                            security principal. Warn. */
-	SMARTCARD_IDENTITY_UNKNOWN             /**< nothing trustworthy: "an unidentified
+	CERTIFICATE_IDENTITY_UNKNOWN             /**< nothing trustworthy: "an unidentified
 	                                            application", strongest warning, first-use
 	                                            confirmation, no selection memory */
-} SmartcardIdentityLevel;
+} CertificateIdentityLevel;
 
 typedef struct
 {
-	SmartcardIdentityLevel level;
+	CertificateIdentityLevel level;
 	char* app_id;           /**< what goes into every impl call and every permission-store key */
 	char* app_display_name; /**< as THIS SERVICE established it. Never caller-supplied text. */
 	char* unique_bus_name;  /**< what a grant is actually bound to */
 	gboolean sandboxed;
 	gboolean id_was_claimed; /**< came from a Registry-style claim rather than from mediation */
-} SmartcardAppInfo;
+} CertificateAppInfo;
 
 /** Resolve the peer of @invocation. Asynchronous because the mechanisms are: Flatpak
  *  metadata is a file read, snapd is a socket round trip. Never blocks the main loop,
  *  and never trusts anything the caller said about itself.
  *
- *  A failure to identify is NOT an error: it produces SMARTCARD_IDENTITY_UNKNOWN, which
+ *  A failure to identify is NOT an error: it produces CERTIFICATE_IDENTITY_UNKNOWN, which
  *  the user is then told about in the strongest terms the design has. */
-void smartcard_app_info_resolve(GDBusMethodInvocation* invocation, GCancellable* cancellable,
+void certificate_app_info_resolve(GDBusMethodInvocation* invocation, GCancellable* cancellable,
                                 GAsyncReadyCallback callback, gpointer user_data);
 
-SmartcardAppInfo* smartcard_app_info_finish(GAsyncResult* result, GError** error);
+CertificateAppInfo* certificate_app_info_finish(GAsyncResult* result, GError** error);
 
 /** The string form used in impl calls and permission-store lookups. For an unidentified
  *  caller this is the empty string -- the same convention upstream uses for an
  *  unsandboxed caller with no known app id -- and an empty app id NEVER keys stored
  *  state. */
-const char* smartcard_app_info_get_id(const SmartcardAppInfo* info);
+const char* certificate_app_info_get_id(const CertificateAppInfo* info);
 
 /** The honesty level as the string the impl interface carries:
  *  "verified_sandboxed" | "derived_host" | "unidentified". */
-const char* smartcard_app_info_level_string(const SmartcardAppInfo* info);
+const char* certificate_app_info_level_string(const CertificateAppInfo* info);
 
-void smartcard_app_info_free(SmartcardAppInfo* info);
+void certificate_app_info_free(CertificateAppInfo* info);
 
-#endif /* SMARTCARD_FRONTEND_APP_INFO_H */
+#endif /* CERTIFICATE_FRONTEND_APP_INFO_H */

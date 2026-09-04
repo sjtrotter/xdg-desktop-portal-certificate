@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_BROKER_OPERATIONS_H
-#define SMARTCARD_BROKER_OPERATIONS_H
+#ifndef CERTIFICATE_BROKER_OPERATIONS_H
+#define CERTIFICATE_BROKER_OPERATIONS_H
 
 #include <glib.h>
 
-#include "../smartcard.h"
+#include "../certificate.h"
 
 /** @file
  *  The broker. THE CORE CONTRACT: the SYSTEM holds the key and performs the operation,
@@ -54,11 +54,11 @@
  *  DIFFERENT PURPOSE. Login is a hardware state; consent is a decision. */
 typedef enum
 {
-	SMARTCARD_CONSENT_PER_GRANT,
-	SMARTCARD_CONSENT_PER_OPERATION
-} SmartcardConsentPolicy;
+	CERTIFICATE_CONSENT_PER_GRANT,
+	CERTIFICATE_CONSENT_PER_OPERATION
+} CertificateConsentPolicy;
 
-SmartcardConsentPolicy smartcard_consent_policy_for(SmartcardPurpose purpose, gboolean decrypt);
+CertificateConsentPolicy certificate_consent_policy_for(CertificatePurpose purpose, gboolean decrypt);
 
 /** A mechanism the allow-list permits, with its parameters ALREADY VALIDATED against the
  *  mechanism and the key -- not forwarded. RSA-PSS hash, MGF and salt length are the
@@ -67,11 +67,11 @@ typedef struct
 {
 	char* mechanism;   /**< from the grant's supported_mechanisms */
 	GVariant* params;  /**< validated, not trusted */
-} SmartcardMechanism;
+} CertificateMechanism;
 
-typedef struct SmartcardBroker SmartcardBroker;
+typedef struct CertificateBroker CertificateBroker;
 
-typedef void (*SmartcardSignDone)(GByteArray* signature, const GError* error, gpointer user_data);
+typedef void (*CertificateSignDone)(GByteArray* signature, const GError* error, gpointer user_data);
 
 /** Sign @data with the grant's key.
  *
@@ -88,24 +88,24 @@ typedef void (*SmartcardSignDone)(GByteArray* signature, const GError* error, gp
  *
  *  @operation_id is caller-chosen and lets a cancellation, a result and a log line be
  *  correlated without correlating them by content. */
-void smartcard_broker_sign(SmartcardBroker* broker, const char* session_handle,
-                           const char* operation_id, const SmartcardMechanism* mechanism,
-                           GBytes* data, GCancellable* cancellable, SmartcardSignDone done,
+void certificate_broker_sign(CertificateBroker* broker, const char* session_handle,
+                           const char* operation_id, const CertificateMechanism* mechanism,
+                           GBytes* data, GCancellable* cancellable, CertificateSignDone done,
                            gpointer user_data);
 
 /** Decrypt. Refused unless the grant's permitted_operations includes decrypt. Not in v1;
  *  see docs/ROADMAP.md. */
-void smartcard_broker_decrypt(SmartcardBroker* broker, const char* session_handle,
-                              const char* operation_id, const SmartcardMechanism* mechanism,
+void certificate_broker_decrypt(CertificateBroker* broker, const char* session_handle,
+                              const char* operation_id, const CertificateMechanism* mechanism,
                               GBytes* ciphertext, GCancellable* cancellable,
-                              SmartcardSignDone done, gpointer user_data);
+                              CertificateSignDone done, gpointer user_data);
 
 /** Ensure this service is logged in on its OWN session for @grant_id, prompting if
  *  necessary. Called at first private-key use, from both the brokered path and the
  *  facade's lazy-login path -- so that both share one login model and one serialised
  *  prompt per token. */
-void smartcard_broker_ensure_login(SmartcardBroker* broker, const char* session_handle,
-                                   GCancellable* cancellable, SmartcardSignDone done,
+void certificate_broker_ensure_login(CertificateBroker* broker, const char* session_handle,
+                                   GCancellable* cancellable, CertificateSignDone done,
                                    gpointer user_data);
 
-#endif /* SMARTCARD_BROKER_OPERATIONS_H */
+#endif /* CERTIFICATE_BROKER_OPERATIONS_H */

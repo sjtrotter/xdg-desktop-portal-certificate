@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_TOKENS_DISCOVERY_H
-#define SMARTCARD_TOKENS_DISCOVERY_H
+#ifndef CERTIFICATE_TOKENS_DISCOVERY_H
+#define CERTIFICATE_TOKENS_DISCOVERY_H
 
 #include <glib.h>
 
@@ -37,7 +37,7 @@
  *  Sketch only; nothing here is implemented.
  */
 
-#define SMARTCARD_P11_KIT_TRUST_MODEL "p11-kit-trust"
+#define CERTIFICATE_P11_KIT_TRUST_MODEL "p11-kit-trust"
 
 /** Token identity. The display fields go in the chooser and in token_display; the
  *  identity fields decide whether two observations are the same token. Neither set is
@@ -55,12 +55,12 @@ typedef struct
 	gboolean login_required;
 	gint retries_remaining; /**< -1 when the token does not reliably report it. NEVER
 	                             invent a value: a wrong count is worse than none. */
-} SmartcardToken;
+} CertificateToken;
 
 /** One candidate certificate, before filtering. */
 typedef struct
 {
-	SmartcardToken* token;
+	CertificateToken* token;
 	GByteArray* der;
 	char* subject_display; /**< for the chooser only; never logged */
 	char* issuer_display;  /**< for the chooser only; never logged */
@@ -72,20 +72,20 @@ typedef struct
 	char* key_type;  /**< "RSA" or "EC" */
 	guint key_size;
 	char* key_curve;
-} SmartcardCandidate;
+} CertificateCandidate;
 
-typedef struct SmartcardDiscovery SmartcardDiscovery;
+typedef struct CertificateDiscovery CertificateDiscovery;
 
-typedef void (*SmartcardDiscoveryDone)(GPtrArray* candidates, const GError* error,
+typedef void (*CertificateDiscoveryDone)(GPtrArray* candidates, const GError* error,
                                        gpointer user_data);
 
 /** Start discovery. Never blocks; @done runs on the main context. Cancelling the
  *  transaction cancels this, and a cancelled discovery reports no error -- a user who
  *  closed the window does not need a dialog about it. */
-SmartcardDiscovery* smartcard_discovery_start(GCancellable* cancellable,
-                                              SmartcardDiscoveryDone done, gpointer user_data);
+CertificateDiscovery* certificate_discovery_start(GCancellable* cancellable,
+                                              CertificateDiscoveryDone done, gpointer user_data);
 
-void smartcard_discovery_cancel(SmartcardDiscovery* discovery);
+void certificate_discovery_cancel(CertificateDiscovery* discovery);
 
 /** Token presence watching, feeding TokenAdded/TokenRemoved and grant invalidation.
  *  A reader that reports insert/remove repeatedly must not produce a signal storm; the
@@ -96,12 +96,12 @@ void smartcard_discovery_cancel(SmartcardDiscovery* discovery);
  *  caller that has not been through a consent dialog. These signals are justified by a
  *  demonstrated need -- reacting to removal mid-flow -- and enumeration on demand is
  *  not, yet. */
-typedef void (*SmartcardTokenEvent)(const SmartcardToken* token, gboolean added,
+typedef void (*CertificateTokenEvent)(const CertificateToken* token, gboolean added,
                                     gpointer user_data);
 
-SmartcardDiscovery* smartcard_discovery_watch(SmartcardTokenEvent event, gpointer user_data);
+CertificateDiscovery* certificate_discovery_watch(CertificateTokenEvent event, gpointer user_data);
 
-void smartcard_token_free(SmartcardToken* token);
-void smartcard_candidate_free(SmartcardCandidate* candidate);
+void certificate_token_free(CertificateToken* token);
+void certificate_candidate_free(CertificateCandidate* candidate);
 
-#endif /* SMARTCARD_TOKENS_DISCOVERY_H */
+#endif /* CERTIFICATE_TOKENS_DISCOVERY_H */

@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_UI_CHOOSER_H
-#define SMARTCARD_UI_CHOOSER_H
+#ifndef CERTIFICATE_UI_CHOOSER_H
+#define CERTIFICATE_UI_CHOOSER_H
 
 #include <glib.h>
 
-#include "../smartcard.h"
+#include "../certificate.h"
 #include "../tokens/discovery.h"
 
 /** @file
@@ -16,7 +16,7 @@
  *  the window, so the window cannot be talked into naming the wrong application by the
  *  application. app_id, the application display name, and HOW WELL THAT NAME IS KNOWN
  *  arrive as arguments to
- *  io.github.sjtrotter.impl.portal.Smartcard1.AcquireCredential. The backend renders
+ *  io.github.sjtrotter.impl.portal.Certificate1.AcquireCredential. The backend renders
  *  them. It never derives them.
  *
  *  Not the PIN prompt. The PIN proves the user was present and knew the PIN; it does not
@@ -71,33 +71,33 @@
  *  See docs/SECURITY.md. */
 typedef enum
 {
-	SMARTCARD_IDENTITY_VERIFIED_SANDBOXED, /**< "verified_sandboxed": Flatpak/Snap identity via
+	CERTIFICATE_IDENTITY_VERIFIED_SANDBOXED, /**< "verified_sandboxed": Flatpak/Snap identity via
 	                                            the containment framework's mediation,
 	                                            treated as authenticated metadata */
-	SMARTCARD_IDENTITY_DERIVED_HOST,       /**< "derived_host": a cgroup-derived desktop label,
+	CERTIFICATE_IDENTITY_DERIVED_HOST,       /**< "derived_host": a cgroup-derived desktop label,
 	                                            possibly a Registry-style self-claim. A useful
 	                                            label, NOT a security principal. Warn. */
-	SMARTCARD_IDENTITY_UNKNOWN             /**< "unidentified": nothing trustworthy. "An
+	CERTIFICATE_IDENTITY_UNKNOWN             /**< "unidentified": nothing trustworthy. "An
 	                                            unidentified application", strongest warning,
 	                                            first-use confirmation, no selection memory */
-} SmartcardIdentityLevel;
+} CertificateIdentityLevel;
 
 /** What the frontend told this backend about the caller. Every field arrived as an
  *  argument. NONE of it is caller-supplied text, and none of it may be replaced by
  *  caller-supplied text. */
 typedef struct
 {
-	SmartcardIdentityLevel level;
+	CertificateIdentityLevel level;
 	const char* app_id;           /**< as the FRONTEND established it; "" if unidentified */
 	const char* app_display_name; /**< as the FRONTEND established it. Never the caller's. */
-} SmartcardCallerIdentity;
+} CertificateCallerIdentity;
 
-SmartcardIdentityLevel smartcard_identity_level_parse(const char* level);
+CertificateIdentityLevel certificate_identity_level_parse(const char* level);
 
 typedef struct
 {
-	const SmartcardCallerIdentity* caller;
-	SmartcardPurpose purpose;
+	const CertificateCallerIdentity* caller;
+	CertificatePurpose purpose;
 	gboolean may_sign;
 	gboolean may_decrypt;
 	guint32 lifetime_seconds; /**< 0 means "this operation only" */
@@ -113,27 +113,27 @@ typedef struct
 	                                        from the permission store, or NULL.
 	                                        PRESELECTION ONLY: the window still opens and
 	                                        the user still confirms. */
-} SmartcardChooserRequest;
+} CertificateChooserRequest;
 
 typedef struct
 {
-	SmartcardCandidate* chosen; /**< NULL if the user cancelled */
+	CertificateCandidate* chosen; /**< NULL if the user cancelled */
 	gboolean remember_selection; /**< what the user said. The frontend decides what to do
 	                                  about it. */
 	char* certificate_id;        /**< stable identifier for the chosen certificate, returned
 	                                  to the frontend as the key it may store */
-} SmartcardChooserResult;
+} CertificateChooserResult;
 
-typedef void (*SmartcardChooserDone)(const SmartcardChooserResult* result, gpointer user_data);
+typedef void (*CertificateChooserDone)(const CertificateChooserResult* result, gpointer user_data);
 
 /** Show the chooser. @parent_window uses the portal window-identifier convention
  *  ("wayland:<handle>" from xdg_foreign, "x11:<xid>", or empty). AN INVALID OR EXPIRED
  *  PARENT MUST NOT FAIL THE REQUEST: degrade to an unparented, service-controlled
  *  window. @activation_token authorises focus; a background caller without one does not
  *  steal it. */
-void smartcard_chooser_show(const char* parent_window, const char* activation_token,
-                            GPtrArray* candidates, const SmartcardChooserRequest* request,
-                            GCancellable* cancellable, SmartcardChooserDone done,
+void certificate_chooser_show(const char* parent_window, const char* activation_token,
+                            GPtrArray* candidates, const CertificateChooserRequest* request,
+                            GCancellable* cancellable, CertificateChooserDone done,
                             gpointer user_data);
 
-#endif /* SMARTCARD_UI_CHOOSER_H */
+#endif /* CERTIFICATE_UI_CHOOSER_H */

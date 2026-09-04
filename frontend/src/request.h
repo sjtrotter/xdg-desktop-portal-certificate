@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_FRONTEND_REQUEST_H
-#define SMARTCARD_FRONTEND_REQUEST_H
+#ifndef CERTIFICATE_FRONTEND_REQUEST_H
+#define CERTIFICATE_FRONTEND_REQUEST_H
 
 #include <glib.h>
 
@@ -13,7 +13,7 @@
  *  docs/decisions/0003-own-namespace-before-freedesktop.md.
  *
  *  The object path is
- *  /io/github/sjtrotter/portal/desktop/request/<sender>/<handle_token>, where <sender>
+ *  /io/github/sjtrotter/portal/Certificate/request/<sender>/<handle_token>, where <sender>
  *  is the caller's unique name with the leading ':' removed and '.' replaced by '_'.
  *  The caller can therefore compute the path and SUBSCRIBE BEFORE CALLING, which is the
  *  entire reason for the pattern: there is no window in which a response can be missed.
@@ -44,12 +44,12 @@
 /** Response codes. Exactly ONE terminal response is ever emitted per request. */
 typedef enum
 {
-	SMARTCARD_RESPONSE_SUCCESS = 0,   /**< results as documented per method */
-	SMARTCARD_RESPONSE_CANCELLED = 1, /**< by the user, or by Close() */
-	SMARTCARD_RESPONSE_OTHER = 2      /**< results carry "error" and "error_message" */
-} SmartcardResponse;
+	CERTIFICATE_RESPONSE_SUCCESS = 0,   /**< results as documented per method */
+	CERTIFICATE_RESPONSE_CANCELLED = 1, /**< by the user, or by Close() */
+	CERTIFICATE_RESPONSE_OTHER = 2      /**< results carry "error" and "error_message" */
+} CertificateResponse;
 
-typedef struct SmartcardRequest SmartcardRequest;
+typedef struct CertificateRequest CertificateRequest;
 
 /** Everything one transaction owns, so that one destructor closes all of it.
  *
@@ -67,7 +67,7 @@ typedef struct SmartcardRequest SmartcardRequest;
  *  around fifteen. Smart-card flows make short fixed timeouts hostile -- a user hunting
  *  for a reader is a normal user. The timeout is the FRONTEND'S, because it is policy;
  *  the backend gets a cancellation, not a deadline. */
-SmartcardRequest* smartcard_request_new(GDBusMethodInvocation* invocation,
+CertificateRequest* certificate_request_new(GDBusMethodInvocation* invocation,
                                         const char* handle_token, GVariant* options,
                                         GError** error);
 
@@ -75,18 +75,18 @@ SmartcardRequest* smartcard_request_new(GDBusMethodInvocation* invocation,
  *  programming error; the second call is dropped and logged as a reason code. A
  *  completion already atomically committed wins over a simultaneous cancellation, and
  *  every other late event is discarded. */
-void smartcard_request_respond(SmartcardRequest* request, SmartcardResponse response,
+void certificate_request_respond(CertificateRequest* request, CertificateResponse response,
                                GVariant* results);
 
 /** Cancel: from Close(), from caller disconnect, from timeout, from shutdown, from the
  *  backend disappearing. Calls Close() on the backend's Request object first, so the
  *  window goes away before the application is told anything. */
-void smartcard_request_cancel(SmartcardRequest* request, const char* reason_code);
+void certificate_request_cancel(CertificateRequest* request, const char* reason_code);
 
 /** Attach the backend-side Request proxy created for this transaction, so that Close()
  *  reaches it. The frontend chooses the @handle path and passes it to the backend, which
  *  exports the object -- the same direction as upstream's
  *  xdp_request_set_impl_request(). */
-void smartcard_request_set_impl(SmartcardRequest* request, GDBusProxy* impl_request);
+void certificate_request_set_impl(CertificateRequest* request, GDBusProxy* impl_request);
 
-#endif /* SMARTCARD_FRONTEND_REQUEST_H */
+#endif /* CERTIFICATE_FRONTEND_REQUEST_H */

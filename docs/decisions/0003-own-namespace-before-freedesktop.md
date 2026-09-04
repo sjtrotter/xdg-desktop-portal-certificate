@@ -5,7 +5,7 @@ Status: accepted (for the sketch)
 
 ## Context
 
-The temptation is to ship `org.freedesktop.portal.Smartcard` immediately. It reads as legitimate, it
+The temptation is to ship `org.freedesktop.portal.Certificate` immediately. It reads as legitimate, it
 is what applications would eventually call, and it saves a rename.
 
 It is also a claim of ownership and acceptance that does not exist. The
@@ -14,18 +14,22 @@ recommends a reverse-domain namespace the project actually controls, and xdg-des
 namespace belongs to xdg-desktop-portal. Squatting it means either the eventual real interface
 collides with a prototype, or the prototype's mistakes become the standard by accident.
 
-There is a second problem, which is that **`Smartcard` is probably the wrong name**. The conceptual
-boundary is a **client certificate** or **cryptographic credential**: the backing key might be a
-smart card, a TPM, a software token, a phone, or a remote HSM. Naming a portal after a physical
-device is exactly the pattern that ages badly, and the credentials/FIDO2 maintainers are unlikely to
-want one portal per device type.
+There was also a second problem: this interface's first name, chosen for the sketch's original
+smart-card-only incarnation, named the hardware rather than the capability, and a portal named
+after a physical device is exactly the pattern that ages badly once the same broker turns out to
+mediate keys on a TPM or a software token just as well. [0009](0009-name-it-certificate.md)
+resolved that specific problem by renaming to a capability-scoped interface name. What is
+unresolved, and is this ADR's actual subject, is the *namespace*: whichever name we pick stays
+project-controlled until an upstream maintainer accepts it, because that acceptance isn't ours to
+claim in advance. The credentials/FIDO2 maintainers are, separately, unlikely to want one portal
+per device type at all — see "The order of conversations" below.
 
 ## Decision
 
-Ship **`io.github.sjtrotter.portal.Smartcard1`** — and, since
+Ship **`io.github.sjtrotter.portal.Certificate1`** — and, since
 [0008](0008-build-to-the-upstream-shape.md), its private counterpart
-**`io.github.sjtrotter.impl.portal.Smartcard1`** — on the bus name
-`io.github.sjtrotter.portal.Desktop` at `/io/github/sjtrotter/portal/desktop`, with the major
+**`io.github.sjtrotter.impl.portal.Certificate1`** — on the bus name
+`io.github.sjtrotter.portal.Certificate` at `/io/github/sjtrotter/portal/Certificate`, with the major
 version in the interface name, from a domain the author controls.
 
 The `portal` and `impl.portal` infixes mirror `org.freedesktop.portal.*` and
@@ -69,6 +73,9 @@ one more reason [0007](0007-brokered-operations-are-the-core.md) makes brokered 
   consumers behind it rather than a name.
 - The repository directory is still called `smartcard-portal`. It is a directory name; the README
   says so.
+- **The interface itself was later renamed**, from its original hardware-derived name to a
+  capability-scoped one; see [0009](0009-name-it-certificate.md). This ADR's argument about
+  namespace ownership is unaffected — only the `<Name>` slot changed, not the shape.
 - **The mapping is now written down rather than implied.** [UPSTREAMING.md](../UPSTREAMING.md) lists
   every interface, bus name, object path and file against what it would become upstream, and the
   handful of places where the change would be more than a rename. That document is the check on

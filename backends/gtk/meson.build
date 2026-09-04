@@ -5,7 +5,7 @@
 # file per portal. See docs/UPSTREAMING.md for where each piece lands.
 
 executable(
-  'smartcard-portal-gtk',
+  'certificate-portal-gtk',
   sources: ['src/main.c'],
   include_directories: shared_inc,
   dependencies: [glib_dep],
@@ -18,11 +18,11 @@ executable(
 # the interface is ours and unstable it ships with the backend that defines it, which is
 # a deviation recorded in docs/UPSTREAMING.md.
 install_data(
-  'data/io.github.sjtrotter.impl.portal.Smartcard1.xml',
+  'data/io.github.sjtrotter.impl.portal.Certificate1.xml',
   install_dir: dbus_interfaces_dir,
 )
 
-# Backend discovery. The frontend scans ${datadir}/smartcard-portal/portals for *.portal
+# Backend discovery. The frontend scans ${datadir}/certificate-portal/portals for *.portal
 # files and reads DBusName and Interfaces from each.
 # Upstream's gtk.portal.in has @-substitutions because its backend's interface list is
 # build-configurable; ours lists one interface unconditionally, so this is a copy. The
@@ -38,8 +38,8 @@ configure_file(
 
 # D-Bus activation for the backend. Applications have no reason to hold this name.
 configure_file(
-  input: 'data/io.github.sjtrotter.impl.portal.desktop.gtk.service.in',
-  output: 'io.github.sjtrotter.impl.portal.desktop.gtk.service',
+  input: 'data/io.github.sjtrotter.impl.portal.Certificate.gtk.service.in',
+  output: 'io.github.sjtrotter.impl.portal.Certificate.gtk.service',
   configuration: {'libexecdir': libexecdir},
   install: true,
   install_dir: dbus_service_dir,

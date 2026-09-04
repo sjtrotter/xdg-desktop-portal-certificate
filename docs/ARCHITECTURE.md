@@ -25,10 +25,10 @@ the backend (`xdg-desktop-portal-gtk` and friends) draws dialogs and touches the
 See [writing a new backend](https://flatpak.github.io/xdg-desktop-portal/docs/writing-a-new-backend.html)
 and the [documentation index](https://flatpak.github.io/xdg-desktop-portal/docs/).
 
-| Concern | Frontend `smartcard-portal-frontend` | Backend `smartcard-portal-gtk` |
+| Concern | Frontend `certificate-portal-frontend` | Backend `certificate-portal-gtk` |
 |---|---|---|
 | **Caller identity** | Derives `app_id` from Flatpak/Snap metadata, host cgroup, or a Registry-style claim; records the honesty level | Never derives anything. Receives `app_id` and its honesty level as **arguments** |
-| **Bus name applications use** | `io.github.sjtrotter.portal.Desktop` — the only one | `io.github.sjtrotter.impl.portal.desktop.gtk` — not for applications |
+| **Bus name applications use** | `io.github.sjtrotter.portal.Certificate` — the only one | `io.github.sjtrotter.impl.portal.Certificate.gtk` — not for applications |
 | **Policy** | Purpose validation (no `any`), option validation, operation set, mechanism allow-list, lifetime ceiling, rate limits | Enforces what it is told, plus its own hard limits. Never widens |
 | **Permissions** | Reads and writes the permission store (remembered certificate *selection*) | Never touches it. Told what to preselect; reports what was chosen |
 | **Request lifecycle** | Exports the caller's `Request`, one terminal `Response`, timeouts, cancellation | Exports an impl `Request` at the path the frontend chose; `Close()` only |
@@ -55,7 +55,7 @@ RemoteDesktop, where the backend owns the device and hands back a descriptor
                     D-Bus                       D-Bus impl iface
   CreateSession ─────────────►  session object   ───────────────►  impl session
   AcquireCredential ─────────►  app-info.h   ← WHO IS ASKING
-                                smartcard.h  ← purpose, options, policy
+                                certificate.h  ← purpose, options, policy
                                 permission-store.h ← remembered SELECTION
                                 portal-impl.h ← which backend
                                      │
@@ -115,10 +115,10 @@ not the real token forwarded.
 
 ## Components
 
-### Frontend: the portal — `frontend/src/smartcard.h`, `frontend/src/request.h`, `frontend/src/session.h`
+### Frontend: the portal — `frontend/src/certificate.h`, `frontend/src/request.h`, `frontend/src/session.h`
 
-Owns `io.github.sjtrotter.portal.Desktop` on the session bus and exports
-`/io/github/sjtrotter/portal/desktop`. Interactive calls follow the
+Owns `io.github.sjtrotter.portal.Certificate` on the session bus and exports
+`/io/github/sjtrotter/portal/Certificate`. Interactive calls follow the
 [xdg-desktop-portal `Request` pattern](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html):
 the caller supplies an unguessable `handle_token`, can compute the request object path and subscribe
 to it *before* the call returns, cancels through `Request.Close()` rather than a bespoke `Cancel`,
@@ -138,7 +138,7 @@ string could not: an object the caller can watch, that dies with its connection,
 path the frontend controls.
 
 **Nothing here draws or discovers.** The frontend resolves identity
-(`frontend/src/app-info.h`), applies policy (`frontend/src/smartcard.h`), consults the
+(`frontend/src/app-info.h`), applies policy (`frontend/src/certificate.h`), consults the
 permission store (`frontend/src/permission-store.h`), selects a backend
 (`frontend/src/portal-impl.h`), and calls it with `app_id` attached. Two `Request` objects
 exist per interaction — the caller's, on the frontend, and the backend's, at a path the
@@ -439,14 +439,14 @@ the fields it is allowed to emit — not a filter applied to strings on the way 
 application                    FRONTEND                       BACKEND              card
   │
   ├─ CreateSession({session_handle_token})  ──────►
-  │   ◄── o /io/github/sjtrotter/portal/desktop/session/<sender>/<token>
+  │   ◄── o /io/github/sjtrotter/portal/Certificate/session/<sender>/<token>
   │                                │  CreateSession(handle, session, app_id, {}) ──►
   │
   ├─ AcquireCredential(session, parent, {handle_token, purpose: client_auth,
   │      certificate_filter: {issuers: <from CertificateRequest>},
   │      operation_policy: {sign}, interaction_mode: allowed,
   │      context: "<destination host>"})                     ──────►
-  │   ◄── o /io/github/sjtrotter/portal/desktop/request/<sender>/<token>
+  │   ◄── o /io/github/sjtrotter/portal/Certificate/request/<sender>/<token>
   │                                │
   │                                ├─ resolve app_id (Flatpak? Snap? host? unknown?)
   │                                ├─ validate purpose and options; apply rate limit
@@ -559,9 +559,9 @@ See [0005](decisions/0005-first-consumer-is-the-web-auth-service.md) and
 ## Process model
 
 - **Two D-Bus-activated per-user services.** The frontend is started by the session bus on
-  first method call via `frontend/data/io.github.sjtrotter.portal.Desktop.service.in`; the
+  first method call via `frontend/data/io.github.sjtrotter.portal.Certificate.service.in`; the
   backend is started by the frontend's first impl call via
-  `backends/gtk/data/io.github.sjtrotter.impl.portal.desktop.gtk.service.in`. Both exit when
+  `backends/gtk/data/io.github.sjtrotter.impl.portal.Certificate.gtk.service.in`. Both exit when
   idle with no live grants. Neither is a system service: cards are the user's and nothing
   here needs root.
 - **One helper process per facade endpoint.** The synthetic module runs in its own process —

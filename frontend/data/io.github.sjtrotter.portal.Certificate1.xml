@@ -5,7 +5,7 @@
  SPDX-License-Identifier: GPL-2.0-or-later
 
  THE PUBLIC (FRONTEND) INTERFACE. This is what an application calls. Applications
- never call the backend: see ../../backends/gtk/data/io.github.sjtrotter.impl.portal.Smartcard1.xml
+ never call the backend: see ../../backends/gtk/data/io.github.sjtrotter.impl.portal.Certificate1.xml
  for the private implementation interface, and docs/IMPL-INTERFACE.md for why it is
  not reachable from an application.
 
@@ -25,10 +25,11 @@
    https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html
    https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Session.html
 
- The name "Smartcard" is also expected to change. The conceptual boundary is a
- client certificate or cryptographic credential; the backing key may be a smart
- card, a TPM, a software token, a phone or a remote HSM. See
- docs/decisions/0003-own-namespace-before-freedesktop.md.
+ The name "Certificate" replaced an earlier, hardware-named one (docs/decisions/0009) and may
+ still change again before acceptance. The conceptual boundary is a client certificate or
+ cryptographic credential; the backing key may be a smart card, a TPM, a software token, a
+ phone or a remote HSM. See docs/decisions/0003-own-namespace-before-freedesktop.md and
+ docs/decisions/0009-name-it-certificate.md.
 
  THE CORE CONTRACT IS CREDENTIAL SELECTION PLUS BROKERED OPERATIONS. The system
  keeps the key and performs the operation. OpenPkcs11Endpoint is an EXPERIMENTAL
@@ -41,15 +42,15 @@
 <node name="/" xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
 
   <!--
-      io.github.sjtrotter.portal.Smartcard1:
+      io.github.sjtrotter.portal.Certificate1:
       @short_description: Brokered use of certificate-backed private keys
 
       Mediates smart cards and other PKCS#11 tokens for applications the way the
       Camera and USB portals mediate devices: the application does not receive
       the device. It receives a grant.
 
-      Exported by the FRONTEND on bus name io.github.sjtrotter.portal.Desktop at
-      /io/github/sjtrotter/portal/desktop.
+      Exported by the FRONTEND on bus name io.github.sjtrotter.portal.Certificate at
+      /io/github/sjtrotter/portal/Certificate.
 
       Who does what (docs/ARCHITECTURE.md has the full table):
 
@@ -80,7 +81,7 @@
         ADMINISTRATION.
       - It does not cache PINs. There is no option asking it to.
   -->
-  <interface name="io.github.sjtrotter.portal.Smartcard1">
+  <interface name="io.github.sjtrotter.portal.Certificate1">
 
     <!--
         CreateSession:
@@ -481,7 +482,7 @@
 
       Copied closely from org.freedesktop.portal.Request. Exported by the
       FRONTEND at
-      /io/github/sjtrotter/portal/desktop/request/<sender>/<handle_token>,
+      /io/github/sjtrotter/portal/Certificate/request/<sender>/<handle_token>,
       where <sender> is the caller's unique name with the leading ":" removed
       and "." replaced by "_", so the caller can subscribe before calling and
       never race the response.
@@ -507,7 +508,7 @@
         @results: per-method, see the method documentation
 
         At most ONE terminal response is ever emitted. On response 2, @results
-        carries "error" (an io.github.sjtrotter.portal.Smartcard1.Error.* name)
+        carries "error" (an io.github.sjtrotter.portal.Certificate1.Error.* name)
         and "error_message". Incorrect PIN, blocked PIN, cancelled prompt,
         device error and token removal are always distinguished from one
         another.
@@ -525,7 +526,7 @@
 
       Copied closely from org.freedesktop.portal.Session. Exported by the
       FRONTEND at
-      /io/github/sjtrotter/portal/desktop/session/<sender>/<session_handle_token>.
+      /io/github/sjtrotter/portal/Certificate/session/<sender>/<session_handle_token>.
 
       A session here IS a grant: one certificate, one key, one operation set,
       one verified caller, one bounded time. The frontend owns it - its
@@ -539,7 +540,7 @@
         Close:
 
         Closes the session and releases the grant. Identical in effect to
-        Smartcard1.ReleaseGrant on the same handle.
+        Certificate1.ReleaseGrant on the same handle.
     -->
     <method name="Close"/>
 

@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_TOKENS_FILTER_H
-#define SMARTCARD_TOKENS_FILTER_H
+#ifndef CERTIFICATE_TOKENS_FILTER_H
+#define CERTIFICATE_TOKENS_FILTER_H
 
 #include <glib.h>
 
-#include "../smartcard.h"
+#include "../certificate.h"
 #include "discovery.h"
 
 /** @file
@@ -37,10 +37,10 @@
  */
 
 /** EKU OIDs the purposes map to. "any" does not exist as a purpose; see
- *  SmartcardPurpose in ../smartcard.h. */
-#define SMARTCARD_EKU_CLIENT_AUTH "1.3.6.1.5.5.7.3.2"
-#define SMARTCARD_EKU_CODE_SIGNING "1.3.6.1.5.5.7.3.3"
-#define SMARTCARD_EKU_EMAIL_PROTECTION "1.3.6.1.5.5.7.3.4"
+ *  CertificatePurpose in ../certificate.h. */
+#define CERTIFICATE_EKU_CLIENT_AUTH "1.3.6.1.5.5.7.3.2"
+#define CERTIFICATE_EKU_CODE_SIGNING "1.3.6.1.5.5.7.3.3"
+#define CERTIFICATE_EKU_EMAIL_PROTECTION "1.3.6.1.5.5.7.3.4"
 
 /** All fields optional, all AND-ed. Supplied by the caller and therefore untrusted as
  *  to INTENT -- but harmless, because narrowing the offered set can only reduce what the
@@ -49,25 +49,25 @@
  *  know whether to insert a card or to talk to whoever issued it. */
 typedef struct
 {
-	SmartcardPurpose purpose;
+	CertificatePurpose purpose;
 	GPtrArray* issuers;    /**< DER issuer DNs, as a TLS CertificateRequest supplies them */
 	char** key_usage;      /**< X.509 key-usage bits that must be present */
 	char** eku_oids;       /**< explicit OIDs, where the purpose shorthand is not enough */
 	char** key_algorithms; /**< key types and signature schemes the CALLER can use */
 	char* token_label;
 	char* piv_slot;
-} SmartcardFilter;
+} CertificateFilter;
 
 /** Apply @filter to @candidates, returning a new array of the survivors in the order
  *  they should be offered. Never reorders by "likely" or "last used" in a way that could
  *  be mistaken for a recommendation this service is not qualified to make. */
-GPtrArray* smartcard_filter_apply(GPtrArray* candidates, const SmartcardFilter* filter);
+GPtrArray* certificate_filter_apply(GPtrArray* candidates, const CertificateFilter* filter);
 
 /** Parse the caller's certificate_filter vardict. Rejects a malformed filter rather than
  *  silently ignoring the parts it did not understand -- a filter that half-applied would
  *  offer credentials the caller said it could not use. */
-gboolean smartcard_filter_parse(GVariant* options, SmartcardFilter* out, GError** error);
+gboolean certificate_filter_parse(GVariant* options, CertificateFilter* out, GError** error);
 
-void smartcard_filter_clear(SmartcardFilter* filter);
+void certificate_filter_clear(CertificateFilter* filter);
 
-#endif /* SMARTCARD_TOKENS_FILTER_H */
+#endif /* CERTIFICATE_TOKENS_FILTER_H */

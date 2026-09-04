@@ -1,15 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_FRONTEND_SMARTCARD_H
-#define SMARTCARD_FRONTEND_SMARTCARD_H
+#ifndef CERTIFICATE_FRONTEND_CERTIFICATE_H
+#define CERTIFICATE_FRONTEND_CERTIFICATE_H
 
 #include <glib.h>
 
 /** @file
- *  The FRONTEND's implementation of io.github.sjtrotter.portal.Smartcard1.
+ *  The FRONTEND's implementation of io.github.sjtrotter.portal.Certificate1.
  *
  *  One file per portal, exactly as xdg-desktop-portal does it (desktop-portal/camera.c,
  *  desktop-portal/usb.c, ...). At upstreaming this file becomes
- *  xdg-desktop-portal/desktop-portal/smartcard.c; see docs/UPSTREAMING.md.
+ *  xdg-desktop-portal/desktop-portal/certificate.c; see docs/UPSTREAMING.md.
  *
  *  WHAT THE FRONTEND OWNS, and what this file therefore does:
  *
@@ -39,16 +39,18 @@
  *  Sketch only; nothing here is implemented.
  */
 
-/** The frontend's public identity. Our stand-in for org.freedesktop.portal.Desktop and
- *  /org/freedesktop/portal/desktop. Applications talk to this and to nothing else. */
-#define SMARTCARD_BUS_NAME "io.github.sjtrotter.portal.Desktop"
-#define SMARTCARD_OBJECT_PATH "/io/github/sjtrotter/portal/desktop"
-#define SMARTCARD_INTERFACE "io.github.sjtrotter.portal.Smartcard1"
-#define SMARTCARD_INTERFACE_VERSION 1u
+/** The frontend's public identity: its own incubation bus name and object path. At
+ *  acceptance this collapses into org.freedesktop.portal.Desktop at
+ *  /org/freedesktop/portal/desktop; see docs/decisions/0008, "Per-project bus names
+ *  during incubation". Applications talk to this and to nothing else. */
+#define CERTIFICATE_BUS_NAME "io.github.sjtrotter.portal.Certificate"
+#define CERTIFICATE_OBJECT_PATH "/io/github/sjtrotter/portal/Certificate"
+#define CERTIFICATE_INTERFACE "io.github.sjtrotter.portal.Certificate1"
+#define CERTIFICATE_INTERFACE_VERSION 1u
 
 /** The interface the frontend requires of a backend. A *.portal file that does not list
  *  this string does not implement this portal, and the frontend will not call it. */
-#define SMARTCARD_IMPL_INTERFACE "io.github.sjtrotter.impl.portal.Smartcard1"
+#define CERTIFICATE_IMPL_INTERFACE "io.github.sjtrotter.impl.portal.Certificate1"
 
 /** Error names. These appear both as D-Bus errors on the initial call and as
  *  results["error"] on a Request.Response of 2. Incorrect PIN, blocked PIN, cancelled
@@ -58,24 +60,24 @@
  *  A backend reports a CONDITION; the frontend chooses the error name the application
  *  sees. A backend cannot invent an error name, and cannot make the frontend say
  *  "cancelled by the user" about something the user never saw. */
-#define SMARTCARD_ERROR_PREFIX SMARTCARD_INTERFACE ".Error"
-#define SMARTCARD_ERROR_NO_TOKEN SMARTCARD_ERROR_PREFIX ".NoToken"
-#define SMARTCARD_ERROR_TOKEN_ABSENT SMARTCARD_ERROR_PREFIX ".TokenAbsent"
-#define SMARTCARD_ERROR_TOKEN_REMOVED SMARTCARD_ERROR_PREFIX ".TokenRemoved"
-#define SMARTCARD_ERROR_NO_MATCHING_CERTIFICATE SMARTCARD_ERROR_PREFIX ".NoMatchingCertificate"
-#define SMARTCARD_ERROR_PIN_INCORRECT SMARTCARD_ERROR_PREFIX ".PinIncorrect"
-#define SMARTCARD_ERROR_PIN_LOCKED SMARTCARD_ERROR_PREFIX ".PinLocked"
-#define SMARTCARD_ERROR_INTERACTION_REQUIRED SMARTCARD_ERROR_PREFIX ".InteractionRequired"
-#define SMARTCARD_ERROR_NO_DISPLAY SMARTCARD_ERROR_PREFIX ".NoDisplay"
-#define SMARTCARD_ERROR_UNSUPPORTED_MECHANISM SMARTCARD_ERROR_PREFIX ".UnsupportedMechanism"
-#define SMARTCARD_ERROR_GRANT_EXPIRED SMARTCARD_ERROR_PREFIX ".GrantExpired"
-#define SMARTCARD_ERROR_NOT_PERMITTED SMARTCARD_ERROR_PREFIX ".NotPermitted"
-#define SMARTCARD_ERROR_RATE_LIMITED SMARTCARD_ERROR_PREFIX ".RateLimited"
-#define SMARTCARD_ERROR_DEVICE_ERROR SMARTCARD_ERROR_PREFIX ".DeviceError"
+#define CERTIFICATE_ERROR_PREFIX CERTIFICATE_INTERFACE ".Error"
+#define CERTIFICATE_ERROR_NO_TOKEN CERTIFICATE_ERROR_PREFIX ".NoToken"
+#define CERTIFICATE_ERROR_TOKEN_ABSENT CERTIFICATE_ERROR_PREFIX ".TokenAbsent"
+#define CERTIFICATE_ERROR_TOKEN_REMOVED CERTIFICATE_ERROR_PREFIX ".TokenRemoved"
+#define CERTIFICATE_ERROR_NO_MATCHING_CERTIFICATE CERTIFICATE_ERROR_PREFIX ".NoMatchingCertificate"
+#define CERTIFICATE_ERROR_PIN_INCORRECT CERTIFICATE_ERROR_PREFIX ".PinIncorrect"
+#define CERTIFICATE_ERROR_PIN_LOCKED CERTIFICATE_ERROR_PREFIX ".PinLocked"
+#define CERTIFICATE_ERROR_INTERACTION_REQUIRED CERTIFICATE_ERROR_PREFIX ".InteractionRequired"
+#define CERTIFICATE_ERROR_NO_DISPLAY CERTIFICATE_ERROR_PREFIX ".NoDisplay"
+#define CERTIFICATE_ERROR_UNSUPPORTED_MECHANISM CERTIFICATE_ERROR_PREFIX ".UnsupportedMechanism"
+#define CERTIFICATE_ERROR_GRANT_EXPIRED CERTIFICATE_ERROR_PREFIX ".GrantExpired"
+#define CERTIFICATE_ERROR_NOT_PERMITTED CERTIFICATE_ERROR_PREFIX ".NotPermitted"
+#define CERTIFICATE_ERROR_RATE_LIMITED CERTIFICATE_ERROR_PREFIX ".RateLimited"
+#define CERTIFICATE_ERROR_DEVICE_ERROR CERTIFICATE_ERROR_PREFIX ".DeviceError"
 /** No backend implements the impl interface, or the one selected will not start. The
  *  old name for "no p11-kit, no pcscd, no module" -- which is now something the BACKEND
  *  discovers and reports, because the frontend does not load modules. */
-#define SMARTCARD_ERROR_BACKEND_UNAVAILABLE SMARTCARD_ERROR_PREFIX ".BackendUnavailable"
+#define CERTIFICATE_ERROR_BACKEND_UNAVAILABLE CERTIFICATE_ERROR_PREFIX ".BackendUnavailable"
 
 /** The purposes. There is deliberately NO "any": a request that will not say what it is
  *  for cannot be described to the user in the system's own words, cannot be given a
@@ -84,37 +86,37 @@
  *  own consent policy; see ../../backends/gtk/src/broker/operations.h. */
 typedef enum
 {
-	SMARTCARD_PURPOSE_CLIENT_AUTH, /**< one consent per short grant, bound to app+cert+context */
-	SMARTCARD_PURPOSE_SIGNING,     /**< per-operation consent by default, digest shown */
-	SMARTCARD_PURPOSE_EMAIL,       /**< session grant defensible; bulk behaviour must be explicit */
-	SMARTCARD_PURPOSE_SSH          /**< its own policy; NOT "signing with extra steps" */
-} SmartcardPurpose;
+	CERTIFICATE_PURPOSE_CLIENT_AUTH, /**< one consent per short grant, bound to app+cert+context */
+	CERTIFICATE_PURPOSE_SIGNING,     /**< per-operation consent by default, digest shown */
+	CERTIFICATE_PURPOSE_EMAIL,       /**< session grant defensible; bulk behaviour must be explicit */
+	CERTIFICATE_PURPOSE_SSH          /**< its own policy; NOT "signing with extra steps" */
+} CertificatePurpose;
 
 /** Parse and validate a caller's purpose string. Rejects anything not in the list, and
  *  in particular rejects "any" and the empty string. */
-gboolean smartcard_purpose_parse(const char* text, SmartcardPurpose* out);
+gboolean certificate_purpose_parse(const char* text, CertificatePurpose* out);
 
-typedef struct SmartcardFrontend SmartcardFrontend;
+typedef struct CertificateFrontend CertificateFrontend;
 
-/** Claim SMARTCARD_BUS_NAME, export SMARTCARD_OBJECT_PATH, load the backend
+/** Claim CERTIFICATE_BUS_NAME, export CERTIFICATE_OBJECT_PATH, load the backend
  *  configuration (portal-impl.h) and connect to the permission store
  *  (permission-store.h). Does NOT require a backend to be running: backends are D-Bus
  *  activated on first use, exactly as upstream does it. */
-SmartcardFrontend* smartcard_frontend_new(gboolean replace, GError** error);
+CertificateFrontend* certificate_frontend_new(gboolean replace, GError** error);
 
 /** Run until idle with no live grants, or until told to stop. A per-user service that
  *  never exits is a per-user service holding a card session nobody asked it to hold. */
-int smartcard_frontend_run(SmartcardFrontend* frontend);
+int certificate_frontend_run(CertificateFrontend* frontend);
 
 /** Shut down: close every session (which closes the backend's), invalidate every grant
  *  with reason "service_shutdown", and drop the backend proxies. */
-void smartcard_frontend_shutdown(SmartcardFrontend* frontend);
+void certificate_frontend_shutdown(CertificateFrontend* frontend);
 
 /** Rate limits, per caller and globally, on requests and on operations. Applied by the
  *  FRONTEND because they are policy and because the frontend is the only side that knows
  *  which application is asking. A backend has no way to distinguish two applications
  *  from one application asking twice. */
-gboolean smartcard_frontend_rate_limit_ok(SmartcardFrontend* frontend, const char* app_id,
+gboolean certificate_frontend_rate_limit_ok(CertificateFrontend* frontend, const char* app_id,
                                           const char* what);
 
-#endif /* SMARTCARD_FRONTEND_SMARTCARD_H */
+#endif /* CERTIFICATE_FRONTEND_CERTIFICATE_H */

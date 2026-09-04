@@ -35,13 +35,13 @@ and the costs it accepts.
 **Build the frontend/backend split now, in the shape xdg-desktop-portal uses, under our own
 namespace.**
 
-- `frontend/` owns `io.github.sjtrotter.portal.Desktop` and exports
-  `io.github.sjtrotter.portal.Smartcard1`. It establishes the caller's app id, validates
+- `frontend/` owns `io.github.sjtrotter.portal.Certificate` and exports
+  `io.github.sjtrotter.portal.Certificate1`. It establishes the caller's app id, validates
   the purpose and options, applies policy, permissions, lifetime ceilings and rate limits,
   owns the `Request` and `Session` objects and the grant registry, selects a backend from
   installed `*.portal` files, and calls that backend with `app_id` attached.
-- `backends/gtk/` owns `io.github.sjtrotter.impl.portal.desktop.gtk` and implements
-  `io.github.sjtrotter.impl.portal.Smartcard1`. It draws the chooser and the PIN prompt,
+- `backends/gtk/` owns `io.github.sjtrotter.impl.portal.Certificate.gtk` and implements
+  `io.github.sjtrotter.impl.portal.Certificate1`. It draws the chooser and the PIN prompt,
   discovers tokens, holds the PKCS#11 session, performs `Sign` and `Decrypt`, and serves
   the experimental facade whose endpoint fd the frontend relays.
 - The impl interface is private to the frontend, by the same means upstream uses plus an
@@ -105,55 +105,47 @@ Every cost the earlier argument listed is real and is now being paid:
 - **Ten fewer person-days on the spike**, roughly, which is a real trade against the one
   thing [SPIKES.md](../SPIKES.md) says matters most.
 
-## The Desktop bus name
+## Per-project bus names during incubation
 
-**The problem.** `io.github.sjtrotter.portal.Desktop` is a singleton, and it is the incubating
-stand-in for `org.freedesktop.portal.Desktop`. The sibling `entra-token-helper` repository (working
-title `webauth-portal`) has restructured in parallel into the same shape, and its frontend claims the
-same name. Two incubating frontends cannot both hold it: the second to start fails to acquire the
-name.
+Each incubating frontend now claims its own bus name and object path, rather than both
+frontends claiming a shared `io.github.sjtrotter.portal.Desktop` stand-in for the real
+singleton `org.freedesktop.portal.Desktop`. This project's frontend owns
+**`io.github.sjtrotter.portal.Certificate`** at **`/io/github/sjtrotter/portal/Certificate`**,
+and exports `io.github.sjtrotter.portal.Certificate1`. The sibling `entra-token-helper`
+repository's frontend owns **`io.github.sjtrotter.portal.WebAuthentication`** at
+**`/io/github/sjtrotter/portal/WebAuthentication`**, exporting
+`io.github.sjtrotter.portal.WebAuthentication1`. Backend impl bus names follow the same
+pattern: this project's backend owns `io.github.sjtrotter.impl.portal.Certificate.gtk`,
+mirroring `org.freedesktop.impl.portal.desktop.gtk`'s per-project shape during incubation; at
+acceptance it merges into the real gtk backend's bus name.
 
-That is not a packaging accident to be worked around. It is the architecture stating a fact: **the
-real xdg-desktop-portal hosts every portal interface in one process.** A per-project frontend is not
-a smaller version of that; it is a different, incompatible thing.
+That is not a workaround for a name collision; it is the correct shape for two independent,
+unreviewed prototypes that happen to share a machine — both incubating frontends install and
+run side by side, and neither has to fail to acquire a name the other already holds.
 
-**The resolution, in three parts, matching the sibling's own account of this same problem** in its
-`entra-token-helper` repository, `docs/decisions/0008-build-to-the-upstream-shape.md`, "The Desktop
-bus name":
+**At acceptance, the question disappears.** Both interfaces move onto
+`org.freedesktop.portal.Desktop` at `/org/freedesktop/portal/desktop`, hosted by
+xdg-desktop-portal itself, and the per-project incubating bus names and object paths vanish
+along with the frontends that held them. Acceptance is a rename, nothing else, for either
+project.
 
-1. **At acceptance, the question disappears.** Both interfaces would be hosted by
-   xdg-desktop-portal itself, on `org.freedesktop.portal.Desktop`, and neither repository would
-   ship a frontend at all.
-2. **Before acceptance, the answer is one shared incubating frontend.** Now that both this
-   project and `webauth-portal` are actually built to the portal shape rather than one of them
-   only arguing for it, a shared `incubating-portal-frontend` — one process, one bus name, one
-   object path, this project's `Smartcard1` and the sibling's `WebAuthentication1` routed side by
-   side to their own impl interfaces, exactly as xdg-desktop-portal's own structure — is no
-   longer a hope contingent on the other side finishing its restructuring. It is the concrete next
-   step, blocked only on agreement between the two projects, not on either project's own shape.
-3. **For now, each repository ships its own frontend stub**, and only one can be installed at a
-   time. Both projects' documents say so rather than papering over it with a per-project bus name,
-   because a per-project bus name would quietly make the two prototypes *look* compatible while
-   removing the one property the shape exists to have.
+**It does not, by itself, fix the delegation gap** described in
+[0005](0005-first-consumer-is-the-web-auth-service.md) and [ARCHITECTURE.md](../ARCHITECTURE.md),
+and that gap no longer has anything to do with which bus name either frontend claims. This
+project derives the app id of *its* caller, which when the sibling's backend calls in as an
+ordinary client is `webauth-portal-gtk`, not the application that started the sign-in — so the
+chooser names the wrong thing, and the original app id can only be passed along as untrusted
+text. That is solved only when both interfaces run inside **one trusted frontend process**,
+sharing one address space and one derived identity — which happens automatically at
+acceptance. A shared incubating frontend built *before* acceptance would also close the gap
+early, and is worth exploring, but it is one option among others rather than a required next
+step; nothing about the per-project bus names above depends on it happening.
 
-**It also solves the delegation gap** described in
-[0005](0005-first-consumer-is-the-web-auth-service.md) and [ARCHITECTURE.md](../ARCHITECTURE.md).
-This service derives the app id of *its* caller, which under the sibling's portal adapter is
-`webauth-portal-gtk`, not the application that started the sign-in — so the chooser names the wrong
-thing, and the original app id can only be passed as untrusted text. **Inside one shared frontend,
-both interfaces would already hold the same derived app id, and the sibling could pass the
-*original* application's app id to this project's `AcquireCredential` in-process, with no attestation
-crossing a bus at all.**
-
-That fix is narrower than it sounds, and the narrowness is the point: **it only holds because the two
-portals then run in one trusted process.** In-process, a passed-along app id is exactly as trustworthy
-as the frontend's own derivation, because nothing untrusted touched it in between. Across two
-processes — this project's frontend and a separately-running `webauth-portal-frontend` — the same
-pass-through would be a caller asserting someone else's identity with nothing to back the assertion,
-which is precisely the identity-laundering [SECURITY.md](../SECURITY.md) forbids. It would need an
-attested-delegation protocol neither project has designed, and **it is not to be done that way.**
-Passing an unattested app id across a process boundary is not a smaller version of the shared-frontend
-fix; it is the thing the shared frontend exists to avoid needing.
+Passing an unattested app id across the process boundary as a stopgap ahead of any such shared
+frontend is **not to be done**: a caller asserting someone else's identity with nothing to back
+the assertion is exactly the identity-laundering [SECURITY.md](../SECURITY.md) forbids, and it
+is not a smaller version of the shared-frontend fix — it is the thing that fix exists to avoid
+needing.
 
 ## Consequences
 

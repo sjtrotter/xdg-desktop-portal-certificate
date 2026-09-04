@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_IMPL_SESSION_H
-#define SMARTCARD_IMPL_SESSION_H
+#ifndef CERTIFICATE_IMPL_SESSION_H
+#define CERTIFICATE_IMPL_SESSION_H
 
 #include <glib.h>
 
@@ -35,24 +35,24 @@
  *  Sketch only; nothing here is implemented.
  */
 
-typedef struct SmartcardImplSession SmartcardImplSession;
+typedef struct CertificateImplSession CertificateImplSession;
 
 /** Export a Session object at the path the frontend chose, bound to @app_id. */
-SmartcardImplSession* smartcard_impl_session_new(const char* session_handle, const char* app_id,
+CertificateImplSession* certificate_impl_session_new(const char* session_handle, const char* app_id,
                                                  GError** error);
 
 /** Look up the session an impl call names. A call naming a session this backend does not
  *  have is a frontend bug or an impostor; either way it is refused and logged. */
-SmartcardImplSession* smartcard_impl_session_lookup(const char* session_handle,
+CertificateImplSession* certificate_impl_session_lookup(const char* session_handle,
                                                     const char* app_id, GError** error);
 
 /** Close(): tear the device state down, as described above. Idempotent. */
-void smartcard_impl_session_close(SmartcardImplSession* session);
+void certificate_impl_session_close(CertificateImplSession* session);
 
 /** The hardware went away underneath a session. Emits SessionInvalidated with
  *  "token_removed" | "device_error" | "backend_shutdown" and closes the session. The
  *  frontend turns that into GrantInvalidated for the application; the backend does not
  *  decide that a grant is over for any reason that is not physical. */
-void smartcard_impl_session_invalidate(SmartcardImplSession* session, const char* reason);
+void certificate_impl_session_invalidate(CertificateImplSession* session, const char* reason);
 
-#endif /* SMARTCARD_IMPL_SESSION_H */
+#endif /* CERTIFICATE_IMPL_SESSION_H */

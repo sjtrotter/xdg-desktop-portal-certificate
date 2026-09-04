@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_UI_PIN_H
-#define SMARTCARD_UI_PIN_H
+#ifndef CERTIFICATE_UI_PIN_H
+#define CERTIFICATE_UI_PIN_H
 
 #include <glib.h>
 
@@ -62,16 +62,16 @@
  *  told "authentication failed". */
 typedef enum
 {
-	SMARTCARD_PIN_OK,
-	SMARTCARD_PIN_INCORRECT,
-	SMARTCARD_PIN_LOCKED,
-	SMARTCARD_PIN_CANCELLED,
-	SMARTCARD_PIN_DEVICE_ERROR,
-	SMARTCARD_PIN_TOKEN_REMOVED,
-	SMARTCARD_PIN_NO_DISPLAY
-} SmartcardPinOutcome;
+	CERTIFICATE_PIN_OK,
+	CERTIFICATE_PIN_INCORRECT,
+	CERTIFICATE_PIN_LOCKED,
+	CERTIFICATE_PIN_CANCELLED,
+	CERTIFICATE_PIN_DEVICE_ERROR,
+	CERTIFICATE_PIN_TOKEN_REMOVED,
+	CERTIFICATE_PIN_NO_DISPLAY
+} CertificatePinOutcome;
 
-typedef void (*SmartcardPinDone)(SmartcardPinOutcome outcome, gpointer user_data);
+typedef void (*CertificatePinDone)(CertificatePinOutcome outcome, gpointer user_data);
 
 /** Prompt and log in. There is no "get the PIN" entry point on purpose: the caller never
  *  receives the PIN, only the outcome of a login this module performed. The window
@@ -80,14 +80,14 @@ typedef void (*SmartcardPinDone)(SmartcardPinOutcome outcome, gpointer user_data
  *
  *  The PIN field is never echoed and its contents never enter the accessibility tree,
  *  while the "incorrect PIN, N attempts remaining" state IS announced. */
-void smartcard_pin_login(const char* parent_window, const SmartcardToken* token,
+void certificate_pin_login(const char* parent_window, const CertificateToken* token,
                          const char* caller_display, const char* purpose_display,
-                         GCancellable* cancellable, SmartcardPinDone done, gpointer user_data);
+                         GCancellable* cancellable, CertificatePinDone done, gpointer user_data);
 
 /** Show the instruction window for a token with a protected authentication path, while
  *  the underlying null-PIN login runs. No editable field. */
-void smartcard_pin_protected_path(const char* parent_window, const SmartcardToken* token,
-                                  GCancellable* cancellable, SmartcardPinDone done,
+void certificate_pin_protected_path(const char* parent_window, const CertificateToken* token,
+                                  GCancellable* cancellable, CertificatePinDone done,
                                   gpointer user_data);
 
-#endif /* SMARTCARD_UI_PIN_H */
+#endif /* CERTIFICATE_UI_PIN_H */

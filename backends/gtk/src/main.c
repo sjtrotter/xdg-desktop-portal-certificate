@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
  *
- * smartcard-portal-gtk - the reference portal BACKEND for certificate-backed keys.
+ * certificate-portal-gtk - the reference portal BACKEND for certificate-backed keys.
  *
  * Copyright (C) 2026 the smartcard-portal authors
  *
  * This would be the D-Bus activated per-user service that owns
- * io.github.sjtrotter.impl.portal.desktop.gtk and implements
- * io.github.sjtrotter.impl.portal.Smartcard1 at /io/github/sjtrotter/portal/desktop --
+ * io.github.sjtrotter.impl.portal.Certificate.gtk and implements
+ * io.github.sjtrotter.impl.portal.Certificate1 at /io/github/sjtrotter/portal/Certificate --
  * laid out exactly like xdg-desktop-portal-gtk, which registers
  * org.freedesktop.impl.portal.desktop.gtk, ships a data/gtk.portal describing which
  * impl interfaces it implements, and puts one file per portal in src/.
@@ -29,31 +29,31 @@
 #include <glib.h>
 
 /* The same exit-code scheme as the frontend, so a supervisor sees one scheme. */
-#define SMARTCARD_EXIT_SUCCESS 0
-#define SMARTCARD_EXIT_UNAVAILABLE 40 /* no session bus, no p11-kit, no reader, no display */
-#define SMARTCARD_EXIT_USAGE 64
-#define SMARTCARD_EXIT_INTERNAL 70
+#define CERTIFICATE_EXIT_SUCCESS 0
+#define CERTIFICATE_EXIT_UNAVAILABLE 40 /* no session bus, no p11-kit, no reader, no display */
+#define CERTIFICATE_EXIT_USAGE 64
+#define CERTIFICATE_EXIT_INTERNAL 70
 
-#define SMARTCARD_VERSION "0.0.0"
-#define SMARTCARD_IMPL_BUS_NAME "io.github.sjtrotter.impl.portal.desktop.gtk"
-#define SMARTCARD_IMPL_OBJECT_PATH "/io/github/sjtrotter/portal/desktop"
-#define SMARTCARD_IMPL_INTERFACE "io.github.sjtrotter.impl.portal.Smartcard1"
+#define CERTIFICATE_VERSION "0.0.0"
+#define CERTIFICATE_IMPL_BUS_NAME "io.github.sjtrotter.impl.portal.Certificate.gtk"
+#define CERTIFICATE_IMPL_OBJECT_PATH "/io/github/sjtrotter/portal/Certificate"
+#define CERTIFICATE_IMPL_INTERFACE "io.github.sjtrotter.impl.portal.Certificate1"
 
 static void backend_usage(FILE* out)
 {
 	fprintf(out,
-	        "smartcard-portal-gtk - GTK portal backend for certificate-backed private keys\n"
+	        "certificate-portal-gtk - GTK portal backend for certificate-backed private keys\n"
 	        "\n"
 	        "USAGE\n"
-	        "  smartcard-portal-gtk [options]\n"
+	        "  certificate-portal-gtk [options]\n"
 	        "\n"
 	        "  Normally started by D-Bus activation when the frontend selects this\n"
 	        "  backend, not from a shell. It owns\n"
-	        "    " SMARTCARD_IMPL_BUS_NAME "\n"
+	        "    " CERTIFICATE_IMPL_BUS_NAME "\n"
 	        "  on the session bus, exporting\n"
-	        "    " SMARTCARD_IMPL_OBJECT_PATH "\n"
+	        "    " CERTIFICATE_IMPL_OBJECT_PATH "\n"
 	        "  and implementing\n"
-	        "    " SMARTCARD_IMPL_INTERFACE "\n"
+	        "    " CERTIFICATE_IMPL_INTERFACE "\n"
 	        "  as declared in data/gtk.portal.\n"
 	        "\n"
 	        "  THIS INTERFACE IS NOT FOR APPLICATIONS. The app id is an argument supplied\n"
@@ -105,14 +105,14 @@ int main(int argc, char** argv)
 		if (g_strcmp0(arg, "--help") == 0 || g_strcmp0(arg, "-h") == 0)
 		{
 			backend_usage(stdout);
-			return SMARTCARD_EXIT_SUCCESS;
+			return CERTIFICATE_EXIT_SUCCESS;
 		}
 
 		if (g_strcmp0(arg, "--version") == 0 || g_strcmp0(arg, "-V") == 0)
 		{
-			printf("smartcard-portal-gtk " SMARTCARD_VERSION
+			printf("certificate-portal-gtk " CERTIFICATE_VERSION
 			       " (design sketch, not implemented; impl interface version 1, experimental)\n");
-			return SMARTCARD_EXIT_SUCCESS;
+			return CERTIFICATE_EXIT_SUCCESS;
 		}
 
 		if (g_strcmp0(arg, "--list-tokens") == 0)
@@ -125,23 +125,23 @@ int main(int argc, char** argv)
 		    g_strcmp0(arg, "--verbose") == 0)
 			continue;
 
-		fprintf(stderr, "smartcard-portal-gtk: unknown option '%s'\n", arg);
-		fprintf(stderr, "Try 'smartcard-portal-gtk --help'.\n");
-		return SMARTCARD_EXIT_USAGE;
+		fprintf(stderr, "certificate-portal-gtk: unknown option '%s'\n", arg);
+		fprintf(stderr, "Try 'certificate-portal-gtk --help'.\n");
+		return CERTIFICATE_EXIT_USAGE;
 	}
 
 	if (list_tokens)
 	{
 		/* This would drive src/tokens/discovery.h and print token DISPLAY identity
 		 * only -- never object labels, key ids or serials, per shared/redact.h. */
-		fprintf(stderr, "smartcard-portal-gtk: --list-tokens: not implemented (design sketch)\n");
-		return SMARTCARD_EXIT_INTERNAL;
+		fprintf(stderr, "certificate-portal-gtk: --list-tokens: not implemented (design sketch)\n");
+		return CERTIFICATE_EXIT_INTERNAL;
 	}
 
 	/* Everything past this point would connect to the session bus, claim the impl bus
-	 * name, export src/smartcard.h's impl interface plus the impl Request and Session
+	 * name, export src/certificate.h's impl interface plus the impl Request and Session
 	 * objects (src/request.h, src/session.h), start token discovery
 	 * (src/tokens/discovery.h), and run a GTK main loop. None of that exists. */
-	fprintf(stderr, "smartcard-portal-gtk: not implemented (design sketch)\n");
-	return SMARTCARD_EXIT_INTERNAL;
+	fprintf(stderr, "certificate-portal-gtk: not implemented (design sketch)\n");
+	return CERTIFICATE_EXIT_INTERNAL;
 }

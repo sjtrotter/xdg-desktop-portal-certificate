@@ -10,33 +10,33 @@ prompted for, and no cryptographic operation has ever been brokered.
 This is the first thing to know about the repository, because it is the shape of everything in it.
 
 ```
-  ┌─────────────┐   io.github.sjtrotter.portal.Desktop      ┌──────────────────────────┐
-  │ application │ ─────────────────────────────────────────►│ FRONTEND                 │
-  └─────────────┘   io.github.sjtrotter.portal.Smartcard1    │ smartcard-portal-frontend│
-        ▲                                                    │                          │
-        │                    who is asking (app id, and how  │ identity · policy ·      │
-        │                    well we know it) · purpose and  │ permissions · request &  │
-        │                    option validation · policy ·    │ session lifecycle ·      │
-        └── grant, signature │ permission store · grants,    │ backend selection        │
-                             │ expiry, rate limits           └────────────┬─────────────┘
-                                                                          │
-                              io.github.sjtrotter.impl.portal.Smartcard1  │  app_id is an
-                              — PRIVATE. Applications never call it. ─────┤  ARGUMENT here
-                                                                          ▼
-                                                             ┌──────────────────────────┐
-                                                             │ BACKEND                  │
-                                                             │ smartcard-portal-gtk     │
-                                                             │                          │
-                                                             │ chooser · PIN prompt ·   │
-                                                             │ PKCS#11 session · Sign · │
-                                                             │ synthetic facade         │
-                                                             └────────────┬─────────────┘
-                                                                          ▼
-                                                              p11-kit → OpenSC → pcscd → card
+  ┌─────────────┐                                                     ┌──────────────────────────────┐
+  │ application │   io.github.sjtrotter.portal.Certificate ──────────►│ FRONTEND                     │
+  └─────────────┘   io.github.sjtrotter.portal.Certificate1           │ certificate-portal-frontend  │
+        ▲                                                             │                              │
+        │                    who is asking (app id, and how           │ identity · policy ·          │
+        │                    well we know it) · purpose and           │ permissions · request &      │
+        │                    option validation · policy ·             │ session lifecycle ·          │
+        └── grant, signature │ permission store · grants,             │ backend selection            │
+                             │ expiry, rate limits                    └────────────┬─────────────────┘
+                                                                                   │
+                              io.github.sjtrotter.impl.portal.Certificate1         │  app_id is an
+                              — PRIVATE. Applications never call it. ──────────────┤  ARGUMENT here
+                                                                                   ▼
+                                                                      ┌──────────────────────────────┐
+                                                                      │ BACKEND                      │
+                                                                      │ certificate-portal-gtk       │
+                                                                      │                              │
+                                                                      │ chooser · PIN prompt ·       │
+                                                                      │ PKCS#11 session · Sign ·     │
+                                                                      │ synthetic facade             │
+                                                                      └────────────┬─────────────────┘
+                                                                                   ▼
+                                                                                    p11-kit → OpenSC → pcscd → card
 ```
 
 **A client talks to the frontend and to nothing else.** It calls
-`io.github.sjtrotter.portal.Smartcard1` on `io.github.sjtrotter.portal.Desktop`, gets a `Request`
+`io.github.sjtrotter.portal.Certificate1` on `io.github.sjtrotter.portal.Certificate`, gets a `Request`
 object whose path it can compute in advance, and a `Session` object that *is* the grant. It never
 learns which backend is installed, never holds a PKCS#11 handle, and never sees a PIN.
 
@@ -64,17 +64,28 @@ Read this paragraph before anything else:
 > [docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md)
 > and [0007](docs/decisions/0007-brokered-operations-are-the-core.md).
 
-> **Names.** `smartcard-portal` is a *directory name*, not a claim. The interfaces ship as
-> **`io.github.sjtrotter.portal.Smartcard1`** (public) and
-> **`io.github.sjtrotter.impl.portal.Smartcard1`** (private, frontend-to-backend) — project-controlled
+> **Names.** `smartcard-portal` is a *directory name*, not a claim; renaming the GitHub repository
+> itself is a separate, later decision — see [0009](docs/decisions/0009-name-it-certificate.md).
+> The interfaces ship as **`io.github.sjtrotter.portal.Certificate1`** (public) and
+> **`io.github.sjtrotter.impl.portal.Certificate1`** (private, frontend-to-backend) — project-controlled
 > reverse-DNS names with a major version, as
 > [the D-Bus specification recommends](https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names)
 > — and deliberately not `org.freedesktop.portal.*`. **We mirror the shape; we do not take the
-> namespace.** The name is also probably wrong in a second
-> way: the real conceptual boundary is a **client certificate** or **cryptographic credential**,
+> namespace.** These interfaces were originally named after the hardware, and were renamed to
+> `Certificate1` once the frontend/backend split made the real conceptual boundary unavoidable to
+> see: a **client certificate** or **cryptographic credential**,
 > because the backing key might be a TPM, a software token, a phone or a remote HSM rather than a
-> card. `Smartcard1` is an incubation name and is expected to change. See
-> [0003](docs/decisions/0003-own-namespace-before-freedesktop.md).
+> card. `Certificate1` is still an incubation name and may change again before acceptance — see
+> [0003](docs/decisions/0003-own-namespace-before-freedesktop.md) and
+> [0009](docs/decisions/0009-name-it-certificate.md), which records the rename itself and why
+> `Credentials` was rejected too.
+>
+> **Bus name.** The frontend owns `io.github.sjtrotter.portal.Certificate` at
+> `/io/github/sjtrotter/portal/Certificate` — its own name during incubation, not a
+> singleton shared with the sibling `entra-token-helper` portal. Both frontends install and run
+> side by side; at acceptance both collapse onto the real `org.freedesktop.portal.Desktop`. See
+> [0008](docs/decisions/0008-build-to-the-upstream-shape.md), "Per-project bus names during
+> incubation".
 
 ## The problem
 
@@ -135,14 +146,14 @@ and nothing else.
 
 ```
                     ┌──────────────────────────────────────────────┐
-                    │  FRONTEND  smartcard-portal-frontend         │
-                    │  io.github.sjtrotter.portal.Smartcard1       │
+                    │  FRONTEND  certificate-portal-frontend         │
+                    │  io.github.sjtrotter.portal.Certificate1       │
                     │  app id · policy · permissions · grants      │
                     └───────────────────┬──────────────────────────┘
-                                        │ io.github.sjtrotter.impl.portal.Smartcard1
+                                        │ io.github.sjtrotter.impl.portal.Certificate1
                                         │ (private; app_id travels as an argument)
                     ┌───────────────────▼──────────────────────────┐
-                    │  BACKEND  smartcard-portal-gtk               │
+                    │  BACKEND  certificate-portal-gtk               │
                     │  chooser UI · PIN UI · token session         │
                     │  brokered Sign / Decrypt        ← the core   │
                     │  synthetic PKCS#11 facade  ← experimental,   │
@@ -180,12 +191,12 @@ for PIV (the only supported card stack in v1), and p11-kit's module configuratio
 
 ## Interface at a glance
 
-**Public**, on `io.github.sjtrotter.portal.Desktop`, object `/io/github/sjtrotter/portal/desktop` —
+**Public**, on `io.github.sjtrotter.portal.Certificate`, object `/io/github/sjtrotter/portal/Certificate` —
 described in [docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md), declared in
-[`frontend/data/io.github.sjtrotter.portal.Smartcard1.xml`](frontend/data/io.github.sjtrotter.portal.Smartcard1.xml).
+[`frontend/data/io.github.sjtrotter.portal.Certificate1.xml`](frontend/data/io.github.sjtrotter.portal.Certificate1.xml).
 
 ```
-io.github.sjtrotter.portal.Smartcard1
+io.github.sjtrotter.portal.Certificate1
 
   CreateSession(a{sv} options) → o session_handle        ← the session IS the grant
 
@@ -215,13 +226,13 @@ io.github.sjtrotter.portal.Request        Close() · Response(u response, a{sv} 
 io.github.sjtrotter.portal.Session        Close() · Closed(a{sv} details)
 ```
 
-**Private**, frontend-to-backend, on `io.github.sjtrotter.impl.portal.desktop.gtk` — described in
+**Private**, frontend-to-backend, on `io.github.sjtrotter.impl.portal.Certificate.gtk` — described in
 [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md), declared in
-[`backends/gtk/data/io.github.sjtrotter.impl.portal.Smartcard1.xml`](backends/gtk/data/io.github.sjtrotter.impl.portal.Smartcard1.xml).
+[`backends/gtk/data/io.github.sjtrotter.impl.portal.Certificate1.xml`](backends/gtk/data/io.github.sjtrotter.impl.portal.Certificate1.xml).
 **Applications do not call this.**
 
 ```
-io.github.sjtrotter.impl.portal.Smartcard1
+io.github.sjtrotter.impl.portal.Certificate1
 
   CreateSession     (o handle, o session_handle, s app_id, a{sv} options) → (u, a{sv})
   AcquireCredential (o handle, o session_handle, s app_id, s parent_window,
@@ -327,8 +338,8 @@ D-Bus signatures are frozen. [docs/ROADMAP.md](docs/ROADMAP.md) phase 3.
 
 ```
 meson setup build && ninja -C build
-./build/frontend/smartcard-portal-frontend --help
-./build/backends/gtk/smartcard-portal-gtk --help
+./build/frontend/certificate-portal-frontend --help
+./build/backends/gtk/certificate-portal-gtk --help
 ```
 
 That is all they do. Both print usage and exit 0; every verb returns exit 70, "not implemented
@@ -339,7 +350,7 @@ Layout:
 
 ```
 frontend/     the portal frontend — the part that would move INTO xdg-desktop-portal
-  data/       public interface XML, the .service file for io.github.sjtrotter.portal.Desktop,
+  data/       public interface XML, the .service file for io.github.sjtrotter.portal.Certificate,
               an example portals.conf
   src/        request, session, app-info, permission-store, portal-impl, smartcard, grant registry
 backends/gtk/ the reference backend — the part that would live in or beside xdg-desktop-portal-gtk

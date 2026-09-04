@@ -138,7 +138,7 @@ machinery, while remaining independently deployable?
 
 The expectation should be that maintainers prefer a coherent credential-use model over a portal
 named after a physical device; that `ClientCertificate` or `CryptographicCredential` is a better
-conceptual boundary than `Smartcard`, because the backing key might be a TPM, a software token, a
+conceptual boundary than `Certificate`, because the backing key might be a TPM, a software token, a
 phone or a remote HSM; and that "return a PKCS#11 module" will not be accepted as the generic
 credential abstraction. The name in this repository is expected to change.
 

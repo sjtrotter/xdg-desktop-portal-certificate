@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_EXPORT_FACADE_H
-#define SMARTCARD_EXPORT_FACADE_H
+#ifndef CERTIFICATE_EXPORT_FACADE_H
+#define CERTIFICATE_EXPORT_FACADE_H
 
 #include <glib.h>
 
@@ -69,7 +69,7 @@
  *  THE FD IS CREATED HERE AND RELAYED BY THE FRONTEND. The facade must reach the token
  *  session, and the token session belongs to this process, so the backend is the only
  *  side that can serve it. The frontend checks the grant, the owner and the policy, calls
- *  io.github.sjtrotter.impl.portal.Smartcard1.OpenPkcs11Endpoint, and passes the
+ *  io.github.sjtrotter.impl.portal.Certificate1.OpenPkcs11Endpoint, and passes the
  *  descriptor straight through to the application without holding a copy. Upstream
  *  precedent for a descriptor crossing the impl boundary:
  *  org.freedesktop.impl.portal.RemoteDesktop.ConnectToEIS (out) and
@@ -97,9 +97,9 @@
  *  Sketch only; nothing here is implemented.
  */
 
-#define SMARTCARD_ENDPOINT_VERSION 1u
+#define CERTIFICATE_ENDPOINT_VERSION 1u
 
-typedef struct SmartcardFacade SmartcardFacade;
+typedef struct CertificateFacade CertificateFacade;
 
 /** Create a facade for @session_handle and return the endpoint socket fd for the
  *  frontend to relay. The facade runs in its own process. The URIs it fills in are valid
@@ -109,7 +109,7 @@ typedef struct SmartcardFacade SmartcardFacade;
  *  rather than by socket, if docs/SPIKES.md S3 forces the single-permanently-registered-
  *  module architecture. It is the frontend's answer, not anything this process worked
  *  out. */
-SmartcardFacade* smartcard_facade_open(const char* session_handle, const char* app_id,
+CertificateFacade* certificate_facade_open(const char* session_handle, const char* app_id,
                                        int* endpoint_fd,
                                        char** certificate_uri, char** private_key_uri,
                                        GError** error);
@@ -119,9 +119,9 @@ SmartcardFacade* smartcard_facade_open(const char* session_handle, const char* a
  *  owner disconnect, and card removal. Reinsertion requires explicit reselection even
  *  when the label and slot number match, because they prove nothing about which card is
  *  in the reader. */
-void smartcard_facade_poison(SmartcardFacade* facade, const char* reason);
+void certificate_facade_poison(CertificateFacade* facade, const char* reason);
 
 /** Reap the helper process and close the socket. */
-void smartcard_facade_close(SmartcardFacade* facade);
+void certificate_facade_close(CertificateFacade* facade);
 
-#endif /* SMARTCARD_EXPORT_FACADE_H */
+#endif /* CERTIFICATE_EXPORT_FACADE_H */

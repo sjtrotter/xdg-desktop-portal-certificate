@@ -1,4 +1,4 @@
-# The public interface — `io.github.sjtrotter.portal.Smartcard1`
+# The public interface — `io.github.sjtrotter.portal.Certificate1`
 
 Status: EXPERIMENTAL. This interface is **not stable**, has **not** been proposed to anyone, and
 will change. The publication gates that must be passed before any part of it is frozen are in
@@ -9,12 +9,14 @@ the *frontend*. The private interface between the frontend and a backend is
 [IMPL-INTERFACE.md](IMPL-INTERFACE.md), and which side does what is the table in
 [ARCHITECTURE.md](ARCHITECTURE.md#who-does-what).
 
-Bus name `io.github.sjtrotter.portal.Desktop`, object `/io/github/sjtrotter/portal/desktop`,
-interface `io.github.sjtrotter.portal.Smartcard1` version 1. Declared in
-[`../frontend/data/io.github.sjtrotter.portal.Smartcard1.xml`](../frontend/data/io.github.sjtrotter.portal.Smartcard1.xml).
+Bus name `io.github.sjtrotter.portal.Certificate`, object `/io/github/sjtrotter/portal/Certificate`,
+interface `io.github.sjtrotter.portal.Certificate1` version 1. Declared in
+[`../frontend/data/io.github.sjtrotter.portal.Certificate1.xml`](../frontend/data/io.github.sjtrotter.portal.Certificate1.xml).
 
-The bus name is our stand-in for `org.freedesktop.portal.Desktop`, exactly as the interface name is
-our stand-in for `org.freedesktop.portal.<Name>`. This is **not** `org.freedesktop.portal.Smartcard`:
+The bus name is this project's own incubation name, not a shared stand-in for
+`org.freedesktop.portal.Desktop` — see [decisions/0008](decisions/0008-build-to-the-upstream-shape.md),
+"Per-project bus names during incubation" — and the interface name is likewise our own incubation
+name for `org.freedesktop.portal.<Name>`. This is **not** `org.freedesktop.portal.Certificate`:
 that namespace belongs to xdg-desktop-portal and using it would imply an acceptance that does not
 exist. The transaction pattern below is copied closely from
 [`org.freedesktop.portal.Request`](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html)
@@ -54,7 +56,7 @@ CreateSession (IN  a{sv} options,
 ```
 
 Creates the object that will hold a grant, at
-`/io/github/sjtrotter/portal/desktop/session/<sender>/<session_handle_token>`. The session exists
+`/io/github/sjtrotter/portal/Certificate/session/<sender>/<session_handle_token>`. The session exists
 before the grant does; `AcquireCredential` fills it in. An empty session that never becomes a grant
 is reaped on the same orphan grace period as an unclaimed one.
 
@@ -254,7 +256,7 @@ Two things are unresolved and are why this is experimental:
 ## The Request object
 
 `io.github.sjtrotter.portal.Request`, at
-`/io/github/sjtrotter/portal/desktop/request/<sender>/<handle_token>`, where `<sender>` is the
+`/io/github/sjtrotter/portal/Certificate/request/<sender>/<handle_token>`, where `<sender>` is the
 caller's unique bus name with the leading colon removed and dots replaced by underscores — the same
 construction xdg-desktop-portal uses, so the caller can subscribe before calling and never race the
 response.
@@ -281,7 +283,7 @@ portal convention.
 ## The Session object
 
 `io.github.sjtrotter.portal.Session`, at
-`/io/github/sjtrotter/portal/desktop/session/<sender>/<session_handle_token>`, built the same way.
+`/io/github/sjtrotter/portal/Certificate/session/<sender>/<session_handle_token>`, built the same way.
 
 ```
 Close ()
@@ -305,20 +307,20 @@ arrive as response `2` with the same string in `results["error"]`.
 
 | Name | Meaning |
 |---|---|
-| `io.github.sjtrotter.portal.Smartcard1.Error.NoToken` | No token present at all. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.TokenAbsent` | The named token is not present. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.TokenRemoved` | Removed during the operation. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.NoMatchingCertificate` | Tokens present, nothing satisfies the filter. Distinct from `NoToken`: the user needs to know which. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.PinIncorrect` | Wrong PIN. Retries remaining reported only if the token reports them reliably. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.PinLocked` | PIN blocked. This service cannot unblock it. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.InteractionRequired` | A prompt was needed and `interaction_mode` was `forbidden`. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.NoDisplay` | No usable display. **The service never falls back to reading a PIN from stdin.** |
-| `io.github.sjtrotter.portal.Smartcard1.Error.UnsupportedMechanism` | Mechanism or parameters not in the grant's allow-list, or invalid for the key. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.GrantExpired` | Expired, released or invalidated. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.NotPermitted` | Operation outside the grant's `permitted_operations`, or a caller acting on a grant it does not own. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.RateLimited` | Too many operations or too many requests. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.DeviceError` | Reader or middleware failure. Deliberately distinct from a wrong PIN. |
-| `io.github.sjtrotter.portal.Smartcard1.Error.BackendUnavailable` | No backend implements the impl interface, the selected one will not start, or the backend reports no p11-kit, no pcscd and no module. The frontend chooses the error name the application sees; a backend reports a *condition*, and cannot make the frontend say "the user cancelled" about something the user never saw. |
+| `io.github.sjtrotter.portal.Certificate1.Error.NoToken` | No token present at all. |
+| `io.github.sjtrotter.portal.Certificate1.Error.TokenAbsent` | The named token is not present. |
+| `io.github.sjtrotter.portal.Certificate1.Error.TokenRemoved` | Removed during the operation. |
+| `io.github.sjtrotter.portal.Certificate1.Error.NoMatchingCertificate` | Tokens present, nothing satisfies the filter. Distinct from `NoToken`: the user needs to know which. |
+| `io.github.sjtrotter.portal.Certificate1.Error.PinIncorrect` | Wrong PIN. Retries remaining reported only if the token reports them reliably. |
+| `io.github.sjtrotter.portal.Certificate1.Error.PinLocked` | PIN blocked. This service cannot unblock it. |
+| `io.github.sjtrotter.portal.Certificate1.Error.InteractionRequired` | A prompt was needed and `interaction_mode` was `forbidden`. |
+| `io.github.sjtrotter.portal.Certificate1.Error.NoDisplay` | No usable display. **The service never falls back to reading a PIN from stdin.** |
+| `io.github.sjtrotter.portal.Certificate1.Error.UnsupportedMechanism` | Mechanism or parameters not in the grant's allow-list, or invalid for the key. |
+| `io.github.sjtrotter.portal.Certificate1.Error.GrantExpired` | Expired, released or invalidated. |
+| `io.github.sjtrotter.portal.Certificate1.Error.NotPermitted` | Operation outside the grant's `permitted_operations`, or a caller acting on a grant it does not own. |
+| `io.github.sjtrotter.portal.Certificate1.Error.RateLimited` | Too many operations or too many requests. |
+| `io.github.sjtrotter.portal.Certificate1.Error.DeviceError` | Reader or middleware failure. Deliberately distinct from a wrong PIN. |
+| `io.github.sjtrotter.portal.Certificate1.Error.BackendUnavailable` | No backend implements the impl interface, the selected one will not start, or the backend reports no p11-kit, no pcscd and no module. The frontend chooses the error name the application sees; a backend reports a *condition*, and cannot make the frontend say "the user cancelled" about something the user never saw. |
 
 ## Signals
 

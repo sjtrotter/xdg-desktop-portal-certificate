@@ -19,25 +19,29 @@ rather than hidden.
 
 | Ours (incubating) | Upstream, if accepted |
 |---|---|
-| `io.github.sjtrotter.portal.Smartcard1` | `org.freedesktop.portal.<Name>` |
-| `io.github.sjtrotter.impl.portal.Smartcard1` | `org.freedesktop.impl.portal.<Name>` |
+| `io.github.sjtrotter.portal.Certificate1` | `org.freedesktop.portal.<Name>` |
+| `io.github.sjtrotter.impl.portal.Certificate1` | `org.freedesktop.impl.portal.<Name>` |
 | `io.github.sjtrotter.portal.Request` | `org.freedesktop.portal.Request` (already exists; ours disappears) |
 | `io.github.sjtrotter.portal.Session` | `org.freedesktop.portal.Session` (already exists; ours disappears) |
 | `io.github.sjtrotter.impl.portal.Request` | `org.freedesktop.impl.portal.Request` (already exists; ours disappears) |
 | `io.github.sjtrotter.impl.portal.Session` | `org.freedesktop.impl.portal.Session` (already exists; ours disappears) |
-| `io.github.sjtrotter.portal.Desktop` (bus name) | `org.freedesktop.portal.Desktop` (already exists; ours disappears) |
-| `io.github.sjtrotter.impl.portal.desktop.gtk` (bus name) | `org.freedesktop.impl.portal.desktop.gtk` (already exists; our interface joins it) |
-| `/io/github/sjtrotter/portal/desktop` | `/org/freedesktop/portal/desktop` |
-| `io.github.sjtrotter.portal.Smartcard1.Error.*` | `org.freedesktop.portal.Error.*`, or the portal's own |
+| `io.github.sjtrotter.portal.Certificate` (bus name) | `org.freedesktop.portal.Desktop` (already exists; ours disappears) |
+| `io.github.sjtrotter.impl.portal.Certificate.gtk` (bus name) | `org.freedesktop.impl.portal.desktop.gtk` (already exists; our interface joins it) |
+| `/io/github/sjtrotter/portal/Certificate` | `/org/freedesktop/portal/desktop` |
+| `io.github.sjtrotter.portal.Certificate1.Error.*` | `org.freedesktop.portal.Error.*`, or the portal's own |
 
-**`<Name>` is not `Smartcard`.** The conceptual boundary is a client certificate or a
-cryptographic credential — the backing key may be a TPM, a software token, a phone or a
-remote HSM — and the most likely destination is not a portal of our own at all but a
-credential *type* under the `org.freedesktop.portal.Credentials` proposal that
+**`<Name>` may not stay `Certificate`.** [0009](decisions/0009-name-it-certificate.md) settled
+the incubating interface on `Certificate` because the conceptual boundary is a client
+certificate or a cryptographic credential — the backing key may be a TPM, a software token, a
+phone or a remote HSM — rather than any one device, and because `Credentials` was rejected as a
+name: it collides with the `org.freedesktop.portal.Credentials` proposal that
 [linux-credentials / credentialsd](https://github.com/linux-credentials/credentialsd) is
-already making for FIDO2 and passkeys. That conversation happens **before** any name is
-frozen; [0003](decisions/0003-own-namespace-before-freedesktop.md) and
-[ROADMAP.md](ROADMAP.md) phase 3.
+already making for FIDO2 and passkeys. Whether `Certificate` is also the name maintainers
+accept, or whether certificate-backed signing instead becomes a credential *type* under that
+other proposal, is a question for the conversation in
+[0003](decisions/0003-own-namespace-before-freedesktop.md) and [ROADMAP.md](ROADMAP.md) phase
+3 — not one this project can settle unilaterally, and it happens **before** any name is
+frozen.
 
 ## Files
 
@@ -48,22 +52,22 @@ interface XML in `data/`. The mapping below targets the tree as it is.
 
 | Ours | Upstream, if accepted |
 |---|---|
-| `frontend/src/smartcard.h` (+ its future `.c`) | `xdg-desktop-portal/desktop-portal/<name>.c`, `<name>.h` |
+| `frontend/src/certificate.h` (+ its future `.c`) | `xdg-desktop-portal/desktop-portal/<name>.c`, `<name>.h` |
 | `frontend/src/request.h` | *deleted* — `desktop-portal/xdp-request.c` already does this |
 | `frontend/src/session.h` | *deleted* — `desktop-portal/xdp-session.c` already does this |
 | `frontend/src/app-info.h` | *deleted* — `shared/xdp-app-info*.c` already does this |
 | `frontend/src/permission-store.h` | *deleted* — `desktop-portal/xdp-permissions.c` already does this |
 | `frontend/src/portal-impl.h` | *deleted* — `desktop-portal/xdp-portal-config.c` already does this |
 | `frontend/src/grant-registry.h` | kept, as portal-specific state inside `<name>.c` |
-| `frontend/data/io.github.sjtrotter.portal.Smartcard1.xml` | `xdg-desktop-portal/data/org.freedesktop.portal.<Name>.xml` |
-| `frontend/data/io.github.sjtrotter.portal.Desktop.service.in` | *deleted* — the name already exists |
+| `frontend/data/io.github.sjtrotter.portal.Certificate1.xml` | `xdg-desktop-portal/data/org.freedesktop.portal.<Name>.xml` |
+| `frontend/data/io.github.sjtrotter.portal.Certificate.service.in` | *deleted* — the name already exists |
 | `frontend/data/portals.conf.example` | *deleted* — `portals.conf` already exists |
-| `backends/gtk/data/io.github.sjtrotter.impl.portal.Smartcard1.xml` | `xdg-desktop-portal/data/org.freedesktop.impl.portal.<Name>.xml` — **note it moves to the frontend repository**, see below |
-| `backends/gtk/src/smartcard.h` (+ `.c`) | `xdg-desktop-portal-gtk/src/<name>.c`, `<name>.h` |
+| `backends/gtk/data/io.github.sjtrotter.impl.portal.Certificate1.xml` | `xdg-desktop-portal/data/org.freedesktop.impl.portal.<Name>.xml` — **note it moves to the frontend repository**, see below |
+| `backends/gtk/src/certificate.h` (+ `.c`) | `xdg-desktop-portal-gtk/src/<name>.c`, `<name>.h` |
 | `backends/gtk/src/request.h`, `session.h` | *deleted* — `xdg-desktop-portal-gtk/src/request.c`, `session.c` already do this |
 | `backends/gtk/src/ui/`, `tokens/`, `broker/`, `export/` | kept, as `xdg-desktop-portal-gtk/src/<name>*.c` or a backend package of its own |
 | `backends/gtk/data/gtk.portal.in` | *merged* — one more entry in xdg-desktop-portal-gtk's `Interfaces=` line |
-| `backends/gtk/data/io.github.sjtrotter.impl.portal.desktop.gtk.service.in` | *deleted* — the name already exists |
+| `backends/gtk/data/io.github.sjtrotter.impl.portal.Certificate.gtk.service.in` | *deleted* — the name already exists |
 | `shared/redact.h` | split: the frontend's rules join xdg-desktop-portal's logging, the backend's stay with the backend |
 | `meson.build` (umbrella) | *deleted* — two repositories, two builds |
 

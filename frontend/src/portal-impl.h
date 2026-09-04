@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_FRONTEND_PORTAL_IMPL_H
-#define SMARTCARD_FRONTEND_PORTAL_IMPL_H
+#ifndef CERTIFICATE_FRONTEND_PORTAL_IMPL_H
+#define CERTIFICATE_FRONTEND_PORTAL_IMPL_H
 
 #include <glib.h>
 
@@ -19,10 +19,10 @@
  *
  *  Scanned, highest priority first, from:
  *
- *    $SMARTCARD_PORTAL_DIR                     (testing only; mirrors XDG_DESKTOP_PORTAL_DIR)
- *    $XDG_DATA_HOME/smartcard-portal/portals
- *    $XDG_DATA_DIRS/smartcard-portal/portals
- *    ${datadir}/smartcard-portal/portals
+ *    $CERTIFICATE_PORTAL_DIR                     (testing only; mirrors XDG_DESKTOP_PORTAL_DIR)
+ *    $XDG_DATA_HOME/certificate-portal/portals
+ *    $XDG_DATA_DIRS/certificate-portal/portals
+ *    ${datadir}/certificate-portal/portals
  *
  *  PORTALS.CONF selects between them. Key file, group "preferred", one key per impl
  *  interface plus "default"; each value is a semicolon-separated list of *.portal
@@ -48,7 +48,7 @@
  *     application controls.
  *   - The frontend calls the backend it selected AND NO OTHER, on the name from the
  *     *.portal file. A backend does not get to volunteer at run time.
- *   - If no backend implements SMARTCARD_IMPL_INTERFACE, every method fails with
+ *   - If no backend implements CERTIFICATE_IMPL_INTERFACE, every method fails with
  *     BackendUnavailable. There is no in-frontend fallback UI: a frontend that could
  *     draw a chooser would be a frontend that has to know about cards, and the split
  *     would be decorative.
@@ -56,9 +56,9 @@
  *  Sketch only; nothing here is implemented.
  */
 
-#define SMARTCARD_PORTAL_DIR_ENV "SMARTCARD_PORTAL_DIR"
-#define SMARTCARD_PORTAL_SUBDIR "smartcard-portal"
-#define SMARTCARD_PORTAL_FILE_SUFFIX ".portal"
+#define CERTIFICATE_PORTAL_DIR_ENV "CERTIFICATE_PORTAL_DIR"
+#define CERTIFICATE_PORTAL_SUBDIR "certificate-portal"
+#define CERTIFICATE_PORTAL_FILE_SUFFIX ".portal"
 
 /** One installed backend, as read from a *.portal file. */
 typedef struct
@@ -67,20 +67,20 @@ typedef struct
 	char* dbus_name; /**< DBusName */
 	char** interfaces; /**< Interfaces */
 	char** use_in;   /**< UseIn, legacy */
-} SmartcardImplConfig;
+} CertificateImplConfig;
 
-typedef struct SmartcardPortalConfig SmartcardPortalConfig;
+typedef struct CertificatePortalConfig CertificatePortalConfig;
 
 /** Scan the portal directories and load the configuration. Done once at startup and on
  *  demand when a directory changes; a backend installed later is picked up without
  *  restarting the frontend. */
-SmartcardPortalConfig* smartcard_portal_config_load(void);
+CertificatePortalConfig* certificate_portal_config_load(void);
 
 /** The backend to use for @interface, or NULL if the configuration says "none" or
  *  nothing implements it. Follows the documented order: the desktop-specific config
  *  file, then the generic one, then the legacy UseIn matching, then -- with a warning,
  *  exactly as upstream does -- the first available backend as a last resort. */
-const SmartcardImplConfig* smartcard_portal_config_find(SmartcardPortalConfig* config,
+const CertificateImplConfig* certificate_portal_config_find(CertificatePortalConfig* config,
                                                         const char* interface);
 
 /** The proxy for the selected backend, activating it if necessary. D-Bus activation is
@@ -89,7 +89,7 @@ const SmartcardImplConfig* smartcard_portal_config_find(SmartcardPortalConfig* c
  *  The frontend WATCHES the name. If the backend vanishes, every grant it was holding a
  *  token session for is dead: the frontend invalidates them with reason "backend_gone"
  *  rather than leaving a caller holding a handle to nothing. */
-GDBusProxy* smartcard_portal_impl_proxy(SmartcardPortalConfig* config, const char* interface,
+GDBusProxy* certificate_portal_impl_proxy(CertificatePortalConfig* config, const char* interface,
                                         GError** error);
 
-#endif /* SMARTCARD_FRONTEND_PORTAL_IMPL_H */
+#endif /* CERTIFICATE_FRONTEND_PORTAL_IMPL_H */

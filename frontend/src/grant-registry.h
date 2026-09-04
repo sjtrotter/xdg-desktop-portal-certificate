@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef SMARTCARD_FRONTEND_GRANT_REGISTRY_H
-#define SMARTCARD_FRONTEND_GRANT_REGISTRY_H
+#ifndef CERTIFICATE_FRONTEND_GRANT_REGISTRY_H
+#define CERTIFICATE_FRONTEND_GRANT_REGISTRY_H
 
 #include <glib.h>
 
 #include "app-info.h"
-#include "smartcard.h"
+#include "certificate.h"
 
 /** @file
  *  Live grants: what was authorised, by whom, for how long, and when it dies.
@@ -70,25 +70,25 @@
 
 typedef enum
 {
-	SMARTCARD_INVALIDATED_RELEASED,
-	SMARTCARD_INVALIDATED_EXPIRED,
-	SMARTCARD_INVALIDATED_TOKEN_REMOVED,
-	SMARTCARD_INVALIDATED_OWNER_GONE,
-	SMARTCARD_INVALIDATED_POLICY,
-	SMARTCARD_INVALIDATED_SERVICE_SHUTDOWN,
-	SMARTCARD_INVALIDATED_BACKEND_GONE, /**< new with the split: the backend died, so the
+	CERTIFICATE_INVALIDATED_RELEASED,
+	CERTIFICATE_INVALIDATED_EXPIRED,
+	CERTIFICATE_INVALIDATED_TOKEN_REMOVED,
+	CERTIFICATE_INVALIDATED_OWNER_GONE,
+	CERTIFICATE_INVALIDATED_POLICY,
+	CERTIFICATE_INVALIDATED_SERVICE_SHUTDOWN,
+	CERTIFICATE_INVALIDATED_BACKEND_GONE, /**< new with the split: the backend died, so the
 	                                         token session behind this grant is gone */
-	SMARTCARD_INVALIDATED_ERROR
-} SmartcardInvalidationReason;
+	CERTIFICATE_INVALIDATED_ERROR
+} CertificateInvalidationReason;
 
 typedef struct
 {
 	char* grant_id;      /**< opaque, for logs and GrantInvalidated. Not a capability. */
 	char* session_handle; /**< the object path; the handle callers actually use */
 	char* owner_unique_name;
-	SmartcardAppInfo* app_info; /**< resolved by the frontend, sent to the backend, and
+	CertificateAppInfo* app_info; /**< resolved by the frontend, sent to the backend, and
 	                                 displayed by it with its honesty level */
-	SmartcardPurpose purpose;
+	CertificatePurpose purpose;
 	gboolean may_sign;
 	gboolean may_decrypt;
 	char** allowed_mechanisms; /**< the frontend's allow-list intersected with what the
@@ -105,55 +105,55 @@ typedef struct
 	guint operation_limit; /**< 0 = unlimited within the lifetime; 1 = single-use */
 	guint endpoint_holders;
 	gboolean terminal; /**< one atomic terminal state; a dead grant never revives */
-	SmartcardInvalidationReason invalidation_reason;
-} SmartcardGrant;
+	CertificateInvalidationReason invalidation_reason;
+} CertificateGrant;
 
-typedef struct SmartcardRegistry SmartcardRegistry;
+typedef struct CertificateRegistry CertificateRegistry;
 
 /** Create a grant from the backend's AcquireCredential results, INTERSECTED with what
  *  the frontend will allow. Applies the per-caller and global concurrent grant caps, and
  *  the lifetime ceiling: requested_lifetime is a CEILING REQUEST, not a floor, policy may
  *  grant less and never grants more -- and a backend that returns a longer one gets it
  *  clamped and logged, not honoured. */
-SmartcardGrant* smartcard_registry_create(SmartcardRegistry* registry,
+CertificateGrant* certificate_registry_create(CertificateRegistry* registry,
                                           const char* session_handle,
-                                          const SmartcardAppInfo* app_info,
-                                          SmartcardPurpose purpose, guint32 requested_lifetime,
+                                          const CertificateAppInfo* app_info,
+                                          CertificatePurpose purpose, guint32 requested_lifetime,
                                           GVariant* impl_results, GError** error);
 
 /** Look up a grant, checking that @unique_name is entitled to act on it. Only the OWNER
  *  may release or renew; a delegated holder may only use the endpoint. */
-SmartcardGrant* smartcard_registry_lookup(SmartcardRegistry* registry, const char* session_handle,
+CertificateGrant* certificate_registry_lookup(CertificateRegistry* registry, const char* session_handle,
                                           const char* unique_name, GError** error);
 
 /** Extend a grant. ONLY while the caller identity and token binding are unchanged, and
  *  NEVER expanding permitted operations or mechanisms. Reauthorisation is required after
  *  long inactivity, token removal and reinsertion, a policy change, or a change in
  *  application identity. Enforced entirely in the frontend; the backend is not asked. */
-gboolean smartcard_registry_renew(SmartcardRegistry* registry, SmartcardGrant* grant,
+gboolean certificate_registry_renew(CertificateRegistry* registry, CertificateGrant* grant,
                                   guint32 requested_lifetime, GError** error);
 
 /** Terminate a grant: close the frontend session, close the backend's (which closes
  *  sessions, logs out where the token permits, poisons every endpoint and cancels
  *  in-flight operations), emit GrantInvalidated and Session.Closed. Idempotent --
  *  releasing an already-dead grant succeeds. */
-void smartcard_registry_invalidate(SmartcardRegistry* registry, SmartcardGrant* grant,
-                                   SmartcardInvalidationReason reason);
+void certificate_registry_invalidate(CertificateRegistry* registry, CertificateGrant* grant,
+                                   CertificateInvalidationReason reason);
 
 /** The backend reported that the hardware behind a grant is gone (SessionInvalidated).
  *  Card removal invalidates immediately; the endpoint is poisoned rather than left to
  *  rebind to a card inserted later. */
-void smartcard_registry_impl_invalidated(SmartcardRegistry* registry, const char* session_handle,
+void certificate_registry_impl_invalidated(CertificateRegistry* registry, const char* session_handle,
                                          const char* reason);
 
 /** Owner connection vanished. Starts the orphan grace period rather than killing the
  *  grant outright, because a delegated subprocess may still be mid-handshake. */
-void smartcard_registry_owner_gone(SmartcardRegistry* registry, const char* unique_name);
+void certificate_registry_owner_gone(CertificateRegistry* registry, const char* unique_name);
 
-/** The backend vanished from the bus. Every grant dies with SMARTCARD_INVALIDATED_
+/** The backend vanished from the bus. Every grant dies with CERTIFICATE_INVALIDATED_
  *  BACKEND_GONE: there is no reconnecting to a PKCS#11 session in a process that no
  *  longer exists, and pretending otherwise would leave callers holding handles to
  *  nothing. */
-void smartcard_registry_backend_gone(SmartcardRegistry* registry);
+void certificate_registry_backend_gone(CertificateRegistry* registry);
 
-#endif /* SMARTCARD_FRONTEND_GRANT_REGISTRY_H */
+#endif /* CERTIFICATE_FRONTEND_GRANT_REGISTRY_H */

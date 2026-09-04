@@ -1,4 +1,4 @@
-# The implementation interface — `io.github.sjtrotter.impl.portal.Smartcard1`
+# The implementation interface — `io.github.sjtrotter.impl.portal.Certificate1`
 
 Status: EXPERIMENTAL, and **more** unstable than the public interface, deliberately. Upstream
 treats the `org.freedesktop.impl.portal.*` interfaces as an internal contract between a frontend
@@ -6,10 +6,10 @@ and the backends of the same release, versioned but not promised to applications
 same, with less of a track record.
 
 **This interface is not for applications.** It is what the frontend
-(`smartcard-portal-frontend`) calls on a backend it selected — for the reference backend in this
-repository, `smartcard-portal-gtk` on bus name `io.github.sjtrotter.impl.portal.desktop.gtk`,
-object `/io/github/sjtrotter/portal/desktop`. Declared in
-[`../backends/gtk/data/io.github.sjtrotter.impl.portal.Smartcard1.xml`](../backends/gtk/data/io.github.sjtrotter.impl.portal.Smartcard1.xml).
+(`certificate-portal-frontend`) calls on a backend it selected — for the reference backend in this
+repository, `certificate-portal-gtk` on bus name `io.github.sjtrotter.impl.portal.Certificate.gtk`,
+object `/io/github/sjtrotter/portal/Certificate`. Declared in
+[`../backends/gtk/data/io.github.sjtrotter.impl.portal.Certificate1.xml`](../backends/gtk/data/io.github.sjtrotter.impl.portal.Certificate1.xml).
 
 The public interface applications do call is [PUBLIC-INTERFACE.md](PUBLIC-INTERFACE.md). Which
 side is responsible for what is the table in [ARCHITECTURE.md](ARCHITECTURE.md#who-does-what).
@@ -86,9 +86,9 @@ and a Flatpak's D-Bus policy does not grant them: a sandboxed application talks 
 `org.freedesktop.impl.portal.desktop.gtk` at all. The same is true here, with our names.
 
 **2. The check this backend adds on top.** Every impl method compares the sender against the
-unique name that currently owns `io.github.sjtrotter.portal.Desktop`, and refuses anything else
+unique name that currently owns `io.github.sjtrotter.portal.Certificate`, and refuses anything else
 with `NotPermitted`, logged by reason code
-(`backends/gtk/src/smartcard.h`, `smartcard_impl_sender_is_frontend`). Upstream backends do not
+(`backends/gtk/src/certificate.h`, `certificate_impl_sender_is_frontend`). Upstream backends do not
 all do this. It is cheap, and the failure it prevents — an unsandboxed application calling
 `AcquireCredential` with an `app_id` of its own invention, and getting a consent dialog that names
 somebody else — would destroy the entire consent model rather than degrade it.

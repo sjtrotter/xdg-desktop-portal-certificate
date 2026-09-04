@@ -1,21 +1,22 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
  *
- * smartcard-portal-frontend - the portal FRONTEND for certificate-backed private keys.
+ * certificate-portal-frontend - the portal FRONTEND for certificate-backed private keys.
  *
  * Copyright (C) 2026 the smartcard-portal authors
  *
  * This would be the D-Bus activated per-user service that owns
- * io.github.sjtrotter.portal.Desktop and exports
- * io.github.sjtrotter.portal.Smartcard1 -- our stand-in for
- * org.freedesktop.portal.Desktop, plumbed exactly as xdg-desktop-portal plumbs a
- * portal.
+ * io.github.sjtrotter.portal.Certificate and exports
+ * io.github.sjtrotter.portal.Certificate1, on its own incubation bus name (see
+ * docs/decisions/0008-build-to-the-upstream-shape.md, "Per-project bus names during
+ * incubation"), plumbed exactly as xdg-desktop-portal plumbs a portal. At acceptance
+ * both the bus name and the interface collapse into org.freedesktop.portal.Desktop.
  *
  * IT DRAWS NOTHING AND TOUCHES NO HARDWARE. It resolves the caller's app id,
  * validates the purpose and the options, applies policy, permissions and rate
  * limits, owns the Request and Session objects and the grant registry, selects a
  * backend from the installed *.portal files, and forwards to that backend with the
  * app id attached. The chooser, the PIN prompt, the PKCS#11 session and the
- * signature all live in the backend (smartcard-portal-gtk).
+ * signature all live in the backend (certificate-portal-gtk).
  *
  * At upstreaming this binary DISAPPEARS: its portal becomes one more file in
  * xdg-desktop-portal, and applications call org.freedesktop.portal.Desktop instead.
@@ -30,36 +31,36 @@
 
 /* Exit codes, chosen to match the backend and the sibling webauth-service so a
  * supervisor sees one scheme across all of them. */
-#define SMARTCARD_EXIT_SUCCESS 0
-#define SMARTCARD_EXIT_UNAVAILABLE 40 /* no session bus, or no backend implements the impl
+#define CERTIFICATE_EXIT_SUCCESS 0
+#define CERTIFICATE_EXIT_UNAVAILABLE 40 /* no session bus, or no backend implements the impl
                                          interface */
-#define SMARTCARD_EXIT_USAGE 64
-#define SMARTCARD_EXIT_INTERNAL 70
+#define CERTIFICATE_EXIT_USAGE 64
+#define CERTIFICATE_EXIT_INTERNAL 70
 
-#define SMARTCARD_VERSION "0.0.0"
-#define SMARTCARD_BUS_NAME "io.github.sjtrotter.portal.Desktop"
-#define SMARTCARD_OBJECT_PATH "/io/github/sjtrotter/portal/desktop"
-#define SMARTCARD_IMPL_INTERFACE "io.github.sjtrotter.impl.portal.Smartcard1"
+#define CERTIFICATE_VERSION "0.0.0"
+#define CERTIFICATE_BUS_NAME "io.github.sjtrotter.portal.Certificate"
+#define CERTIFICATE_OBJECT_PATH "/io/github/sjtrotter/portal/Certificate"
+#define CERTIFICATE_IMPL_INTERFACE "io.github.sjtrotter.impl.portal.Certificate1"
 
 static void frontend_usage(FILE* out)
 {
 	fprintf(out,
-	        "smartcard-portal-frontend - portal frontend for certificate-backed private keys\n"
+	        "certificate-portal-frontend - portal frontend for certificate-backed private keys\n"
 	        "\n"
 	        "USAGE\n"
-	        "  smartcard-portal-frontend [options]\n"
+	        "  certificate-portal-frontend [options]\n"
 	        "\n"
 	        "  Normally started by D-Bus activation, not from a shell. It owns\n"
-	        "    " SMARTCARD_BUS_NAME "\n"
+	        "    " CERTIFICATE_BUS_NAME "\n"
 	        "  on the session bus, exporting\n"
-	        "    " SMARTCARD_OBJECT_PATH "\n"
+	        "    " CERTIFICATE_OBJECT_PATH "\n"
 	        "  This is the ONLY name an application talks to.\n"
 	        "\n"
 	        "OPTIONS\n"
 	        "  --replace              take the name from a running instance\n"
 	        "  --no-activate          do not request the bus name; run for inspection only\n"
 	        "  --list-backends        list installed *.portal files and which one would be\n"
-	        "                         selected for " SMARTCARD_IMPL_INTERFACE ", then exit\n"
+	        "                         selected for " CERTIFICATE_IMPL_INTERFACE ", then exit\n"
 	        "  --verbose              raise the log level on stderr\n"
 	        "  --help, --version      print this, or the version, and exit\n"
 	        "\n"
@@ -103,14 +104,14 @@ int main(int argc, char** argv)
 		if (g_strcmp0(arg, "--help") == 0 || g_strcmp0(arg, "-h") == 0)
 		{
 			frontend_usage(stdout);
-			return SMARTCARD_EXIT_SUCCESS;
+			return CERTIFICATE_EXIT_SUCCESS;
 		}
 
 		if (g_strcmp0(arg, "--version") == 0 || g_strcmp0(arg, "-V") == 0)
 		{
-			printf("smartcard-portal-frontend " SMARTCARD_VERSION
+			printf("certificate-portal-frontend " CERTIFICATE_VERSION
 			       " (design sketch, not implemented; interface version 1, experimental)\n");
-			return SMARTCARD_EXIT_SUCCESS;
+			return CERTIFICATE_EXIT_SUCCESS;
 		}
 
 		if (g_strcmp0(arg, "--list-backends") == 0)
@@ -123,26 +124,26 @@ int main(int argc, char** argv)
 		    g_strcmp0(arg, "--verbose") == 0)
 			continue;
 
-		fprintf(stderr, "smartcard-portal-frontend: unknown option '%s'\n", arg);
-		fprintf(stderr, "Try 'smartcard-portal-frontend --help'.\n");
-		return SMARTCARD_EXIT_USAGE;
+		fprintf(stderr, "certificate-portal-frontend: unknown option '%s'\n", arg);
+		fprintf(stderr, "Try 'certificate-portal-frontend --help'.\n");
+		return CERTIFICATE_EXIT_USAGE;
 	}
 
 	if (list_backends)
 	{
 		/* This would drive src/portal-impl.h: scan the portal directories, read
 		 * DBusName and Interfaces from each *.portal file, apply portals.conf, and
-		 * print which backend would serve SMARTCARD_IMPL_INTERFACE. It prints
+		 * print which backend would serve CERTIFICATE_IMPL_INTERFACE. It prints
 		 * configuration, never anything about a card. */
 		fprintf(stderr,
-		        "smartcard-portal-frontend: --list-backends: not implemented (design sketch)\n");
-		return SMARTCARD_EXIT_INTERNAL;
+		        "certificate-portal-frontend: --list-backends: not implemented (design sketch)\n");
+		return CERTIFICATE_EXIT_INTERNAL;
 	}
 
 	/* Everything past this point would connect to the session bus, export
-	 * src/smartcard.h's interface, load the backend configuration (src/portal-impl.h),
+	 * src/certificate.h's interface, load the backend configuration (src/portal-impl.h),
 	 * connect to the permission store (src/permission-store.h), and run a main loop.
 	 * None of that exists. */
-	fprintf(stderr, "smartcard-portal-frontend: not implemented (design sketch)\n");
-	return SMARTCARD_EXIT_INTERNAL;
+	fprintf(stderr, "certificate-portal-frontend: not implemented (design sketch)\n");
+	return CERTIFICATE_EXIT_INTERNAL;
 }

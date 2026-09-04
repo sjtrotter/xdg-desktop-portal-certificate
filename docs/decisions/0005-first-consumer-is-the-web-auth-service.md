@@ -11,8 +11,10 @@ one thing every user needs.
 
 The available candidate is `webauth-portal` — the sibling design sketch in the author's
 `entra-token-helper` repository (working title `webauth-portal`; the repository itself is still
-named `entra-token-helper`), interface `io.github.sjtrotter.portal.WebAuthentication1` on the same
-`io.github.sjtrotter.portal.Desktop` bus name this project's own frontend claims. Like this project,
+named `entra-token-helper`), interface `io.github.sjtrotter.portal.WebAuthentication1` on its own
+`io.github.sjtrotter.portal.WebAuthentication` bus name — a sibling incubation name to this
+project's own `io.github.sjtrotter.portal.Certificate`, not a shared one; see
+[0008](0008-build-to-the-upstream-shape.md), "Per-project bus names during incubation". Like this project,
 it has restructured into a portal frontend (`webauth-portal-frontend`) and a portal backend
 (`webauth-portal-gtk`); it is the **backend** that performs one interactive web authentication
 transaction in a WebKitGTK window it owns, and therefore the backend that calls this service, as an
@@ -72,17 +74,18 @@ identity position, which [SECURITY.md](../SECURITY.md) forbids.
 user has the information. That is a mitigation, not a solution while the two portals run as separate
 processes.
 
-**The resolution, once both are in portal shape, is a shared frontend.** With both sketches now
-built to the upstream shape, one process hosting both `io.github.sjtrotter.portal.Smartcard1` and
-`io.github.sjtrotter.portal.WebAuthentication1` — the proposed `incubating-portal-frontend`, see
-[0008](0008-build-to-the-upstream-shape.md) — already holds the app id it derived for the web
-authentication request before it ever calls into the smart-card side, so it can pass that *original*
-`app_id` through in-process instead of as the untrusted `reason` text a cross-process call is limited
-to today. **That only holds because the two portals then run in one trusted process.** Across two
-processes — this service and a separately-running `webauth-portal-frontend` — passing an app id
-across the boundary would need attestation neither project has, and doing it without attestation
-would be exactly the identity-laundering this document lists as forbidden above. It is not to be
-done that way. Until the shared frontend exists, this remains an open problem rather than a design.
+**One resolution, if it is ever built, is a shared frontend.** A single process hosting both
+`io.github.sjtrotter.portal.Certificate1` and `io.github.sjtrotter.portal.WebAuthentication1` —
+see [0008](0008-build-to-the-upstream-shape.md), "Per-project bus names during incubation" — would
+already hold the app id it derived for the web authentication request before it ever calls into
+the certificate side, so it could pass that *original* `app_id` through in-process instead of as
+the untrusted `reason` text a cross-process call is limited to today. **That only holds because the
+two portals would then run in one trusted process.** Across two processes — this service and a
+separately-running `webauth-portal-frontend` — passing an app id across the boundary would need
+attestation neither project has, and doing it without attestation would be exactly the
+identity-laundering this document lists as forbidden above. It is not to be done that way. A shared
+frontend is one option worth exploring, not a plan either project has committed to; until something
+along those lines exists, this remains an open problem rather than a design.
 
 ## Consequences
 
