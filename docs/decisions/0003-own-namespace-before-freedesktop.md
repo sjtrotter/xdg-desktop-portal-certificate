@@ -22,10 +22,19 @@ want one portal per device type.
 
 ## Decision
 
-Ship **`io.github.sjtrotter.Smartcard1`** at `/io/github/sjtrotter/Smartcard1`, with the major
-version in the name, from a domain the author controls.
+Ship **`io.github.sjtrotter.portal.Smartcard1`** — and, since
+[0008](0008-build-to-the-upstream-shape.md), its private counterpart
+**`io.github.sjtrotter.impl.portal.Smartcard1`** — on the bus name
+`io.github.sjtrotter.portal.Desktop` at `/io/github/sjtrotter/portal/desktop`, with the major
+version in the interface name, from a domain the author controls.
 
-Copy the `org.freedesktop.portal.Request` transaction pattern closely — handle token, precomputable
+The `portal` and `impl.portal` infixes mirror `org.freedesktop.portal.*` and
+`org.freedesktop.impl.portal.*` position for position, which is the point: the *shape* is copied so
+that the mapping in [UPSTREAMING.md](../UPSTREAMING.md) is mechanical, while the *namespace* stays
+one the project actually controls. Mirroring a naming scheme inside your own domain is not
+squatting; putting `org.freedesktop.` in front of it would be.
+
+Copy the `org.freedesktop.portal.Request` and `org.freedesktop.portal.Session` patterns closely — handle token, precomputable
 object path, `Close()` rather than a bespoke `Cancel`, one terminal `Response`, the three response
 codes — because that pattern is correct and callers already know it. **Copying a pattern is not
 claiming a namespace.**
@@ -60,3 +69,8 @@ one more reason [0007](0007-brokered-operations-are-the-core.md) makes brokered 
   consumers behind it rather than a name.
 - The repository directory is still called `smartcard-portal`. It is a directory name; the README
   says so.
+- **The mapping is now written down rather than implied.** [UPSTREAMING.md](../UPSTREAMING.md) lists
+  every interface, bus name, object path and file against what it would become upstream, and the
+  handful of places where the change would be more than a rename. That document is the check on
+  this one: if the mapping ever stops being mechanical, the incubating names have drifted from the
+  thing they are incubating.

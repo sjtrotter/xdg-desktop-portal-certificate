@@ -4,14 +4,21 @@
 
 #include <glib.h>
 
-#include "../dbus/service.h"
+#include "../smartcard.h"
 
 /** @file
- *  The broker. THE CORE CONTRACT: this service holds the key and performs the operation.
+ *  The broker. THE CORE CONTRACT: the SYSTEM holds the key and performs the operation,
+ *  and "the system" means this process -- the backend -- because the backend is the side
+ *  that owns the token session.
+ *
+ *  The frontend has already established who is asking, that the grant exists, that it is
+ *  live, that it is owned by the caller, that the operation is inside it, and that the
+ *  caller is not over its rate limit. What arrives here is (session_handle, app_id,
+ *  operation_id, mechanism, parameters, data). Everything below is checked AGAIN anyway.
  *
  *  An application never receives key material, never receives the PIN, and never holds a
  *  PKCS#11 handle unless it explicitly asks for the experimental compatibility endpoint
- *  (src/export/facade.h). It asks for a signature and gets a signature.
+ *  (export/facade.h). It asks for a signature and gets a signature.
  *
  *  WHY THIS AND NOT A FORWARDED MODULE. A sign-capable PKCS#11 session IS a signing
  *  capability, and one with almost no accounting: it cannot be counted, expired per
@@ -69,10 +76,11 @@ typedef void (*SmartcardSignDone)(GByteArray* signature, const GError* error, gp
 /** Sign @data with the grant's key.
  *
  *  MAY PROMPT. The first private-key use triggers this service's own lazy login
- *  (src/ui/pin.h), and some purposes require per-operation consent, so this is
+ *  (ui/pin.h), and some purposes require per-operation consent, so this is
  *  asynchronous and callers were told may_prompt_later at grant time.
  *
- *  Order of checks, all of which must pass: grant is live and owned by this caller;
+ *  Order of checks, all of which must pass: the session exists in this backend and is
+ *  bound to this app_id; the caller was the frontend;
  *  operation is in permitted_operations; mechanism is in the allow-list; parameters
  *  validate against mechanism and key; rate limit not exceeded; consent policy satisfied
  *  (which may show a window); token still present; login performed on THIS SERVICE'S
@@ -80,14 +88,14 @@ typedef void (*SmartcardSignDone)(GByteArray* signature, const GError* error, gp
  *
  *  @operation_id is caller-chosen and lets a cancellation, a result and a log line be
  *  correlated without correlating them by content. */
-void smartcard_broker_sign(SmartcardBroker* broker, const char* grant_id,
+void smartcard_broker_sign(SmartcardBroker* broker, const char* session_handle,
                            const char* operation_id, const SmartcardMechanism* mechanism,
                            GBytes* data, GCancellable* cancellable, SmartcardSignDone done,
                            gpointer user_data);
 
 /** Decrypt. Refused unless the grant's permitted_operations includes decrypt. Not in v1;
  *  see docs/ROADMAP.md. */
-void smartcard_broker_decrypt(SmartcardBroker* broker, const char* grant_id,
+void smartcard_broker_decrypt(SmartcardBroker* broker, const char* session_handle,
                               const char* operation_id, const SmartcardMechanism* mechanism,
                               GBytes* ciphertext, GCancellable* cancellable,
                               SmartcardSignDone done, gpointer user_data);
@@ -96,7 +104,7 @@ void smartcard_broker_decrypt(SmartcardBroker* broker, const char* grant_id,
  *  necessary. Called at first private-key use, from both the brokered path and the
  *  facade's lazy-login path -- so that both share one login model and one serialised
  *  prompt per token. */
-void smartcard_broker_ensure_login(SmartcardBroker* broker, const char* grant_id,
+void smartcard_broker_ensure_login(SmartcardBroker* broker, const char* session_handle,
                                    GCancellable* cancellable, SmartcardSignDone done,
                                    gpointer user_data);
 

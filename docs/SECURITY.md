@@ -3,6 +3,12 @@
 Status: EXPERIMENTAL design sketch. Nothing here has been implemented or reviewed by anyone but its
 authors. This document states what the design intends to be true; none of it is true yet.
 
+**Two processes.** A *frontend* establishes who is calling and applies policy; a *backend* draws the
+windows and holds the token. Every rule below says which one it binds, because after
+[0008](decisions/0008-build-to-the-upstream-shape.md) "the service" is not one thing. The division
+is [ARCHITECTURE.md](ARCHITECTURE.md#who-does-what); the private interface between them, and how it
+is kept private, is [IMPL-INTERFACE.md](IMPL-INTERFACE.md).
+
 ## What this is a boundary against, and what it is not
 
 Stated plainly, because the temptation to overclaim here is enormous:
@@ -60,6 +66,13 @@ later use has misread it, and the interface documentation says so in those words
 
 ## Caller identity
 
+**The frontend establishes it. The backend is told.** This is the single security property the
+frontend/backend split buys, and it is worth stating before the mechanics: the process that draws
+the window asserting "this application is asking" is not the process that had to work out which
+application it was. `app_id`, the display name, and the honesty level all arrive at the backend as
+arguments to `AcquireCredential`. A backend cannot derive an app id even by accident, because it is
+not talking to the application.
+
 Executable paths are not application identities. A same-UID process can execute another path,
 manipulate launch context, or connect directly to the bus. `/proc/$pid/exe` is a hint.
 
@@ -81,6 +94,13 @@ This service resolves identity into three honesty levels, and **displays which o
 
 Rules that follow:
 
+- **Identity is derived once, in the frontend, at the start of the transaction**, and travels as an
+  argument from there. There is no second derivation anywhere, and no option, key or header by
+  which a caller can supply one.
+- **The backend must never trust a caller directly.** Its only legitimate caller is the frontend; it
+  checks that the sender owns the frontend's well-known name and refuses everything else. See
+  [IMPL-INTERFACE.md](IMPL-INTERFACE.md), "Why an application cannot call this" — including the part
+  about what that check does *not* protect against.
 - **Bind every grant to the initiating unique D-Bus connection** (plus its delegated endpoint
   holders — see lifetime).
 - **Never use an unverified app ID as the sole key** for selection memory, policy, or anything else
@@ -94,16 +114,26 @@ Rules that follow:
 - **The trusted identity position in the window is never occupied by caller-supplied text** — not
   `reason`, not `context`, not a title, not the token label, not the certificate subject.
 
-If this service ever runs behind xdg-desktop-portal, the frontend establishes `app_id` and passes it
-to an inaccessible backend, and levels 2 and 3 mostly disappear. That is one of the reasons to want
-acceptance.
+This is now the shape the project is *built* in rather than a thing to hope for later: a frontend
+establishes `app_id` and passes it to a backend applications cannot reach. What acceptance upstream
+would add is not the shape but the **reach** of level 1 — xdg-desktop-portal's own app-info code has
+containment-framework integrations, a maintained host-identity story and a documented Registry
+mechanism, and inheriting those is worth more than reimplementing them.
+[UPSTREAMING.md](UPSTREAMING.md) lists our `app-info.h` among the files that are *deleted* at
+acceptance, for exactly that reason. Levels 2 and 3 do not disappear upstream; they are honestly
+labelled there too.
 
 ## The trusted dialog
 
-The chooser must show all of the following, in service-owned text:
+Drawn by the **backend**, from facts the **frontend** established. The first two items in this list
+arrive as arguments; the backend renders them and may not substitute anything for them. The chooser
+must show all of the following, in backend-owned text:
 
-- verified application **name** and **id**;
-- **sandboxed versus unsandboxed**, with an explicit warning for unverified or unsandboxed callers;
+- verified application **name** and **id**, as the frontend established them;
+- **which honesty level that was** — sandboxed and verified, a derived host label, or unidentified —
+  with an explicit warning for the second and the strongest warning the design has for the third. A
+  backend that displayed an app id without saying how it was established would be lying by
+  omission, and the level is an argument on the wire so that it cannot be forgotten;
 - the **purpose in the service's own words**, not the caller's;
 - the **operation class**: authenticate, sign, or decrypt;
 - the certificate's **subject identity** and **issuer**, and a **fingerprint or short stable
@@ -120,13 +150,15 @@ Selection memory is keyed only on trusted fields.
 
 Accessibility is part of this, not adjacent to it: a security dialog a screen-reader user cannot
 navigate is a security dialog that user cannot give informed consent through. The criteria are in
-[INTERFACE.md](INTERFACE.md#accessibility-as-acceptance-criteria) and they are acceptance criteria.
+[PUBLIC-INTERFACE.md](PUBLIC-INTERFACE.md#accessibility-as-acceptance-criteria) and they are acceptance criteria.
 
 ## PIN handling
 
-- **The PIN is collected only in a service-owned window** and exists only inside this service. It
-  never crosses D-Bus in either direction, never enters a `GVariant`, a `GError` message, a URI, or
-  a log line.
+- **The PIN is collected only in a backend-owned window** and exists only inside the backend
+  process. It never crosses D-Bus in either direction — not on the public interface and **not on the
+  impl interface either** — never enters a `GVariant`, a `GError` message, a URI, or a log line. The
+  frontend cannot see a PIN: not as a rule it obeys, but because it has no window and no token
+  session.
 - **No `pin-value` and no `pin-source` in any PKCS#11 URI this service emits**, ever. Any URI
   arriving from elsewhere carrying one is truncated before it can be logged.
 - **The buffer is wiped on every exit path** — success, failure, cancel, timeout, window destroyed,
@@ -166,6 +198,13 @@ Brokered operations enforce this directly: the service holds the session, checks
 the mechanism against an allow-list, validates the parameters, applies the purpose's consent policy,
 counts the operation and applies a rate limit.
 
+Enforcement is split, and both halves are load-bearing. The **frontend** checks that the grant
+exists, is live, is owned by this caller, permits this operation, permits this mechanism, and is
+inside its rate limit. The **backend** checks the mechanism against the key, validates the
+parameters, applies the per-purpose consent policy, and performs the operation on its own session.
+Neither check is redundant: the frontend is the only side that knows which application is asking,
+and the backend is the only side that knows what the card will accept.
+
 **The PKCS#11 facade must enforce the same thing at a much harder interface**, which is why it is
 experimental and why it is a separate milestone. The minimum it must do:
 
@@ -191,8 +230,10 @@ experimental and why it is a separate milestone. The minimum it must do:
   `C_GetFunctionList` alone leaves `C_GetInterface` as an unfiltered way back in.
 
 This is a security-sensitive PKCS#11 implementation facing a hostile peer over a wire protocol. It
-runs in **its own process**, holding no PIN and reaching the card only through the broker, and it is
-the first thing that should be fuzzed.
+runs in **its own process** — a child of the backend, since that is where the token session is —
+holding no PIN and reaching the card only through the broker, and it is the first thing that should
+be fuzzed. Its socket is created by the backend and **relayed** by the frontend, which checks the
+grant and the caller and then passes the descriptor through without holding a copy.
 
 **Hiding objects during enumeration is not scoping.** A caller that can use templates, cached
 handles, object creation, key generation, wrapping or derivation does not need `C_FindObjects` to
@@ -245,8 +286,12 @@ revocable in the service's own UI. There is no "remember PIN" and there never wi
 
 ## Logging
 
+- **Two journals, one story.** The frontend records the decision and the caller; the backend records
+  the card event. The grant id and the operation id are what join them, and neither journal alone
+  answers "what used my card, and when".
 - **Allowed**: counts, stable reason codes, purposes, resolved caller identity and its honesty
-  level, grant and operation ids, mechanism names, token presence, timings.
+  level, grant and operation ids, mechanism names, token presence, timings, and — frontend only —
+  which backend was selected.
 - **Never**: PINs, PKCS#11 URIs, object labels, key ids, card serials, certificate subjects, signed
   data, plaintext, or the contents of `reason` and `context`.
 - Error text from p11-kit, OpenSC and GnuTLS is **truncated before any embedded URI**, because those
@@ -269,6 +314,11 @@ Named because they are unsolved, not because they are minor.
   consumer in that process, and grant binding must be enforced inside the module by caller identity
   rather than by socket. That is a different and harder security argument. [SPIKES.md](SPIKES.md) S3.
 - **`purpose` is not enforceable.** Stated everywhere it appears; there is no fix, only honesty.
+- **The impl boundary is not a privilege boundary.** Both processes run as the user. The split makes
+  identity derivation and window drawing structurally separate, which is worth a great deal; it does
+  not make the backend safe from a hostile process that can `ptrace` it. A deployment that wants
+  more can add a D-Bus policy rule or a private socket; neither is in v1.
+  [IMPL-INTERFACE.md](IMPL-INTERFACE.md) says so in the same words.
 - **Hardened-desktop assumptions.** How much level-2 and level-3 identity is worth depends on
   `ptrace` scope, compositor input isolation and `/proc` hardening, none of which this service
   controls or can detect reliably.

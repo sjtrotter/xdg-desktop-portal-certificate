@@ -16,18 +16,26 @@ their caveats:
   reader, and two readers at once;
 - GNOME/Wayland as the primary target, with KDE testing later;
 - **no browser integration**, which is separate work in someone else's tree;
-- the figures assume S1 and S3 **pass**. If they fail the project gets smaller, not later.
+- the figures assume S1 and S3 **pass**. If they fail the project gets smaller, not later;
+- the frontend/backend split is now **in** the figures rather than deferred
+  ([0008](decisions/0008-build-to-the-upstream-shape.md)). It adds roughly two to three
+  person-weeks up front — two services, an impl interface, app-id derivation, permission-store
+  integration and backend discovery — and removes an unbudgeted rewrite later. Half of it is
+  plumbing xdg-desktop-portal already has and that we would delete at acceptance
+  ([UPSTREAMING.md](UPSTREAMING.md)), which is the strongest argument that the estimate is a
+  ceiling rather than a floor.
 
 | | |
 |---|---|
 | Feasibility spike (phase 0) | **2–4 weeks** |
+| The frontend/backend split itself: two services, the impl interface, app-id derivation, permission store, backend discovery | 2–3 weeks |
 | Chooser, enumeration, D-Bus request lifecycle, basic brokered signing | 4–7 weeks |
 | PIN agent, protected path, removal, concurrency, lifecycle hardening | 3–5 weeks |
 | The restricted synthetic PKCS#11 facade | 5–9 weeks |
 | WebKitGTK/GnuTLS integration and distro testing | 3–6 weeks |
 | Packaging, fuzzing, documentation, accessibility, security review | 4–7 weeks |
-| **A useful brokered-signing prototype** | **8–12 person-weeks** |
-| **A credible release including the experimental facade** | **18–30 person-weeks** |
+| **A useful brokered-signing prototype** | **10–15 person-weeks** |
+| **A credible release including the experimental facade** | **20–33 person-weeks** |
 
 Firefox, Chromium, NSS, VPN clients, mail clients, SSH and PDF signing are **more** on top of that,
 each in its own tree, each needing its own maintainers to agree.
@@ -61,23 +69,33 @@ dependency, until all of the following exist.**
 8. **Caller disconnect and subprocess delegation** tests.
 9. **Fuzzing** of the facade's RPC surface and **mechanism-parameter validation** tests, RSA-PSS
    included.
+10. **The frontend/backend boundary** ([SPIKES.md](SPIKES.md) S5): the endpoint fd relayed cleanly
+    through two processes, `Close()` reaching the backend's window before the caller is told
+    anything, a backend that dies mid-grant invalidating loudly, and a backend that lies being
+    clamped rather than believed.
 
 ---
 
-## Phase 1 — Brokered-signing service — **8–12 person-weeks**
+## Phase 1 — Brokered-signing frontend and backend — **10–15 person-weeks**
 
 Assuming the spike passed. A working service on the machines the author controls. Not packaged for
 the world, not proposed to anyone, **facade not included**.
 
 **Scope, deliberately narrow:**
 
+- **both processes**: the frontend (identity, policy, permissions, request and session lifecycle,
+  backend discovery) and the reference GTK backend (chooser, PIN, discovery, brokered signing),
+  talking over the impl interface;
 - OpenSC-compatible **PIV cards only**;
 - certificate enumeration and filtering, with the Remmina hardware edge-case list as acceptance
   criteria, using the p11-kit API rather than a `p11tool` subprocess;
 - one selected certificate; leaf DER plus best-effort intermediates, labelled `complete`/`partial`/
   `leaf_only`;
 - the trusted chooser and the PIN / protected-path UI, with accessibility as acceptance criteria;
-- verified Flatpak application identity, and clearly marked unsandboxed callers;
+- verified Flatpak application identity **derived in the frontend and passed to the backend as an
+  argument**, and clearly marked unsandboxed callers;
+- remembered certificate selection in the real `org.freedesktop.impl.portal.PermissionStore`, and
+  nothing else in it;
 - **`client_auth` and `signing` as separate purposes**, with separate consent policies;
 - short-lived grants, multiple independent grants, removal and invalidation signals;
 - brokered `Sign`, with RSA PKCS#1 v1.5, RSA-PSS and ECDSA **only as the tested cards require**;
@@ -89,16 +107,18 @@ integration; no browser integration claims; no remembered authorisation; no raw 
 
 ---
 
-## Phase 2 — The experimental PKCS#11 facade — to **18–30 person-weeks** cumulative
+## Phase 2 — The experimental PKCS#11 facade — to **20–33 person-weeks** cumulative
 
 The compatibility milestone, and the one with the security-sensitive engineering in it: the
 synthetic module, its refusals, its handle mapping, its mechanism validation, its process isolation,
 its fuzzing. `OpenPkcs11Endpoint` appears here, marked experimental, versioned by
 `endpoint_version`, and reported by `GetCapabilities` so no caller has to probe by failing.
 
-Also here: distro packaging; GNOME **and KDE** Wayland testing, including parenting and activation
-(a KDE implementation of the chooser and PIN UI is a prerequisite for phase 3, and there is no KDE
-equivalent of gcr's prompter to defer to); and the first non-`webauth-service` consumer, chosen for
+Also here: distro packaging **of two components**; GNOME **and KDE** Wayland testing, including
+parenting and activation (a KDE chooser and PIN prompt is a prerequisite for phase 3 — and is now a
+second *backend package* with its own `.portal` file rather than a second code path in one binary,
+which is the main practical dividend of [0008](decisions/0008-build-to-the-upstream-shape.md); there
+is still no KDE equivalent of gcr's prompter to defer to); and the first non-`webauth-service` consumer, chosen for
 being *willing* rather than for being popular.
 
 **Firefox and Chromium are not this phase's consumers.** Their sandboxing, module lifecycle, browser
@@ -136,8 +156,12 @@ Only then, the acceptance path:
    PIN UI around it**, replacing a blanket `--socket=pcsc` grant with a scoped, revocable,
    attributable one.
 6. Agreement on the public interface and on what the frontend enforces.
-7. Frontend routing plus an `org.freedesktop.impl.portal.*` backend interface, derived **with** the
-   maintainers rather than imitated in advance.
+7. Frontend routing plus an `org.freedesktop.impl.portal.*` backend interface. **This repository now
+   arrives with both already built and exercised**, under its own names, with the mapping written
+   down in [UPSTREAMING.md](UPSTREAMING.md) — which is a proposal to argue with rather than a design
+   to start. It is emphatically not a claim that the shape is agreed: the three open items in that
+   document (which side opens the device, `Sign` returning a `Request`, and the duplicated
+   `ReleaseGrant`) are questions for maintainers, and the answers may change the interface.
 8. At least one backend implementation, and interest from a second desktop.
 9. Conformance tests and documentation before the incubating name is declared obsolete.
 

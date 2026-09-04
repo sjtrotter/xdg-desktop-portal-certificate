@@ -23,6 +23,14 @@ adoption advantage and it was the original design.
 **Credential selection plus brokered operations is the core contract. The PKCS#11 facade is an
 experimental compatibility transport, requested explicitly, delivered in a later milestone.**
 
+### Which process is "the broker"
+
+Since [0008](0008-build-to-the-upstream-shape.md), the broker is the **backend**: it holds the
+PKCS#11 session, so it is the only side that can perform an operation. None of the reasoning below
+changes — the argument was never about how many processes there are, it was about whether a grant
+is a standing capability or a sequence of accountable events. The split sharpens it: the frontend
+counts, expires and revokes; the backend performs and prompts.
+
 ### Why the broker wins on security
 
 A module endpoint hands over a **generic cryptographic interface whose calls carry almost no
@@ -57,17 +65,20 @@ implementation and a weaker per-operation story.
 
 ### The split, concretely
 
-- **Core:** `AcquireCredential`, `Sign`, `Decrypt` (later), `RenewGrant`, `ReleaseGrant`,
-  `GetCapabilities`, `TokenAdded`/`TokenRemoved`/`GrantInvalidated`.
-- **Compatibility:** `OpenPkcs11Endpoint(grant_id, options) → {endpoint_fd, certificate_uri,
-  private_key_uri, endpoint_version}`, **experimental**, milestone 2.
+- **Core:** `CreateSession`, `AcquireCredential`, `Sign`, `Decrypt` (later), `RenewGrant`,
+  `ReleaseGrant`, `GetCapabilities`, `TokenAdded`/`TokenRemoved`/`GrantInvalidated`.
+- **Compatibility:** `OpenPkcs11Endpoint(session_handle, options) → {endpoint_fd,
+  certificate_uri, private_key_uri, endpoint_version}`, **experimental**, milestone 2.
 - **Never both automatically.** The caller asks for the capability it can actually use, and
   `GetCapabilities` says whether this implementation has it, so callers negotiate instead of probing
   by failing.
 - **A URI is not a capability.** `certificate_uri` and `private_key_uri` are returned only *with* an
   endpoint that resolves them, never alone. No `pin-value`, no `pin-source`, ever.
 - **The endpoint is a file descriptor, not a path** — a path is discoverable, races on the
-  filesystem, and needs a bind mount to cross a sandbox.
+  filesystem, and needs a bind mount to cross a sandbox. Since
+  [0008](0008-build-to-the-upstream-shape.md) it is created by the **backend**, which holds the
+  token session, and **relayed** by the frontend, which checks the grant and the caller and keeps
+  no copy.
 - **Build the signing API into the first security model.** Add the module bridge when a demonstrated
   consumer requires it, which for phase 2 means `webauth-service` and only if
   [SPIKES.md](../SPIKES.md) S3 passes.

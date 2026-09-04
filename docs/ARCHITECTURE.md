@@ -3,43 +3,89 @@
 Status: EXPERIMENTAL design sketch. None of this is implemented, and
 [SPIKES.md](SPIKES.md) may invalidate parts of it.
 
-One process owns the user's credentials and the user's interaction with them. **The core contract
-is credential selection plus brokered operations**: the application never receives the key, never
-receives the PIN, and — unless it explicitly asks for the experimental compatibility endpoint and
-the service grants it — never receives a PKCS#11 handle either.
+**Two processes, plumbed exactly like xdg-desktop-portal.** A *frontend* owns the public
+bus name, establishes who is calling, applies policy and permissions, and owns the
+request and session lifecycle. A *backend* draws the windows, holds the PKCS#11 session,
+and performs the cryptography. The application talks only to the frontend and never
+learns the backend's name. The split, and the decision to build it now rather than after
+a first release, is [0008](decisions/0008-build-to-the-upstream-shape.md); where each
+piece lands when this is accepted upstream is [UPSTREAMING.md](UPSTREAMING.md).
+
+**The core contract is unchanged by the split**: credential selection plus brokered
+operations. The application never receives the key, never receives the PIN, and — unless
+it explicitly asks for the experimental compatibility endpoint and the system grants it —
+never receives a PKCS#11 handle either.
+
+## Who does what
+
+The division is copied from upstream, not invented here. Upstream's frontend
+(`xdg-desktop-portal`) resolves the caller's app id, checks the permission store, owns
+`Request` and `Session` objects, and picks a backend from the installed `.portal` files;
+the backend (`xdg-desktop-portal-gtk` and friends) draws dialogs and touches the device.
+See [writing a new backend](https://flatpak.github.io/xdg-desktop-portal/docs/writing-a-new-backend.html)
+and the [documentation index](https://flatpak.github.io/xdg-desktop-portal/docs/).
+
+| Concern | Frontend `smartcard-portal-frontend` | Backend `smartcard-portal-gtk` |
+|---|---|---|
+| **Caller identity** | Derives `app_id` from Flatpak/Snap metadata, host cgroup, or a Registry-style claim; records the honesty level | Never derives anything. Receives `app_id` and its honesty level as **arguments** |
+| **Bus name applications use** | `io.github.sjtrotter.portal.Desktop` — the only one | `io.github.sjtrotter.impl.portal.desktop.gtk` — not for applications |
+| **Policy** | Purpose validation (no `any`), option validation, operation set, mechanism allow-list, lifetime ceiling, rate limits | Enforces what it is told, plus its own hard limits. Never widens |
+| **Permissions** | Reads and writes the permission store (remembered certificate *selection*) | Never touches it. Told what to preselect; reports what was chosen |
+| **Request lifecycle** | Exports the caller's `Request`, one terminal `Response`, timeouts, cancellation | Exports an impl `Request` at the path the frontend chose; `Close()` only |
+| **Session lifecycle** | Grant identity, ownership, delegation, expiry, renewal, invalidation signals | The token session behind it: PKCS#11 session, login state, handles, facade process |
+| **Backend selection** | Reads `*.portal` files and `portals.conf`; activates one backend | Declares itself in `gtk.portal` |
+| **UI** | Draws nothing. Has no toolkit dependency | Chooser and PIN prompt, in its own words, with accessibility as acceptance criteria |
+| **Device access** | Loads no PKCS#11 module, never talks to p11-kit, never sees a card serial | Token discovery, certificate reading, `C_Login`, `C_Sign`, card-removal watching |
+| **PIN** | Cannot see one — not a rule it obeys, a thing it cannot do | Collects it in its own window; it never leaves the process |
+| **PKCS#11 facade** | Checks the grant and **relays the fd** | Creates the endpoint and serves the synthetic module |
+| **Logging** | Which app, which honesty level, which purpose, granted or refused | Token presence, mechanism names, PIN outcome codes, facade refusals |
+
+Upstream splits Camera and USB slightly differently — for those the *frontend* opens the
+device (a PipeWire remote, an fd from `open()`) and the backend only draws the permission
+dialog. That does not work here: a PKCS#11 session is not a file descriptor you can hand
+over, it is a login state with handles attached, and the process that draws the PIN prompt
+must be the process that holds it. The precedent this follows is ScreenCast and
+RemoteDesktop, where the backend owns the device and hands back a descriptor
+(`org.freedesktop.impl.portal.RemoteDesktop.ConnectToEIS`). It is recorded in
+[UPSTREAMING.md](UPSTREAMING.md) as a thing to raise with maintainers rather than assume.
 
 ```
-    application                 smartcard-portal                    the card
-    ───────────                 ────────────────                    ────────
-                        D-Bus
-    AcquireCredential ───────►  transaction layer  (src/dbus/)
-                                       │
-                                       ▼
-                                token discovery    (src/tokens/discovery.h)  ──► p11-kit ──► OpenSC ──► pcscd
-                                certificate filter (src/tokens/filter.h)
-                                       │
-                                       ▼
-                                chooser window     (src/ui/chooser.h)
-                                       │
-                                       ▼
-                                grant registry     (src/grant/registry.h)
-    ◄─── Response(0, { grant_id, certificate_der, chain_der, chain_status,
-                       token_display, key_type, supported_mechanisms,
-                       permitted_operations, expires_at, may_prompt_later })
+  application                  FRONTEND                          BACKEND                the card
+  ───────────                  ────────                          ───────                ────────
+                    D-Bus                       D-Bus impl iface
+  CreateSession ─────────────►  session object   ───────────────►  impl session
+  AcquireCredential ─────────►  app-info.h   ← WHO IS ASKING
+                                smartcard.h  ← purpose, options, policy
+                                permission-store.h ← remembered SELECTION
+                                portal-impl.h ← which backend
+                                     │
+                                     │ AcquireCredential(handle, session, app_id,
+                                     │                   parent_window, options)
+                                     └──────────────────►  tokens/discovery.h ──► p11-kit ──► OpenSC ──► pcscd
+                                                           tokens/filter.h
+                                                           ui/chooser.h   ← THE CONSENT WINDOW
+                                                                │
+                                     ◄─────────────────────── (response, results)
+                                grant-registry.h  ← identity, expiry, ownership
+  ◄─── Response(0, { grant_id, certificate_der, chain_der, chain_status,
+                     token_display, key_type, supported_mechanisms,
+                     permitted_operations, expires_at, may_prompt_later })
 
-    Sign(grant_id, op_id, ─────►  broker           (src/broker/operations.h)
-         mechanism, params,               │
-         data)                            ├─ consent policy for this purpose
-                                          ├─ PIN window (src/ui/pin.h) ── C_Login ──►  (broker's OWN session)
-                                          └─ mechanism allow-list + parameter validation
-    ◄─── signature                                          └─ C_Sign ──────────────►
+  Sign(session, opts) ───────►  check grant, owner, operation, mechanism, rate limit
+                                     │  Sign(handle, session, app_id, parent, options)
+                                     └──────────────────►  broker/operations.h
+                                                             ├─ consent policy for this purpose
+                                                             ├─ ui/pin.h ── C_Login ──►  (backend's OWN session)
+                                                             └─ mechanism + parameter validation
+  ◄─── Response(0, { signature })                            └─ C_Sign ──────────────►
 
-    ── EXPERIMENTAL, milestone 2, opt-in ───────────────────────────────────────────
-    OpenPkcs11Endpoint(grant_id) ►  synthetic facade (src/export/facade.h)
-    ◄─── endpoint_fd                      one synthetic slot, one synthetic token,
-                                          the granted objects, read-only sessions,
-                                          a mechanism allow-list, handle mapping,
-                                          lazy login through the broker's own session
+  ── EXPERIMENTAL, milestone 2, opt-in ────────────────────────────────────────────────────
+  OpenPkcs11Endpoint(session) ►  check grant       ──────►  export/facade.h
+  ◄─── endpoint_fd  ◄──── relayed, not copied ◄──────────── one synthetic slot, one synthetic
+                                                            token, the granted objects,
+                                                            read-only sessions, a mechanism
+                                                            allow-list, handle mapping, lazy
+                                                            login through the backend's session
 ```
 
 ## The correction this design is built on
@@ -69,21 +115,37 @@ not the real token forwarded.
 
 ## Components
 
-### D-Bus transaction layer — `src/dbus/service.h`, `src/dbus/request.h`
+### Frontend: the portal — `frontend/src/smartcard.h`, `frontend/src/request.h`, `frontend/src/session.h`
 
-Owns `io.github.sjtrotter.Smartcard1` on the session bus and exports
-`/io/github/sjtrotter/Smartcard1`. Interactive calls follow the
+Owns `io.github.sjtrotter.portal.Desktop` on the session bus and exports
+`/io/github/sjtrotter/portal/desktop`. Interactive calls follow the
 [xdg-desktop-portal `Request` pattern](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html):
 the caller supplies an unguessable `handle_token`, can compute the request object path and subscribe
 to it *before* the call returns, cancels through `Request.Close()` rather than a bespoke `Cancel`,
 and receives at most one terminal `Response`. The pattern is copied; the namespace is not.
 
-Non-interactive calls (`Sign`, `Decrypt`, `ReleaseGrant`, `GetCapabilities`) are ordinary methods —
-except that `Sign` and `Decrypt` *may* become interactive, when the purpose's consent policy or a
-lazy login requires a prompt. That is why the acquire response carries `may_prompt_later`: a caller
-must never be able to claim it was promised silence.
+`Sign` and `Decrypt` are **also** `Request`-shaped, which is a change the upstream shape
+forced: they may prompt — for a lazy login or for per-operation consent — and upstream's
+convention is that anything which can show a window returns a `Request` the caller can
+`Close()`. `RenewGrant`, `ReleaseGrant` and `GetCapabilities` stay ordinary methods. The
+acquire response still carries `may_prompt_later`, because a caller must never be able to
+claim it was promised silence.
 
-### Token and slot discovery — `src/tokens/discovery.h`
+The grant itself is a **`Session`**: `CreateSession` makes the object, `AcquireCredential`
+fills it in, `Session.Close()` (or `ReleaseGrant`, its smartcard-shaped alias) ends it. That
+is what upstream does with anything long-lived, and it buys the thing a bare `grant_id`
+string could not: an object the caller can watch, that dies with its connection, and whose
+path the frontend controls.
+
+**Nothing here draws or discovers.** The frontend resolves identity
+(`frontend/src/app-info.h`), applies policy (`frontend/src/smartcard.h`), consults the
+permission store (`frontend/src/permission-store.h`), selects a backend
+(`frontend/src/portal-impl.h`), and calls it with `app_id` attached. Two `Request` objects
+exist per interaction — the caller's, on the frontend, and the backend's, at a path the
+frontend chose — and `Close()` is forwarded between them. The application can never reach
+the backend's.
+
+### Backend: token and slot discovery — `backends/gtk/src/tokens/discovery.h`
 
 Enumerates slots and tokens through p11-kit's configured modules, asynchronously and under a
 `GCancellable`, and watches for insertion and removal.
@@ -115,7 +177,7 @@ list. It proved, on real hardware:
 
 **This service should not shell out.** A fixed-argv subprocess was right inside a Remmina plugin,
 where a runtime dependency on `gnutls-utils` is cheaper than linking. Here enumeration is the
-*product*, so `src/tokens/discovery.h` describes direct use of the p11-kit managed-module API. The
+*product*, so `backends/gtk/src/tokens/discovery.h` describes direct use of the p11-kit managed-module API. The
 edge-case list above survives the change of mechanism unaltered — it is a list of things cards do,
 not things `p11tool` does — and it is the acceptance criteria for the rewrite.
 
@@ -123,7 +185,7 @@ not things `p11tool` does — and it is the acceptance criteria for the rewrite.
 — never by slot number, and never by label alone. A reinserted card is a *new* token until proven
 otherwise.
 
-### Certificate filtering — `src/tokens/filter.h`
+### Backend: certificate filtering — `backends/gtk/src/tokens/filter.h`
 
 Reduces the discovered certificates to the ones that can satisfy the request, before any are shown.
 All filters optional, all AND-ed:
@@ -147,10 +209,13 @@ selectable** — an expired certificate is a diagnosis the user needs, and hidin
 is empty" bug reports. **Filtering never narrows the set to one and auto-confirms**: a single
 candidate still gets a chooser, because the chooser is where consent happens.
 
-### Chooser UI — `src/ui/chooser.h`
+### Backend: chooser UI — `backends/gtk/src/ui/chooser.h`
 
-A service-owned window, parented to `parent_window` when one was supplied and valid, unparented
-otherwise. It must show, in text the caller cannot influence:
+A **backend**-owned window, parented to `parent_window` when one was supplied and valid,
+unparented otherwise. It must show, in text the caller cannot influence — and note that the
+first two items now *arrive from the frontend as arguments*, which is the whole point of the
+split: the side that knows who is calling is not the side drawing the window, so the window
+cannot be talked into naming the wrong application by the application:
 
 1. **verified application name and application id**;
 2. **sandboxed or unsandboxed**, with an explicit warning for unverified or unsandboxed callers;
@@ -183,9 +248,9 @@ information carried by colour alone, accessible error and cancellation states, a
 to the calling application afterwards. The chooser and the PIN prompt *carry* the security
 decision; nothing else in the stack covers them.
 
-### PIN UI — `src/ui/pin.h`
+### Backend: PIN UI — `backends/gtk/src/ui/pin.h`
 
-A separate service-owned window, shown when the broker needs to log into its own session — which is
+A separate **backend**-owned window, shown when the broker needs to log into its own session — which is
 **at first private-key use, not at grant time** (see "Login model" below). It names the token being
 unlocked and restates the verified caller, purpose and operation class.
 
@@ -213,7 +278,7 @@ Same accessibility criteria as the chooser, plus: the PIN field is never echoed 
 never enter the accessibility tree, while the "incorrect PIN, N attempts remaining" state is
 announced.
 
-### Broker — `src/broker/operations.h`
+### Backend: broker — `backends/gtk/src/broker/operations.h`
 
 The core. Holds the underlying PKCS#11 session and performs operations on the application's behalf.
 
@@ -254,7 +319,7 @@ PIN and the facade does not forward one — and the broker prompts and logs into
 session when the first `C_Sign` or `C_Decrypt` arrives. Libraries that expect particular `C_Login`
 return codes are a known compatibility hazard and are part of [SPIKES.md](SPIKES.md) S2.
 
-### The synthetic PKCS#11 facade — `src/export/facade.h`
+### Backend: the synthetic PKCS#11 facade — `backends/gtk/src/export/facade.h`
 
 **EXPERIMENTAL, milestone 2, requested explicitly through `OpenPkcs11Endpoint`, never returned
 automatically.** This is the compatibility path for consumers that can only consume a module, and
@@ -305,9 +370,20 @@ identity and the returned URI. That changes the contract from "here is a new mod
 URI your already-registered broker module can resolve". It is described here as the likely
 architecture, and S3 is what decides.
 
-### Grant registry — `src/grant/registry.h`
+### Frontend: grant registry — `frontend/src/grant-registry.h`
 
-Live grants: id, owner connection, delegated endpoint holders, verified caller identity, certificate,
+**The frontend owns the grant registry, and the backend owns the token session behind it.**
+That is the one allocation the split forced a decision on: grant identity, the binding to an
+app id and an owning connection, the operation set, expiry, renewal, rate limits, delegation
+and invalidation are policy, and policy is the frontend's; the PKCS#11 session, the login
+state, the object handles and the facade process are the device, and the device is the
+backend's. So a grant exists before the backend has a session, the backend cannot expire or
+renew one, and a backend that dies takes every grant with it — announced as
+`GrantInvalidated` with reason `backend_gone` rather than left for the caller to discover at
+the next `Sign`.
+
+Live grants: id, session object path, owner connection, delegated endpoint holders, the
+resolved app info, certificate,
 token identity, purpose, operation policy, mechanism allow-list, operation counter, expiry, and one
 atomic terminal state with an invalidation reason.
 
@@ -343,7 +419,12 @@ identity could not be verified, is session-scoped unless the user makes it durab
 and revocable in the service's own UI. There is no "remember PIN", and there is no remembered
 authorisation to use the key.
 
-### Logging — `src/log/redact.h`
+### Both: logging — `shared/redact.h`
+
+Compiled into both binaries, because the rule is the same on both sides of the impl boundary
+and the failure would be the same too. The two journals answer different halves of "what used
+my card, and when" — the frontend records the decision and the caller, the backend records the
+card event — and the grant id and operation id are what join them.
 
 Structured, with a stable reason code per event, and a hard rule about what may appear: counts,
 reason codes, purposes, resolved caller identity, grant and operation ids, token *presence*, and
@@ -355,32 +436,59 @@ the fields it is allowed to emit — not a filter applied to strings on the way 
 ## Sequence — client authentication through brokered signing
 
 ```
-application                     smartcard-portal                    card
+application                    FRONTEND                       BACKEND              card
   │
-  ├─ AcquireCredential(parent, {handle_token, purpose: client_auth,
+  ├─ CreateSession({session_handle_token})  ──────►
+  │   ◄── o /io/github/sjtrotter/portal/desktop/session/<sender>/<token>
+  │                                │  CreateSession(handle, session, app_id, {}) ──►
+  │
+  ├─ AcquireCredential(session, parent, {handle_token, purpose: client_auth,
   │      certificate_filter: {issuers: <from CertificateRequest>},
   │      operation_policy: {sign}, interaction_mode: allowed,
   │      context: "<destination host>"})                     ──────►
-  │   ◄── o /io/github/sjtrotter/Smartcard1/request/<sender>/<token>
+  │   ◄── o /io/github/sjtrotter/portal/desktop/request/<sender>/<token>
   │                                │
-  │                                ├─ resolve caller identity (sandboxed? verified?)
-  │                                ├─ discover tokens, filter by issuer + EKU ────────►
-  │                                ├─ chooser: verified app, sandbox status, purpose,
-  │                                │   certificate, token, duration, "may prompt again"
+  │                                ├─ resolve app_id (Flatpak? Snap? host? unknown?)
+  │                                ├─ validate purpose and options; apply rate limit
+  │                                ├─ permission store: any remembered SELECTION?
+  │                                ├─ portals.conf → which backend
+  │                                │
+  │                                ├─ AcquireCredential(handle, session, app_id,
+  │                                │     parent_window, {purpose, filter, lifetime,
+  │                                │     app_display_name, app_identity_level,
+  │                                │     preselect_certificate, reason, context}) ──►
+  │                                │                     ├─ discover tokens, filter ───►
+  │                                │                     ├─ chooser: the app id and HOW
+  │                                │                     │   WELL IT IS KNOWN, purpose in
+  │                                │                     │   the backend's own words, the
+  │                                │                     │   certificate, token, duration,
+  │                                │                     │   "may prompt again"
+  │                                │   ◄── (0, {certificate_der, …, certificate_id,
+  │                                │            remember_selection})
+  │                                ├─ intersect with policy; create grant; maybe store
+  │                                │   the selection
   │   ◄── Response(0, {grant_id, certificate_der, chain_der, chain_status: partial,
   │                    token_display, key_type, supported_mechanisms,
   │                    permitted_operations: [sign], expires_at, may_prompt_later: true})
   │
   ├─ (TLS stack builds CertificateVerify input)
-  ├─ Sign(grant_id, op_id, "ECDSA", {hash: SHA256}, <digest>)  ───►
-  │                                ├─ consent policy: covered by this grant
-  │                                ├─ first private use → PIN window ── C_Login ──────►
-  │                                ├─ mechanism + parameters validated
-  │                                └─ C_Sign ──────────────────────────────────────────►
-  │   ◄── signature
+  ├─ Sign(session, parent, {handle_token, op_id, "ECDSA", {hash: SHA256}, <digest>}) ──►
+  │   ◄── o …/request/<sender>/<token>
+  │                                ├─ grant live? owned? sign permitted? mechanism
+  │                                │   allowed? rate limit ok?
+  │                                ├─ Sign(handle, session, app_id, parent, {…}) ────►
+  │                                │                     ├─ consent policy: covered by
+  │                                │                     │   this grant
+  │                                │                     ├─ first private use → PIN
+  │                                │                     │   window ── C_Login ────────►
+  │                                │                     ├─ mechanism + parameters
+  │                                │                     │   validated AGAIN
+  │                                │   ◄── (0, {signature})   └─ C_Sign ───────────────►
+  │   ◄── Response(0, {signature})
   │
   ├─ handshake completes
-  └─ ReleaseGrant(grant_id)        └─ close session, log out, invalidate, reap
+  └─ ReleaseGrant(session)  ──────► invalidate ─► Session.Close() ─► close session,
+                                                   log out, poison endpoints, reap
 ```
 
 No `--socket=pcsc`. No PIN in the application. No PKCS#11 handle in the application. What the
@@ -390,33 +498,42 @@ is exactly the integration work that makes Firefox and Chromium **not** MVP cons
 ## Sequence — the web-auth service answering a WebKit challenge
 
 ```
-entra client → webauth-service                    smartcard-portal
+entra client → webauth-service              FRONTEND                  BACKEND
                     │
                     │ WebKit "authenticate" signal, client certificate,
                     │ host certauth.<authority>
                     │
-                    ├─ AcquireCredential({purpose: client_auth, operation_policy: {sign},
-                    │      context: "<origin>", certificate_filter: {issuers}}) ────►
-                    │                                    ├─ identity resolves to
-                    │                                    │  webauth-service, NOT to the
-                    │                                    │  RDP client behind it
-                    │                                    ├─ chooser, naming webauth-service
-                    │                                    │  and the requested destination
+                    ├─ CreateSession() ──────────────►
+                    ├─ AcquireCredential(session, {purpose: client_auth,
+                    │      operation_policy: {sign}, context: "<origin>",
+                    │      certificate_filter: {issuers}}) ─────────►
+                    │                            ├─ app_id resolves to
+                    │                            │  webauth-service, NOT to the
+                    │                            │  RDP client behind it
+                    │                            ├─ impl AcquireCredential(app_id …) ──►
+                    │                            │                  ├─ chooser, naming
+                    │                            │                  │  webauth-service and
+                    │                            │                  │  the requested
+                    │                            │                  │  destination
                     │   ◄─── Response(0, {grant_id, certificate_der, …})
                     │
-                    ├─ OpenPkcs11Endpoint(grant_id) ────────────────────────► EXPERIMENTAL
-                    │   ◄─── {endpoint_fd, certificate_uri, private_key_uri, endpoint_version}
-                    │
+                    ├─ OpenPkcs11Endpoint(session) ──►  check grant, owner, policy
+                    │                            ├─ impl OpenPkcs11Endpoint(session,
+                    │                            │     app_id, {}) ───────────────────►
+                    │                            │                  └─ facade helper
+                    │                            │                     process + socket
+                    │   ◄─── {endpoint_fd, …} ◄── fd RELAYED, not copied ◄─────────────┘
+                    │                                                    EXPERIMENTAL
                     ├─ g_tls_certificate_new_from_pkcs11_uris(cert_uri, key_uri)
                     │      ── and this is the step that may not work; see SPIKES S3 ──
                     ├─ webkit_credential_new_for_certificate(...)
                     ├─ webkit_authentication_request_authenticate(request, credential)
-                    ├─ GnuTLS drives the handshake; the signature happens in the broker
+                    ├─ GnuTLS drives the handshake; the signature happens in the BACKEND
                     │   ── possibly from WebKit's NETWORK process, not this one ──
                     └─ ReleaseGrant on every exit path
 ```
 
-Two windows will name the same origin — the web view's own security chrome and this service's
+Two windows will name the same origin — the web view's own security chrome and the backend's
 chooser. That is not duplication: they are two independent statements of the same true thing, one of
 which the caller cannot influence. Two windows asking for a PIN would be duplication, and there is
 one.
@@ -435,21 +552,35 @@ have to agree, and neither has. See
 
 ## Process model
 
-- **One D-Bus-activated per-user service.** Started by the session bus on first method call via
-  `data/io.github.sjtrotter.Smartcard1.service.in`, exits when idle with no live grants. Not a
-  system service: cards are the user's and nothing here needs root.
-- **One helper process per facade endpoint.** The synthetic module runs in its own process, holding
-  no PIN and reaching the card only by asking the broker, so a bug in the facade — the most
-  attacker-exposed code in the project, speaking a wire protocol to a hostile peer — cannot reach
-  another grant, the chooser, or the PIN buffer. The brokered `Sign` path does not need one.
-- **No frontend/backend split.** There is no `org.freedesktop.impl.portal.*` ABI here. Imitating a
-  portal's names confers none of a portal's properties while doubling the D-Bus surface, the
-  activation and crash handling, the versioning obligations, the packaging and the transaction
-  lifetime bugs. Internally the seam exists — transaction layer → chooser/PIN interface → GTK4
-  implementation — as a C vtable, which is where the split goes if it is ever earned.
-- **UI toolkit.** GTK4 for the reference chooser and PIN prompt, behind that vtable so a Qt
-  implementation is a second implementation rather than a fork. A KDE implementation is a phase 1
-  goal and a prerequisite for phase 2; there is no KDE equivalent of gcr's prompter to defer to.
+- **Two D-Bus-activated per-user services.** The frontend is started by the session bus on
+  first method call via `frontend/data/io.github.sjtrotter.portal.Desktop.service.in`; the
+  backend is started by the frontend's first impl call via
+  `backends/gtk/data/io.github.sjtrotter.impl.portal.desktop.gtk.service.in`. Both exit when
+  idle with no live grants. Neither is a system service: cards are the user's and nothing
+  here needs root.
+- **One helper process per facade endpoint.** The synthetic module runs in its own process —
+  a child of the *backend*, since that is where the token session is — holding no PIN and
+  reaching the card only by asking the broker, so a bug in the facade (the most
+  attacker-exposed code in the project, speaking a wire protocol to a hostile peer) cannot
+  reach another grant, the chooser, or the PIN buffer. The brokered `Sign` path does not need
+  one. That makes three processes in the facade case, which is a real cost and is counted in
+  [0008](decisions/0008-build-to-the-upstream-shape.md).
+- **The frontend/backend split is a D-Bus ABI, not a vtable.** An earlier draft of this
+  document argued the opposite — that imitating a portal's names confers none of a portal's
+  properties while doubling the D-Bus surface, the activation, the crash handling, the
+  versioning and the transaction-lifetime bugs — and every one of those costs is real and is
+  now being paid deliberately. The reasons for paying them early are in
+  [0008](decisions/0008-build-to-the-upstream-shape.md): the impl boundary is where `app_id`
+  stops being something a service guesses and starts being something it is *given*, it is
+  what makes a KDE chooser a second package rather than a fork, and building it now means the
+  upstream patch is a rename rather than a redesign.
+- **The impl interface is private.** Applications talk to the frontend's name and nothing
+  else. How that is enforced — and what it does and does not protect against on a same-UID
+  desktop — is [IMPL-INTERFACE.md](IMPL-INTERFACE.md).
+- **UI toolkit.** GTK4 in the reference backend. A Qt/KDE chooser and PIN prompt is a second
+  *backend package* with its own `.portal` file, selected by `portals.conf`, not a second
+  code path inside one binary. It remains a phase 1 goal and a prerequisite for phase 2;
+  there is no KDE equivalent of gcr's prompter to defer to.
 
 ## What this project does not own
 
@@ -459,8 +590,8 @@ have to agree, and neither has. See
   than from a PDF or from nothing. Purpose constrains certificate selection and consent language; it
   does not prove what a signature was later used for. Anyone who reads a `purpose` as a guarantee
   has misread it.
-- **The application's UI.** This service draws a chooser and a PIN prompt. It does not draw progress,
-  results or errors on the consumer's behalf.
+- **The application's UI.** The backend draws a chooser and a PIN prompt. Neither process
+  draws progress, results or errors on the consumer's behalf.
 - **Chain construction as a trust claim.** Many tokens store only the leaf. The service returns what
   the card holds plus what it can assemble from system stores, and labels the result `complete`,
   `partial` or `leaf_only`. It never implies the chain is trusted.

@@ -100,7 +100,7 @@ the first thing that should be fuzzed. It is budgeted at 5–9 person-weeks on i
 - [SPIKES.md](../SPIKES.md) S1 and S3 exist to test failure modes 1–6 and 8 before anything is built.
 - Failure mode 7 rewrote the lifetime model into owner-plus-delegated-holders.
 - Failure mode 10 has no technical fix and appears as an honesty requirement in
-  [INTERFACE.md](../INTERFACE.md), [SECURITY.md](../SECURITY.md) and the XML.
+  [PUBLIC-INTERFACE.md](../PUBLIC-INTERFACE.md), [SECURITY.md](../SECURITY.md) and the XML.
 - Failure mode 6 is why S3 is the gate on publishing this repository at all, and why the likely real
   architecture is **one permanently registered broker module with synthetic grant-bound slots**
   rather than a new module per grant.

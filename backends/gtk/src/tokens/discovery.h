@@ -7,6 +7,10 @@
 /** @file
  *  Finding tokens and the certificates on them.
  *
+ *  DEVICE ACCESS IS THE BACKEND'S. The frontend never loads a PKCS#11 module, never
+ *  talks to p11-kit and never learns a card serial: it could not do any of it usefully
+ *  without becoming the thing the split exists to separate.
+ *
  *  Enumerates slots and tokens through p11-kit's configured managed modules,
  *  asynchronously and under a GCancellable, and watches for insertion and removal.
  *
@@ -37,7 +41,7 @@
 
 /** Token identity. The display fields go in the chooser and in token_display; the
  *  identity fields decide whether two observations are the same token. Neither set is
- *  ever logged: src/log/redact.h permits token PRESENCE, not token identity. */
+ *  ever logged: shared/redact.h permits token PRESENCE, not token identity. */
 typedef struct
 {
 	char* label;
@@ -47,7 +51,7 @@ typedef struct
 	char* reader_name;
 	gboolean protected_authentication_path; /**< CKF_PROTECTED_AUTHENTICATION_PATH: the
 	                                             token or reader collects the PIN, and
-	                                             src/ui/pin.h must NOT draw a PIN field */
+	                                             ui/pin.h must NOT draw a PIN field */
 	gboolean login_required;
 	gint retries_remaining; /**< -1 when the token does not reliably report it. NEVER
 	                             invent a value: a wrong count is worse than none. */

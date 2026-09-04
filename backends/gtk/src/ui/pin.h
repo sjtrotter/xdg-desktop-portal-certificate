@@ -9,7 +9,7 @@
 /** @file
  *  The PIN prompt. The only place in the system where a PIN is typed for a transaction.
  *
- *  A PIN PROMPT IS NOT CONSENT. Consent is src/ui/chooser.h. This window unlocks a
+ *  A PIN PROMPT IS NOT CONSENT. Consent is ui/chooser.h. This window unlocks a
  *  token that consent has already authorised the use of.
  *
  *  WHEN IT APPEARS: at FIRST PRIVATE-KEY USE, not at grant time. Logging in early spends
@@ -17,7 +17,12 @@
  *  buys nothing at all, because login state is per application and does not transfer.
  *  See docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md failure mode 3.
  *
- *  THE PIN NEVER LEAVES THIS PROCESS. It never crosses D-Bus in either direction, never
+ *  THE PIN NEVER LEAVES THIS PROCESS -- and after the frontend/backend split "this
+ *  process" is the BACKEND, which is the only side that ever had a reason to hold one.
+ *  The frontend cannot see a PIN because the frontend has no window and no token
+ *  session; that is not a rule it must obey, it is a thing it cannot do.
+ *
+ *  It never crosses D-Bus in either direction, never
  *  enters a GVariant, a GError message, a PKCS#11 URI, or a log line. NO pin-value and
  *  NO pin-source ever appears in a URI this service emits.
  *

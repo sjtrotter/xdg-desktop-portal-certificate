@@ -4,11 +4,17 @@
 
 #include <glib.h>
 
-#include "../dbus/service.h"
+#include "../smartcard.h"
 #include "discovery.h"
 
 /** @file
  *  Reducing the discovered certificates to the ones that can satisfy the request.
+ *
+ *  FILTERING IS THE BACKEND'S because only the backend can see the certificates. The
+ *  frontend validated the SHAPE of the caller's certificate_filter -- and rejected a
+ *  malformed one before any backend was called -- but it has never read a card and never
+ *  will. This is the clean half of the device/policy split: the frontend says what may be
+ *  asked for, the backend answers from the hardware.
  *
  *  Filtering happens BEFORE anything is shown, so the chooser offers only credentials
  *  that would actually work. It is a usability mechanism with a security consequence,
@@ -31,7 +37,7 @@
  */
 
 /** EKU OIDs the purposes map to. "any" does not exist as a purpose; see
- *  SmartcardPurpose in ../dbus/service.h. */
+ *  SmartcardPurpose in ../smartcard.h. */
 #define SMARTCARD_EKU_CLIENT_AUTH "1.3.6.1.5.5.7.3.2"
 #define SMARTCARD_EKU_CODE_SIGNING "1.3.6.1.5.5.7.3.3"
 #define SMARTCARD_EKU_EMAIL_PROTECTION "1.3.6.1.5.5.7.3.4"

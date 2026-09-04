@@ -34,6 +34,9 @@ Specifically valuable:
   what would prove it. Every document here names its own open problems on purpose.
 - **Do not add a feature without a consumer.** One consumer is already thin evidence; zero is none.
 - **Do not describe token-scoped forwarding as object scoping**, in any wording, anywhere.
+- **Do not blur the frontend/backend line to make a paragraph shorter.** "The service" is now two
+  services with different jobs, and a document that says "the service resolves the caller's
+  identity and shows the chooser" has described a design this project deliberately does not have.
 - **`purpose` is not enforceable** and every document that mentions it says so. Keep it that way.
 - **Nothing may put caller-supplied text in the trusted identity position.**
 - **No design may store, log, or transport a PIN.** There is no "remember PIN" and there will not
@@ -46,11 +49,34 @@ Specifically valuable:
   [docs/decisions/0004-license.md](docs/decisions/0004-license.md) for why, and for the Apache-2.0
   alternative that would require a clean-room rewrite of the chooser and PIN handling.
 - Code derived from Remmina keeps its Remmina copyright attribution alongside the SPDX header.
-- Logging goes through `src/log/redact.h`, which accepts only the fields it may emit. Do not add a
+- Logging goes through `shared/redact.h`, which accepts only the fields it may emit. Do not add a
   `printf`-shaped logging call; a filter that must recognise a secret has already been handed one.
-- The synthetic PKCS#11 facade (`src/export/facade.h`) is hostile-input code. Every entry point is
-  refused or constrained by default; there is no allow-by-default path, and a change to it needs a
-  test that a hostile client cannot do the thing.
+- The synthetic PKCS#11 facade (`backends/gtk/src/export/facade.h`) is hostile-input code. Every
+  entry point is refused or constrained by default; there is no allow-by-default path, and a change
+  to it needs a test that a hostile client cannot do the thing.
+
+## Which side does a change belong on
+
+The repository is a portal **frontend** and a portal **backend**, laid out like xdg-desktop-portal
+and xdg-desktop-portal-gtk ([docs/decisions/0008](docs/decisions/0008-build-to-the-upstream-shape.md)).
+Before writing anything, decide which side it goes on, and check it against
+[the responsibility table](docs/ARCHITECTURE.md#who-does-what):
+
+- **Frontend** (`frontend/`): who is calling, what they are allowed to ask for, what is remembered,
+  how long a grant lives, which backend is used. It has no toolkit dependency and no PKCS#11
+  dependency, and adding one is a design change, not a build change.
+- **Backend** (`backends/gtk/`): what the user sees, what the card does. It never derives an app id,
+  never decides policy, never writes the permission store, and never widens what it was granted.
+- **Both** (`shared/`): only things that are genuinely identical on both sides. So far that is the
+  redaction rules.
+
+Two rules that are easy to break by accident:
+
+- **Do not let the backend learn anything about the caller except what the frontend passed it.** If
+  a change needs the backend to know something new about the application, the change is a new
+  argument on the impl interface, not a lookup in the backend.
+- **Do not add a way for an application to reach the impl interface.** Not a convenience method, not
+  a debug flag, not a "direct mode". See [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md).
 
 ## AI assistance
 

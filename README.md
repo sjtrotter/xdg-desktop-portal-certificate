@@ -1,9 +1,56 @@
 # smartcard-portal
 
 **Status: EXPERIMENTAL design sketch. Nothing works yet, and the first thing to do is a spike that
-may kill it.** This repository contains design documents, a repository skeleton, and one stub
-binary that builds and prints usage. No card has ever been read by this code, no PIN has ever been
+may kill it.** This repository contains design documents, a repository skeleton, and two stub
+binaries that build and print usage. No card has ever been read by this code, no PIN has ever been
 prompted for, and no cryptographic operation has ever been brokered.
+
+## Two processes, plumbed like xdg-desktop-portal
+
+This is the first thing to know about the repository, because it is the shape of everything in it.
+
+```
+  ┌─────────────┐   io.github.sjtrotter.portal.Desktop      ┌──────────────────────────┐
+  │ application │ ─────────────────────────────────────────►│ FRONTEND                 │
+  └─────────────┘   io.github.sjtrotter.portal.Smartcard1    │ smartcard-portal-frontend│
+        ▲                                                    │                          │
+        │                    who is asking (app id, and how  │ identity · policy ·      │
+        │                    well we know it) · purpose and  │ permissions · request &  │
+        │                    option validation · policy ·    │ session lifecycle ·      │
+        └── grant, signature │ permission store · grants,    │ backend selection        │
+                             │ expiry, rate limits           └────────────┬─────────────┘
+                                                                          │
+                              io.github.sjtrotter.impl.portal.Smartcard1  │  app_id is an
+                              — PRIVATE. Applications never call it. ─────┤  ARGUMENT here
+                                                                          ▼
+                                                             ┌──────────────────────────┐
+                                                             │ BACKEND                  │
+                                                             │ smartcard-portal-gtk     │
+                                                             │                          │
+                                                             │ chooser · PIN prompt ·   │
+                                                             │ PKCS#11 session · Sign · │
+                                                             │ synthetic facade         │
+                                                             └────────────┬─────────────┘
+                                                                          ▼
+                                                              p11-kit → OpenSC → pcscd → card
+```
+
+**A client talks to the frontend and to nothing else.** It calls
+`io.github.sjtrotter.portal.Smartcard1` on `io.github.sjtrotter.portal.Desktop`, gets a `Request`
+object whose path it can compute in advance, and a `Session` object that *is* the grant. It never
+learns which backend is installed, never holds a PKCS#11 handle, and never sees a PIN.
+
+The division is copied from xdg-desktop-portal, not invented: **frontend = caller identity, policy,
+permissions, request lifecycle, backend selection; backend = UI and device access**. The one thing
+that matters most is that `app_id` is *derived by the frontend* and *passed to the backend as an
+argument* — so the process drawing the window that names an application never had to guess which
+application it was.
+
+Building it this way now, rather than after a first release, is a deliberate override of the
+review's "premature for v0" advice:
+[docs/decisions/0008](docs/decisions/0008-build-to-the-upstream-shape.md). What would change if this
+were ever accepted upstream — names, and where the frontend lives — is
+[docs/UPSTREAMING.md](docs/UPSTREAMING.md).
 
 Read this paragraph before anything else:
 
@@ -17,10 +64,13 @@ Read this paragraph before anything else:
 > [docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md)
 > and [0007](docs/decisions/0007-brokered-operations-are-the-core.md).
 
-> **Names.** `smartcard-portal` is a *directory name*, not a claim. The D-Bus interface ships as
-> **`io.github.sjtrotter.Smartcard1`** — a project-controlled reverse-DNS name with a major
-> version, as [the D-Bus specification recommends](https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names)
-> — and deliberately not `org.freedesktop.portal.*`. The name is also probably wrong in a second
+> **Names.** `smartcard-portal` is a *directory name*, not a claim. The interfaces ship as
+> **`io.github.sjtrotter.portal.Smartcard1`** (public) and
+> **`io.github.sjtrotter.impl.portal.Smartcard1`** (private, frontend-to-backend) — project-controlled
+> reverse-DNS names with a major version, as
+> [the D-Bus specification recommends](https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names)
+> — and deliberately not `org.freedesktop.portal.*`. **We mirror the shape; we do not take the
+> namespace.** The name is also probably wrong in a second
 > way: the real conceptual boundary is a **client certificate** or **cryptographic credential**,
 > because the backing key might be a TPM, a software token, a phone or a remote HSM rather than a
 > card. `Smartcard1` is an incubation name and is expected to change. See
@@ -64,15 +114,17 @@ application a raw, general-purpose token interface and calls it mediation.
 
 ## The design, in one paragraph
 
-A per-user, D-Bus-activated service brokers cryptographic credentials the way
+A per-user, D-Bus-activated **portal** brokers cryptographic credentials the way
 [`org.freedesktop.portal.Camera`](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Camera.html)
 brokers cameras: it does not hand over the device. An application calls `AcquireCredential` naming
-a purpose. The **service** — not the application — shows a chooser naming the verified application,
-whether it is sandboxed, the purpose in the service's own words, and the candidate certificates on
-each token; it returns a **grant**: the chosen certificate as DER, its chain and chain status, the
+a purpose. The **frontend** works out who is asking and whether it may ask; the **backend** — not
+the application — shows a chooser naming the application *the frontend identified*, how well it is
+identified, the purpose in the backend's own words, and the candidate certificates on each token;
+the frontend returns a **grant**: the chosen certificate as DER, its chain and chain status, the
 key's type and mechanisms, the permitted operations, and an expiry. The application then asks the
-service to **`Sign`** (and, if the grant allows it, `Decrypt`); the service prompts for the PIN in
-its own window, logs into its own PKCS#11 session, performs the operation and returns the result.
+frontend to **`Sign`** (and, if the grant allows it, `Decrypt`); the frontend checks the grant and
+forwards; the backend prompts for the PIN in its own window, logs into its own PKCS#11 session,
+performs the operation and returns the result.
 The PIN never crosses D-Bus, the private key never leaves the card, and the application never holds
 a PKCS#11 handle. For consumers that can only consume a PKCS#11 module — which is most existing TLS
 code — a **separately requested, experimental** `OpenPkcs11Endpoint` returns a socket fd backed by
@@ -83,17 +135,23 @@ and nothing else.
 
 ```
                     ┌──────────────────────────────────────────────┐
-                    │  smartcard-portal                            │
-                    │  io.github.sjtrotter.Smartcard1              │
-                    │                                              │
-                    │  chooser UI · PIN UI · grant registry        │
+                    │  FRONTEND  smartcard-portal-frontend         │
+                    │  io.github.sjtrotter.portal.Smartcard1       │
+                    │  app id · policy · permissions · grants      │
+                    └───────────────────┬──────────────────────────┘
+                                        │ io.github.sjtrotter.impl.portal.Smartcard1
+                                        │ (private; app_id travels as an argument)
+                    ┌───────────────────▼──────────────────────────┐
+                    │  BACKEND  smartcard-portal-gtk               │
+                    │  chooser UI · PIN UI · token session         │
                     │  brokered Sign / Decrypt        ← the core   │
                     │  synthetic PKCS#11 facade  ← experimental,   │
                     │                              opt-in, milestone 2
                     └───────┬──────────────────────────┬───────────┘
                             │                          │
              grant + brokered Sign                     │ grant + PKCS#11 endpoint fd
-                            │                          │
+             (relayed by the frontend)                 │ (created by the backend,
+                            │                          │  relayed by the frontend)
             ┌───────────────▼────────────────┐   ┌─────▼───────────────────────────┐
             │ webauth-service                │   │ TLS applications that can only  │
             │ io.github.sjtrotter.WebAuth…1  │   │ consume a module. NOT MVP       │
@@ -108,6 +166,9 @@ and nothing else.
             └────────────────────────────────┘
 ```
 
+Consumers see only the top box. The arrows from the backend are drawn from where the work happens,
+not from where the D-Bus reply comes: every one of them passes through the frontend.
+
 The left branch is the first consumer and the reason this exists
 ([0005](docs/decisions/0005-first-consumer-is-the-web-auth-service.md)). The right branch is the
 long-term case for a separate service — but it is a *hope*, not a plan: every one of those
@@ -118,13 +179,16 @@ for PIV (the only supported card stack in v1), and p11-kit's module configuratio
 
 ## Interface at a glance
 
-Object `/io/github/sjtrotter/Smartcard1`, described in [docs/INTERFACE.md](docs/INTERFACE.md) and
-declared in [`data/io.github.sjtrotter.Smartcard1.xml`](data/io.github.sjtrotter.Smartcard1.xml).
+**Public**, on `io.github.sjtrotter.portal.Desktop`, object `/io/github/sjtrotter/portal/desktop` —
+described in [docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md), declared in
+[`frontend/data/io.github.sjtrotter.portal.Smartcard1.xml`](frontend/data/io.github.sjtrotter.portal.Smartcard1.xml).
 
 ```
-io.github.sjtrotter.Smartcard1
+io.github.sjtrotter.portal.Smartcard1
 
-  AcquireCredential(s parent_window, a{sv} options) → o request_handle
+  CreateSession(a{sv} options) → o session_handle        ← the session IS the grant
+
+  AcquireCredential(o session_handle, s parent_window, a{sv} options) → o request_handle
         options: handle_token, activation_token,
                  purpose: client_auth | signing | email | ssh   (no "any")
                  certificate_filter { issuers, key_usage, eku, token_label,
@@ -133,26 +197,51 @@ io.github.sjtrotter.Smartcard1
                  requested_lifetime, interaction_mode: required|allowed|forbidden,
                  allow_selection_memory, reason (untrusted), context (untrusted)
 
-  Sign(s grant_id, s operation_id, s mechanism, a{sv} params, ay data) → ay signature
-  Decrypt(s grant_id, s operation_id, s mechanism, a{sv} params, ay ciphertext) → ay plaintext
-  RenewGrant(s grant_id, a{sv} options) → t expires_at
-  ReleaseGrant(s grant_id)
-  GetCapabilities() → a{sv}
+  Sign(o session_handle, s parent_window, a{sv} options) → o request_handle
+        options: handle_token, operation_id, mechanism, parameters, data
+        results: signature ay        ← a Request, because it MAY prompt
+  Decrypt(o session_handle, s parent_window, a{sv} options) → o request_handle
+  RenewGrant(o session_handle, a{sv} options) → t expires_at
+  ReleaseGrant(o session_handle)                    ← alias of Session.Close()
+  GetCapabilities(a{sv} options) → a{sv}
 
-  OpenPkcs11Endpoint(s grant_id, a{sv} options)                     ← EXPERIMENTAL
+  OpenPkcs11Endpoint(o session_handle, a{sv} options)               ← EXPERIMENTAL
         → h endpoint_fd, s certificate_uri, s private_key_uri, u endpoint_version
 
   signals: TokenAdded, TokenRemoved, GrantInvalidated
 
-io.github.sjtrotter.Smartcard1.Request
-
-  Close()                                cancel — there is no separate Cancel method
-  Response(u response, a{sv} results)    0 success, 1 cancelled, 2 other
+io.github.sjtrotter.portal.Request        Close() · Response(u response, a{sv} results)
+io.github.sjtrotter.portal.Session        Close() · Closed(a{sv} details)
 ```
 
+**Private**, frontend-to-backend, on `io.github.sjtrotter.impl.portal.desktop.gtk` — described in
+[docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md), declared in
+[`backends/gtk/data/io.github.sjtrotter.impl.portal.Smartcard1.xml`](backends/gtk/data/io.github.sjtrotter.impl.portal.Smartcard1.xml).
+**Applications do not call this.**
+
+```
+io.github.sjtrotter.impl.portal.Smartcard1
+
+  CreateSession     (o handle, o session_handle, s app_id, a{sv} options) → (u, a{sv})
+  AcquireCredential (o handle, o session_handle, s app_id, s parent_window,
+                     a{sv} options) → (u response, a{sv} results)
+  Sign / Decrypt    (o handle, o session_handle, s app_id, s parent_window,
+                     a{sv} options) → (u response, a{sv} results)
+  OpenPkcs11Endpoint(o session_handle, s app_id, a{sv} options)
+                     → h endpoint_fd, s certificate_uri, s private_key_uri, u endpoint_version
+  GetCapabilities   (a{sv} options) → a{sv}
+  signals: TokenAdded, TokenRemoved, SessionInvalidated
+```
+
+Every impl call carries `app_id` and the grant handle. That is the whole point of the boundary.
+
 The transaction pattern is copied closely from
-[`org.freedesktop.portal.Request`](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html),
-because that pattern is right and callers already know it. Copying a pattern is not claiming a
+[`org.freedesktop.portal.Request`](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html)
+and [`org.freedesktop.portal.Session`](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Session.html),
+and the frontend/backend division from
+[writing a new backend](https://flatpak.github.io/xdg-desktop-portal/docs/writing-a-new-backend.html)
+and [portals.conf](https://flatpak.github.io/xdg-desktop-portal/docs/portals.conf.html), because
+those patterns are right and callers already know them. Copying a pattern is not claiming a
 namespace.
 
 ## Why not something simpler
@@ -191,7 +280,7 @@ it does not attest to what a later signature was for.
 [gcr](https://gitlab.gnome.org/GNOME/gcr)'s `GcrSystemPrompt` are a real precedent for a
 system-owned, system-modal PIN prompt — and they are GNOME's, tied to gnome-keyring's needs, with
 no KDE equivalent. Impersonating that interface means inheriting its semantics without its
-maintainers. This service draws its own prompt and cites gcr as prior art. See
+maintainers. The backend draws its own prompt and cites gcr as prior art. See
 [0002](docs/decisions/0002-service-owned-pin-prompt.md).
 
 **Why not blanket pcsc access?** Because that is the status quo, and it is what this exists to
@@ -199,16 +288,27 @@ replace.
 
 ## What this is not a boundary against
 
-This service can give a **strong boundary for sandboxed applications**, whose identity a
+This design can give a **strong boundary for sandboxed applications**, whose identity a
 containment framework can vouch for, and a **useful application-identity and consent boundary** for
 ordinary host applications. It is **not** absolute same-UID isolation. A hostile unsandboxed
 process running as the user may be able to inspect other processes, manipulate their environment,
 read runtime files or inject input, depending on how the system is hardened. Any claim stronger
-than that is false. See [docs/SECURITY.md](docs/SECURITY.md).
+than that is false. The frontend/backend split does not change that answer either: both processes
+run as the user, and what it buys is that identity derivation and window drawing are structurally
+separate, not that either process is safe from a process that can `ptrace` it. See
+[docs/SECURITY.md](docs/SECURITY.md) and
+[docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md).
 
 ## Relation to xdg-desktop-portal
 
-Incubating under its own namespace, and not ready to be proposed. The
+**Built in its shape, under our own names, and not ready to be proposed.** The frontend is the part
+that would move *into* xdg-desktop-portal; the backend is the part that would live in or beside
+xdg-desktop-portal-gtk. Every name and file has a mapping in
+[docs/UPSTREAMING.md](docs/UPSTREAMING.md), and the claim that document exists to test is that
+acceptance would be a rename rather than a redesign — with three open items where it would not be,
+listed there rather than hidden.
+
+Still incubating under its own namespace, and still not ready to be proposed. The
 [review that shaped this repository](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md)
 lists why it is not yet a credible portal API: applications cannot transparently consume
 per-request PKCS#11 endpoints, object and operation scoping is unproven, application identity
@@ -220,24 +320,44 @@ The likely destination is *not* a portal named after a device. The
 already proposing `org.freedesktop.portal.Credentials` for FIDO2 and passkeys, and certificate-backed
 signing plausibly belongs there as a **credential type** sharing the request, identity and consent
 machinery, rather than as a rival portal. Those maintainers should be approached **before** names or
-D-Bus signatures are frozen. [docs/ROADMAP.md](docs/ROADMAP.md) phase 2.
+D-Bus signatures are frozen. [docs/ROADMAP.md](docs/ROADMAP.md) phase 3.
 
 ## Building the sketch
 
 ```
-meson setup build && ninja -C build && ./build/smartcard-portal --help
+meson setup build && ninja -C build
+./build/frontend/smartcard-portal-frontend --help
+./build/backends/gtk/smartcard-portal-gtk --help
 ```
 
-That is all it does. Every verb returns exit 70, "not implemented (design sketch)".
+That is all they do. Both print usage and exit 0; every verb returns exit 70, "not implemented
+(design sketch)". The exit codes are the same on both: `0` clean, `40` unavailable, `64` usage,
+`70` internal / not implemented.
+
+Layout:
+
+```
+frontend/     the portal frontend — the part that would move INTO xdg-desktop-portal
+  data/       public interface XML, the .service file for io.github.sjtrotter.portal.Desktop,
+              an example portals.conf
+  src/        request, session, app-info, permission-store, portal-impl, smartcard, grant registry
+backends/gtk/ the reference backend — the part that would live in or beside xdg-desktop-portal-gtk
+  data/       impl interface XML, gtk.portal, the .service file for the impl bus name
+  src/        request, session, smartcard, ui/, tokens/, broker/, export/
+shared/       redaction rules, compiled into both
+docs/         architecture, both interfaces, security, spikes, roadmap, upstreaming, decisions
+```
 
 ## Documents
 
 | | |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, sequences, process model, what is not owned |
-| [docs/INTERFACE.md](docs/INTERFACE.md) | the D-Bus interface, in xdg-desktop-portal documentation style |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, the frontend/backend responsibility table, sequences, process model |
+| [docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md) | the interface applications call, in xdg-desktop-portal documentation style |
+| [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) | the private frontend-to-backend interface, and why applications cannot reach it |
+| [docs/UPSTREAMING.md](docs/UPSTREAMING.md) | name-by-name and file-by-file mapping to freedesktop, and what changes at acceptance |
 | [docs/SECURITY.md](docs/SECURITY.md) | threat model, PIN handling, grant scoping, caller identity |
-| [docs/SPIKES.md](docs/SPIKES.md) | the four questions that decide whether this is buildable |
+| [docs/SPIKES.md](docs/SPIKES.md) | the five questions that decide whether this is buildable |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | phases, effort estimate, and its assumptions |
 | [docs/decisions/](docs/decisions/) | why the shape is the shape |
 

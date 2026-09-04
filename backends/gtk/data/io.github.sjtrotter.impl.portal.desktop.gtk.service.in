@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# D-Bus activation for the reference BACKEND, mirroring
+# xdg-desktop-portal-gtk's org.freedesktop.impl.portal.desktop.gtk.service.
+#
+# The frontend activates this name when a *.portal file selects this backend.
+# APPLICATIONS HAVE NO REASON TO HOLD THIS NAME and are not expected to reach it;
+# see docs/IMPL-INTERFACE.md, "Why an application cannot call this".
+#
+# EXPERIMENTAL. The binary this points at is a design-sketch stub that exits 70.
+
+[D-BUS Service]
+Name=io.github.sjtrotter.impl.portal.desktop.gtk
+Exec=@libexecdir@/smartcard-portal-gtk

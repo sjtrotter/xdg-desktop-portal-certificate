@@ -1,0 +1,338 @@
+<?xml version="1.0"?>
+<!--
+ Copyright (C) 2026 the smartcard-portal authors
+
+ SPDX-License-Identifier: GPL-2.0-or-later
+
+ THE PRIVATE (BACKEND) INTERFACE. Only the frontend calls this. It is the exact
+ analogue of org.freedesktop.impl.portal.* in xdg-desktop-portal, and it follows
+ the same conventions:
+
+   - every interactive method takes @handle (the object path on which the
+     backend exports an io.github.sjtrotter.impl.portal.Request), @app_id, and
+     @parent_window, and returns (@response, @results);
+   - the APP ID IS AN ARGUMENT, established by the frontend and passed in. The
+     backend never derives it, never asks the bus for it, and never talks to the
+     application;
+   - long-lived state hangs off an io.github.sjtrotter.impl.portal.Session at the
+     object path the frontend chose;
+   - file descriptors may cross this boundary, as they do for
+     org.freedesktop.impl.portal.RemoteDesktop.ConnectToEIS (out) and
+     org.freedesktop.impl.portal.Secret.RetrieveSecret (in).
+
+ THIS INTERFACE IS NOT FOR APPLICATIONS. An application that reached it would be
+ handing itself an app id of its own choosing. It is protected exactly as
+ upstream protects org.freedesktop.impl.portal.*: the backend is a separate
+ D-Bus-activated service whose bus name applications have no reason to hold, it
+ is not proxied into sandboxes, and it rejects any caller that is not the
+ frontend. See docs/IMPL-INTERFACE.md, "Why an application cannot call this".
+
+ Documentation of the upstream shape this mirrors:
+   https://flatpak.github.io/xdg-desktop-portal/docs/writing-a-new-backend.html
+   https://flatpak.github.io/xdg-desktop-portal/docs/impl-dbus-interfaces.html
+-->
+<node name="/" xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+
+  <!--
+      io.github.sjtrotter.impl.portal.Smartcard1:
+      @short_description: Smartcard portal backend interface
+
+      Implemented by a backend and exported at /io/github/sjtrotter/portal/desktop
+      on the backend's own bus name - for the reference backend in this
+      repository, io.github.sjtrotter.impl.portal.desktop.gtk.
+
+      WHAT THE BACKEND OWNS: the UI (the chooser and the PIN prompt), the device
+      (PKCS#11 module loading, slot and token discovery, certificate reading),
+      the token session (its own C_Login, its own handles), the cryptographic
+      operations, and the synthetic PKCS#11 facade that stands in front of them.
+
+      WHAT THE BACKEND MUST NEVER DO: derive the caller's identity, decide
+      policy, keep grant identity or expiry, write the permission store, or
+      accept a call from anything but the frontend.
+
+      THE BACKEND MUST NOT TRUST THE CALLER DIRECTLY. It trusts the frontend to
+      have resolved @app_id and validated the options; it displays @app_id as
+      what it is - what the frontend established, at the honesty level the
+      frontend reported - and it applies its own limits on top rather than
+      assuming the frontend caught everything.
+
+      This documentation describes version 1 of this interface.
+  -->
+  <interface name="io.github.sjtrotter.impl.portal.Smartcard1">
+
+    <!--
+        CreateSession:
+        @handle: object path for the io.github.sjtrotter.impl.portal.Request
+        @session_handle: object path for the io.github.sjtrotter.impl.portal.Session
+        @app_id: app id, as established by the FRONTEND
+        @options: vardict
+        @response: numeric response
+        @results: vardict
+
+        Creates the backend-side state for a grant: a slot for a token session
+        that does not exist yet, bound to @session_handle and to @app_id.
+
+        Non-interactive; it exists so that the backend can fail early (no
+        p11-kit, no reader, no display) and so that the session object exists
+        before any UI does. The backend exports the Session object at
+        @session_handle and emits Closed on it when it tears the state down on
+        its own initiative.
+
+        Mirrors org.freedesktop.impl.portal.ScreenCast.CreateSession.
+    -->
+    <method name="CreateSession">
+      <arg type="o" name="handle" direction="in"/>
+      <arg type="o" name="session_handle" direction="in"/>
+      <arg type="s" name="app_id" direction="in"/>
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type="u" name="response" direction="out"/>
+      <arg type="a{sv}" name="results" direction="out"/>
+    </method>
+
+    <!--
+        AcquireCredential:
+        @handle: object path for the io.github.sjtrotter.impl.portal.Request
+        @session_handle: the grant
+        @app_id: app id, as established by the FRONTEND
+        @parent_window: window identifier, or ""
+        @options: vardict
+        @response: numeric response
+        @results: vardict
+
+        Discovers tokens, applies the certificate filter, SHOWS THE CHOOSER, and
+        binds the chosen certificate to the session.
+
+        Supported keys in @options - all already validated by the frontend, and
+        all still checked here:
+
+        * purpose s                one of the four known purposes; the backend
+                                   renders it IN ITS OWN WORDS and never renders
+                                   caller-supplied text in its place
+        * certificate_filter a{sv} as in the public interface
+        * operation_policy a{sv}   sign b, decrypt b, as the frontend approved
+                                   them
+        * interaction_mode s       "required" | "allowed" | "forbidden"
+        * lifetime u               seconds the frontend has decided to allow.
+                                   NOT the caller's request: the frontend has
+                                   already applied its ceiling.
+        * app_display_name s       what the chooser should call the application,
+                                   established by the frontend
+        * app_identity_level s     "verified_sandboxed" | "derived_host" |
+                                   "unidentified". THE BACKEND MUST DISPLAY
+                                   THIS. A backend that shows an app id without
+                                   showing how well it is known is lying by
+                                   omission.
+        * preselect_certificate s  a stable certificate identifier the frontend
+                                   read from the permission store. PRESELECTION
+                                   ONLY: the chooser still opens, the user still
+                                   confirms, and a PIN is still required.
+        * reason s                 UNTRUSTED caller text. Displayed labelled and
+                                   subordinate. Never in the identity position.
+        * context s                UNTRUSTED caller text, shown as the REQUESTED
+                                   destination.
+        * activation_token s
+
+        Results with response 0:
+
+        * certificate_der ay, chain_der aay, chain_status s,
+          token_display a{sv}, key_type s, key_size u, key_curve s,
+          supported_mechanisms as, permitted_operations as,
+          may_prompt_later b, remember_selection b,
+          certificate_id s   (stable identifier for selection memory; the
+                              FRONTEND, not the backend, decides whether to
+                              store it)
+
+        The backend returns what it can do. The frontend intersects that with
+        what it will allow, and the caller sees the intersection.
+    -->
+    <method name="AcquireCredential">
+      <arg type="o" name="handle" direction="in"/>
+      <arg type="o" name="session_handle" direction="in"/>
+      <arg type="s" name="app_id" direction="in"/>
+      <arg type="s" name="parent_window" direction="in"/>
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type="u" name="response" direction="out"/>
+      <arg type="a{sv}" name="results" direction="out"/>
+    </method>
+
+    <!--
+        Sign:
+        @handle: object path for the io.github.sjtrotter.impl.portal.Request
+        @session_handle: the grant
+        @app_id: app id, as established by the FRONTEND
+        @parent_window: window identifier, or ""
+        @options: vardict; operation_id, mechanism, parameters, data
+        @response: numeric response
+        @results: vardict; signature ay
+
+        PERFORMS THE SIGNATURE. This is on the backend because the backend holds
+        the token session: the key is reachable from here and from nowhere else.
+
+        MAY PROMPT, which is why it is Request-shaped: the first private-key use
+        triggers lazy login (the PIN prompt), and a per-operation consent policy
+        may require a second window. Request.Close() cancels the prompt and the
+        operation.
+
+        The backend validates the mechanism against its allow-list and the key,
+        and VALIDATES THE PARAMETERS - RSA-PSS hash, MGF and salt length above
+        all - rather than forwarding them. It does this even though the frontend
+        also checked: two checks against a hostile caller is the correct number.
+
+        The backend also enforces the per-purpose consent policy, because the
+        consent UI is here. The frontend enforces the grant's existence, its
+        ownership, its expiry, its operation set and its rate limit, because
+        those are policy.
+    -->
+    <method name="Sign">
+      <arg type="o" name="handle" direction="in"/>
+      <arg type="o" name="session_handle" direction="in"/>
+      <arg type="s" name="app_id" direction="in"/>
+      <arg type="s" name="parent_window" direction="in"/>
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type="u" name="response" direction="out"/>
+      <arg type="a{sv}" name="results" direction="out"/>
+    </method>
+
+    <!--
+        Decrypt:
+
+        As Sign, with "ciphertext" in @options and "plaintext" in @results.
+        Refused unless the grant's permitted_operations includes decrypt. Not in
+        v1.
+    -->
+    <method name="Decrypt">
+      <arg type="o" name="handle" direction="in"/>
+      <arg type="o" name="session_handle" direction="in"/>
+      <arg type="s" name="app_id" direction="in"/>
+      <arg type="s" name="parent_window" direction="in"/>
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type="u" name="response" direction="out"/>
+      <arg type="a{sv}" name="results" direction="out"/>
+    </method>
+
+    <!--
+        OpenPkcs11Endpoint:
+        @session_handle: the grant
+        @app_id: app id, as established by the FRONTEND
+        @options: vardict, reserved
+        @endpoint_fd: Unix socket file descriptor
+        @certificate_uri: RFC 7512 URI, valid only on @endpoint_fd
+        @private_key_uri: RFC 7512 URI, valid only on @endpoint_fd
+        @endpoint_version: wire/behaviour version
+
+        EXPERIMENTAL. Starts the synthetic PKCS#11 facade for this grant, in its
+        own process, and returns the socket.
+
+        THE FD IS CREATED HERE, because the facade must reach the token session
+        and the token session is the backend's. The frontend relays the
+        descriptor to the caller without holding a copy. It is not a
+        Request-shaped call: it shows no UI. Non-interactive fd-returning impl
+        methods are established practice -
+        org.freedesktop.impl.portal.RemoteDesktop.ConnectToEIS is one.
+
+        @app_id is passed because the facade's grant binding may have to be
+        enforced by caller identity rather than by socket, if SPIKES S3 forces
+        the single-permanently-registered-module architecture.
+
+        NO pin-value AND NO pin-source EVER APPEARS IN A URI RETURNED HERE.
+    -->
+    <method name="OpenPkcs11Endpoint">
+      <annotation name="org.gtk.GDBus.C.UnixFD" value="true"/>
+      <arg type="o" name="session_handle" direction="in"/>
+      <arg type="s" name="app_id" direction="in"/>
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type="h" name="endpoint_fd" direction="out"/>
+      <arg type="s" name="certificate_uri" direction="out"/>
+      <arg type="s" name="private_key_uri" direction="out"/>
+      <arg type="u" name="endpoint_version" direction="out"/>
+    </method>
+
+    <!--
+        GetCapabilities:
+        @options: vardict, reserved
+        @capabilities: vardict
+
+        What this BACKEND can do, on this hardware, with this p11-kit
+        configuration: purposes as, operations as, mechanisms as,
+        pkcs11_endpoint b, endpoint_version u,
+        protected_authentication_path b, has_display b.
+
+        The frontend intersects this with its own policy before answering an
+        application. A backend that claims a capability the frontend does not
+        allow does not get it.
+    -->
+    <method name="GetCapabilities">
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type="a{sv}" name="capabilities" direction="out"/>
+    </method>
+
+    <!--
+        TokenAdded / TokenRemoved:
+        @token: DISPLAY identity only
+
+        The backend watches the readers and reports. THE FRONTEND DECIDES WHO
+        HEARS: these signals go to the frontend, which re-emits to the
+        applications that are entitled to know, and to nobody else. A backend
+        that broadcast token presence on a bus applications can watch would
+        undo the reason ListTokens does not exist.
+
+        Debounced by the backend: a reader that reports insert/remove
+        repeatedly must not produce a signal storm. docs/SPIKES.md S4 sets the
+        threshold from real hardware.
+    -->
+    <signal name="TokenAdded">
+      <arg type="a{sv}" name="token"/>
+    </signal>
+    <signal name="TokenRemoved">
+      <arg type="a{sv}" name="token"/>
+    </signal>
+
+    <!--
+        SessionInvalidated:
+        @session_handle: the grant whose backing state died
+        @reason: "token_removed" | "device_error" | "backend_shutdown"
+
+        The backend lost the thing behind the grant. The frontend turns this
+        into GrantInvalidated and Session.Closed for the application. The
+        backend does not decide that a grant has expired or been revoked by
+        policy - it only reports what the hardware did.
+    -->
+    <signal name="SessionInvalidated">
+      <arg type="o" name="session_handle"/>
+      <arg type="s" name="reason"/>
+    </signal>
+
+    <property name="version" type="u" access="read"/>
+
+  </interface>
+
+  <!--
+      io.github.sjtrotter.impl.portal.Request:
+      @short_description: Shared backend request interface
+
+      Exactly org.freedesktop.impl.portal.Request, renamed. The backend exports
+      a Request object on the path the frontend passed as @handle; the FRONTEND
+      calls Close() on it to end the interaction. The application cannot: it
+      only ever holds the frontend's own Request object, and the frontend
+      forwards.
+  -->
+  <interface name="io.github.sjtrotter.impl.portal.Request">
+    <method name="Close"/>
+  </interface>
+
+  <!--
+      io.github.sjtrotter.impl.portal.Session:
+      @short_description: Shared backend session interface
+
+      Exactly org.freedesktop.impl.portal.Session, renamed. Close() tears down
+      the token session, logs out where the token permits, poisons any facade
+      endpoint and cancels in-flight operations. Closed is emitted when the
+      backend closes the session on its own initiative.
+  -->
+  <interface name="io.github.sjtrotter.impl.portal.Session">
+    <method name="Close"/>
+    <signal name="Closed"/>
+    <property name="version" type="u" access="read"/>
+  </interface>
+
+</node>

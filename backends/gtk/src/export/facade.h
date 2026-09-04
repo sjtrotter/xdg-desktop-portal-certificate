@@ -66,6 +66,15 @@
  *  handles, object creation, key generation, wrapping or derivation does not need
  *  C_FindObjects to reach the rest of the card. There is no allow-by-default path.
  *
+ *  THE FD IS CREATED HERE AND RELAYED BY THE FRONTEND. The facade must reach the token
+ *  session, and the token session belongs to this process, so the backend is the only
+ *  side that can serve it. The frontend checks the grant, the owner and the policy, calls
+ *  io.github.sjtrotter.impl.portal.Smartcard1.OpenPkcs11Endpoint, and passes the
+ *  descriptor straight through to the application without holding a copy. Upstream
+ *  precedent for a descriptor crossing the impl boundary:
+ *  org.freedesktop.impl.portal.RemoteDesktop.ConnectToEIS (out) and
+ *  org.freedesktop.impl.portal.Secret.RetrieveSecret (in).
+ *
  *  THE ENDPOINT IS A FILE DESCRIPTOR, NOT A PATH. A path is discoverable, races on the
  *  filesystem, and needs a bind mount to cross a sandbox; an fd passed over D-Bus is the
  *  capability and already crosses.
@@ -92,10 +101,16 @@
 
 typedef struct SmartcardFacade SmartcardFacade;
 
-/** Create a facade for @grant_id and return the endpoint socket fd to hand back over
- *  D-Bus. The facade runs in its own process. The URIs it fills in are valid only on
- *  this endpoint and carry no PIN attributes. */
-SmartcardFacade* smartcard_facade_open(const char* grant_id, int* endpoint_fd,
+/** Create a facade for @session_handle and return the endpoint socket fd for the
+ *  frontend to relay. The facade runs in its own process. The URIs it fills in are valid
+ *  only on this endpoint and carry no PIN attributes.
+ *
+ *  @app_id is passed because grant binding may have to be enforced by CALLER IDENTITY
+ *  rather than by socket, if docs/SPIKES.md S3 forces the single-permanently-registered-
+ *  module architecture. It is the frontend's answer, not anything this process worked
+ *  out. */
+SmartcardFacade* smartcard_facade_open(const char* session_handle, const char* app_id,
+                                       int* endpoint_fd,
                                        char** certificate_uri, char** private_key_uri,
                                        GError** error);
 

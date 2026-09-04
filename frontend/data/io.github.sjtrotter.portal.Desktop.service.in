@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# D-Bus activation for the portal FRONTEND. It is a SESSION service: the cards are
+# the user's and nothing here needs root.
+#
+# This is our stand-in for org.freedesktop.portal.Desktop, the name
+# xdg-desktop-portal's frontend owns. Applications talk to THIS name and to no
+# other; the backend has its own name and is not for applications.
+#
+# EXPERIMENTAL. The binary this points at is a design-sketch stub that exits 70.
+
+[D-BUS Service]
+Name=io.github.sjtrotter.portal.Desktop
+Exec=@libexecdir@/smartcard-portal-frontend

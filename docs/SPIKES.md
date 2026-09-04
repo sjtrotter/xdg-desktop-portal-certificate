@@ -13,8 +13,11 @@ the product, it does not get a test suite, and it does not get merged.
 | **S2** | Who prompts for the PIN, and when, once a module is involved? | The login model, and whether the consent story survives contact with real TLS stacks |
 | **S3** | Can WebKitGTK complete a client-certificate handshake through it? | Whether the first consumer can use this project — the weakest link in the design |
 | **S4** | What happens with removal, reinsertion, and several readers? | Whether the lifetime model is right, and how much of it is card-specific |
+| **S5** | Does the frontend/backend split survive contact with fd passing, prompts and a dying backend? | Whether [0008](decisions/0008-build-to-the-upstream-shape.md)'s claim — that acceptance upstream is a rename — is true |
 
-**S3 is the one that decides whether this project is worth publishing.** Run S1 and S3 together;
+**S3 is the one that decides whether this project is worth publishing.** S5 is new with the
+frontend/backend split and is cheap; run it alongside S1, because S1's facade is the thing whose fd
+has to cross two processes. Run S1 and S3 together;
 S3's failure modes are S1's requirements list. Until S3 passes, `webauth-service` keeps its
 in-process certificate handling behind an internal adapter, so that it can use either path.
 
@@ -63,9 +66,15 @@ six.
 8. **Sandbox reach.** Determine whether the endpoint fd can be used inside a Flatpak — it is passed
    over D-Bus, which should be the point of doing it that way — and what p11-kit configuration the
    sandboxed consumer still needs.
+9. **Two hops.** The fd is created by the backend, returned over the impl interface, and relayed by
+   the frontend without being copied. Confirm that survives: that the descriptor the application
+   receives is the backend's socket, that no reference is retained by the frontend, that closing it
+   in the application is observed by the facade helper, and that a `GUnixFDList` round trip through
+   two services does not silently duplicate or leak it. This is S5's first step and it belongs in
+   both spikes.
 
-**Pass** = a real GnuTLS mutual-TLS handshake through the facade, every hostile call refused, and a
-credible answer for concurrency. **Fail** = brokered operations only; delete `OpenPkcs11Endpoint`
+**Pass** = a real GnuTLS mutual-TLS handshake through the facade, every hostile call refused, a
+credible answer for concurrency, and the fd surviving the relay. **Fail** = brokered operations only; delete `OpenPkcs11Endpoint`
 from the interface rather than shipping it weakened.
 
 ---
@@ -194,5 +203,47 @@ version?
    API.
 
 **Pass** = a documented, card-independent lifetime model, with the card-specific parts identified as
-such. **Fail** = the lifetime model in [INTERFACE.md](INTERFACE.md#lifetime) needs rewriting before
+such. **Fail** = the lifetime model in [PUBLIC-INTERFACE.md](PUBLIC-INTERFACE.md#lifetime) needs rewriting before
 anything is built on it.
+
+---
+
+## S5 — The frontend/backend boundary
+
+**The question.** Does the split behave the way [0008](decisions/0008-build-to-the-upstream-shape.md)
+assumes — and is the claim in [UPSTREAMING.md](UPSTREAMING.md), that acceptance upstream is a rename
+rather than a redesign, still true after contact with a running system?
+
+**Why it matters.** The split was built early, against the review's advice, on the strength of that
+claim. It is cheap to test and expensive to be wrong about.
+
+### Steps
+
+1. **fd relay.** As S1 step 9: the facade socket created in the backend, returned over the impl
+   interface, relayed by the frontend, used by the application. No copy retained, no leak, closure
+   observed.
+2. **Prompt cancellation across two hops.** `Request.Close()` on the frontend's object must close
+   the backend's window *before* the application is told anything. Measure the gap. A user who
+   cancels and sees the PIN dialog linger has been shown that the dialog is not in charge.
+3. **A backend that dies mid-grant.** Kill it during a prompt, during a `Sign`, and while a facade
+   endpoint is open. Confirm every grant is invalidated with `backend_gone`, that no application is
+   left holding a session handle to nothing, and that the facade helper is reaped.
+4. **A backend that lies.** A test backend that returns a longer `expires_at` than it was given,
+   mechanisms outside the allow-list, `permitted_operations` the purpose forbids, and a
+   `remember_selection` the caller never asked for. **Every one must be clamped by the frontend and
+   logged**, not honoured.
+5. **A caller that tries to reach the impl interface directly**, sandboxed and unsandboxed. Confirm
+   the sender check refuses it, and record honestly what an unsandboxed process on an unhardened
+   desktop can still do.
+6. **Backend selection.** Two `.portal` files, `portals.conf` preferring each in turn, one naming a
+   backend that is not installed, and one naming `none`. Confirm the documented order and that a
+   missing backend produces `BackendUnavailable` rather than a hang.
+7. **Round-trip cost.** Measure `Sign` end to end, with and without a prompt, against a
+   single-process build of the same code. This is the number that decides whether the
+   `Request`-shaped `Sign` needs a non-interactive fast path — see
+   [UPSTREAMING.md](UPSTREAMING.md), open items.
+
+**Pass** = the relay is clean, cancellation is prompt, a dying backend is survivable and loud, a
+lying backend cannot widen a grant, and the round-trip cost is tolerable. **Fail** = either the
+boundary needs a redesign before anything is built on it, or the round trip is too expensive and the
+interface needs a fast path — both of which are much cheaper to learn now than after acceptance.
