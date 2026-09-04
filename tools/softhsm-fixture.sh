@@ -20,14 +20,24 @@
 #   $SOFTHSM_DIR     where to put it. Default ${TMPDIR:-/tmp}/xdp-certificate-softhsm
 #   $SOFTHSM_MODULE  path to libsofthsm2.so. Searched for if unset.
 #
-# THE DIRECTORY IS CHECKED BEFORE IT IS USED. The default path is predictable
-# and it has to be -- tests/test-broker-device.c and tools/dev-stack.sh both
-# look for it there -- and what lives in it is a file the BACKEND dlopen()s:
-# $SOFTHSM_DIR/module-path is passed to --module. On a machine with a shared
-# sticky /tmp another user can create that directory first, so this refuses to
-# touch anything that is a symlink, is not a directory, is not owned by this
-# user, or is group- or world-writable, rather than writing the fixture into
-# somebody else's directory.
+# THE DIRECTORY IS CHECKED BEFORE IT IS USED, AND BEFORE IT IS DELETED. The
+# default path is predictable and it has to be -- tests/test-broker-device.c and
+# tools/dev-stack.sh both look for it there -- and what lives in it is a file the
+# BACKEND dlopen()s: $SOFTHSM_DIR/module-path is passed to --module. On a machine
+# with a shared sticky /tmp another user can create that directory first.
+#
+# tools/lib.sh does the checking, and ownership is only the first of four things
+# it wants: the directory must also be under $TMPDIR by real path and must carry
+# this project's marker file naming this fixture. An `rm -rf` gated on ownership
+# alone is an `rm -rf` a mistyped SOFTHSM_DIR aims at $HOME. A directory that
+# exists WITHOUT the marker is never touched: the message says to remove it by
+# hand, which is the only safe thing a script can say about somebody else's
+# directory.
+#
+# THE TOKEN IS SOFTWARE, and the backend's default is hardware only (CKF_HW), so
+# everything that uses this fixture passes --module -- naming a module is
+# already the deliberate act -- and tools/ passes --allow-software-tokens as
+# well so that the intent is visible in the command line.
 
 set -eu
 
@@ -40,29 +50,8 @@ die() {
 	exit 40
 }
 
-# Refuse anything we do not own outright. See the header.
-check_dir() {
-	local path="$1" owner mode
-
-	# The two that cannot be repaired: somebody else's directory, or a link into
-	# one. Both mean the fixture -- and the module the backend dlopen()s out of
-	# it -- would be under someone else's control.
-	[ -L "$path" ] && die "$path is a symlink; refusing to use it"
-	[ -d "$path" ] || die "$path exists and is not a directory"
-
-	owner="$(stat -c %u "$path")"
-	[ "$owner" = "$(id -u)" ] || die "$path is owned by uid $owner, not $(id -u)"
-
-	# The one that can: we own it, so tighten it rather than refusing to work.
-	mode="$(stat -c %a "$path")"
-	case "$mode" in
-	700 | 500) ;;
-	*)
-		echo "${0##*/}: tightening $path from mode $mode to 700" >&2
-		chmod 700 "$path" || die "could not chmod $path"
-		;;
-	esac
-}
+# shellcheck source=tools/lib.sh
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 find_module() {
 	if [ -n "${SOFTHSM_MODULE:-}" ]; then
@@ -103,10 +92,7 @@ find_util() {
 }
 
 if [ "${1:-}" = "--clean" ]; then
-	if [ -e "$SOFTHSM_DIR" ]; then
-		check_dir "$SOFTHSM_DIR"
-		rm -rf -- "$SOFTHSM_DIR"
-	fi
+	fixture_remove "$SOFTHSM_DIR" softhsm
 	echo "removed $SOFTHSM_DIR"
 	exit 0
 fi
@@ -118,15 +104,12 @@ command -v openssl >/dev/null || die "openssl not found"
 MODULE="$(find_module)"
 UTIL="$(find_util "$MODULE")"
 
-if [ -e "$SOFTHSM_DIR" ]; then
-	check_dir "$SOFTHSM_DIR"
-	rm -rf -- "$SOFTHSM_DIR"
-fi
+fixture_remove "$SOFTHSM_DIR" softhsm
 
 # 700 from the moment it exists, not after: the token files hold the fixture's
 # private keys, and a window in which they are world-readable is a window.
+fixture_make "$SOFTHSM_DIR" softhsm
 (umask 077 && mkdir -p "$SOFTHSM_DIR/tokens")
-check_dir "$SOFTHSM_DIR"
 
 cat >"$SOFTHSM_DIR/softhsm2.conf" <<EOF
 directories.tokendir = $SOFTHSM_DIR/tokens

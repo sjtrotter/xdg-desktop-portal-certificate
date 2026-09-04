@@ -40,6 +40,15 @@
 # verify against the second certificate:
 #
 #     tools/ui-smoke.sh -- --key-algorithm RSA --regrant EC
+#
+# THE OTHER PIN PROMPT. --pin-prompt=system runs the same stack against the
+# system-prompter implementation instead of the in-process window: this script
+# starts build/tests/certificate-test-prompter on the private bus, which owns
+# org.gnome.keyring.SystemPrompter there and answers with $PIN. Nothing is typed
+# and xdotool is not used for the PIN, so the run also proves that path needs no
+# display of this backend's own.
+#
+#     tools/ui-smoke.sh --pin-prompt=system
 
 set -u
 
@@ -60,43 +69,24 @@ die() {
 	exit 40
 }
 
-check_dir() {
-	local path="$1" owner mode
-
-	# The two that cannot be repaired: somebody else's directory, or a link into
-	# one. Both mean the fixture -- and the module the backend dlopen()s out of
-	# it -- would be under someone else's control.
-	[ -L "$path" ] && die "$path is a symlink; refusing to use it"
-	[ -d "$path" ] || die "$path exists and is not a directory"
-
-	owner="$(stat -c %u "$path")"
-	[ "$owner" = "$(id -u)" ] || die "$path is owned by uid $owner, not $(id -u)"
-
-	# The one that can: we own it, so tighten it rather than refusing to work.
-	mode="$(stat -c %a "$path")"
-	case "$mode" in
-	700 | 500) ;;
-	*)
-		echo "${0##*/}: tightening $path from mode $mode to 700" >&2
-		chmod 700 "$path" || die "could not chmod $path"
-		;;
-	esac
-}
+# shellcheck source=tools/lib.sh
+. "$REPO/tools/lib.sh"
 
 # A FRESH DIRECTORY WITH AN UNGUESSABLE NAME, not a fixed path under /tmp:
 # nothing else has to find these logs, so nothing else has to be able to
-# predict where they are.
+# predict where they are. tools/lib.sh checks that anything given in $LOGDIR is
+# ours, is under $TMPDIR and carries this project's marker.
 if [ -n "${LOGDIR:-}" ]; then
-	check_dir "$LOGDIR"
+	fixture_make "$LOGDIR" ui-smoke
 else
-	LOGDIR="$(mktemp -d "${TMPDIR:-/tmp}/xdp-certificate-ui-smoke.XXXXXXXX")" || die "mktemp failed"
+	LOGDIR="$(fixture_mktemp xdp-certificate-ui-smoke ui-smoke)"
 fi
 
 [ -n "$XVFB" ] || die "Xvfb not found; set \$XVFB"
 [ -n "$XDOTOOL" ] || die "xdotool not found; set \$XDOTOOL"
 # The module path in here is dlopen()ed by the backend, so the directory it
 # comes out of is checked the same way tools/softhsm-fixture.sh checks it.
-check_dir "$SOFTHSM_DIR"
+fixture_check "$SOFTHSM_DIR" softhsm
 [ -f "$SOFTHSM_DIR/module-path" ] || die "no SoftHSM fixture; run tools/softhsm-fixture.sh"
 [ -x "$BACKEND" ] || die "no backend at $BACKEND"
 [ -x "$XDP_BUILD/desktop-portal/xdg-desktop-portal" ] || die "no frontend; set XDP_BUILD"
@@ -104,16 +94,15 @@ check_dir "$SOFTHSM_DIR"
 # shellcheck disable=SC1090
 [ -f "$XDP_ENV" ] && . "$XDP_ENV"
 
+# EVERY .portal ON THE MACHINE, plus ours, plus a copy of the machine's
+# portals.conf with one line added. XDG_DESKTOP_PORTAL_DIR makes the frontend
+# ignore every other portal directory AND every other portals.conf, so a
+# directory holding only certificate.portal leaves the stack with no settings
+# portal -- which is why the windows used to come up light on a dark desktop.
+# tools/lib.sh says it at length.
 DEVDIR="$LOGDIR/portals"
-rm -rf -- "$DEVDIR"
 (umask 077 && mkdir -p "$DEVDIR")
-
-sed -e '/^#/d' -e '/^$/d' "$REPO/data/certificate.portal.in" >"$DEVDIR/certificate.portal"
-cat >"$DEVDIR/portals.conf" <<-EOF
-	[preferred]
-	default=none;
-	org.freedesktop.impl.portal.experimental.Certificate=certificate;
-EOF
+xdp_write_portal_dir "$DEVDIR" "$REPO"
 
 "$XVFB" "$SCREEN" -screen 0 1280x1024x24 -nolisten tcp >"$LOGDIR/xvfb.log" 2>&1 &
 XVFB_PID=$!
@@ -133,7 +122,9 @@ export GDK_BACKEND=x11
 export GTK_A11Y=none
 export SOFTHSM2_CONF="$SOFTHSM_DIR/softhsm2.conf"
 export XDG_DESKTOP_PORTAL_DIR="$DEVDIR"
-export XDG_CURRENT_DESKTOP=dev
+# The session's own desktop, not "dev": the portals.conf in $DEVDIR is a copy of
+# the machine's, so the backends it names are the ones this desktop uses.
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-dev}"
 export XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate
 
 MODULE="$(cat "$SOFTHSM_DIR/module-path")"
@@ -142,21 +133,78 @@ MODULE="$(cat "$SOFTHSM_DIR/module-path")"
 # point is that something else ends the interaction -- Request.Close() from the
 # frontend, or a timeout.
 DRIVE_WINDOWS=1
-if [ "${1:-}" = "--no-drive" ]; then
-	DRIVE_WINDOWS=0
-	shift
-fi
+PIN_PROMPT=gtk
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--no-drive)
+		DRIVE_WINDOWS=0
+		shift
+		;;
+	--pin-prompt=*)
+		PIN_PROMPT="${1#--pin-prompt=}"
+		shift
+		;;
+	*) break ;;
+	esac
+done
 [ "${1:-}" = "--" ] && shift
+
+case "$PIN_PROMPT" in
+gtk | system) ;;
+*) die "--pin-prompt takes gtk or system here; 'auto' would depend on what is on the bus" ;;
+esac
+
+PROMPTER_BIN="${PROMPTER_BIN:-$(dirname -- "$BACKEND")/../tests/certificate-test-prompter}"
+if [ "$PIN_PROMPT" = system ]; then
+	[ -x "$PROMPTER_BIN" ] ||
+		die "no test prompter at $PROMPTER_BIN.
+It is built only when the build found gcr-4; check 'meson configure build | grep gcr'."
+fi
 
 inner() {
 	"$XDP_BUILD/document-portal/xdg-permission-store" >"$LOGDIR/permission-store.log" 2>&1 &
 	PERM=$!
 	sleep 1
-	"$BACKEND" --verbose --module "$MODULE" >"$LOGDIR/backend.log" 2>&1 &
-	BE=$!
+
+	# THE FRONTEND GOES UP FIRST, and this is not a preference. GTK asks the
+	# settings portal for a colour scheme as soon as the backend initialises it,
+	# which on a private bus ACTIVATES org.freedesktop.portal.Desktop -- and
+	# activation finds the SYSTEM portal at /usr/libexec, which then owns the
+	# name this script's frontend was about to take. tools/dev-stack.sh has done
+	# this since the day it hit that; this script had not, and it only started
+	# failing once the portal directory grew a settings backend for GTK to
+	# reach.
 	"$XDP_BUILD/desktop-portal/xdg-desktop-portal" -v >"$LOGDIR/frontend.log" 2>&1 &
 	FE=$!
-	sleep 3
+	xdp_wait_for_name org.freedesktop.portal.Desktop "$FE" || {
+		echo "ui-smoke: the frontend never took org.freedesktop.portal.Desktop"
+		tail -20 "$LOGDIR/frontend.log"
+		return 40
+	}
+
+	# THE PROMPTER GOES UP BEFORE THE BACKEND, because the backend resolves
+	# --pin-prompt=auto by asking the bus once. Here the choice is explicit, but
+	# the prompter still has to be there before the first Sign.
+	PROMPTER=""
+	if [ "$PIN_PROMPT" = system ]; then
+		TEST_PROMPTER_PIN="$PIN" "$PROMPTER_BIN" >"$LOGDIR/prompter.log" 2>&1 &
+		PROMPTER=$!
+		sleep 1
+		grep -q 'serving' "$LOGDIR/prompter.log" || {
+			echo "ui-smoke: the test prompter did not start:"
+			cat "$LOGDIR/prompter.log"
+			return 40
+		}
+	fi
+
+	"$BACKEND" --verbose --module "$MODULE" --allow-software-tokens \
+		--pin-prompt "$PIN_PROMPT" >"$LOGDIR/backend.log" 2>&1 &
+	BE=$!
+	xdp_wait_for_name org.freedesktop.impl.portal.desktop.certificate "$BE" || {
+		echo "ui-smoke: the backend never took its bus name"
+		tail -20 "$LOGDIR/backend.log"
+		return 40
+	}
 
 	python3 "$REPO/tools/certificate-e2e.py" --timeout 45000 "$@" >"$LOGDIR/e2e.log" 2>&1 &
 	E2E=$!
@@ -199,7 +247,11 @@ inner() {
 
 	if [ "$DRIVE_WINDOWS" = 1 ]; then
 		drive "Use a Certificate" Down Return
-		drive "Unlock Security Token" "type:" Return
+		# WITH THE SYSTEM PROMPTER THERE IS NO WINDOW TO DRIVE. The PIN field is
+		# the prompter's, and the prompter answers from $TEST_PROMPTER_PIN -- so
+		# a run that gets a signature back has proved the whole path without
+		# anything typing into anything.
+		[ "$PIN_PROMPT" = gtk ] && drive "Unlock Security Token" "type:" Return
 
 		# --regrant asks for a SECOND credential on the same session, so there
 		# is a second chooser and -- this is the point -- a SECOND PIN prompt.
@@ -208,7 +260,7 @@ inner() {
 		for arg in "$@"; do
 			if [ "$arg" = --regrant ]; then
 				drive "Use a Certificate" Down Return
-				drive "Unlock Security Token" "type:" Return
+				[ "$PIN_PROMPT" = gtk ] && drive "Unlock Security Token" "type:" Return
 				break
 			fi
 		done
@@ -219,15 +271,15 @@ inner() {
 	wait "$E2E"
 	rc=$?
 
-	kill "$FE" "$BE" "$PERM" 2>/dev/null
+	kill "$FE" "$BE" "$PERM" ${PROMPTER:+"$PROMPTER"} 2>/dev/null
 	return "$rc"
 }
 
 # THE PIN GOES THROUGH THE ENVIRONMENT, NOT ARGV. /proc/*/cmdline is readable
 # by every user on the machine and /proc/*/environ is not. It is the fixture PIN
 # today; it is also the line anyone adapting this script for a card will copy.
-export PIN LOGDIR REPO XDP_BUILD BACKEND MODULE XDOTOOL DRIVE_WINDOWS
-dbus-run-session -- bash -c "$(declare -f inner); inner \"\$@\"" -- "$@"
+export PIN LOGDIR REPO XDP_BUILD BACKEND MODULE XDOTOOL DRIVE_WINDOWS PIN_PROMPT PROMPTER_BIN
+dbus-run-session -- bash -c "$(declare -f xdp_wait_for_name); $(declare -f inner); inner \"\$@\"" -- "$@"
 rc=$?
 
 echo

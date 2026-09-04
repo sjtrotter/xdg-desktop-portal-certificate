@@ -27,6 +27,15 @@
 #     tools/dev-stack.sh --keep                   # leave it up for manual gdbus
 #     tools/dev-stack.sh --live -- --purpose client_auth
 #     tools/dev-stack.sh --softhsm                # against a SoftHSM fixture token
+#     tools/dev-stack.sh --pin-prompt=gtk         # this backend draws the PIN window
+#
+#   WHERE THE PIN IS TYPED. --pin-prompt is passed straight to the backend.
+#   "system" needs org.gnome.keyring.SystemPrompter on the bus the backend is
+#   using, and on a PRIVATE bus there is no shell to own it -- so this script
+#   refuses --pin-prompt=system unless --live. The system prompter is covered
+#   headlessly by `meson test pin-system` and by
+#   `tools/ui-smoke.sh --pin-prompt=system`, both of which stand up gcr's own
+#   server half on their private bus; docs/TESTING.md says so in one place.
 #
 # WHAT IT NEEDS
 #
@@ -45,13 +54,19 @@
 #
 # WHAT IT DOES
 #
-#   1. writes a throwaway $XDG_DESKTOP_PORTAL_DIR holding this repository's
-#      certificate.portal and a portals.conf that routes
-#      org.freedesktop.impl.portal.experimental.Certificate to it. Setting
-#      XDG_DESKTOP_PORTAL_DIR makes the frontend ignore every other .portal and
-#      portals.conf directory on the machine
-#      (desktop-portal/xdp-portal-config.c, lines 340-344 and 508-516), so
-#      nothing installed system wide can interfere.
+#   1. writes a throwaway $XDG_DESKTOP_PORTAL_DIR holding A SYMLINK TO EVERY
+#      .portal FILE ON THE MACHINE, this repository's certificate.portal, and a
+#      COPY of the machine's effective portals.conf with one line added routing
+#      org.freedesktop.impl.portal.experimental.Certificate to this backend.
+#
+#      All of it, and not just ours, because setting XDG_DESKTOP_PORTAL_DIR
+#      makes the frontend ignore every other .portal and portals.conf directory
+#      on the machine (desktop-portal/xdp-portal-config.c, lines 340-344 and
+#      508-516). A directory holding only certificate.portal is not "our
+#      backend as well"; it is our backend and no file chooser, no screenshot
+#      and NO SETTINGS -- which is why the chooser used to come up light on a
+#      dark desktop, and why --live used to take every portal on the session
+#      down for as long as it ran. tools/lib.sh says the same at length.
 #   2. starts xdg-permission-store -- xdg-desktop-portal refuses to start
 #      without it -- on the private bus. In --live mode the session's own is
 #      used.
@@ -75,6 +90,7 @@ PERMSTORE_BIN="$XDP_BUILD/document-portal/xdg-permission-store"
 
 MODE=private
 KEEP=0
+PIN_PROMPT=
 RUN_E2E=1
 SOFTHSM=0
 E2E_ARGS=()
@@ -84,35 +100,17 @@ die() {
 	exit 40
 }
 
-check_dir() {
-	local path="$1" owner mode
-
-	# The two that cannot be repaired: somebody else's directory, or a link into
-	# one. Both mean the fixture -- and the module the backend dlopen()s out of
-	# it -- would be under someone else's control.
-	[ -L "$path" ] && die "$path is a symlink; refusing to use it"
-	[ -d "$path" ] || die "$path exists and is not a directory"
-
-	owner="$(stat -c %u "$path")"
-	[ "$owner" = "$(id -u)" ] || die "$path is owned by uid $owner, not $(id -u)"
-
-	# The one that can: we own it, so tighten it rather than refusing to work.
-	mode="$(stat -c %a "$path")"
-	case "$mode" in
-	700 | 500) ;;
-	*)
-		echo "${0##*/}: tightening $path from mode $mode to 700" >&2
-		chmod 700 "$path" || die "could not chmod $path"
-		;;
-	esac
-}
+# shellcheck source=tools/lib.sh
+. "$REPO/tools/lib.sh"
 
 # mktemp rather than a fixed name plus $$: a pid is guessable, and what goes in
-# here decides which .portal files the frontend reads.
+# here decides which .portal files the frontend reads. tools/lib.sh checks that
+# it is ours, that it is under $TMPDIR, and that it carries this project's
+# marker, because this script `rm -rf`s it.
 if [ -n "${DEVDIR:-}" ]; then
-	check_dir "$DEVDIR"
+	fixture_make "$DEVDIR" dev-stack
 else
-	DEVDIR="$(mktemp -d "${TMPDIR:-/tmp}/xdp-certificate-dev.XXXXXXXX")" || die "mktemp failed"
+	DEVDIR="$(fixture_mktemp xdp-certificate-dev dev-stack)"
 fi
 
 usage() {
@@ -127,6 +125,11 @@ parse_args() {
 		--live) MODE=live ;;
 		--no-e2e) RUN_E2E=0 ;;
 		--softhsm) SOFTHSM=1 ;;
+		--pin-prompt=*) PIN_PROMPT="${1#--pin-prompt=}" ;;
+		--pin-prompt)
+			shift
+			PIN_PROMPT="${1:-}"
+			;;
 		-h | --help) usage ;;
 		--)
 			shift
@@ -163,25 +166,16 @@ preflight() {
 }
 
 write_devdir() {
-	(umask 077 && mkdir -p "$DEVDIR")
-
-	# The comments are stripped so the file is readable in the log below; the
-	# installed one keeps them.
-	sed -e '/^#/d' -e '/^$/d' "$REPO/data/certificate.portal.in" >"$DEVDIR/certificate.portal"
-
-	# Named explicitly rather than with default=certificate, so that the log
-	# line the frontend prints names the interface this backend implements.
-	cat >"$DEVDIR/portals.conf" <<-EOF
-		[preferred]
-		default=none;
-		org.freedesktop.impl.portal.experimental.Certificate=certificate;
-	EOF
+	xdp_write_portal_dir "$DEVDIR" "$REPO"
 
 	echo "${0##*/}: dev portal dir $DEVDIR"
 	echo "--- certificate.portal"
 	sed 's/^/    /' "$DEVDIR/certificate.portal"
 	echo "--- portals.conf"
 	sed 's/^/    /' "$DEVDIR/portals.conf"
+	echo "--- other portals (symlinked from this machine)"
+	# shellcheck disable=SC2012
+	ls "$DEVDIR" | grep '\.portal$' | grep -v '^certificate.portal$' | sed 's/^/    /'
 	echo
 }
 
@@ -196,33 +190,17 @@ softhsm_env() {
 	# module-path out of this directory is dlopen()ed by the backend, so the
 	# directory is checked before it is trusted: same rule as
 	# tools/softhsm-fixture.sh, same reason.
-	check_dir "$SOFTHSM_DIR"
+	fixture_check "$SOFTHSM_DIR" softhsm
 	[ -f "$SOFTHSM_DIR/softhsm2.conf" ] ||
 		die "no SoftHSM fixture at $SOFTHSM_DIR; run tools/softhsm-fixture.sh first"
 
 	export SOFTHSM2_CONF="$SOFTHSM_DIR/softhsm2.conf"
-	BACKEND_ARGS+=(--module "$(cat "$SOFTHSM_DIR/module-path")")
+	# SoftHSM IS NOT A HARDWARE TOKEN and the backend's default is hardware
+	# only, so the rehearsal says so out loud. --module alone would be enough --
+	# naming a module is the same act -- but a flag in the command line is what
+	# makes the difference between the rehearsal and a card run readable.
+	BACKEND_ARGS+=(--module "$(cat "$SOFTHSM_DIR/module-path")" --allow-software-tokens)
 	echo "${0##*/}: using the SoftHSM fixture in $SOFTHSM_DIR"
-}
-
-# Poll the bus for @1 until it has an owner, for at most 30 seconds, giving up
-# early if the process that is meant to own it (@2) has exited.
-wait_for_name() {
-	local name="$1" pid="$2" owned=""
-
-	for _ in $(seq 1 120); do
-		owned="$(gdbus call --session --dest org.freedesktop.DBus \
-			--object-path /org/freedesktop/DBus \
-			--method org.freedesktop.DBus.NameHasOwner "$name" 2>/dev/null)"
-		case "$owned" in
-		*true*) return 0 ;;
-		esac
-
-		kill -0 "$pid" 2>/dev/null || return 1
-		sleep 0.25
-	done
-
-	return 1
 }
 
 start_stack() {
@@ -230,7 +208,11 @@ start_stack() {
 	export XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate
 
 	if [ "$MODE" = private ]; then
-		export XDG_CURRENT_DESKTOP=dev
+		# THE SESSION'S OWN DESKTOP, not "dev". The portals.conf in $DEVDIR is a
+		# copy of the machine's effective one, so the backends it names are the
+		# ones this desktop uses; telling the frontend it is running under a
+		# desktop nobody has ever heard of would throw that away again.
+		export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-dev}"
 		"$PERMSTORE_BIN" &
 		PERM_PID=$!
 		sleep 1
@@ -257,13 +239,13 @@ start_stack() {
 	# backend requests its name only after that -- so a fixed sleep raced it and
 	# the frontend's first call came back "was not provided by any .service
 	# files", there being no activation file on a private bus.
-	wait_for_name org.freedesktop.portal.Desktop "$FRONTEND_PID" ||
+	xdp_wait_for_name org.freedesktop.portal.Desktop "$FRONTEND_PID" ||
 		die "the frontend never took org.freedesktop.portal.Desktop"
 
 	"$BACKEND" "${BACKEND_ARGS[@]}" &
 	BACKEND_PID=$!
 
-	wait_for_name org.freedesktop.impl.portal.desktop.certificate "$BACKEND_PID" ||
+	xdp_wait_for_name org.freedesktop.impl.portal.desktop.certificate "$BACKEND_PID" ||
 		die "the backend never took org.freedesktop.impl.portal.desktop.certificate"
 }
 
@@ -285,6 +267,10 @@ inner() {
 	# .service file passes neither, and docs/SECURITY.md says why.
 	if [ "$MODE" = live ]; then
 		BACKEND_ARGS+=(--replace --allow-replacement)
+	fi
+
+	if [ -n "$PIN_PROMPT" ]; then
+		BACKEND_ARGS+=(--pin-prompt "$PIN_PROMPT")
 	fi
 
 	softhsm_env
@@ -320,8 +306,20 @@ inner() {
 	return "$rc"
 }
 
+# Refused before anything is started or written, rather than after: a private
+# bus has no shell to own org.gnome.keyring.SystemPrompter, so the backend
+# would come up, answer no_display at the first Sign, and look like a bug.
+check_pin_prompt() {
+	[ "$PIN_PROMPT" = system ] && [ "$MODE" != live ] &&
+		die "--pin-prompt=system needs a system prompter on the bus, and a private
+bus has no shell to own org.gnome.keyring.SystemPrompter. Use --live, or
+tools/ui-smoke.sh --pin-prompt=system, which brings its own."
+	return 0
+}
+
 main() {
 	parse_args "$@"
+	check_pin_prompt
 
 	if [ "${DEV_STACK_INNER:-0}" = "1" ]; then
 		trap stop_stack EXIT
@@ -336,7 +334,7 @@ main() {
 		echo "${0##*/}: --live: taking org.freedesktop.portal.Desktop on the REAL session bus."
 		echo "${0##*/}: the system portal returns by activation when this exits; see docs/TESTING.md."
 		echo
-		trap 'rm -rf -- "$DEVDIR"' EXIT
+		trap 'fixture_remove "$DEVDIR" dev-stack' EXIT
 		DEV_STACK_INNER=1 DEVDIR="$DEVDIR" XDP_BUILD="$XDP_BUILD" BACKEND="$BACKEND" \
 			XDP_ENV="$XDP_ENV" SOFTHSM="$SOFTHSM" \
 			"${BASH_SOURCE[0]}" $([ "$KEEP" = 1 ] && echo --keep) \
@@ -345,13 +343,14 @@ main() {
 		return $?
 	fi
 
-	trap 'rm -rf -- "$DEVDIR"' EXIT
+	trap 'fixture_remove "$DEVDIR" dev-stack' EXIT
 	DEV_STACK_INNER=1 DEVDIR="$DEVDIR" XDP_BUILD="$XDP_BUILD" BACKEND="$BACKEND" \
 		XDP_ENV="$XDP_ENV" SOFTHSM="$SOFTHSM" \
 		dbus-run-session -- "${BASH_SOURCE[0]}" \
 		$([ "$KEEP" = 1 ] && echo --keep) \
 		$([ "$RUN_E2E" = 0 ] && echo --no-e2e) \
-		$([ "$SOFTHSM" = 1 ] && echo --softhsm) -- "${E2E_ARGS[@]}"
+		$([ "$SOFTHSM" = 1 ] && echo --softhsm) \
+		$([ -n "$PIN_PROMPT" ] && echo "--pin-prompt=$PIN_PROMPT") -- "${E2E_ARGS[@]}"
 }
 
 main "$@"
