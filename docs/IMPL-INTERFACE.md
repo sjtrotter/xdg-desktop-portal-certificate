@@ -61,9 +61,9 @@ Every one of these is xdg-desktop-portal's, and none of them is an improvement o
 | `CreateSession(o handle, o session_handle, s app_id, a{sv} options) → (u, a{sv})` | non-interactive | Creates the backend-side state for a grant. `options` is unused and `results` is empty. Fails early when there is no p11-kit, no reader, no display. |
 | `AcquireCredential(o handle, o session_handle, s app_id, s parent_window, a{sv} options) → (u, a{sv})` | **interactive** | Discovery, filtering, and **the chooser**. |
 | `Sign(o handle, o session_handle, s app_id, s parent_window, a{sv} options) → (u, a{sv})` | **interactive** | The signature, and the PIN prompt if this is the first private-key use. |
-| `Decrypt(...)` | **interactive** | As `Sign`, with `ciphertext` in place of `data` and `plaintext` in place of `signature`. Not in v1. |
+| `Decrypt(...)` | **interactive** | As `Sign`, with `ciphertext` in place of `data` and `plaintext` in place of `signature`. **Refused in v1** — see "Decrypt is refused" below. |
 | `GetCapabilities(s app_id, a{sv} options) → a{sv}` | non-interactive | What this backend can do on this hardware. **Note the `app_id`** — see below. |
-| `TokenAdded(a{sv})`, `TokenRemoved(a{sv})` | signals | To the frontend. The frontend decides who else hears. |
+| `TokenAdded(a{sv})`, `TokenRemoved(a{sv})` | signals | To the frontend, which re-emits them to every client. **Presence only**: see "The token signals carry presence, not identity". |
 | `SessionInvalidated(o session_handle, s reason)` | signal | The hardware behind a grant went away: `token_removed`, `device_error`, `backend_shutdown`. The frontend turns it into `GrantInvalidated` and closes the Session. |
 
 **`GetCapabilities` carries `app_id`, and that is a change** from what this repository used to
@@ -192,6 +192,91 @@ or a different card takes its place, `backend_shutdown` on the way out, and `dev
 currently emitted at all — a device that fails mid-operation fails that operation and keeps the
 grant, because the card may still be there.
 
+### `Decrypt` is refused, and `GetCapabilities` does not offer it
+
+The XML has a `Decrypt` method and this backend implements it by **refusing it**, with the
+`invalid_request` shape, and by leaving `decrypt` out of the `operations` it reports from
+`GetCapabilities`.
+
+The interface's mechanism vocabulary is `RSA_PKCS1_V1_5`, `RSA_PSS` and `ECDSA`. Exactly one of
+those decrypts anything, and `C_Decrypt` under `CKM_RSA_PKCS` answers "padding valid, here is the
+plaintext" or "that failed" — two outcomes that are distinguishable on the wire. Against a key the
+user consented to once, repeated, that is Bleichenbacher's attack: it recovers plaintext and can
+forge a signature with the same key, for as long as the grant lasts, with no further consent and
+no rate limit on either side of the boundary.
+
+`Sign` is deliberately constrained to a digest of a named length so that it cannot be a signing
+oracle. Letting `Decrypt` hand over the equivalent capability through a different door would make
+that constraint decorative, so it does not.
+
+**What would change this**: an `RSA_OAEP` entry in the frontend's mechanism allow list, with a hash,
+an MGF and a label that this backend validates the way it already validates the PSS parameters.
+That is a frontend change; until it lands, "Decrypt is not in v1" is true again, which is what this
+document said all along.
+
+### The token signals carry presence, not identity
+
+`TokenAdded` and `TokenRemoved` send an **opaque id** and `protected_authentication_path`, and
+nothing else. The id is a hash of the token's stable attributes salted with a value this process
+generates at startup: stable enough to pair an insertion with its removal, useless as a
+cross-process or cross-boot identifier.
+
+The reason is the audience. The frontend re-emits these signals verbatim on its own public
+interface, to **every client on the bus**, before anybody has consented to anything. On PIV
+deployments a token label is routinely the cardholder's name, an EDIPI or an issuing agency — which
+is exactly the correlation the serial is withheld to prevent, delivered to a strictly larger
+audience than `token_display`, which goes only to the application that obtained a grant. The full
+`token_display` still goes there, in the `AcquireCredential` results.
+
+Gating or filtering the public signal is the frontend's half of this; it is on that branch's list.
+
+### A session is bound to its app id, and its identity level may not rise
+
+`AcquireCredential`, `Sign` and `Decrypt` all compare `app_id` against the one the session was
+created with and answer `2` / `no_such_session` when they differ. The frontend enforces session
+ownership too, and that is the point: it is the check this backend can make for free, and a
+frontend regression or a second frontend implementation would otherwise turn a session handle into
+cross-application key use.
+
+`app_identity_level` is recorded on the session at the first `AcquireCredential` and may **fall** —
+the frontend can legitimately know less about a caller later — but never **rise**. A session
+created for an unidentified caller does not become a session for a verified one because a later
+call said so.
+
+### Options are validated strictly, and defaults apply only to absent fields
+
+A field that is **present with the wrong type**, an unknown value for an enumerated field, or an
+unknown key in `operation_policy`, `certificate_filter` or `parameters` is refused with `2` /
+`invalid_request` (or `invalid_filter`). It used to be treated as absent, which meant an unknown
+`interaction_mode` became "prompting is allowed", a mistyped `certificate_filter` stopped filtering,
+and a `lifetime` of the wrong type became 300 seconds.
+
+**Unknown keys at the top level are still ignored**, deliberately: that is where the frontend adds
+fields, and a backend that refused them could not be upgraded past. Unknown keys in the three nested
+dictionaries above are refused, because a key nobody understood may have been the one that said
+"less".
+
+### `Session.Close()` is idempotent, and a session path can be used again
+
+`SessionInvalidated` leaves the Session skeleton **on the bus**. The frontend answers that signal
+with `Session.Close()` and returns its result to the application, so a backend that had already
+unexported the object turned a clean close into `UnknownObject`.
+
+The frontend's session paths are built from the caller's unique name and its
+`session_handle_token`, and applications pass a fixed token — so the same application gets the same
+path every time. A closed entry left in the table therefore made every later `CreateSession` from
+that application fail for the life of the backend process. A **closed** session at a path is now
+replaced; a **live** one is still refused.
+
+### Selection memory is offered only where it cannot lie
+
+The frontend stores a remembered selection only when the application passed
+`allow_selection_memory`. The impl interface has no such key, so this backend cannot know, and
+offering the checkbox to every identified caller meant a user could tick it and have nothing
+stored. Until the frontend adds `allow_selection_memory` (`b`) to the impl `AcquireCredential`
+options — a one-key change, the same shape as `lifetime` and `app_identity_level` — the checkbox is
+shown **only when `preselect_certificate` was supplied**. That under-approximates and never lies.
+
 ### `token_display` does not carry the serial
 
 The XML says `token_display` is "token and reader identity for display only" and does not enumerate
@@ -263,10 +348,27 @@ upstream relies on, rather than an analogue of it under our own names.
 unique name that currently owns `org.freedesktop.portal.Desktop`, and refuses anything else with
 `org.freedesktop.DBus.Error.AccessDenied`, logged by reason code
 ([`../src/certificate-impl.h`](../src/certificate-impl.h),
-`certificate_impl_sender_is_frontend`). The owner is *watched* rather than asked per call, so the
-comparison in every handler is a string compare and not a round trip; when nothing owns the name,
-every method is refused, because with no frontend on the bus there is nobody who may legitimately
-call. When the frontend goes away, every grant goes with it and every card session is closed.
+`certificate_impl_sender_is_frontend`). **"Every method" includes `Request.Close()` and
+`Session.Close()`** on the objects this backend exports at the paths the frontend chose: those
+paths are guessable, and a `Session.Close()` from a stranger logs the card out and destroys a
+grant.
+
+The owner is **resolved from the bus** with `GetNameOwner`, not taken from the name watcher's
+cache: D-Bus does not order `NameOwnerChanged` against the messages of the process that lost the
+name, so a former frontend that is still connected could otherwise be compared equal to a stale
+cached owner. An answer is reused for 100 ms so that a burst of calls inside one transaction is one
+round trip rather than five, and a **refusal** is always decided on a fresh answer. The watcher is
+kept for what it is good at: when the name changes hands or goes away, every session belonging to
+the old owner is invalidated before the new owner is accepted.
+
+What that still does not provide is atomicity: the answer is a snapshot, and the name can change
+hands between the check and the work the call authorises. That is the ordinary check-then-use
+property of every bus check; the residual risk is recorded in
+[SECURITY.md](SECURITY.md#open-problems).
+
+When nothing owns the name, every method is refused, because with no frontend on the bus there is
+nobody who may legitimately call. When the frontend goes away, every grant goes with it and every
+card session is closed.
 Upstream backends do not all do this. It is cheap, and the failure it prevents — an unsandboxed
 application calling `AcquireCredential` with an `app_id` of its own invention, and getting a consent
 dialog that names somebody else — would destroy the entire consent model rather than degrade it.
@@ -281,6 +383,14 @@ application's identity and drawing the window that asserts it.
 A deployment that wants more can add a D-Bus policy rule denying this backend's name to everything
 but the portal's uid. That is not in v1; it is recorded here so that "we could tighten this" is
 written down rather than assumed.
+
+**The bus name is not offered for replacement unless `--replace` was passed.** Every other backend
+sets `ALLOW_REPLACEMENT` unconditionally, and for a file chooser that is reasonable; here it meant
+any process running as the user could take
+`org.freedesktop.impl.portal.desktop.certificate` with one call and become the thing the portal
+calls — receiving `AcquireCredential` and `Sign` with a real app id and identity level, and drawing
+the window that asks for the PIN. `--replace` both allows replacement and asks to be one, so an
+operator can still upgrade in place; an arbitrary peer cannot simply ask.
 
 ## What the backend must never do
 

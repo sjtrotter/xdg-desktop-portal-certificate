@@ -34,31 +34,46 @@ such throughout the rest of this document.
 
 | Control | Where | How it is exercised |
 |---|---|---|
-| Only the owner of `org.freedesktop.portal.Desktop` may call any method; everything else gets `AccessDenied` | `src/certificate-impl.c`, `reject_stranger()` | the name is watched, not asked per call; refusals are logged by reason code |
+| Only the owner of `org.freedesktop.portal.Desktop` may call any method — **including `Request.Close()` and `Session.Close()`** | `src/certificate-impl.c`, `reject_stranger()`; `src/request-impl.c`; `src/session-impl.c` | `tests/test-impl-dbus.c`: a third connection calls every method, and both `Close()`s, and is refused |
+| The owner is resolved from the bus on every call, not taken from a watcher's cache | `src/certificate-impl.c`, `resolve_frontend_owner()` | `NameOwnerChanged` is not ordered against the former owner's messages; a 100 ms cache bounds the round trips and every *refusal* is decided on a fresh answer |
+| A session is bound to the `app_id` it was created for, and its identity level may fall but never rise | `src/certificate-impl.c`, `lookup_session()` | `tests/test-impl-dbus.c`: app B cannot use app A's session; `unidentified` cannot become `verified_sandboxed` |
+| A closed session leaves the table and its path can be used again | `src/certificate-impl.c`, `handle_create_session()` | `tests/test-impl-dbus.c`: create, close, create again |
+| The Session skeleton stays on the bus after invalidation, so the frontend's answering `Close()` is answered | `src/session-impl.c` | `Close()` is idempotent; the frontend sends one in reply to every `SessionInvalidated` |
+| Options are validated strictly: a present field of the wrong type, an unknown enum value or an unknown key in a security-relevant nested vardict is refused, and defaults apply only to absent fields | `src/certificate-impl.c`, `parse_acquire_options()`; `src/tokens/filter.c`; `src/broker/mechanism.c` | `tests/test-impl-dbus.c` drives fourteen malformed option sets; `tests/test-mechanism.c` covers the parameters |
+| Export failures abort the call; an unexported session is never inserted | `src/certificate-impl.c`, `src/request-impl.c`, `src/session-impl.c` | a session the frontend cannot close, or a prompt it cannot cancel, is worse than a failed call |
 | The app id and its identity level are **displayed, never derived** | `src/ui/chooser.c`, `build_identity()` | the private-bus run shows `identity=unidentified` and the window says so in words |
-| Caller-supplied `reason` is sanitised to one line, capped, quoted, and labelled as the application's | `src/certificate.c`, `certificate_sanitize_untrusted_text()` | `tests/test-redact.c`: newlines, control characters, bidi overrides and whitespace-only input |
+| Every externally sourced display string — app display name, app id, subject, issuer, token label, reader name, `reason` — is sanitised and capped, with a cap on combining-mark runs | `src/certificate.c`, `certificate_display_text()` | `tests/test-redact.c`; a desktop file's `Name=` is writable by any unsandboxed process and a card's label is chosen by whoever issued it |
 | The purpose is rendered in this backend's own words | `src/certificate.c`, `certificate_purpose_display()` | — |
 | Expired certificates are offered and marked **in words, not colour** | `src/tokens/filter.c`, `src/ui/chooser.c` | `tests/test-filter.c` |
 | A single candidate still opens the chooser | `src/certificate-impl.c` | by construction: there is no code path that skips it |
 | The PIN never leaves the process, never enters a GVariant, a GError or a log line | `src/ui/pin.c` | there is no entry point that returns a PIN; the caller passes a login function |
-| The PIN buffer is page-aligned, `mlock()`ed where the rlimit allows, and `explicit_bzero()`ed on every exit path | `src/ui/pin.c`, `PinBuffer` | wiped before the callback runs, on success, failure, cancel and window destroy |
+| The PIN buffer is page-aligned, `mlock()`ed where the rlimit allows, `MADV_DONTDUMP`ed, and `explicit_bzero()`ed on every exit path | `src/ui/pin.c`, `PinBuffer` | wiped before the callback runs, on success, failure, cancel and window destroy; an `mlock()` failure is warned about once and does not refuse the login |
+| The login worker gets a **private copy** of the PIN that it owns and wipes itself | `src/ui/pin.c`, `pin_buffer_dup()` | `tests/test-cancellation.c` asserts the worker still sees the whole PIN after the window was cancelled |
+| Cancelling while `C_Login` is in flight hides the window, defers the answer, and frees nothing until the worker returns | `src/ui/pin.c`, `pin_prompt_finish()` | `tests/test-cancellation.c`, under ASan |
+| Core dumps are disabled and `ptrace` attach is blocked for this process | `src/main.c`, `harden()` | `PR_SET_DUMPABLE(0)` plus `RLIMIT_CORE 0`, before anything can fault. `--debug-allow-core` turns it off for development and is never in an installed service file |
+| The bus name is only offered for replacement under `--replace` | `src/main.c` | otherwise any process running as the user could take the name and draw the PIN window |
 | Nothing persists a PIN | — | there is no option, no keyring call and no configuration key |
 | Protected authentication path draws **no PIN field** and logs in with a NULL PIN | `src/ui/pin.c` | — |
-| Retry state is shown only from `CKF_USER_PIN_COUNT_LOW` / `FINAL_TRY` / `LOCKED`, never as an invented number | `src/ui/pin.c`, `retry_hint()` | — |
+| Retry state is shown only from `CKF_USER_PIN_COUNT_LOW` / `FINAL_TRY` / `LOCKED`, never as an invented number, and is **re-read after every refusal** | `src/ui/pin.c`, `retry_hint()`; `src/tokens/discovery.c`, `certificate_tokens_refresh_flags()` | `FINAL_TRY` is normally set by the attempt that just failed |
+| Once `FINAL_TRY` is set the window requires a second, explicit Unlock before the attempt is spent | `src/ui/pin.c`, `on_unlock()` | — |
+| One window offers at most three attempts | `src/ui/pin.c`, `PIN_MAX_ATTEMPTS` | it is not a rate limit (see below); it is a bound on one prompt |
 | Retries are user-initiated; nothing retries on its own | `src/ui/pin.c` | `tests/test-broker-device.c` checks the wrong PIN is reported as `PIN_INCORRECT` and not collapsed |
-| PIN prompts are serialised process-wide | `src/ui/pin.c`, the prompt queue | — |
+| PIN prompts are serialised process-wide, and two operations on one session share **one** prompt | `src/ui/pin.c`, the prompt queue; `src/broker/operations.c`, the waiter list | two concurrent `Sign` calls on a logged-out grant produce one window, not two |
 | Login is **lazy**: at first private-key use, not at grant time | `src/broker/operations.c` | the UI smoke run shows the PIN window appearing at `Sign` |
 | Every mechanism and parameter is re-validated against the mechanism **and the key** | `src/broker/mechanism.c` | `tests/test-mechanism.c`, including the RSA-PSS salt that does not fit |
 | `data` is a digest of a stated length, never an arbitrary blob | `src/broker/mechanism.c` | `tests/test-mechanism.c` |
+| **`Decrypt` is refused outright** | `src/broker/mechanism.c` | the only decryption mechanism on the interface is RSA PKCS#1 v1.5, which would be a padding oracle over the card's key; `tests/test-mechanism.c` and `tests/test-impl-dbus.c` |
 | The token behind a grant is re-resolved by manufacturer, model, serial and label — never by slot | `src/tokens/discovery.c`, `certificate_tokens_open_session()` | a different card in the same slot is a different token |
-| The backend enforces the grant lifetime itself and tears the card session down when it expires | `src/session-impl.c` | — |
+| A token with no serial cannot back a grant, and that is said at `AcquireCredential` time | `src/certificate-impl.c`, `finish_acquire()` | it used to be discovered at the first `Sign`, after consent and a PIN |
+| The backend enforces the grant lifetime itself and tears the card session down when it expires | `src/session-impl.c` | closed, expired and cancelled are re-checked before the device lock and again with it held |
 | Token removal invalidates every grant on that token | `src/certificate-impl.c`, `on_token_event()` | — |
-| The frontend leaving the bus closes every grant | `src/certificate-impl.c`, `on_frontend_vanished()` | — |
+| The frontend leaving the bus closes every grant, and so does the name changing hands | `src/certificate-impl.c`, `on_frontend_vanished()`, `set_frontend_owner()` | — |
 | Shutdown emits `SessionInvalidated(backend_shutdown)` and flushes before exit | `src/main.c` | — |
-| Logging is structural: no format-string entry point, no PIN, no subject, no URI, no signature | `src/redact.h`, `src/redact.c` | `tests/test-redact.c` asserts `pin-value` never survives |
+| Logging is structural: no format-string entry point, no PIN, no subject, no URI, no signature — and every external field is escaped and capped | `src/redact.h`, `src/redact.c` | `tests/test-redact.c` asserts `pin-value` never survives and that a newline in an app id cannot forge a journal line |
 | Card serials are truncated in logs and **absent from `token_display`** | `src/redact.c`, `src/certificate-impl.c` | — |
-| Every PKCS#11 call runs off the main thread | `src/broker/`, `src/tokens/discovery.c` | — |
-| Every request is tied to one `GCancellable` that `Close()` cancels | `src/request-impl.c` | — |
+| `TokenAdded`/`TokenRemoved` carry **presence only** — a per-process salted id and the protected-path flag | `src/certificate-impl.c`, `token_presence_for()` | the frontend re-emits these to every client on the bus; a PIV label is routinely the cardholder's name |
+| Every PKCS#11 call runs off the main thread, `GetCapabilities` included | `src/broker/`, `src/tokens/discovery.c`, `src/certificate-impl.c` | `GetCapabilities` used to enumerate every slot from the method handler, under the lock a card enumeration holds for seconds |
+| Every request is tied to one `GCancellable` that `Close()` cancels, and a cancelled operation answers 1 rather than 2 | `src/request-impl.c`, `src/certificate-impl.c` | `tests/test-cancellation.c` |
 | Discovery does not log in | `src/tokens/discovery.c` | `tests/test-broker-device.c` |
 
 ### Not implemented
@@ -66,10 +81,11 @@ such throughout the rest of this document.
 | | |
 |---|---|
 | The synthetic PKCS#11 facade | there is no method to reach it: `OpenPkcs11Endpoint` is on neither interface. `src/export/facade.h` holds the requirements |
-| Rate limiting | neither side does it. The frontend is the right place; it is on that branch's open-items list |
+| Rate limiting | neither side does it. The frontend is the right place; it is on that branch's open-items list. The three-attempt cap on one PIN window is a bound on one prompt, not a rate limit: nothing counts requests per caller or per hour |
 | Chain building | `chain_status` is always `leaf_only`, honestly |
 | A D-Bus policy denying this backend's name to everything but the portal's uid | recorded in [IMPL-INTERFACE.md](IMPL-INTERFACE.md) as a deployment option, not shipped |
-| Disabling core dumps for the process | the PIN buffer is `mlock()`ed and wiped, but a core dump taken between `pin_buffer_set()` and the wipe would contain it |
+| A wipeable GTK entry buffer | `GtkPasswordEntry` is backed by a `GtkPasswordEntryBuffer`, which GTK allocates from its secure-memory pool and zeroes when it frees it, and GTK places the text in non-pageable memory "if the underlying platform allows it". GTK guarantees nothing about the intermediate copies a text widget, an input method or a Pango layout may have made, so **this project does not claim the PIN existed in exactly one place** — only that its own copy is in one wiped, locked, non-dumpable page |
+| `RSA_OAEP`, and therefore any decryption at all | the interface's mechanism vocabulary has no OAEP entry, so `Decrypt` is refused. Adding one — with a validated hash, MGF and label — is a frontend change |
 | Any hardware assurance at all | **no real smart card has ever been read by this code.** [TESTING.md](TESTING.md) tier 3 is the run that would change that |
 
 ## What this is a boundary against, and what it is not
@@ -240,9 +256,30 @@ satisfy them.
   session, and because neither interface has a field one could travel in.
 - **No `pin-value` and no `pin-source` in any PKCS#11 URI this service emits**, ever. Any URI
   arriving from elsewhere carrying one is truncated before it can be logged.
-- **The buffer is wiped on every exit path** — success, failure, cancel, timeout, window destroyed,
-  crash handler — allocated in locked, non-swappable memory where the platform allows, and core
-  dumps are disabled for the process where practical.
+- **The buffer is wiped on every exit path** — success, failure, cancel, timeout, window destroyed
+  — allocated in locked, non-swappable memory where the platform allows, marked `MADV_DONTDUMP`,
+  and **core dumps are disabled for the process**: `PR_SET_DUMPABLE(0)` and `RLIMIT_CORE 0` are set
+  before anything else in `main()`. `PR_SET_DUMPABLE(0)` also makes `/proc/self/*` root-owned,
+  which blocks a same-uid `ptrace` attach — a partial mitigation of an open problem below rather
+  than a fix for it, since it does nothing about a tracer that attached first.
+  - **What it costs, honestly.** A non-dumpable process cannot be attached to by `gdb` either, and
+    xdg-desktop-portal's own settings portal cannot read `/proc/$pid/root` to identify this
+    process, so GDK logs a warning and falls back to GSettings for the colour scheme.
+    `--debug-allow-core` turns the hardening off for development and must never appear in an
+    installed service file.
+  - **What GTK's copy is.** The PIN is typed into a `GtkPasswordEntry`, which GTK backs with a
+    `GtkPasswordEntryBuffer` allocated from its secure-memory pool and zeroed when freed, and which
+    GTK places in non-pageable memory "if the underlying platform allows it". GTK promises nothing
+    about intermediate copies made by the text widget, an input method or a Pango layout. **This
+    project therefore does not claim the PIN exists in exactly one place.** What it claims is that
+    the copy it owns is in one page that is locked, non-dumpable and wiped, that the entry is
+    cleared the moment that copy is made, and that the worker gets a private copy nothing else can
+    free under it.
+  - **`mlock()` failing is not fatal**, and that is a policy rather than an oversight: the default
+    `RLIMIT_MEMLOCK` is small, a desktop session may have spent it, and refusing to unlock a card
+    because the kernel would not pin one page would be a denial of service with no security gain.
+    It is warned about once per process, at message level, so the difference between "not written
+    to swap" and "probably not written to swap" is in the journal rather than assumed.
 - **Nothing persists a PIN.** There is no "remember PIN", no keyring entry, no option, and no
   configuration key. A design that stores a PIN has converted a two-factor credential into a
   one-factor one.
@@ -255,7 +292,10 @@ satisfy them.
   instructional dialog **with no editable PIN field** and never receives the PIN. Emulating a PIN
   field for such a token would be a lie about where the secret goes.
 - **Retry handling.** Remaining attempts are displayed only when the token reports them reliably and
-  are **never invented**; the user is warned before the final known attempt. Incorrect PIN, blocked
+  are **never invented**; the user is warned before the final known attempt, and the flags are
+  **re-read from the token after every refusal**, because `CKF_USER_PIN_FINAL_TRY` is normally set
+  by the attempt that just failed. Once it is set, the window requires a second, explicit Unlock
+  before spending the attempt, and one window offers at most three attempts in total. Incorrect PIN, blocked
   PIN, cancelled prompt, device error and removal are always distinguished. Retries are
   user-initiated only; the service never retries automatically, and never after an ambiguous
   transport failure. Prompts for the same token are serialised so two grants cannot race two windows
@@ -274,8 +314,10 @@ A grant authorises **one certificate, one key, one operation set, one verified c
 bounded time**.
 
 Brokered operations enforce this directly: the service holds the session, checks the grant, checks
-the mechanism against an allow-list, validates the parameters, applies the purpose's consent policy,
-counts the operation and applies a rate limit.
+that the session belongs to the app id the call names, checks that the identity level has not
+risen, checks the mechanism against an allow-list, validates the parameters against the mechanism
+and the key, and applies the purpose's consent policy. **It does not count operations and there is
+no rate limit** — see the checklist above, which says so in the same words.
 
 Enforcement is split, and both halves are load-bearing. The **frontend** checks that the grant
 exists, is live, is owned by this caller, permits this operation and permits this mechanism —
@@ -377,6 +419,13 @@ remember; and because it is in the real permission store it is listed and revoca
 desktop's own UI rather than in a private store nobody can see. There is no "remember PIN" and
 there never will be.
 
+**The impl interface cannot express `allow_selection_memory` yet**, so this backend cannot know
+whether the application asked. It used to offer the checkbox to every identified caller, which
+meant a user could tick "remember this certificate" and have nothing stored, silently. Until the
+frontend adds the key, the checkbox is offered **only when `preselect_certificate` was supplied** —
+under-approximating rather than lying. [IMPL-INTERFACE.md](IMPL-INTERFACE.md) records the interface
+change that fixes it.
+
 ## Logging
 
 - **Two journals, one story.** xdg-desktop-portal records the decision and the caller; this backend
@@ -419,9 +468,19 @@ Named because they are unsolved, not because they are minor.
 - **`purpose` is not enforceable.** Stated everywhere it appears; there is no fix, only honesty.
 - **The impl boundary is not a privilege boundary.** Both processes run as the user. The split makes
   identity derivation and window drawing structurally separate, which is worth a great deal; it does
-  not make this backend safe from a hostile process that can `ptrace` it. A deployment that wants
+  not make this backend safe from a hostile process that can `ptrace` it — though
+  `PR_SET_DUMPABLE(0)` now blocks the ordinary same-uid attach, which is a mitigation and not a
+  boundary: it does nothing about a tracer that attached before the flag was set, about a
+  `CAP_SYS_PTRACE` process, or about a kernel configured differently. A deployment that wants
   more can add a D-Bus policy rule on `org.freedesktop.impl.portal.desktop.certificate`; that is not
   in v1. [IMPL-INTERFACE.md](IMPL-INTERFACE.md) says so in the same words.
+- **The peer check is a check-then-use.** The owner of `org.freedesktop.portal.Desktop` is resolved
+  from the bus on every call rather than trusted from a watcher's cache, because `NameOwnerChanged`
+  is not ordered against the messages of the process that lost the name. What remains is that the
+  answer is a snapshot: the name can change hands between the check and the work the call
+  authorises. Sessions belonging to a previous owner are invalidated as soon as this backend
+  notices the change, and a deployment that wants more can deny this backend's name in D-Bus policy
+  to everything but the portal's uid.
 - **Hardened-desktop assumptions.** How much level-2 and level-3 identity is worth depends on
   `ptrace` scope, compositor input isolation and `/proc` hardening, none of which this service
   controls or can detect reliably.

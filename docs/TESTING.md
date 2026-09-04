@@ -16,9 +16,41 @@ $ ninja -C build
 $ meson test -C build
 ```
 
-Four suites. Three of them — `filter`, `mechanism`, `redact` — need no display, no bus, no card and
-no network. The fourth, `broker-device`, **skips itself** unless a SoftHSM fixture exists; see
-tier 2.
+Six suites:
+
+| Suite | Needs | What it covers |
+|---|---|---|
+| `filter` | nothing | purpose and `certificate_filter` matching against fixture certificates |
+| `mechanism` | nothing | the mechanism mapping, the digest-length rule, the PSS parameters, **that `Decrypt` is refused** |
+| `redact` | nothing | the redactor, the display-text sanitiser, that a newline in an app id cannot forge a journal line |
+| `broker-device` | a SoftHSM fixture | `C_Login`, `C_Sign`, signature verification. **Skips itself** without one; see tier 2 |
+| `impl-dbus` | nothing (it stands up its own `GTestDBus`) | the D-Bus boundary: a stranger calling every method including both `Close()`s, cross-`app_id` session use, session-path reuse, strict option validation, the results vardict's types |
+| `cancellation` | a display for two of three, a SoftHSM fixture for the third | cancelling while `C_Login` is in flight, cancelling before the window is up, cancelling a signature |
+
+### Under a sanitizer, which is where the cancellation tests earn their keep
+
+Three of the defects the 2026 review found were use-after-frees on cancellation paths, and none of
+them was reachable by a test that only checked return values. Run the whole suite again with
+AddressSanitizer and UndefinedBehaviorSanitizer:
+
+```console
+$ meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
+$ meson test -C build-asan
+```
+
+`tests/lsan.supp` suppresses the one-time allocations GTK, GnuTLS and p11-kit keep for the life of
+the process. **Nothing under `src/` is suppressed**: a leak reported against this backend's own
+code is a defect.
+
+To check that the cancellation tests still fail when the bug is put back, make
+`pin_prompt_finish()` answer immediately while a login is in flight and hand the worker the
+prompt's own buffer instead of a copy — `/cancel/during-login` fails on the assertion that nothing
+has been answered yet.
+
+**`/cancel/during-login` opens a real PIN window** for a fraction of a second: it drives this
+process's own prompt rather than needing `xdotool`. It skips itself when `gtk_init_check()` fails,
+so a headless CI run reports it as skipped rather than failed. Run the suite under `Xvfb` if a
+window appearing on your desktop is a problem.
 
 ```console
 $ ./build/src/xdg-desktop-portal-certificate --help
@@ -78,13 +110,14 @@ then, from the backend:
 ** Message: no-matching-certificate tokens=0 candidates=0
 ```
 
-and from the client:
+and from the client (**`operations` is `['sign']`**: this backend refuses `Decrypt`, and
+[IMPL-INTERFACE.md](IMPL-INTERFACE.md) says why):
 
 ```
 GetCapabilities:
   max_grant_lifetime               3600
   mechanisms                       ['RSA_PKCS1_V1_5', 'RSA_PSS', 'ECDSA']
-  operations                       ['sign', 'decrypt']
+  operations                       ['sign']
   protected_authentication_path    False
   purposes                         ['client_auth', 'signing', 'email', 'ssh']
   selection_memory                 True
@@ -119,10 +152,14 @@ $ meson test -C build broker-device --verbose
 
 `broker-device` opens a session on the fixture token, logs in, signs with RSA PKCS#1 v1.5 over
 SHA-256 and SHA-384, with RSA-PSS and with ECDSA, and **verifies each signature against the
-certificate the token handed back** — not against the key the fixture script generated. It
-decrypts a ciphertext made with that same public key. It checks that a wrong PIN comes back as
+certificate the token handed back** — not against the key the fixture script generated. It asserts
+that **every** spelling of a decryption request is refused. It checks that a wrong PIN comes back as
 `PIN_INCORRECT` and not as a generic failure, and that discovery sees both certificates without
 logging in.
+
+`tools/softhsm-fixture.sh` refuses to write into a directory it does not own or that is reached
+through a symlink, and tightens the mode to 700 if it has to: what lives in that directory includes
+the module path the backend `dlopen()`s.
 
 Then the whole thing including the windows, in a headless X server:
 
@@ -246,7 +283,22 @@ keeping the logs for: it means the wrong key signed, or the digest was wrapped w
 
 ### 3.4 The things only a card can answer
 
-Each of these is a separate run. **The first one spends a PIN attempt.**
+Each of these is a separate run. **The wrong-PIN one spends a PIN attempt.**
+
+Before starting, three things that changed in the November 2026 fix pass and that this section
+depends on:
+
+- **Cancelling during the PIN prompt no longer frees what `C_Login` is reading.** The window
+  disappears at once, the answer is given when the worker returns, and the buffer the card is
+  reading is a private copy the worker owns. `tests/test-cancellation.c` is the regression test and
+  it runs under ASan. The card operation itself is still not cancellable — PKCS#11 has no way to
+  withdraw a `C_Login` — so **an attempt that has been submitted is spent whatever you do with the
+  window**.
+- **The PIN flags are re-read after every refusal**, so `CKF_USER_PIN_FINAL_TRY` appearing mid-run
+  is shown. Once it is set the window demands a **second, explicit Unlock** before spending the
+  attempt, and one window offers at most three attempts.
+- **`Decrypt` is refused**, so there is nothing to test against a card there and nothing that could
+  expose the key to a padding oracle.
 
 ```console
 # cancel from the application's side while the chooser is up: the window must
@@ -266,6 +318,11 @@ $ tools/dev-stack.sh --keep -- --purpose client_auth
 # pull the card out while the PIN prompt is up
 # pull the card out after the grant, before signing
 #   -> expect GrantInvalidated with reason token_removed, and a clean error
+
+# two Sign calls on one logged-out grant: exactly ONE PIN window must appear,
+# and both calls must be answered
+$ tools/dev-stack.sh --keep -- --purpose client_auth
+# ...then two tools/certificate-e2e.py runs at once from another shell
 ```
 
 The one that matters most and is easiest to get wrong: **reinsert the same card, then insert a
@@ -339,8 +396,12 @@ backend's. That is a consequence of the split, and the session handle is what jo
 |---|---|
 | `org.freedesktop.portal.experimental.Certificate is not exported` | the frontend was started without `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`, or it is not the branch |
 | the frontend logs nothing about `certificate` | no `.portal` file matched: check `XDG_DESKTOP_PORTAL_DIR` and `portals.conf` |
-| `Backend call failed: ... disconnected from message bus without replying` | **this backend crashed.** `coredumpctl list` and `coredumpctl debug` |
+| `Backend call failed: ... disconnected from message bus without replying` | **this backend crashed** — and there will be no core dump, because `main()` sets `PR_SET_DUMPABLE(0)` and `RLIMIT_CORE 0` so that a crash between typing a PIN and wiping it cannot write one to disk. Re-run it with `--debug-allow-core` to get a dump and to be able to attach `gdb`; never put that flag in an installed service file |
+| `Gdk-WARNING: Failed to read portal settings ... Unable to open /proc/<pid>/root` | expected, and the same hardening: a non-dumpable process's `/proc` entries are root-owned, so the settings portal cannot identify this one and GDK falls back to GSettings. It is the mechanism that blocks a same-uid `ptrace` attach |
 | every method returns `AccessDenied` | the sender does not own `org.freedesktop.portal.Desktop`. That is the peer check, and it is working |
 | `AcquireCredential` answers 2 with `no_token` | no token is present |
 | `AcquireCredential` answers 2 with `no_matching_certificate` | a token is present but nothing on it fits the purpose and filter. `--list-tokens` says which purposes each certificate fits |
 | `Sign` answers 2 with `invalid_request` | the mechanism, the `hash` parameter or the digest length did not validate. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) |
+| `Decrypt` answers 2 with `invalid_request` | that is the answer. Decryption is refused; [IMPL-INTERFACE.md](IMPL-INTERFACE.md) says what would have to change on the frontend |
+| `AcquireCredential` answers 2 with `no_such_session` and the session obviously exists | the call named a different `app_id` than `CreateSession` did, or a higher `app_identity_level` than the session has already been used at |
+| a second `CreateSession` on the same path answers 2 | there is a live session there. Close it first; a **closed** one is replaced |

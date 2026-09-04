@@ -128,11 +128,13 @@ the application — shows a chooser naming the application *the frontend identif
 identified, the purpose in the backend's own words, and the candidate certificates on each token;
 the frontend returns a **grant**: the chosen certificate as DER, its chain and chain status, the
 key's type and mechanisms, the permitted operations, and an expiry. The application then asks the
-frontend to **`Sign`** (and, if the grant allows it, `Decrypt`); the frontend checks the grant and
-forwards; this backend prompts for the PIN in its own window, logs into its own PKCS#11 session,
+frontend to **`Sign`**; the frontend checks the grant and forwards; this backend prompts for the PIN in its own window, logs into its own PKCS#11 session,
 performs the operation and returns the result.
 The PIN never crosses D-Bus, the private key never leaves the card, and the application never holds
-a PKCS#11 handle.
+a PKCS#11 handle. `Decrypt` is on the interface and this backend **refuses it**: the only decryption
+mechanism the interface has is RSA PKCS#1 v1.5, and answering "padding valid" or "padding invalid"
+for a card key over D-Bus is an oracle against that key. [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md)
+says what would have to change first.
 
 ## Interfaces
 
