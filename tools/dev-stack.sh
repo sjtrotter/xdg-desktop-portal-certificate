@@ -67,7 +67,6 @@ REPO="$(here)"
 XDP_BUILD="${XDP_BUILD:-$REPO/../xdg-desktop-portal/build}"
 BACKEND="${BACKEND:-$REPO/build/src/xdg-desktop-portal-certificate}"
 XDP_ENV="${XDP_ENV:-$REPO/.xdp-env}"
-DEVDIR="${DEVDIR:-${TMPDIR:-/tmp}/xdp-certificate-dev.$$}"
 
 FRONTEND_BIN="$XDP_BUILD/desktop-portal/xdg-desktop-portal"
 PERMSTORE_BIN="$XDP_BUILD/document-portal/xdg-permission-store"
@@ -82,6 +81,37 @@ die() {
 	echo "${0##*/}: $*" >&2
 	exit 40
 }
+
+check_dir() {
+	local path="$1" owner mode
+
+	# The two that cannot be repaired: somebody else's directory, or a link into
+	# one. Both mean the fixture -- and the module the backend dlopen()s out of
+	# it -- would be under someone else's control.
+	[ -L "$path" ] && die "$path is a symlink; refusing to use it"
+	[ -d "$path" ] || die "$path exists and is not a directory"
+
+	owner="$(stat -c %u "$path")"
+	[ "$owner" = "$(id -u)" ] || die "$path is owned by uid $owner, not $(id -u)"
+
+	# The one that can: we own it, so tighten it rather than refusing to work.
+	mode="$(stat -c %a "$path")"
+	case "$mode" in
+	700 | 500) ;;
+	*)
+		echo "${0##*/}: tightening $path from mode $mode to 700" >&2
+		chmod 700 "$path" || die "could not chmod $path"
+		;;
+	esac
+}
+
+# mktemp rather than a fixed name plus $$: a pid is guessable, and what goes in
+# here decides which .portal files the frontend reads.
+if [ -n "${DEVDIR:-}" ]; then
+	check_dir "$DEVDIR"
+else
+	DEVDIR="$(mktemp -d "${TMPDIR:-/tmp}/xdp-certificate-dev.XXXXXXXX")" || die "mktemp failed"
+fi
 
 usage() {
 	sed -n '3,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -131,7 +161,7 @@ preflight() {
 }
 
 write_devdir() {
-	mkdir -p "$DEVDIR"
+	(umask 077 && mkdir -p "$DEVDIR")
 
 	# The comments are stripped so the file is readable in the log below; the
 	# installed one keeps them.
@@ -161,6 +191,10 @@ softhsm_env() {
 	[ "$SOFTHSM" = 1 ] || return 0
 
 	: "${SOFTHSM_DIR:=${TMPDIR:-/tmp}/xdp-certificate-softhsm}"
+	# module-path out of this directory is dlopen()ed by the backend, so the
+	# directory is checked before it is trusted: same rule as
+	# tools/softhsm-fixture.sh, same reason.
+	check_dir "$SOFTHSM_DIR"
 	[ -f "$SOFTHSM_DIR/softhsm2.conf" ] ||
 		die "no SoftHSM fixture at $SOFTHSM_DIR; run tools/softhsm-fixture.sh first"
 

@@ -48,15 +48,49 @@ XVFB="${XVFB:-$(command -v Xvfb || true)}"
 XDOTOOL="${XDOTOOL:-$(command -v xdotool || true)}"
 PIN="${PIN:-123456}"
 SCREEN="${SCREEN:-:77}"
-LOGDIR="${LOGDIR:-${TMPDIR:-/tmp}/xdp-certificate-ui-smoke}"
 
 die() {
 	echo "${0##*/}: $*" >&2
 	exit 40
 }
 
+check_dir() {
+	local path="$1" owner mode
+
+	# The two that cannot be repaired: somebody else's directory, or a link into
+	# one. Both mean the fixture -- and the module the backend dlopen()s out of
+	# it -- would be under someone else's control.
+	[ -L "$path" ] && die "$path is a symlink; refusing to use it"
+	[ -d "$path" ] || die "$path exists and is not a directory"
+
+	owner="$(stat -c %u "$path")"
+	[ "$owner" = "$(id -u)" ] || die "$path is owned by uid $owner, not $(id -u)"
+
+	# The one that can: we own it, so tighten it rather than refusing to work.
+	mode="$(stat -c %a "$path")"
+	case "$mode" in
+	700 | 500) ;;
+	*)
+		echo "${0##*/}: tightening $path from mode $mode to 700" >&2
+		chmod 700 "$path" || die "could not chmod $path"
+		;;
+	esac
+}
+
+# A FRESH DIRECTORY WITH AN UNGUESSABLE NAME, not a fixed path under /tmp:
+# nothing else has to find these logs, so nothing else has to be able to
+# predict where they are.
+if [ -n "${LOGDIR:-}" ]; then
+	check_dir "$LOGDIR"
+else
+	LOGDIR="$(mktemp -d "${TMPDIR:-/tmp}/xdp-certificate-ui-smoke.XXXXXXXX")" || die "mktemp failed"
+fi
+
 [ -n "$XVFB" ] || die "Xvfb not found; set \$XVFB"
 [ -n "$XDOTOOL" ] || die "xdotool not found; set \$XDOTOOL"
+# The module path in here is dlopen()ed by the backend, so the directory it
+# comes out of is checked the same way tools/softhsm-fixture.sh checks it.
+check_dir "$SOFTHSM_DIR"
 [ -f "$SOFTHSM_DIR/module-path" ] || die "no SoftHSM fixture; run tools/softhsm-fixture.sh"
 [ -x "$BACKEND" ] || die "no backend at $BACKEND"
 [ -x "$XDP_BUILD/desktop-portal/xdg-desktop-portal" ] || die "no frontend; set XDP_BUILD"
@@ -64,10 +98,9 @@ die() {
 # shellcheck disable=SC1090
 [ -f "$XDP_ENV" ] && . "$XDP_ENV"
 
-mkdir -p "$LOGDIR"
 DEVDIR="$LOGDIR/portals"
 rm -rf -- "$DEVDIR"
-mkdir -p "$DEVDIR"
+(umask 077 && mkdir -p "$DEVDIR")
 
 sed -e '/^#/d' -e '/^$/d' "$REPO/data/certificate.portal.in" >"$DEVDIR/certificate.portal"
 cat >"$DEVDIR/portals.conf" <<-EOF
@@ -146,6 +179,11 @@ inner() {
 
 		for key in "$@"; do
 			case "$key" in
+			# THE PIN IS NOT AN ARGUMENT. xdotool --file - reads what to type
+			# from stdin, so it never appears in /proc/*/cmdline. "type:" with
+			# no value means "the PIN", which is the only secret this script
+			# has; anything after "type:" is literal and public.
+			type:) printf '%s' "$PIN" | "$XDOTOOL" type --delay 60 --file - ;;
 			type:*) "$XDOTOOL" type --delay 60 "${key#type:}" ;;
 			*) "$XDOTOOL" key "$key" ;;
 			esac
@@ -155,7 +193,7 @@ inner() {
 
 	if [ "$DRIVE_WINDOWS" = 1 ]; then
 		drive "Use a Certificate" Down Return
-		drive "Unlock Security Token" "type:$PIN" Return
+		drive "Unlock Security Token" "type:" Return
 	else
 		echo "ui-smoke: --no-drive: the windows are up and nothing will touch them"
 	fi
@@ -167,7 +205,11 @@ inner() {
 	return "$rc"
 }
 
-dbus-run-session -- bash -c "$(declare -f inner); LOGDIR='$LOGDIR' REPO='$REPO' XDP_BUILD='$XDP_BUILD' BACKEND='$BACKEND' MODULE='$MODULE' XDOTOOL='$XDOTOOL' PIN='$PIN' DRIVE_WINDOWS='$DRIVE_WINDOWS' inner \"\$@\"" -- "$@"
+# THE PIN GOES THROUGH THE ENVIRONMENT, NOT ARGV. /proc/*/cmdline is readable
+# by every user on the machine and /proc/*/environ is not. It is the fixture PIN
+# today; it is also the line anyone adapting this script for a card will copy.
+export PIN LOGDIR REPO XDP_BUILD BACKEND MODULE XDOTOOL DRIVE_WINDOWS
+dbus-run-session -- bash -c "$(declare -f inner); inner \"\$@\"" -- "$@"
 rc=$?
 
 echo
