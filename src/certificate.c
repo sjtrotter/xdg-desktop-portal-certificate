@@ -156,6 +156,10 @@ char* certificate_app_display_name(const char* app_id)
 	return g_strdup(name);
 }
 
+/* Combining marks in a row before the rest of the run is dropped. Four is
+ * enough for anything a human language does to one base character. */
+#define CERTIFICATE_SANITIZE_MAX_MARK_RUN 4
+
 char* certificate_sanitize_untrusted_text(const char* text, gsize max_chars)
 {
 	g_autofree char* valid = NULL;
@@ -163,6 +167,8 @@ char* certificate_sanitize_untrusted_text(const char* text, gsize max_chars)
 	const char* p = NULL;
 	gboolean pending_space = FALSE;
 	gsize count = 0;
+
+	gsize marks = 0;
 
 	if (text == NULL || *text == '\0')
 		return NULL;
@@ -194,6 +200,24 @@ char* certificate_sanitize_untrusted_text(const char* text, gsize max_chars)
 			continue;
 		}
 
+		/* A LONG RUN OF COMBINING MARKS is how one "character" is made to
+		 * cover the line above it. They are legitimate in small numbers -- an
+		 * accented name is exactly this -- so the run is capped rather than the
+		 * category refused. */
+		switch (g_unichar_type(c))
+		{
+			case G_UNICODE_NON_SPACING_MARK:
+			case G_UNICODE_SPACING_MARK:
+			case G_UNICODE_ENCLOSING_MARK:
+				if (marks >= CERTIFICATE_SANITIZE_MAX_MARK_RUN)
+					continue;
+				marks++;
+				break;
+			default:
+				marks = 0;
+				break;
+		}
+
 		if (pending_space)
 		{
 			g_string_append_c(out, ' ');
@@ -215,4 +239,14 @@ char* certificate_sanitize_untrusted_text(const char* text, gsize max_chars)
 		return NULL;
 
 	return g_strdup(out->str);
+}
+
+char* certificate_display_text(const char* text, gsize max_chars, const char* fallback)
+{
+	char* clean = certificate_sanitize_untrusted_text(text, max_chars);
+
+	if (clean != NULL)
+		return clean;
+
+	return fallback != NULL ? g_strdup(fallback) : NULL;
 }

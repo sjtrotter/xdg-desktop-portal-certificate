@@ -99,9 +99,32 @@ char* certificate_app_display_name(const char* app_id);
 
 /** Turn caller-supplied text into something that cannot impersonate a window's
  *  own chrome: control characters and line breaks removed, the result collapsed
- *  to a single line and capped in length, and always valid UTF-8. Returns NULL
- *  for text that is empty once cleaned, so that a caller cannot reserve space
- *  in the window with whitespace. */
+ *  to a single line and capped in length, long runs of combining marks cut
+ *  short, and always valid UTF-8. Returns NULL for text that is empty once
+ *  cleaned, so that a caller cannot reserve space in the window with
+ *  whitespace. */
 char* certificate_sanitize_untrusted_text(const char* text, gsize max_chars);
+
+/** EVERY externally sourced string that reaches a window goes through this.
+ *  "Externally sourced" is wider than "caller-supplied": a desktop file's Name=
+ *  is writable by any unsandboxed process, and a certificate subject, an issuer,
+ *  a token label and a reader name all come off a card that somebody else
+ *  issued. None of them may draw a second line, a right-to-left override or a
+ *  hundred combining marks inside a window that carries a security decision.
+ *
+ *  Sanitises @text and caps it at @max_chars; returns a copy of @fallback (which
+ *  may be NULL) when nothing survives. The caller owns the result. */
+char* certificate_display_text(const char* text, gsize max_chars, const char* fallback);
+
+/* Per-field caps. They are display limits, not validation: a longer value is
+ * shown truncated rather than refused, because refusing a certificate because
+ * its subject is long would be this backend deciding which credentials exist. */
+#define CERTIFICATE_DISPLAY_MAX_APP_NAME 80
+#define CERTIFICATE_DISPLAY_MAX_APP_ID 128
+#define CERTIFICATE_DISPLAY_MAX_SUBJECT 120
+#define CERTIFICATE_DISPLAY_MAX_ISSUER 120
+#define CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL 64
+#define CERTIFICATE_DISPLAY_MAX_READER 80
+#define CERTIFICATE_DISPLAY_MAX_PURPOSE 160
 
 #endif /* CERTIFICATE_H */

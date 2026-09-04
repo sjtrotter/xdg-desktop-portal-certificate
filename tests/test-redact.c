@@ -141,6 +141,53 @@ static void test_logging_entry_points_are_structural(void)
 	g_assert_true(TRUE);
 }
 
+/* A newline in an app id used to forge a second journal line. The app id is
+ * frontend-established and upstream validates it, but "somebody else checked"
+ * is not what the structural-redaction rule in redact.h promises. */
+static void test_logged_fields_are_escaped(void)
+{
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE, "*app_id=org.example.App\\x0aMESSAGE:*");
+	certificate_log_decision("test", "org.example.App\nMESSAGE: forged", NULL, NULL, TRUE);
+	g_test_assert_expected_messages();
+}
+
+/* A LONG RUN OF COMBINING MARKS is how one "character" is made to cover the
+ * line above it. Accented text is legitimate and must survive; a hundred marks
+ * on one base character must not. */
+static void test_combining_mark_runs_are_capped(void)
+{
+	g_autofree char* accented = certificate_sanitize_untrusted_text("e\xcc\x81t\xc3\xa9", 80);
+	g_autoptr(GString) attack = g_string_new("x");
+	g_autofree char* capped = NULL;
+
+	g_assert_nonnull(accented);
+	g_assert_cmpstr(accented, ==, "e\xcc\x81t\xc3\xa9");
+
+	for (int i = 0; i < 60; i++)
+		g_string_append(attack, "\xcc\x81");
+
+	capped = certificate_sanitize_untrusted_text(attack->str, 200);
+	g_assert_nonnull(capped);
+	/* one base character plus at most the permitted run */
+	g_assert_cmpuint(g_utf8_strlen(capped, -1), <=, 5);
+}
+
+/* Every externally sourced label goes through this, and a value that is empty
+ * once cleaned falls back rather than leaving a blank where a name should be. */
+static void test_display_text_falls_back(void)
+{
+	g_autofree char* empty = certificate_display_text("   \n\t ", 40, "unnamed token");
+	g_autofree char* nothing = certificate_display_text(NULL, 40, NULL);
+	g_autofree char* kept = certificate_display_text("Portal Test Token", 40, "unnamed token");
+	g_autofree char* flattened =
+	    certificate_display_text("Thing\n\nSandboxed application, identity verified", 40, NULL);
+
+	g_assert_cmpstr(empty, ==, "unnamed token");
+	g_assert_null(nothing);
+	g_assert_cmpstr(kept, ==, "Portal Test Token");
+	g_assert_null(strchr(flattened, '\n'));
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -154,6 +201,9 @@ int main(int argc, char** argv)
 	                test_untrusted_text_that_is_only_whitespace);
 	g_test_add_func("/redact/untrusted-text-invalid-utf8", test_invalid_utf8_does_not_escape);
 	g_test_add_func("/redact/logging-is-structural", test_logging_entry_points_are_structural);
+	g_test_add_func("/redact/logged-fields-escaped", test_logged_fields_are_escaped);
+	g_test_add_func("/redact/combining-mark-runs", test_combining_mark_runs_are_capped);
+	g_test_add_func("/redact/display-text-fallback", test_display_text_falls_back);
 
 	return g_test_run();
 }
