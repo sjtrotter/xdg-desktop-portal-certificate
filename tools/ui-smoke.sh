@@ -102,7 +102,7 @@ fixture_check "$SOFTHSM_DIR" softhsm
 # tools/lib.sh says it at length.
 DEVDIR="$LOGDIR/portals"
 (umask 077 && mkdir -p "$DEVDIR")
-xdp_write_portal_dir "$DEVDIR" "$REPO"
+xdp_write_portal_dir "$DEVDIR" "$REPO" private
 
 "$XVFB" "$SCREEN" -screen 0 1280x1024x24 -nolisten tcp >"$LOGDIR/xvfb.log" 2>&1 &
 XVFB_PID=$!
@@ -265,7 +265,7 @@ inner() {
 			fi
 		done
 	else
-		echo "ui-smoke: --no-drive: the windows are up and nothing will touch them"
+		echo "ui-smoke: --no-drive: windows up, not driven"
 	fi
 
 	wait "$E2E"

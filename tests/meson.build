@@ -87,6 +87,16 @@ foreach name, source : service_test_cases
   test(name, exe, protocol: 'tap', env: test_env, timeout: 120)
 endforeach
 
+# THE SHELL HELPERS IN tools/lib.sh. Two of them decide something dangerous --
+# which portals.conf the development stack gets, and which directories it will
+# remove -- and both were wrong at some point in a way no successful run showed.
+test(
+  'tools-lib',
+  find_program('test-tools-lib.sh'),
+  protocol: 'tap',
+  env: test_env,
+)
+
 # THE SYSTEM-PROMPTER PATH. Only when the build found gcr-4, because without it
 # there is no second implementation to test.
 #
