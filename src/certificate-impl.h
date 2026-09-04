@@ -101,7 +101,7 @@ GVariant* certificate_impl_acquire_results(CertificateCandidate* candidate, gboo
                                            gboolean may_decrypt, gboolean remember);
 
 /** Shut down: close every token session, and emit SessionInvalidated with
- *  "backend_shutdown" for each one so the frontend can tell its callers the
+ *  "service_shutdown" for each one so the frontend can tell its callers the
  *  truth rather than letting them discover it at the next Sign. */
 void certificate_impl_shutdown(CertificateImpl* impl);
 

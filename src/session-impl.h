@@ -119,11 +119,18 @@ void certificate_impl_session_release_device(CertificateImplSession* session);
  *  answered rather than returning UnknownObject. */
 void certificate_impl_session_close(CertificateImplSession* session);
 
-/** The hardware went away, or the lifetime ran out. Emits the "invalidated"
- *  signal with @reason and closes the session; certificate-impl.c turns that
- *  into org.freedesktop.impl.portal.experimental.Certificate.SessionInvalidated,
+/** The hardware went away, the lifetime ran out, or the frontend that owned the
+ *  grant is gone. Emits the "invalidated" signal with @reason and closes the
+ *  session; certificate-impl.c turns that into
+ *  org.freedesktop.impl.portal.experimental.Certificate.SessionInvalidated,
  *  which the frontend turns into GrantInvalidated. The backend does not decide
- *  that a grant is over for any reason that is not physical or temporal. */
+ *  that a grant is over for any reason that is not physical or temporal.
+ *
+ *  @reason MUST BE ONE OF THE INTERFACE'S EIGHT: released, expired,
+ *  token_removed, owner_gone, policy, service_shutdown, backend_gone, error.
+ *  The frontend forwards it verbatim to applications, so an invented value is
+ *  a word nobody can act on delivered as though it were part of the contract.
+ *  Anything else is g_critical()ed and sent as "error". */
 void certificate_impl_session_invalidate(CertificateImplSession* session, const char* reason);
 
 gboolean certificate_impl_session_is_expired(CertificateImplSession* session);

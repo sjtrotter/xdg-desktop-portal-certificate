@@ -64,7 +64,7 @@ Every one of these is xdg-desktop-portal's, and none of them is an improvement o
 | `Decrypt(...)` | **interactive** | As `Sign`, with `ciphertext` in place of `data` and `plaintext` in place of `signature`. **Refused in v1** — see "Decrypt is refused" below. |
 | `GetCapabilities(s app_id, a{sv} options) → a{sv}` | non-interactive | What this backend can do on this hardware. **Note the `app_id`** — see below. |
 | `TokenAdded(a{sv})`, `TokenRemoved(a{sv})` | signals | To the frontend, which re-emits them to every client. **Presence only**: see "The token signals carry presence, not identity". |
-| `SessionInvalidated(o session_handle, s reason)` | signal | The hardware behind a grant went away: `token_removed`, `device_error`, `backend_shutdown`. The frontend turns it into `GrantInvalidated` and closes the Session. |
+| `SessionInvalidated(o session_handle, s reason)` | signal | A grant can no longer be honoured. `reason` is one of the interface's eight and nothing else: see "`SessionInvalidated` speaks the public vocabulary". The frontend turns it into `GrantInvalidated` and closes the Session. |
 
 **`GetCapabilities` carries `app_id`, and that is a change** from what this repository used to
 document. The old sketch had `GetCapabilities(a{sv}) → a{sv}` on both interfaces. The branch made
@@ -175,23 +175,38 @@ consent dialog into a PIN dialog, which is the failure mode this project exists 
 For `forbidden` there is no path to a grant at all, and `AcquireCredential` answers 2. That is the
 XML's own reading: consent here *is* a prompt.
 
-### `SessionInvalidated` is emitted with `expired`
+### `SessionInvalidated` speaks the public vocabulary
 
-The impl XML's prose lists three reasons — `token_removed`, `device_error`, `backend_shutdown` —
-and the public `GrantInvalidated` lists eight, including `expired`. The frontend forwards the
-backend's string through unchanged.
+The impl XML used to list three reasons — `token_removed`, `device_error`, `backend_shutdown` —
+where the public `GrantInvalidated` lists eight. The frontend does not translate: it forwards the
+backend's string through unchanged, so the smaller list was a trap in both directions. `expired`,
+the ordinary case, was not in it; `backend_shutdown` was in it and is not a value any application
+has ever been told about. The impl XML now carries the public list verbatim:
 
-This backend emits `expired` when a grant's lifetime runs out. It is not in the impl XML's list, it
-*is* in the public one, and the alternative — saying `device_error` about a healthy card, or saying
-nothing — is worse. **The backend enforces the lifetime too**, even though the frontend refuses an
-expired grant before this backend is called: the check here is not what stops the operation, it is
-what stops this process from sitting on a logged-in card session after the authorisation for it has
-run out.
+> `released`, `expired`, `token_removed`, `owner_gone`, `policy`, `service_shutdown`,
+> `backend_gone`, `error`
 
-The other reasons are emitted as the XML has them: `token_removed` when the card leaves the reader
-or a different card takes its place, `backend_shutdown` on the way out, and `device_error` is not
-currently emitted at all — a device that fails mid-operation fails that operation and keeps the
-grant, because the card may still be there.
+**A value outside it is a `g_critical()` and goes on the bus as `error`.** The list is in
+`src/session-impl.c`, checked in `certificate_impl_session_invalidate()`, because a typo in a
+string literal is otherwise a word applications receive as though it were part of the contract.
+
+What this backend actually emits, and when:
+
+| Reason | When |
+|---|---|
+| `token_removed` | the card leaves the reader, or a different card takes its place, or a login fails because the token is gone |
+| `expired` | the grant's lifetime ran out. **The backend enforces it too**, even though the frontend refuses an expired grant before this process is called: the check here is not what stops the operation, it is what stops this process sitting on a logged-in card session after the authorisation for it has run out |
+| `owner_gone` | `org.freedesktop.portal.Desktop` changed hands and the grant belonged to the previous owner. A grant belongs to the frontend connection that created it; a replacement portal must not inherit a logged-in card session it never asked for |
+| `service_shutdown` | this backend is exiting. It was spelled `backend_shutdown`, which is in neither vocabulary |
+
+The other four are not this backend's to emit. `released` and `policy` are frontend decisions,
+`backend_gone` is what the frontend says *about* this process, and `error` is the fallback above.
+`device_error` is gone from the interface and was never emitted anyway — a device that fails
+mid-operation fails that operation and keeps the grant, because the card may still be there.
+
+**One case is deliberately silent.** When the portal name loses its owner altogether, every grant
+is still closed and the card session released, but nothing is emitted: there is no longer anybody
+subscribed to hear it.
 
 ### `Decrypt` is refused, and `GetCapabilities` does not offer it
 

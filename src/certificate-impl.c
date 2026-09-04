@@ -158,7 +158,11 @@ static gboolean reject_stranger(CertificateImpl* impl, GDBusMethodInvocation* in
 	return TRUE;
 }
 
-static void close_and_forget_all(CertificateImpl* impl)
+/* @reason is what to tell the bus on the way, or NULL to close silently.
+ * Silence is right in exactly one case: the frontend has left the bus, so
+ * there is nobody to tell and emitting is a message into a socket whose
+ * listener is gone. */
+static void close_and_forget_all(CertificateImpl* impl, const char* reason)
 {
 	GHashTableIter iter;
 	gpointer value = NULL;
@@ -168,7 +172,11 @@ static void close_and_forget_all(CertificateImpl* impl)
 	{
 		CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(value);
 
-		certificate_impl_session_close(session);
+		if (reason != NULL)
+			certificate_impl_session_invalidate(session, reason);
+		else
+			certificate_impl_session_close(session);
+
 		certificate_impl_session_unexport(session);
 	}
 
@@ -203,7 +211,12 @@ static void invalidate_foreign_sessions(CertificateImpl* impl, const char* owner
 		CertificateImplSession* session = g_ptr_array_index(doomed, i);
 
 		certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "frontend-gone");
-		certificate_impl_session_close(session);
+		/* owner_gone, not silence. The connection that created this grant no
+		 * longer owns the portal name, and whoever owns it now is listening:
+		 * a successor frontend that is told a session it does not know has
+		 * ended learns nothing it can misuse, and one that IS somehow still
+		 * tracking it learns the truth. */
+		certificate_impl_session_invalidate(session, "owner_gone");
 		certificate_impl_session_unexport(session);
 		g_hash_table_remove(impl->sessions, session->id);
 	}
@@ -227,7 +240,12 @@ static void on_frontend_vanished(GDBusConnection* connection, const char* name, 
 	 * session held past that point is a capability nobody can account for. */
 	set_frontend_owner(impl, NULL);
 	impl->owner_checked_at = g_get_monotonic_time();
-	close_and_forget_all(impl);
+
+	/* NULL: the name has no owner, so SessionInvalidated has no reader. The
+	 * grants still go, because a logged-in card session held past the death of
+	 * the only process allowed to ask for an operation on it is a capability
+	 * nobody can account for. */
+	close_and_forget_all(impl, NULL);
 }
 
 void certificate_impl_session_forget(CertificateImplSession* session)
@@ -1470,9 +1488,9 @@ void certificate_impl_shutdown(CertificateImpl* impl)
 	 * caller discover it at its next Sign. */
 	g_hash_table_iter_init(&iter, impl->sessions);
 	while (g_hash_table_iter_next(&iter, NULL, &value))
-		certificate_impl_session_invalidate(CERTIFICATE_IMPL_SESSION(value), "backend_shutdown");
+		certificate_impl_session_invalidate(CERTIFICATE_IMPL_SESSION(value), "service_shutdown");
 
-	close_and_forget_all(impl);
+	close_and_forget_all(impl, NULL);
 
 	certificate_tokens_stop_watch(impl->tokens);
 }

@@ -221,10 +221,43 @@ void certificate_impl_session_close(CertificateImplSession* session)
 	 * comes off the bus in handle_close() and at finalize, and nowhere else. */
 }
 
+/* THE VOCABULARY IS THE INTERFACE'S, and it is closed. The frontend forwards
+ * @reason verbatim into GrantInvalidated, so a value invented here goes
+ * straight to applications, which have no way to learn what it means and a
+ * documented list that says it cannot happen. The impl XML names these eight.
+ *
+ * Not all eight are this backend's to emit -- `released` and `policy` are
+ * decisions the frontend makes, and `backend_gone` is what the frontend says
+ * ABOUT this process -- but the list is the interface's rather than this
+ * file's, so it is written down whole and the assertion catches a typo in any
+ * of them. */
+static const char* const certificate_session_reasons[] = {
+	"released", "expired",          "token_removed", "owner_gone",
+	"policy",   "service_shutdown", "backend_gone",  "error",
+};
+
+static const char* checked_reason(const char* reason)
+{
+	for (gsize i = 0; i < G_N_ELEMENTS(certificate_session_reasons); i++)
+	{
+		if (g_strcmp0(reason, certificate_session_reasons[i]) == 0)
+			return reason;
+	}
+
+	/* A programming error, not a caller's. Say so loudly in a development
+	 * build and send the one value that is always honest in a shipped one,
+	 * rather than putting a word the interface does not define on the bus. */
+	g_critical("SessionInvalidated reason '%s' is not in the interface's vocabulary",
+	           reason != NULL ? reason : "(null)");
+	return "error";
+}
+
 void certificate_impl_session_invalidate(CertificateImplSession* session, const char* reason)
 {
 	if (session->closed)
 		return;
+
+	reason = checked_reason(reason);
 
 	/* Tell the frontend BEFORE the object goes away, so that it can turn this
 	 * into GrantInvalidated for a caller that would otherwise only discover the

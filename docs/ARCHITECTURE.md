@@ -390,8 +390,10 @@ for the caller to discover at the next `Sign`.
 
 The `GrantInvalidated` reasons the frontend can emit are fixed by the public XML:
 `released`, `expired`, `token_removed`, `owner_gone`, `policy`, `service_shutdown`,
-`backend_gone`, `error`. The three this backend can *cause*, through
-`SessionInvalidated`, are `token_removed`, `device_error` and `backend_shutdown`.
+`backend_gone`, `error`. The impl XML now carries that same list, because the frontend
+forwards `SessionInvalidated`'s reason verbatim. The four this backend can *cause* are
+`token_removed`, `expired`, `owner_gone` and `service_shutdown`; anything else is a
+programming error and is sent as `error`.
 
 **Card removal** invalidates every session, cancels any in-flight operation, and emits
 `SessionInvalidated`. Reinsertion requires explicit reselection even when the label and slot number

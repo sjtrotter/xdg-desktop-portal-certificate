@@ -599,6 +599,55 @@ static void test_token_presence_carries_no_identity(Fixture* fixture, gconstpoin
 	g_assert_cmpstr(token_id, ==, second);
 }
 
+typedef struct
+{
+	char* reason;
+	guint count;
+} InvalidationWatch;
+
+static void on_session_invalidated_signal(GDBusConnection* connection, const char* sender,
+                                          const char* path, const char* interface,
+                                          const char* signal, GVariant* parameters,
+                                          gpointer user_data)
+{
+	InvalidationWatch* watch = user_data;
+	const char* session_path = NULL;
+	const char* reason = NULL;
+
+	g_variant_get(parameters, "(&o&s)", &session_path, &reason);
+	g_free(watch->reason);
+	watch->reason = g_strdup(reason);
+	watch->count++;
+}
+
+/* THE REASON IS AN INTERFACE VALUE, NOT A WORD THIS BACKEND CHOSE. The frontend
+ * forwards it verbatim into GrantInvalidated, so an invented value reaches
+ * applications with a documented list that says it cannot happen. Shutting the
+ * backend down is the one reason a test can produce without hardware, and the
+ * spelling used to be "backend_shutdown", which is in neither vocabulary. */
+static void test_shutdown_reason_is_in_the_vocabulary(Fixture* fixture, gconstpointer user_data)
+{
+	InvalidationWatch watch = { NULL, 0 };
+	guint id;
+
+	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
+
+	id = g_dbus_connection_signal_subscribe(fixture->frontend, NULL, IMPL_INTERFACE,
+	                                        "SessionInvalidated", IMPL_PATH, NULL,
+	                                        G_DBUS_SIGNAL_FLAGS_NONE,
+	                                        on_session_invalidated_signal, &watch, NULL);
+
+	certificate_impl_shutdown(fixture->impl);
+
+	while (watch.count == 0)
+		g_main_context_iteration(NULL, TRUE);
+
+	g_dbus_connection_signal_unsubscribe(fixture->frontend, id);
+
+	g_assert_cmpstr(watch.reason, ==, "service_shutdown");
+	g_free(watch.reason);
+}
+
 /* Sign on a session that never acquired anything is refused, and a Close() in
  * flight is answered as a cancellation rather than a device failure. */
 static void test_sign_without_grant(Fixture* fixture, gconstpointer user_data)
@@ -804,6 +853,7 @@ int main(int argc, char** argv)
 	ADD("/impl/capabilities", test_capabilities);
 	ADD("/impl/replaced-frontend-is-refused", test_replaced_frontend_is_refused);
 	ADD("/impl/close-mid-flight", test_close_mid_flight);
+	ADD("/impl/shutdown-reason-is-in-the-vocabulary", test_shutdown_reason_is_in_the_vocabulary);
 
 #undef ADD
 
