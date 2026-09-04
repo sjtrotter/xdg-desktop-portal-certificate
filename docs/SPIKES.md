@@ -1,7 +1,29 @@
 # Go / no-go spikes
 
-Status: EXPERIMENTAL design sketch. **None of these have been run on hardware, and the project
-should not exist as a production repository until S1 and S3 have answers.**
+Status: EXPERIMENTAL. **None of these have been run on hardware, and the project should not exist
+as a production repository until S1 and S3 have answers.** That has not changed, and building the
+backend did not change it: what the backend proves is that brokered `Sign` works, which was never
+the doubtful part.
+
+What the implementation has answered, partially and against a software token only:
+
+- **S2's backend half.** The login model is settled in code: this backend keeps its own PKCS#11
+  session per grant, logs in lazily at first private-key use, and the PIN prompt is its own window.
+  That is the *brokered* answer. S2's real question — what happens once a forwarded module is
+  involved and a TLS stack opens its own sessions — is untouched, because there is no module to
+  forward.
+- **S4's software half.** Tokens are identified by manufacturer, model, serial and label together
+  and re-resolved on every use, so a different card in the same slot is a different token by
+  construction. The insertion and removal watcher polls every two seconds and debounces over two
+  polls. **Both numbers are guesses**, and S4 exists to replace them with measurements from real
+  readers. Nothing has been pulled out of a reader mid-signature.
+- **S5's non-fd half.** Answered by the branch's own pytest suite, plus this repository's
+  private-bus run: a real frontend and a real backend complete `CreateSession`,
+  `AcquireCredential`, `Sign` and `Close` on a private bus, and a backend crash surfaces as
+  "Backend call failed" rather than a hang — which is how the one use-after-free found so far was
+  noticed.
+
+S1 and S3 are exactly where they were.
 
 Two things changed since this list was written. The frontend is now an xdg-desktop-portal branch
 ([0010](decisions/0010-backend-only-frontend-lives-upstream.md)), so **S5 is largely answered

@@ -12,7 +12,9 @@
 # APPLICATIONS HAVE NO REASON TO HOLD THIS NAME and are not expected to reach
 # it; see docs/IMPL-INTERFACE.md, "Why an application cannot call this".
 #
-# EXPERIMENTAL. The binary this points at is a design-sketch stub that exits 70.
+# EXPERIMENTAL, and the interface it implements is an unmerged branch. On a machine
+# whose xdg-desktop-portal has never heard of that interface this file is inert:
+# nothing matches certificate.portal, so nothing ever activates this name.
 
 [D-BUS Service]
 Name=org.freedesktop.impl.portal.desktop.certificate

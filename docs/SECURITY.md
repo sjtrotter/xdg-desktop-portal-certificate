@@ -1,7 +1,12 @@
 # Security model
 
-Status: EXPERIMENTAL design sketch. Nothing here has been implemented or reviewed by anyone but its
-authors. This document states what the design intends to be true; none of it is true yet.
+Status: EXPERIMENTAL. **Some of this is now implemented and some of it is still an intention**, and
+the checklist below says which is which. Nothing here has been reviewed by anyone but its authors,
+and nothing here has been run against a real smart card.
+
+The rules in the body of this document are unchanged: they are what the design intends to be true.
+The checklist immediately below is what the code in this repository does today, so that a reader
+can tell a promise from a fact without reading the source.
 
 **Two processes, one repository.** A *frontend* establishes who is calling and applies policy; a
 *backend* draws the windows and holds the token. Every rule below says which one it binds, because
@@ -19,6 +24,53 @@ kept private, is [IMPL-INTERFACE.md](IMPL-INTERFACE.md).
 exported unless the portal was started with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`.
 With the gate off, no application can reach any of this and this backend is never activated. That
 is a property of the frontend and this repository cannot change it in either direction.
+
+## What is implemented, and what is not
+
+Backend controls only — the frontend's are xdg-desktop-portal's, on the branch, and are marked as
+such throughout the rest of this document.
+
+### Implemented and exercised
+
+| Control | Where | How it is exercised |
+|---|---|---|
+| Only the owner of `org.freedesktop.portal.Desktop` may call any method; everything else gets `AccessDenied` | `src/certificate-impl.c`, `reject_stranger()` | the name is watched, not asked per call; refusals are logged by reason code |
+| The app id and its identity level are **displayed, never derived** | `src/ui/chooser.c`, `build_identity()` | the private-bus run shows `identity=unidentified` and the window says so in words |
+| Caller-supplied `reason` is sanitised to one line, capped, quoted, and labelled as the application's | `src/certificate.c`, `certificate_sanitize_untrusted_text()` | `tests/test-redact.c`: newlines, control characters, bidi overrides and whitespace-only input |
+| The purpose is rendered in this backend's own words | `src/certificate.c`, `certificate_purpose_display()` | — |
+| Expired certificates are offered and marked **in words, not colour** | `src/tokens/filter.c`, `src/ui/chooser.c` | `tests/test-filter.c` |
+| A single candidate still opens the chooser | `src/certificate-impl.c` | by construction: there is no code path that skips it |
+| The PIN never leaves the process, never enters a GVariant, a GError or a log line | `src/ui/pin.c` | there is no entry point that returns a PIN; the caller passes a login function |
+| The PIN buffer is page-aligned, `mlock()`ed where the rlimit allows, and `explicit_bzero()`ed on every exit path | `src/ui/pin.c`, `PinBuffer` | wiped before the callback runs, on success, failure, cancel and window destroy |
+| Nothing persists a PIN | — | there is no option, no keyring call and no configuration key |
+| Protected authentication path draws **no PIN field** and logs in with a NULL PIN | `src/ui/pin.c` | — |
+| Retry state is shown only from `CKF_USER_PIN_COUNT_LOW` / `FINAL_TRY` / `LOCKED`, never as an invented number | `src/ui/pin.c`, `retry_hint()` | — |
+| Retries are user-initiated; nothing retries on its own | `src/ui/pin.c` | `tests/test-broker-device.c` checks the wrong PIN is reported as `PIN_INCORRECT` and not collapsed |
+| PIN prompts are serialised process-wide | `src/ui/pin.c`, the prompt queue | — |
+| Login is **lazy**: at first private-key use, not at grant time | `src/broker/operations.c` | the UI smoke run shows the PIN window appearing at `Sign` |
+| Every mechanism and parameter is re-validated against the mechanism **and the key** | `src/broker/mechanism.c` | `tests/test-mechanism.c`, including the RSA-PSS salt that does not fit |
+| `data` is a digest of a stated length, never an arbitrary blob | `src/broker/mechanism.c` | `tests/test-mechanism.c` |
+| The token behind a grant is re-resolved by manufacturer, model, serial and label — never by slot | `src/tokens/discovery.c`, `certificate_tokens_open_session()` | a different card in the same slot is a different token |
+| The backend enforces the grant lifetime itself and tears the card session down when it expires | `src/session-impl.c` | — |
+| Token removal invalidates every grant on that token | `src/certificate-impl.c`, `on_token_event()` | — |
+| The frontend leaving the bus closes every grant | `src/certificate-impl.c`, `on_frontend_vanished()` | — |
+| Shutdown emits `SessionInvalidated(backend_shutdown)` and flushes before exit | `src/main.c` | — |
+| Logging is structural: no format-string entry point, no PIN, no subject, no URI, no signature | `src/redact.h`, `src/redact.c` | `tests/test-redact.c` asserts `pin-value` never survives |
+| Card serials are truncated in logs and **absent from `token_display`** | `src/redact.c`, `src/certificate-impl.c` | — |
+| Every PKCS#11 call runs off the main thread | `src/broker/`, `src/tokens/discovery.c` | — |
+| Every request is tied to one `GCancellable` that `Close()` cancels | `src/request-impl.c` | — |
+| Discovery does not log in | `src/tokens/discovery.c` | `tests/test-broker-device.c` |
+
+### Not implemented
+
+| | |
+|---|---|
+| The synthetic PKCS#11 facade | there is no method to reach it: `OpenPkcs11Endpoint` is on neither interface. `src/export/facade.h` holds the requirements |
+| Rate limiting | neither side does it. The frontend is the right place; it is on that branch's open-items list |
+| Chain building | `chain_status` is always `leaf_only`, honestly |
+| A D-Bus policy denying this backend's name to everything but the portal's uid | recorded in [IMPL-INTERFACE.md](IMPL-INTERFACE.md) as a deployment option, not shipped |
+| Disabling core dumps for the process | the PIN buffer is `mlock()`ed and wiped, but a core dump taken between `pin_buffer_set()` and the wipe would contain it |
+| Any hardware assurance at all | **no real smart card has ever been read by this code.** [TESTING.md](TESTING.md) tier 3 is the run that would change that |
 
 ## What this is a boundary against, and what it is not
 

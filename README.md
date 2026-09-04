@@ -5,11 +5,17 @@ public interface, and no application talks to it. It draws a certificate chooser
 prompt, discovers PKCS#11 tokens, and performs private-key operations when
 xdg-desktop-portal asks it to.
 
-**Status: EXPERIMENTAL design sketch. Nothing works yet, and the first thing to do is a
-spike that may kill it.** This repository contains design documents, a repository
-skeleton, and one stub binary that builds and prints usage. No card has ever been read by
-this code, no PIN has ever been prompted for, and no cryptographic operation has ever been
-brokered.
+**Status: EXPERIMENTAL, and now implemented — against a software token.** It builds, it
+runs, it finds PKCS#11 tokens, it draws a chooser and a PIN prompt, and it signs. Driven by
+the frontend branch it has completed `CreateSession` → `AcquireCredential` → `Sign` end to
+end, with the signature verified against the certificate it returned, for RSA PKCS#1 v1.5,
+RSA-PSS and ECDSA.
+
+**No real smart card has ever been read by this code.** Everything above happened against a
+SoftHSM fixture token. [docs/TESTING.md](docs/TESTING.md) tier 3 is the run that would
+change that, and it is the author's to make. The PKCS#11 compatibility facade is still not
+reachable — `OpenPkcs11Endpoint` is on neither interface — and the two spikes that decide
+whether it can exist at all are still unrun ([docs/SPIKES.md](docs/SPIKES.md)).
 
 > **The directory is still called `smartcard-portal`.** That is a directory name and a
 > URL, not a claim. The binary, the D-Bus names and everything else are
@@ -176,64 +182,122 @@ org.freedesktop.impl.portal.experimental.Certificate
 Every impl call carries `app_id` — including `GetCapabilities`, which is one of the things
 the move upstream changed. That is the whole point of the boundary.
 
-## Building, and testing it on a dev machine
+## Building, and running it
 
 ```console
-$ meson setup build && ninja -C build
-$ ./build/xdg-desktop-portal-certificate --help
+$ meson setup build
+$ ninja -C build
+$ meson test -C build
+$ ./build/src/xdg-desktop-portal-certificate --help
 ```
 
-That is all it does. It prints usage and exits 0; every verb returns exit 70, "not
-implemented (design sketch)". Exit codes: `0` clean, `40` unavailable, `64` usage, `70`
-internal / not implemented.
+Dependencies: GLib/GIO, GTK 4, libadwaita, p11-kit and GnuTLS. **Not libdex** — that is the
+frontend branch's dependency, not a backend's.
 
-Two scripts drive the real thing, and neither touches your session bus unless you ask it
-to:
+### Is there a card, and what is on it
 
 ```console
-$ tools/dev-stack.sh
+$ ./build/src/xdg-desktop-portal-certificate --list-tokens
 ```
 
-starts, on a **private bus** made by `dbus-run-session`: `xdg-permission-store` (the portal
-refuses to start without it), this backend, and a development xdg-desktop-portal from the
-branch with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate` and an
-`XDG_DESKTOP_PORTAL_DIR` pointing at a throwaway directory holding this repository's
-`.portal` file and a `portals.conf` selecting it. Then it runs the trigger. Point it at
-your build with `XDP_BUILD=/path/to/xdg-desktop-portal/build`.
+prints one block per security token — label, manufacturer, model, a truncated serial,
+reader, module, whether login is required and whether the reader has a PIN pad — and then
+one entry per **usable** certificate: subject, issuer, expiry (marked when expired), key
+type and size, the mechanisms the token advertises for it, the purposes it fits, the PIV
+slot where that could be determined, and its stable id. Nothing is logged in for this and no
+PIN is asked for.
+
+If p11-kit is not configured for your card's module, name it:
 
 ```console
-$ tools/trigger-certificate.sh          # version + capabilities + CreateSession
-$ tools/trigger-certificate.sh version
-$ tools/trigger-certificate.sh monitor  # watch the Response signals
+$ ./build/src/xdg-desktop-portal-certificate \
+      --module /usr/lib64/pkcs11/opensc-pkcs11.so --list-tokens
 ```
 
-calls the **public** interface with `gdbus`, exactly as an application would — on
-`org.freedesktop.portal.Desktop`, never on this backend's name. Run it inside
-`dbus-run-session` if you want it off the real bus. If the frontend was started without the
-gate, every call fails with "no such interface"; that is the gate working.
+`--module` is repeatable, and when it is given **nothing else is loaded**.
 
-Layout:
+### The whole stack, on a private bus
 
+```console
+$ tools/dev-stack.sh -- --expect-no-certificate
 ```
-src/          the backend: main.c, the impl skeleton, ui/, tokens/, broker/, export/,
-              redact.h
-data/         the impl interface XML (a verbatim copy of the branch's), certificate.portal,
-              the D-Bus service file
-tools/        dev-stack.sh, trigger-certificate.sh
-docs/         architecture, both interfaces, security, spikes, roadmap, upstreaming,
-              decisions
+
+starts, inside `dbus-run-session`: `xdg-permission-store` (the portal refuses to start
+without it), this backend, and a development xdg-desktop-portal from the branch with
+`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate` and an `XDG_DESKTOP_PORTAL_DIR`
+pointing at a throwaway directory holding this repository's `.portal` file and a
+`portals.conf` selecting it. Then it runs the end-to-end client. Point it at your frontend
+build with `XDP_BUILD=/path/to/xdg-desktop-portal/build`, and put the `LD_LIBRARY_PATH` its
+libdex needs in `.xdp-env`.
+
+`--live` does the same on your real session bus, with the frontend replacing the system one
+— which is what a run against a real card needs, because the windows have to appear on your
+display. `--keep` leaves the stack up. `--softhsm` points the backend at a fixture token
+from `tools/softhsm-fixture.sh`.
+
+### The client
+
+```console
+$ tools/certificate-e2e.py --purpose client_auth --reason "Sign in to the VPN"
+$ tools/certificate-e2e.py --capabilities
+$ tools/certificate-e2e.py --close          # acquire a grant and release it, no signature
 ```
+
+talks to the **public** interface on `org.freedesktop.portal.Desktop`, exactly as an
+application would, and then verifies the signature it got against the certificate that came
+back. With the experimental gate off it says so and exits 40; that is the gate working.
+`tools/trigger-certificate.sh` is the same idea with `gdbus`, for poking one method at a
+time.
+
+### What the windows look like
+
+**The chooser** — *Use a Certificate* — leads with the application: the name resolved from
+its desktop file if there is one, the raw app id, and, in words, how well the frontend knows
+it ("Sandboxed application, identity verified by the system", or a warning that it is
+unsandboxed, or that it could not be identified at all). Then the purpose in this backend's
+own words. Then, only if the application sent one, its `reason` — sanitised to a single line,
+quoted, inside a frame labelled *The application says*, and never in the position where the
+application's identity goes. Then the certificates, each with subject, issuer, validity
+(with **EXPIRED** as a word, not a colour), key type and size, token label and reader. Then
+what the grant allows and for how long, and whether more operations can happen without
+another prompt. Then Cancel and Use Certificate. Escape cancels, and so does `Close()` from
+the frontend.
+
+**The PIN prompt** — *Unlock Security Token* — appears at the **first signature**, not when
+the grant is made, and names the application, the purpose, the token and the reader. A
+reader with a PIN pad gets an instruction window with no editable field. A wrong PIN clears
+the field and says so; nothing retries on its own. The PIN is copied into a locked buffer,
+wiped on every exit path, and never crosses D-Bus in either direction — there is no field on
+either interface it could travel in.
 
 Installed files: `$libexecdir/xdg-desktop-portal-certificate`,
-`$datadir/xdg-desktop-portal/portals/certificate.portal` (the real directory — that is
-where the frontend looks, and it is what every out-of-tree backend does),
-`$datadir/dbus-1/services/org.freedesktop.impl.portal.desktop.certificate.service`, and
-the interface XML in `$datadir/dbus-1/interfaces`. To select it explicitly, put this in
+`$datadir/xdg-desktop-portal/portals/certificate.portal` (the real directory — that is where
+the frontend looks, and it is what every out-of-tree backend does),
+`$datadir/dbus-1/services/org.freedesktop.impl.portal.desktop.certificate.service`, and the
+interface XML in `$datadir/dbus-1/interfaces`. To select it explicitly, put this in
 `portals.conf`:
 
 ```ini
 [preferred]
 org.freedesktop.impl.portal.experimental.Certificate=certificate
+```
+
+Layout:
+
+```
+src/          main.c, the impl interface, the impl Request and Session,
+              tokens/    module loading, discovery, X.509 parsing, the filter
+              broker/    the mechanism mapping, the device calls, the operation
+              ui/        the chooser, the PIN prompt, window parenting
+              export/    the facade's requirements; nothing can reach it yet
+              redact.h   what may be logged, enforced by there being no other way
+data/         the impl interface XML (verbatim copies of the branch's), certificate.portal,
+              the D-Bus service file
+tests/        the unit tests, their fixture certificates, and the SoftHSM device test
+tools/        dev-stack.sh, certificate-e2e.py, softhsm-fixture.sh, ui-smoke.sh,
+              trigger-certificate.sh
+docs/         architecture, both interfaces, security, testing, spikes, roadmap,
+              upstreaming, decisions
 ```
 
 ## Documents
@@ -245,6 +309,7 @@ org.freedesktop.impl.portal.experimental.Certificate=certificate
 | [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) | the interface this backend implements, why the XML here is a tracking copy, and why applications cannot reach it |
 | [docs/UPSTREAMING.md](docs/UPSTREAMING.md) | where the frontend branch is, what its XML forced this repository to change, and what remains before a PR |
 | [docs/SECURITY.md](docs/SECURITY.md) | threat model, PIN handling, grant scoping, caller identity |
+| [docs/TESTING.md](docs/TESTING.md) | **the exact commands**, including the run with a real card in a reader |
 | [docs/SPIKES.md](docs/SPIKES.md) | the questions that decide whether this is buildable |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | phases, effort estimate, and its assumptions |
 | [docs/decisions/](docs/decisions/) | why the shape is the shape |
@@ -258,7 +323,7 @@ Consumers only speak D-Bus, so the licence places no constraint on them.
 
 ## AI assistance
 
-These documents and the skeleton were drafted with AI assistance — Anthropic Claude and OpenAI
+These documents and the code were written with AI assistance — Anthropic Claude and OpenAI
 Codex — under the author's direction, and the author is responsible for every claim in them. The
 prior-art citations were checked against primary sources; the ones that could not be verified are
 called out where they appear.

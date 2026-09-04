@@ -1,7 +1,13 @@
 # Roadmap
 
-Status: EXPERIMENTAL design sketch. The sketch itself is done; nothing after it has started, and
-**phase 0 is a spike that may end the project rather than a build that begins it.**
+Status: EXPERIMENTAL. **The backend is built.** The chooser, the PIN prompt, token discovery,
+certificate filtering and brokered `Sign`/`Decrypt` exist, build clean, and have been driven end to
+end through the real frontend against a software token. What has *not* happened is the thing the
+whole list below was gated on: **nothing has touched a smart card.** The facade is still not
+reachable, and the spikes that decide whether it can exist are still unrun.
+
+Read the table under "Where the code actually is" before the effort figures: the figures were
+written when none of this existed and have not been re-derived.
 
 **What has changed since this document was last honest about its own scope:** the frontend is no
 longer this project's to build. It is an xdg-desktop-portal branch
@@ -11,6 +17,30 @@ frontend/backend split itself" line below is therefore work that is *done, elsew
 author*, and what is left in this repository is the backend. The effort figures have not been
 re-derived from scratch; the split's line is struck through in the table instead, which is honest
 about where the saving landed without pretending the rest of the numbers got any better.
+
+## Where the code actually is
+
+| | Status |
+|---|---|
+| The frontend, the impl interface, app-id derivation, the grant registry, the permission store, backend discovery | **Done**, upstream, on the branch. 40 pytest cases green against a mock backend |
+| PKCS#11 module loading, slot and token enumeration, certificate and key discovery, X.509 parsing | **Done**. `--list-tokens` prints it |
+| The purpose rules and `certificate_filter` | **Done**, unit-tested against seven real fixture certificates |
+| The mechanism mapping and its parameter validation | **Done**, unit-tested, including the RSA-PSS salt that does not fit the key |
+| The chooser | **Done**. Identity level in words, caller text quoted and labelled, expiry as a word |
+| The PIN prompt | **Done**, including protected authentication path, retry, and locked-token handling |
+| Brokered `Sign` and `Decrypt`, lazy login, one PKCS#11 session per grant | **Done**. Verified against SoftHSM for RSA PKCS#1 v1.5, RSA-PSS and ECDSA |
+| Token insertion and removal watching, `SessionInvalidated` | **Done**, polled, debounced. Never tested with a card actually leaving a reader |
+| The end-to-end client, the private-bus stack, the headless UI run | **Done** |
+| Chain building | **Not done.** `chain_status` is always `leaf_only` |
+| Rate limiting | **Not done**, on either side |
+| The synthetic PKCS#11 facade | **Not started, and unreachable**: `OpenPkcs11Endpoint` is on neither interface |
+| Anything on hardware | **Not done.** This is the gap that matters |
+| Translation, packaging, a KDE backend | **Not started** |
+
+The two-to-four-week feasibility spike below is therefore **half-answered**: the brokered path is
+built and works, which was never the doubtful half. S1 and S3 — can a synthetic facade exist, and
+can a browser use it — are untouched, and they are the ones that decide the shape of everything
+after brokered `Sign`.
 
 ## Effort figures and their assumptions
 

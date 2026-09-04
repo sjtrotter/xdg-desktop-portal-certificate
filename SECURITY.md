@@ -5,9 +5,12 @@ model and logging rules live in **[docs/SECURITY.md](docs/SECURITY.md)**.
 
 Three things are worth saying here, where people look first.
 
-**This is an experimental design sketch.** Nothing is implemented. There is no attack surface yet
-because there is no code yet — and correspondingly, nothing in `docs/SECURITY.md` has been reviewed
-by anyone but its authors.
+**This is experimental, and it now has an attack surface.** The backend is implemented: it loads
+PKCS#11 modules, draws a consent window and a PIN prompt, holds a logged-in card session, and
+performs signatures. `docs/SECURITY.md` opens with a checklist of which of its rules are enforced by
+code today and which are still intentions. Nothing in it has been reviewed by anyone but its
+authors, and **no real smart card has ever been read by this code** — see
+[docs/TESTING.md](docs/TESTING.md), tier 3, for the run that would change that.
 
 **There are two processes, and only one of them is in this repository.** The frontend is
 xdg-desktop-portal — specifically the branch `experimental/certificate-webauthentication` — and it
@@ -31,7 +34,7 @@ hostile unsandboxed process running as the user may be able to inspect other pro
 their environment, reach runtime files or inject input, depending on how the system is hardened.
 Splitting the design into two processes does not change that: both run as the user.
 
-**Reporting.** Once there is code, report security issues privately to the repository owner rather
+**Reporting.** Report security issues privately to the repository owner rather
 than in a public issue. Until then, the most valuable report is a hole in the design — especially in
 [docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md),
 which exists because an independent review found that this project's founding claim was wrong. That

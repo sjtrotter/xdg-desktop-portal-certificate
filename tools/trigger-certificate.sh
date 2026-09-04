@@ -20,8 +20,13 @@
 #
 #     dbus-run-session -- tools/trigger-certificate.sh
 #
-# ...but a private bus has no portal on it, so in practice use tools/dev-stack.sh,
-# which starts a frontend and a backend on a private bus and then runs this.
+# ...but a private bus has no portal on it, so in practice use
+#     tools/dev-stack.sh --keep --no-e2e
+# which starts a frontend and a backend on a private bus and leaves them up, and
+# then run this from another shell with the DBUS_SESSION_BUS_ADDRESS it printed.
+#
+# For anything more than poking one method, tools/certificate-e2e.py does the
+# whole flow and verifies the signature at the end.
 #
 # Method and argument shapes are taken from
 # data/org.freedesktop.portal.experimental.Certificate.xml on the
