@@ -119,9 +119,10 @@ $ meson test -C build broker-device --verbose
 
 `broker-device` opens a session on the fixture token, logs in, signs with RSA PKCS#1 v1.5 over
 SHA-256 and SHA-384, with RSA-PSS and with ECDSA, and **verifies each signature against the
-certificate the token handed back** — not against the key the fixture script generated. It also
-checks that a wrong PIN comes back as `PIN_INCORRECT` and not as a generic failure, and that
-discovery sees both certificates without logging in.
+certificate the token handed back** — not against the key the fixture script generated. It
+decrypts a ciphertext made with that same public key. It checks that a wrong PIN comes back as
+`PIN_INCORRECT` and not as a generic failure, and that discovery sees both certificates without
+logging in.
 
 Then the whole thing including the windows, in a headless X server:
 

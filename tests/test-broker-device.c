@@ -240,6 +240,67 @@ static void test_ecdsa(Fixture* fixture, gconstpointer user_data)
 	sign_and_verify(fixture, "EC", "ECDSA", "SHA256", GNUTLS_SIGN_ECDSA_SHA256);
 }
 
+/* Decrypt is on the interface and is implemented, so it gets exercised rather
+ * than being a code path nobody has run. The ciphertext is made with the PUBLIC
+ * key out of the certificate the token returned, so a wrong key would fail
+ * here as loudly as a wrong signature does above. */
+static void test_decrypt(Fixture* fixture, gconstpointer user_data)
+{
+	CertificateCandidate* candidate = NULL;
+	CertificateDevice device = { 0 };
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GVariant) parameters = NULL;
+	g_autoptr(GBytes) ciphertext = NULL;
+	g_autoptr(GBytes) plaintext = NULL;
+	gnutls_x509_crt_t crt = NULL;
+	gnutls_pubkey_t pubkey = NULL;
+	gnutls_datum_t der;
+	gnutls_datum_t clear = { (unsigned char*) "portal decrypt test", 19 };
+	gnutls_datum_t sealed = { NULL, 0 };
+
+	if (fixture->tokens == NULL)
+		return;
+
+	candidate = candidate_of_type(fixture, "RSA");
+	if (candidate == NULL || !candidate->can_decrypt)
+	{
+		g_test_skip("the fixture has no decrypt-capable RSA key");
+		return;
+	}
+
+	der.data = candidate->der->data;
+	der.size = candidate->der->len;
+
+	g_assert_cmpint(gnutls_x509_crt_init(&crt), ==, 0);
+	g_assert_cmpint(gnutls_x509_crt_import(crt, &der, GNUTLS_X509_FMT_DER), ==, 0);
+	g_assert_cmpint(gnutls_pubkey_init(&pubkey), ==, 0);
+	g_assert_cmpint(gnutls_pubkey_import_x509(pubkey, crt, 0), ==, 0);
+	g_assert_cmpint(gnutls_pubkey_encrypt_data(pubkey, 0, &clear, &sealed), ==, 0);
+	gnutls_pubkey_deinit(pubkey);
+	gnutls_x509_crt_deinit(crt);
+
+	ciphertext = g_bytes_new(sealed.data, sealed.size);
+	gnutls_free(sealed.data);
+
+	parameters = g_variant_parse(G_VARIANT_TYPE_VARDICT, "{}", NULL, NULL, NULL);
+	g_assert_true(certificate_mechanism_parse("RSA_PKCS1_V1_5", parameters, candidate->key_type,
+	                                          candidate->key_size, TRUE, &mechanism, &error));
+	g_assert_no_error(error);
+
+	g_assert_true(certificate_device_open(&device, fixture->tokens, candidate, &error));
+	g_assert_true(certificate_device_login(&device, candidate, FIXTURE_PIN, &error));
+
+	plaintext = certificate_device_perform(&device, TRUE, &mechanism, ciphertext, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(plaintext);
+	g_assert_cmpuint(g_bytes_get_size(plaintext), ==, clear.size);
+	g_assert_cmpint(memcmp(g_bytes_get_data(plaintext, NULL), clear.data, clear.size), ==, 0);
+
+	certificate_device_close(&device);
+	certificate_mechanism_clear(&mechanism);
+}
+
 /* The wrong PIN must come back as PIN_INCORRECT and nothing else: collapsing
  * that into a generic failure is how a user blocks a card while being told
  * "authentication failed". This spends one of the token's attempts, which is
@@ -316,6 +377,7 @@ int main(int argc, char** argv)
 	ADD("/device/rsa-pkcs1-sha384", test_rsa_pkcs1_sha384);
 	ADD("/device/rsa-pss-sha256", test_rsa_pss);
 	ADD("/device/ecdsa-sha256", test_ecdsa);
+	ADD("/device/decrypt", test_decrypt);
 	ADD("/device/wrong-pin", test_wrong_pin);
 
 #undef ADD

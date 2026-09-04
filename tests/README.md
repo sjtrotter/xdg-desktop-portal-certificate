@@ -7,7 +7,7 @@
 | `filter` | the purpose rules and `certificate_filter`, against seven real certificates in `fixtures/` | nothing |
 | `mechanism` | the portal-mechanism-to-`CKM_*` mapping, its parameter validation, the DigestInfo construction and the raw-to-DER ECDSA re-encoding | nothing |
 | `redact` | that no `pkcs11:` URI, `pin-value` or `pin-source` survives the redactor, and that caller-supplied text cannot draw chrome | nothing |
-| `broker-device` | `C_OpenSession`, `C_Login`, `C_Sign` and a verification of the signature against the certificate the token returned, for RSA PKCS#1 v1.5, RSA-PSS and ECDSA; the wrong PIN reported as `PIN_INCORRECT`; discovery without logging in | a SoftHSM fixture, or it **skips itself** |
+| `broker-device` | `C_OpenSession`, `C_Login`, `C_Sign` and a verification of the signature against the certificate the token returned, for RSA PKCS#1 v1.5, RSA-PSS and ECDSA; `C_Decrypt` of a ciphertext made with that certificate's public key; the wrong PIN reported as `PIN_INCORRECT`; discovery without logging in | a SoftHSM fixture, or it **skips itself** |
 
 and outside `meson test`, because they need a bus and a display:
 
