@@ -287,7 +287,7 @@ Afterwards, check the system portal came back:
 $ busctl --user status org.freedesktop.portal.Desktop
 ```
 
-The `ExecPath` should be `/usr/libexec/xdg-desktop-portal` again, not your build directory. It
+The `Exe=` line should read `/usr/libexec/xdg-desktop-portal` again, not your build directory. It
 returns by D-Bus activation the next time anything asks for the name; if nothing has asked yet,
 `busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop >/dev/null`
 is enough to provoke it. To be certain nothing of the development stack is left:
