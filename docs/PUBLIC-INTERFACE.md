@@ -68,8 +68,13 @@ returns a `Request` the caller can `Close()`. The acquire response carries
 - `interaction_mode` is `required`, `allowed` (default) or `forbidden`.
 - `requested_lifetime` is a ceiling *request*: the frontend clamps it to 3600 s (default
   300) and hands the backend its own decision.
-- `mechanism` on `Sign`/`Decrypt` must be one the grant reported, from the frontend's
-  allow list `RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA`.
+- `mechanism` must be one the grant reported, and the allow list is now **per operation**:
+  `Sign` takes `RSA_PKCS1_V1_5`, `RSA_PSS` or `ECDSA`; `Decrypt` takes `RSA_OAEP` and
+  nothing else. A v1.5 decryption whose outcome the caller can observe is a padding
+  oracle over the card's key, so it is a signing mechanism here and not a decryption one.
+- `data` on `Sign` is **always a digest** of the `hash` named in `parameters`, and its
+  length must be exactly that digest's length. That is what keeps `Sign` from being a
+  general signing oracle.
 - `reason` (≤ 256 chars) is application-supplied text, shown as such and never in the
   trusted identity position.
 - `allow_selection_memory` permits *preselection only*, is ignored for applications whose
