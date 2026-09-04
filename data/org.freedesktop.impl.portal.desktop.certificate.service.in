@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# D-Bus activation for this backend, mirroring xdg-desktop-portal-gtk's
+# org.freedesktop.impl.portal.desktop.gtk.service and
+# xdg-desktop-portal-termfilechooser's
+# org.freedesktop.impl.portal.desktop.termfilechooser.service: one session
+# service per out-of-tree backend, named
+# org.freedesktop.impl.portal.desktop.<backend>.
+#
+# xdg-desktop-portal activates this name when portals.conf (or UseIn) selects
+# certificate.portal for org.freedesktop.impl.portal.experimental.Certificate.
+# APPLICATIONS HAVE NO REASON TO HOLD THIS NAME and are not expected to reach
+# it; see docs/IMPL-INTERFACE.md, "Why an application cannot call this".
+#
+# EXPERIMENTAL. The binary this points at is a design-sketch stub that exits 70.
+
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.certificate
+Exec=@libexecdir@/xdg-desktop-portal-certificate

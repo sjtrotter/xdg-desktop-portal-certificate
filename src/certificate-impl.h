@@ -5,12 +5,16 @@
 #include <glib.h>
 
 /** @file
- *  The BACKEND's implementation of io.github.sjtrotter.impl.portal.Certificate1.
+ *  This backend's implementation of
+ *  org.freedesktop.impl.portal.experimental.Certificate.
  *
  *  One file per portal, exactly as xdg-desktop-portal-gtk does it (src/filechooser.c,
- *  src/account.c, ...). At upstreaming this file becomes
- *  xdg-desktop-portal-gtk/src/certificate.c, or the same file in a backend package of its
- *  own; see docs/UPSTREAMING.md.
+ *  src/account.c, ...) and as every out-of-tree backend does. This repository IS that
+ *  backend package: there is no frontend here, and this file has no upstream destination
+ *  to move to. The interface it implements is defined by the xdg-desktop-portal branch
+ *  experimental/certificate-webauthentication, and the copy of the XML in
+ *  data/ tracks that branch verbatim; see docs/IMPL-INTERFACE.md and
+ *  docs/decisions/0010-backend-only-frontend-lives-upstream.md.
  *
  *  WHAT THE BACKEND OWNS: the UI and the device. The chooser (ui/chooser.h), the PIN
  *  prompt (ui/pin.h), PKCS#11 module loading and token discovery (tokens/), the token
@@ -21,14 +25,18 @@
  *
  *   - DERIVE THE CALLER'S IDENTITY. app_id is an argument. There is no code here that
  *     asks the bus who is calling, reads /proc, or consults Flatpak metadata, because
- *     the answer would describe the frontend.
+ *     the answer would describe xdg-desktop-portal.
  *   - DECIDE POLICY. Whether a purpose may ask for decrypt, how long a grant lives,
- *     whether a caller has made too many requests: all frontend. The backend enforces
- *     what it is told plus its own hard limits, and never widens.
+ *     whether a caller has made too many requests: all frontend. Note in particular that
+ *     the `lifetime` option arrives as the number of seconds the frontend has DECIDED to
+ *     allow, after applying its 3600 s ceiling -- it is not the application's request.
+ *     The backend enforces what it is told plus its own hard limits, and never widens.
  *   - TOUCH THE PERMISSION STORE. Selection memory is keyed by app id, and the app id is
- *     the frontend's.
- *   - TRUST THE CALLER DIRECTLY. The only legitimate caller is the frontend. See
- *     "Refusing everyone but the frontend" below and docs/IMPL-INTERFACE.md.
+ *     the frontend's. This backend reports `certificate_id` and `remember_selection` and
+ *     receives `preselect_certificate`; the frontend's `certificate` permission table is
+ *     none of its business.
+ *   - TRUST THE CALLER DIRECTLY. The only legitimate caller is xdg-desktop-portal. See
+ *     "Refusing everyone but the portal" below and docs/IMPL-INTERFACE.md.
  *
  *  WHAT IT MUST ALWAYS DO: display what it was told about the caller INCLUDING HOW WELL
  *  THE CALLER IS KNOWN, render the purpose in its own words, keep caller-supplied text
@@ -36,23 +44,23 @@
  *  even though the frontend already did. Two checks against a hostile caller is the
  *  correct number.
  *
- *  REFUSING EVERYONE BUT THE FRONTEND. Upstream relies on the impl bus names simply not
+ *  REFUSING EVERYONE BUT THE PORTAL. Upstream relies on the impl bus names simply not
  *  being interesting to applications and not being proxied into sandboxes. This backend
  *  does that AND checks: every method compares the sender against the unique name that
- *  owns the frontend's well-known bus name, and refuses anything else with
- *  NotPermitted, logged by reason code. That check is cheap, and the failure it prevents
- *  -- an application handing itself an app id -- destroys the entire consent model.
+ *  owns org.freedesktop.portal.Desktop, and refuses anything else with NotPermitted,
+ *  logged by reason code. That check is cheap, and the failure it prevents -- an
+ *  application handing itself an app id -- destroys the entire consent model.
  *
  *  Sketch only; nothing here is implemented.
  */
 
-#define CERTIFICATE_IMPL_BUS_NAME "io.github.sjtrotter.impl.portal.Certificate.gtk"
-#define CERTIFICATE_IMPL_OBJECT_PATH "/io/github/sjtrotter/portal/Certificate"
-#define CERTIFICATE_IMPL_INTERFACE "io.github.sjtrotter.impl.portal.Certificate1"
+#define CERTIFICATE_IMPL_BUS_NAME "org.freedesktop.impl.portal.desktop.certificate"
+#define CERTIFICATE_IMPL_OBJECT_PATH "/org/freedesktop/portal/desktop"
+#define CERTIFICATE_IMPL_INTERFACE "org.freedesktop.impl.portal.experimental.Certificate"
 #define CERTIFICATE_IMPL_INTERFACE_VERSION 1u
 
 /** The only bus name whose owner may call this backend. */
-#define CERTIFICATE_FRONTEND_BUS_NAME "io.github.sjtrotter.portal.Certificate"
+#define CERTIFICATE_FRONTEND_BUS_NAME "org.freedesktop.portal.Desktop"
 
 /** How well the frontend knows the caller, as it arrives on the wire. The backend does
  *  not compute this and cannot improve it; it DISPLAYS it. */
@@ -84,8 +92,8 @@ typedef struct CertificateImpl CertificateImpl;
 
 /** Claim the impl bus name and export the impl interface plus the impl Request and
  *  Session objects. Fails with exit code 40 when there is no session bus, no p11-kit, or
- *  no usable module configuration -- checked at startup so the frontend gets
- *  BackendUnavailable early and clearly rather than mid-handshake. */
+ *  no usable module configuration -- checked at startup so the frontend fails early and
+ *  clearly rather than mid-handshake. */
 CertificateImpl* certificate_impl_new(gboolean replace, GError** error);
 
 /** True if @sender currently owns CERTIFICATE_FRONTEND_BUS_NAME. Every method calls this
@@ -97,8 +105,8 @@ gboolean certificate_impl_sender_is_frontend(CertificateImpl* impl, const char* 
  *  exits is a backend holding a card session nobody asked it to hold. */
 int certificate_impl_run(CertificateImpl* impl);
 
-/** Shut down: close every token session, log out where the token permits, poison every
- *  facade endpoint, reap every helper, and emit SessionInvalidated with
+/** Shut down: close every token session, log out where the token permits, reap every
+ *  helper, and emit SessionInvalidated with
  *  "backend_shutdown" for each session so the frontend can tell its callers the truth
  *  rather than letting them discover it at the next Sign. */
 void certificate_impl_shutdown(CertificateImpl* impl);

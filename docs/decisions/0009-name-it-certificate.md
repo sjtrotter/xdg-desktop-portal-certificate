@@ -1,7 +1,16 @@
 # 9. Name it Certificate, not Smartcard, ClientCertificate or Credentials
 
 Date: 2026-09-04
-Status: accepted (for the sketch)
+Status: accepted (for the sketch), amended by [0010](0010-backend-only-frontend-lives-upstream.md)
+
+> **Amendment (0010).** `Certificate` is still the name, and the reasoning below is why.
+> Every *fully qualified* name in this ADR is historical: the project-controlled
+> `io.github.sjtrotter.*` interfaces it renamed no longer exist on either side of the
+> arrow, because this repository stopped shipping a frontend or a public interface at all.
+> The interface is now `org.freedesktop.portal.experimental.Certificate` /
+> `org.freedesktop.impl.portal.experimental.Certificate`, defined by the xdg-desktop-portal
+> branch, and the binaries are one binary, `xdg-desktop-portal-certificate`. This ADR is
+> retained as the record of *why the word is "Certificate"*, which the branch adopted.
 
 ## Context
 

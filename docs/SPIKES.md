@@ -1,7 +1,14 @@
 # Go / no-go spikes
 
-Status: EXPERIMENTAL design sketch. **None of these have been run, and the project should not exist
-as a production repository until S1 and S3 have answers.**
+Status: EXPERIMENTAL design sketch. **None of these have been run on hardware, and the project
+should not exist as a production repository until S1 and S3 have answers.**
+
+Two things changed since this list was written. The frontend is now an xdg-desktop-portal branch
+([0010](decisions/0010-backend-only-frontend-lives-upstream.md)), so **S5 is largely answered
+already** — against a mock backend, in somebody else's test harness — and what is left of it is
+noted in place. And `OpenPkcs11Endpoint` is not on either interface: the branch deferred it, so
+**S1 and S2 have nothing to run against until it is added upstream**. That does not make them less
+important; it makes them blocked on a patch rather than on hardware.
 
 Phase 0 of [ROADMAP.md](ROADMAP.md) is a **time-boxed feasibility spike of 2–4 weeks**, not a build.
 The rule for all of them: a spike is throwaway code that answers one question. It does not become
@@ -13,13 +20,11 @@ the product, it does not get a test suite, and it does not get merged.
 | **S2** | Who prompts for the PIN, and when, once a module is involved? | The login model, and whether the consent story survives contact with real TLS stacks |
 | **S3** | Can WebKitGTK complete a client-certificate handshake through it? | Whether the first consumer can use this project — the weakest link in the design |
 | **S4** | What happens with removal, reinsertion, and several readers? | Whether the lifetime model is right, and how much of it is card-specific |
-| **S5** | Does the frontend/backend split survive contact with fd passing, prompts and a dying backend? | Whether [0008](decisions/0008-build-to-the-upstream-shape.md)'s claim — that acceptance upstream is a rename — is true |
+| **S5** | Does the frontend/backend split survive contact with fd passing, prompts and a dying backend? | Mostly answered by the branch's pytest suite; the fd half is blocked on there being an fd |
 
-**S3 is the one that decides whether this project is worth publishing.** S5 is new with the
-frontend/backend split and is cheap; run it alongside S1, because S1's facade is the thing whose fd
-has to cross two processes. Run S1 and S3 together;
-S3's failure modes are S1's requirements list. Until S3 passes, `webauth-service` keeps its
-in-process certificate handling behind an internal adapter, so that it can use either path.
+**S3 is the one that decides whether this project is worth publishing.** Run S1 and S3 together;
+S3's failure modes are S1's requirements list. Until S3 passes, `xdg-desktop-portal-webauth` keeps
+its in-process certificate handling behind an internal adapter, so that it can use either path.
 
 ---
 
@@ -119,9 +124,9 @@ facade should not ship.
 
 ---
 
-## S3 — WebKitGTK client-certificate handshake (joint with `webauth-service`)
+## S3 — WebKitGTK client-certificate handshake (joint with `xdg-desktop-portal-webauth`)
 
-**The question.** Can WebKitGTK, driven by `webauth-service`, complete a real client-certificate
+**The question.** Can WebKitGTK, driven by `xdg-desktop-portal-webauth`, complete a real client-certificate
 handshake using a credential this service produced? **This is the weakest link in the design.**
 
 **Why it matters.** It is the first consumer and the reason the project exists. It is also the case
@@ -163,8 +168,8 @@ existed and may not see an environment variable or a module registered afterward
    inside a module shared by every consumer in the process.
 2. A dedicated WebKit network process or environment per authentication session.
 3. Integrating the broker into glib-networking or GnuTLS directly.
-4. `webauth-service` keeps its in-process PKCS#11 implementation and this project serves other
-   consumers first.
+4. `xdg-desktop-portal-webauth` keeps its in-process PKCS#11 implementation and this project serves
+   other consumers first.
 
 **Pass** = one real WebKitGTK client-certificate handshake, on at least one distro version.
 **Fail** = do not publish this repository as a dependency of anything; keep it as an experiment.
@@ -210,34 +215,39 @@ anything is built on it.
 
 ## S5 — The frontend/backend boundary
 
-**The question.** Does the split behave the way [0008](decisions/0008-build-to-the-upstream-shape.md)
-assumes — and is the claim in [UPSTREAMING.md](UPSTREAMING.md), that acceptance upstream is a rename
-rather than a redesign, still true after contact with a running system?
+**Largely answered, and by somebody else's tests.** The frontend is an xdg-desktop-portal branch
+with a python-dbusmock backend and 40 passing pytest cases, which cover steps 2, 4 and part of 6
+below against a mock. What is left is the fd relay (blocked: no `OpenPkcs11Endpoint`), and running
+the same cases against a backend that talks to real hardware rather than a mock. The steps are kept
+because "a mock passed" is not "a card passed".
 
-**Why it matters.** The split was built early, against the review's advice, on the strength of that
-claim. It is cheap to test and expensive to be wrong about.
+**The question.** Does the split behave the way [0008](decisions/0008-build-to-the-upstream-shape.md)
+assumes, after contact with a running system and a real card?
 
 ### Steps
 
 1. **fd relay.** As S1 step 9: the facade socket created in the backend, returned over the impl
    interface, relayed by the frontend, used by the application. No copy retained, no leak, closure
-   observed.
+   observed. **Blocked**: there is no method that returns one.
 2. **Prompt cancellation across two hops.** `Request.Close()` on the frontend's object must close
    the backend's window *before* the application is told anything. Measure the gap. A user who
    cancels and sees the PIN dialog linger has been shown that the dialog is not in charge.
 3. **A backend that dies mid-grant.** Kill it during a prompt, during a `Sign`, and while a facade
    endpoint is open. Confirm every grant is invalidated with `backend_gone`, that no application is
    left holding a session handle to nothing, and that the facade helper is reaped.
-4. **A backend that lies.** A test backend that returns a longer `expires_at` than it was given,
-   mechanisms outside the allow-list, `permitted_operations` the purpose forbids, and a
-   `remember_selection` the caller never asked for. **Every one must be clamped by the frontend and
-   logged**, not honoured.
+4. **A backend that lies.** A test backend that returns mechanisms outside the allow-list,
+   `permitted_operations` the purpose forbids, and a `remember_selection` the caller never asked
+   for. **Every one must be clamped by the frontend and logged**, not honoured. *(Done on the
+   branch: `test_backend_results_are_clamped`. Note `expires_at` is not in the list any more — it is
+   frontend-generated and a backend has no way to send one.)*
 5. **A caller that tries to reach the impl interface directly**, sandboxed and unsandboxed. Confirm
    the sender check refuses it, and record honestly what an unsandboxed process on an unhardened
    desktop can still do.
 6. **Backend selection.** Two `.portal` files, `portals.conf` preferring each in turn, one naming a
    backend that is not installed, and one naming `none`. Confirm the documented order and that a
-   missing backend produces `BackendUnavailable` rather than a hang.
+   missing backend is handled cleanly. *(Note what the frontend actually does when no backend is
+   configured: it logs nothing and simply does not export the public interface, so an application
+   sees "no such interface" rather than an error.)* `tools/dev-stack.sh` is the harness for this.
 7. **Round-trip cost.** Measure `Sign` end to end, with and without a prompt, against a
    single-process build of the same code. This is the number that decides whether the
    `Request`-shaped `Sign` needs a non-interactive fast path — see

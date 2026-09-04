@@ -1,56 +1,66 @@
-# smartcard-portal
+# xdg-desktop-portal-certificate
 
-**Status: EXPERIMENTAL design sketch. Nothing works yet, and the first thing to do is a spike that
-may kill it.** This repository contains design documents, a repository skeleton, and two stub
-binaries that build and print usage. No card has ever been read by this code, no PIN has ever been
-prompted for, and no cryptographic operation has ever been brokered.
+**This repository is an xdg-desktop-portal BACKEND.** It is not a portal, it owns no
+public interface, and no application talks to it. It draws a certificate chooser and a PIN
+prompt, discovers PKCS#11 tokens, and performs private-key operations when
+xdg-desktop-portal asks it to.
 
-## Two processes, plumbed like xdg-desktop-portal
+**Status: EXPERIMENTAL design sketch. Nothing works yet, and the first thing to do is a
+spike that may kill it.** This repository contains design documents, a repository
+skeleton, and one stub binary that builds and prints usage. No card has ever been read by
+this code, no PIN has ever been prompted for, and no cryptographic operation has ever been
+brokered.
 
-This is the first thing to know about the repository, because it is the shape of everything in it.
+> **The directory is still called `smartcard-portal`.** That is a directory name and a
+> URL, not a claim. The binary, the D-Bus names and everything else are
+> `xdg-desktop-portal-certificate`; renaming the GitHub repository to match is a separate,
+> later decision — see [0009](docs/decisions/0009-name-it-certificate.md), which is why the
+> interface is named after the certificate rather than after the hardware, and
+> [0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md), which is why the
+> repository is a backend.
+
+## Where the other half is
 
 ```
-  ┌─────────────┐                                                     ┌──────────────────────────────┐
-  │ application │   io.github.sjtrotter.portal.Certificate ──────────►│ FRONTEND                     │
-  └─────────────┘   io.github.sjtrotter.portal.Certificate1           │ certificate-portal-frontend  │
-        ▲                                                             │                              │
-        │                    who is asking (app id, and how           │ identity · policy ·          │
-        │                    well we know it) · purpose and           │ permissions · request &      │
-        │                    option validation · policy ·             │ session lifecycle ·          │
-        └── grant, signature │ permission store · grants,             │ backend selection            │
-                             │ expiry, rate limits                    └────────────┬─────────────────┘
-                                                                                   │
-                              io.github.sjtrotter.impl.portal.Certificate1         │  app_id is an
-                              — PRIVATE. Applications never call it. ──────────────┤  ARGUMENT here
-                                                                                   ▼
-                                                                      ┌──────────────────────────────┐
-                                                                      │ BACKEND                      │
-                                                                      │ certificate-portal-gtk       │
-                                                                      │                              │
-                                                                      │ chooser · PIN prompt ·       │
-                                                                      │ PKCS#11 session · Sign ·     │
-                                                                      │ synthetic facade             │
-                                                                      └────────────┬─────────────────┘
-                                                                                   ▼
-                                                                                    p11-kit → OpenSC → pcscd → card
+  ┌─────────────┐                                     ┌──────────────────────────────────┐
+  │ application │  org.freedesktop.portal.experimental │ FRONTEND                         │
+  └─────────────┘  .Certificate  ────────────────────► │ xdg-desktop-portal               │
+        ▲          on org.freedesktop.portal.Desktop   │ branch experimental/             │
+        │                                              │   certificate-webauthentication  │
+        │                                              │                                  │
+        │          who is asking (app id, and how      │ identity · policy · permissions  │
+        └── grant, │ well we know it) · option         │ request & session lifecycle ·    │
+            sig    │ validation · lifetime ceiling ·   │ grants, expiry, clamping ·       │
+                   │ permission store · grants         │ backend selection                │
+                                                       └────────────┬─────────────────────┘
+                     org.freedesktop.impl.portal        NOT for      │  app_id is an
+                       .experimental.Certificate        applications │  ARGUMENT here
+                     on org.freedesktop.impl.portal ────────────────►│
+                       .desktop.certificate                          ▼
+                                                       ┌──────────────────────────────────┐
+                                                       │ BACKEND — THIS REPOSITORY        │
+                                                       │ xdg-desktop-portal-certificate   │
+                                                       │                                  │
+                                                       │ chooser · PIN prompt ·           │
+                                                       │ PKCS#11 session · Sign           │
+                                                       └────────────┬─────────────────────┘
+                                                                    ▼
+                                                       p11-kit → OpenSC → pcscd → card
 ```
 
-**A client talks to the frontend and to nothing else.** It calls
-`io.github.sjtrotter.portal.Certificate1` on `io.github.sjtrotter.portal.Certificate`, gets a `Request`
-object whose path it can compute in advance, and a `Session` object that *is* the grant. It never
-learns which backend is installed, never holds a PKCS#11 handle, and never sees a PIN.
+**A client talks to xdg-desktop-portal and to nothing else.** It never learns which backend
+is installed, never holds a PKCS#11 handle, and never sees a PIN. The division is not
+copied from xdg-desktop-portal any more — it *is* xdg-desktop-portal: `app_id` is derived
+by the frontend and passed to this backend as an argument, so the process drawing the
+window that names an application never had to guess which application it was.
 
-The division is copied from xdg-desktop-portal, not invented: **frontend = caller identity, policy,
-permissions, request lifecycle, backend selection; backend = UI and device access**. The one thing
-that matters most is that `app_id` is *derived by the frontend* and *passed to the backend as an
-argument* — so the process drawing the window that names an application never had to guess which
-application it was.
-
-Building it this way now, rather than after a first release, is a deliberate override of the
-review's "premature for v0" advice:
-[docs/decisions/0008](docs/decisions/0008-build-to-the-upstream-shape.md). What would change if this
-were ever accepted upstream — names, and where the frontend lives — is
-[docs/UPSTREAMING.md](docs/UPSTREAMING.md).
+The frontend is a local-only branch, `experimental/certificate-webauthentication`, commits
+`3f46e3c..661e441`. It has been built and tested (40 pytest cases for this portal, all
+green, against a python-dbusmock backend) and **has not been proposed to anyone**. Its
+interfaces live in the `org.freedesktop.portal.experimental.*` namespace, which is what
+upstream set aside for portals that are not finished — not a claim that this one has been
+accepted. [docs/UPSTREAMING.md](docs/UPSTREAMING.md) has the whole picture, including what
+remains before a pull request.
 
 Read this paragraph before anything else:
 
@@ -62,30 +72,9 @@ Read this paragraph before anything else:
 > That is materially larger and riskier than it first looks: the facade is a security-sensitive
 > PKCS#11 implementation, not plumbing. See
 > [docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md)
-> and [0007](docs/decisions/0007-brokered-operations-are-the-core.md).
-
-> **Names.** `smartcard-portal` is a *directory name*, not a claim; renaming the GitHub repository
-> itself is a separate, later decision — see [0009](docs/decisions/0009-name-it-certificate.md).
-> The interfaces ship as **`io.github.sjtrotter.portal.Certificate1`** (public) and
-> **`io.github.sjtrotter.impl.portal.Certificate1`** (private, frontend-to-backend) — project-controlled
-> reverse-DNS names with a major version, as
-> [the D-Bus specification recommends](https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names)
-> — and deliberately not `org.freedesktop.portal.*`. **We mirror the shape; we do not take the
-> namespace.** These interfaces were originally named after the hardware, and were renamed to
-> `Certificate1` once the frontend/backend split made the real conceptual boundary unavoidable to
-> see: a **client certificate** or **cryptographic credential**,
-> because the backing key might be a TPM, a software token, a phone or a remote HSM rather than a
-> card. `Certificate1` is still an incubation name and may change again before acceptance — see
-> [0003](docs/decisions/0003-own-namespace-before-freedesktop.md) and
-> [0009](docs/decisions/0009-name-it-certificate.md), which records the rename itself and why
-> `Credentials` was rejected too.
->
-> **Bus name.** The frontend owns `io.github.sjtrotter.portal.Certificate` at
-> `/io/github/sjtrotter/portal/Certificate` — its own name during incubation, not a
-> singleton shared with the sibling `entra-token-helper` portal. Both frontends install and run
-> side by side; at acceptance both collapse onto the real `org.freedesktop.portal.Desktop`. See
-> [0008](docs/decisions/0008-build-to-the-upstream-shape.md), "Per-project bus names during
-> incubation".
+> and [0007](docs/decisions/0007-brokered-operations-are-the-core.md). The facade is
+> currently unreachable: the frontend branch deliberately left `OpenPkcs11Endpoint` off
+> both interfaces, so brokered `Sign` is the only path there is.
 
 ## The problem
 
@@ -125,239 +114,126 @@ application a raw, general-purpose token interface and calls it mediation.
 
 ## The design, in one paragraph
 
-A per-user, D-Bus-activated **portal** brokers cryptographic credentials the way
+xdg-desktop-portal brokers cryptographic credentials the way
 [`org.freedesktop.portal.Camera`](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Camera.html)
 brokers cameras: it does not hand over the device. An application calls `AcquireCredential` naming
-a purpose. The **frontend** works out who is asking and whether it may ask; the **backend** — not
+a purpose. The **frontend** works out who is asking and whether it may ask; **this backend** — not
 the application — shows a chooser naming the application *the frontend identified*, how well it is
 identified, the purpose in the backend's own words, and the candidate certificates on each token;
 the frontend returns a **grant**: the chosen certificate as DER, its chain and chain status, the
 key's type and mechanisms, the permitted operations, and an expiry. The application then asks the
 frontend to **`Sign`** (and, if the grant allows it, `Decrypt`); the frontend checks the grant and
-forwards; the backend prompts for the PIN in its own window, logs into its own PKCS#11 session,
+forwards; this backend prompts for the PIN in its own window, logs into its own PKCS#11 session,
 performs the operation and returns the result.
 The PIN never crosses D-Bus, the private key never leaves the card, and the application never holds
-a PKCS#11 handle. For consumers that can only consume a PKCS#11 module — which is most existing TLS
-code — a **separately requested, experimental** `OpenPkcs11Endpoint` returns a socket fd backed by
-a broker-controlled **synthetic** PKCS#11 facade exposing one slot, one token, the granted objects
-and nothing else.
+a PKCS#11 handle.
 
-## Layers
+## Interfaces
 
-```
-                    ┌──────────────────────────────────────────────┐
-                    │  FRONTEND  certificate-portal-frontend         │
-                    │  io.github.sjtrotter.portal.Certificate1       │
-                    │  app id · policy · permissions · grants      │
-                    └───────────────────┬──────────────────────────┘
-                                        │ io.github.sjtrotter.impl.portal.Certificate1
-                                        │ (private; app_id travels as an argument)
-                    ┌───────────────────▼──────────────────────────┐
-                    │  BACKEND  certificate-portal-gtk               │
-                    │  chooser UI · PIN UI · token session         │
-                    │  brokered Sign / Decrypt        ← the core   │
-                    │  synthetic PKCS#11 facade  ← experimental,   │
-                    │                              opt-in, milestone 2
-                    └───────┬──────────────────────────┬───────────┘
-                            │                          │
-             grant + brokered Sign                     │ grant + PKCS#11 endpoint fd
-             (relayed by the frontend)                 │ (created by the backend,
-                            │                          │  relayed by the frontend)
-            ┌───────────────▼────────────────┐   ┌─────▼───────────────────────────┐
-            │ webauth-portal-gtk (backend)   │   │ TLS applications that can only  │
-            │ io.github.sjtrotter.portal.    │   │ consume a module. NOT MVP       │
-            │ WebAuthentication1             │   │ consumers: Firefox, Chromium,   │
-            │ (WebKit client-cert challenge) │   │ Evolution, openconnect, SSH,    │
-            └───────────────┬────────────────┘   │ PDF signing each need explicit  │
-                            │                    │ integration work of their own.  │
-                completion URI                   └─────────────────────────────────┘
-
-            ┌───────────────▼────────────────┐
-            │ entra token client → FreeRDP   │
-            │ Remmina / KRDC / sdl-freerdp   │
-            └────────────────────────────────┘
-```
-
-Consumers see only the top box. The arrows from the backend are drawn from where the work happens,
-not from where the D-Bus reply comes: every one of them passes through the frontend.
-
-The left branch is the first consumer and the reason this exists
-([0005](docs/decisions/0005-first-consumer-is-the-web-auth-service.md)). The right branch is the
-long-term case for a separate service — but it is a *hope*, not a plan: every one of those
-applications needs integration work in its own tree, and none of them has been asked.
-
-Underneath, unchanged and unowned by this project: `pcsc-lite`, [OpenSC](https://github.com/OpenSC/OpenSC)
-for PIV (the only supported card stack in v1), and p11-kit's module configuration.
-
-## Interface at a glance
-
-**Public**, on `io.github.sjtrotter.portal.Certificate`, object `/io/github/sjtrotter/portal/Certificate` —
-described in [docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md), declared in
-[`frontend/data/io.github.sjtrotter.portal.Certificate1.xml`](frontend/data/io.github.sjtrotter.portal.Certificate1.xml).
+**Public**, on `org.freedesktop.portal.Desktop` at `/org/freedesktop/portal/desktop` —
+**defined by the frontend branch, not here**. Summarised in
+[docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md), which points at
+`data/org.freedesktop.portal.experimental.Certificate.xml` on the branch.
 
 ```
-io.github.sjtrotter.portal.Certificate1
+org.freedesktop.portal.experimental.Certificate      [EXPERIMENTAL, gated]
 
-  CreateSession(a{sv} options) → o session_handle        ← the session IS the grant
-
-  AcquireCredential(o session_handle, s parent_window, a{sv} options) → o request_handle
+  CreateSession      (a{sv})                            → o handle      [Request]
+                                      ↑ the session_handle comes back in the Response
+  AcquireCredential  (o session, s parent_window, a{sv}) → o handle      [Request]
         options: handle_token, activation_token,
-                 purpose: client_auth | signing | email | ssh   (no "any")
+                 purpose: client_auth | signing | email | ssh   (required, no "any")
                  certificate_filter { issuers, key_usage, eku, token_label,
                                       piv_slot, key_algorithms }
                  operation_policy { sign, decrypt }
-                 requested_lifetime, interaction_mode: required|allowed|forbidden,
-                 allow_selection_memory, reason (untrusted), context (untrusted)
-
-  Sign(o session_handle, s parent_window, a{sv} options) → o request_handle
-        options: handle_token, operation_id, mechanism, parameters, data
-        results: signature ay        ← a Request, because it MAY prompt
-  Decrypt(o session_handle, s parent_window, a{sv} options) → o request_handle
-  RenewGrant(o session_handle, a{sv} options) → t expires_at
-  ReleaseGrant(o session_handle)                    ← alias of Session.Close()
-  GetCapabilities(a{sv} options) → a{sv}
-
-  OpenPkcs11Endpoint(o session_handle, a{sv} options)               ← EXPERIMENTAL
-        → h endpoint_fd, s certificate_uri, s private_key_uri, u endpoint_version
-
+                 requested_lifetime (clamped to 3600), interaction_mode,
+                 allow_selection_memory, reason (untrusted)
+  Sign / Decrypt     (o session, s parent_window, a{sv}) → o handle      [Request]
+  RenewGrant         (o session, a{sv})                  → t expires_at
+  ReleaseGrant       (o session)
+  GetCapabilities    (a{sv})                             → a{sv}
   signals: TokenAdded, TokenRemoved, GrantInvalidated
-
-io.github.sjtrotter.portal.Request        Close() · Response(u response, a{sv} results)
-io.github.sjtrotter.portal.Session        Close() · Closed(a{sv} details)
 ```
 
-**Private**, frontend-to-backend, on `io.github.sjtrotter.impl.portal.Certificate.gtk` — described in
-[docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md), declared in
-[`backends/gtk/data/io.github.sjtrotter.impl.portal.Certificate1.xml`](backends/gtk/data/io.github.sjtrotter.impl.portal.Certificate1.xml).
+**Private**, frontend-to-backend, on `org.freedesktop.impl.portal.desktop.certificate` at the
+same object path — described in [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md), declared in
+[`data/org.freedesktop.impl.portal.experimental.Certificate.xml`](data/org.freedesktop.impl.portal.experimental.Certificate.xml),
+which is a **verbatim copy of the branch's file and must track it**.
 **Applications do not call this.**
 
 ```
-io.github.sjtrotter.impl.portal.Certificate1
+org.freedesktop.impl.portal.experimental.Certificate
 
-  CreateSession     (o handle, o session_handle, s app_id, a{sv} options) → (u, a{sv})
+  CreateSession     (o handle, o session_handle, s app_id, a{sv}) → (u, a{sv})
   AcquireCredential (o handle, o session_handle, s app_id, s parent_window,
                      a{sv} options) → (u response, a{sv} results)
   Sign / Decrypt    (o handle, o session_handle, s app_id, s parent_window,
                      a{sv} options) → (u response, a{sv} results)
-  OpenPkcs11Endpoint(o session_handle, s app_id, a{sv} options)
-                     → h endpoint_fd, s certificate_uri, s private_key_uri, u endpoint_version
-  GetCapabilities   (a{sv} options) → a{sv}
+  GetCapabilities   (s app_id, a{sv} options) → a{sv}
   signals: TokenAdded, TokenRemoved, SessionInvalidated
 ```
 
-Every impl call carries `app_id` and the grant handle. That is the whole point of the boundary.
+Every impl call carries `app_id` — including `GetCapabilities`, which is one of the things
+the move upstream changed. That is the whole point of the boundary.
 
-The transaction pattern is copied closely from
-[`org.freedesktop.portal.Request`](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html)
-and [`org.freedesktop.portal.Session`](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Session.html),
-and the frontend/backend division from
-[writing a new backend](https://flatpak.github.io/xdg-desktop-portal/docs/writing-a-new-backend.html)
-and [portals.conf](https://flatpak.github.io/xdg-desktop-portal/docs/portals.conf.html), because
-those patterns are right and callers already know them. Copying a pattern is not claiming a
-namespace.
+## Building, and testing it on a dev machine
 
-## Why not something simpler
-
-**Why not just a PIN dialog?** A shared PIN prompt with no scoping is a UI library, not a security
-boundary: the application still holds the module, still enumerates every object on the card, and
-still holds a logged-in session it can use for anything. The consent moment would be honest and the
-authorisation it granted would be unbounded.
-
-**Why not just forward the token with `p11-kit server`?** Because that is the bad version. Stock
-`p11-kit server` takes **token** URIs — its unit of exposure is a token, not an object — and
-forwards the general PKCS#11 interface, including object creation and key generation. Login state
-does not transfer across the forwarding boundary: the consumer's TLS stack opens its own sessions
-and makes its own `C_Login` call. And `p11-kit-client.so` is located through process-level
-configuration plus a single `P11_KIT_SERVER_ADDRESS`, which does not accommodate several concurrent
-per-request grants in one process. Ten specific failure modes are enumerated in
-[0006](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md). **Token-scoped forwarding
-is insufficient isolation and this project will not ship it while calling it scoped.**
-
-**Why is `Sign` the core rather than the module?** Because a grant expressed as brokered operations
-can be counted, expired, revoked, rate-limited, audited and consented to per operation, and a
-PKCS#11 session cannot. A module endpoint is a *compatibility* concession — a large one, worth
-making — but it must be requested explicitly by a caller that can use it, and it must be backed by
-a synthetic facade rather than by the real token. See
-[0007](docs/decisions/0007-brokered-operations-are-the-core.md).
-
-**Why not a signing API and nothing else?** Because GnuTLS, NSS and OpenSSL want a
-`CK_FUNCTION_LIST`, and rewriting the PKCS#11 half of each TLS stack per consumer is not realistic.
-The honest statement of the trade is: brokered operations give the better security model, the
-facade gives the reach, and the facade is the part that might not work. Note also that neither
-approach proves *semantics*: a `Sign` call cannot demonstrate that its input came from a TLS
-handshake rather than from a PDF. Purpose constrains certificate *selection* and consent language;
-it does not attest to what a later signature was for.
-
-**Why not implement GNOME's system prompter interface?** `org.gnome.keyring.SystemPrompter` and
-[gcr](https://gitlab.gnome.org/GNOME/gcr)'s `GcrSystemPrompt` are a real precedent for a
-system-owned, system-modal PIN prompt — and they are GNOME's, tied to gnome-keyring's needs, with
-no KDE equivalent. Impersonating that interface means inheriting its semantics without its
-maintainers. The backend draws its own prompt and cites gcr as prior art. See
-[0002](docs/decisions/0002-service-owned-pin-prompt.md).
-
-**Why not blanket pcsc access?** Because that is the status quo, and it is what this exists to
-replace.
-
-## What this is not a boundary against
-
-This design can give a **strong boundary for sandboxed applications**, whose identity a
-containment framework can vouch for, and a **useful application-identity and consent boundary** for
-ordinary host applications. It is **not** absolute same-UID isolation. A hostile unsandboxed
-process running as the user may be able to inspect other processes, manipulate their environment,
-read runtime files or inject input, depending on how the system is hardened. Any claim stronger
-than that is false. The frontend/backend split does not change that answer either: both processes
-run as the user, and what it buys is that identity derivation and window drawing are structurally
-separate, not that either process is safe from a process that can `ptrace` it. See
-[docs/SECURITY.md](docs/SECURITY.md) and
-[docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md).
-
-## Relation to xdg-desktop-portal
-
-**Built in its shape, under our own names, and not ready to be proposed.** The frontend is the part
-that would move *into* xdg-desktop-portal; the backend is the part that would live in or beside
-xdg-desktop-portal-gtk. Every name and file has a mapping in
-[docs/UPSTREAMING.md](docs/UPSTREAMING.md), and the claim that document exists to test is that
-acceptance would be a rename rather than a redesign — with three open items where it would not be,
-listed there rather than hidden.
-
-Still incubating under its own namespace, and still not ready to be proposed. The
-[review that shaped this repository](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md)
-lists why it is not yet a credible portal API: applications cannot transparently consume
-per-request PKCS#11 endpoints, object and operation scoping is unproven, application identity
-versus delegated subprocess identity is unresolved, and the API currently mixes credential
-selection, PIN agent behaviour, cryptographic operations and module transport.
-
-The likely destination is *not* a portal named after a device. The
-[linux-credentials / credentialsd](https://github.com/linux-credentials/credentialsd) project is
-already proposing `org.freedesktop.portal.Credentials` for FIDO2 and passkeys, and certificate-backed
-signing plausibly belongs there as a **credential type** sharing the request, identity and consent
-machinery, rather than as a rival portal. Those maintainers should be approached **before** names or
-D-Bus signatures are frozen. [docs/ROADMAP.md](docs/ROADMAP.md) phase 3.
-
-## Building the sketch
-
-```
-meson setup build && ninja -C build
-./build/frontend/certificate-portal-frontend --help
-./build/backends/gtk/certificate-portal-gtk --help
+```console
+$ meson setup build && ninja -C build
+$ ./build/xdg-desktop-portal-certificate --help
 ```
 
-That is all they do. Both print usage and exit 0; every verb returns exit 70, "not implemented
-(design sketch)". The exit codes are the same on both: `0` clean, `40` unavailable, `64` usage,
-`70` internal / not implemented.
+That is all it does. It prints usage and exits 0; every verb returns exit 70, "not
+implemented (design sketch)". Exit codes: `0` clean, `40` unavailable, `64` usage, `70`
+internal / not implemented.
+
+Two scripts drive the real thing, and neither touches your session bus unless you ask it
+to:
+
+```console
+$ tools/dev-stack.sh
+```
+
+starts, on a **private bus** made by `dbus-run-session`: `xdg-permission-store` (the portal
+refuses to start without it), this backend, and a development xdg-desktop-portal from the
+branch with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate` and an
+`XDG_DESKTOP_PORTAL_DIR` pointing at a throwaway directory holding this repository's
+`.portal` file and a `portals.conf` selecting it. Then it runs the trigger. Point it at
+your build with `XDP_BUILD=/path/to/xdg-desktop-portal/build`.
+
+```console
+$ tools/trigger-certificate.sh          # version + capabilities + CreateSession
+$ tools/trigger-certificate.sh version
+$ tools/trigger-certificate.sh monitor  # watch the Response signals
+```
+
+calls the **public** interface with `gdbus`, exactly as an application would — on
+`org.freedesktop.portal.Desktop`, never on this backend's name. Run it inside
+`dbus-run-session` if you want it off the real bus. If the frontend was started without the
+gate, every call fails with "no such interface"; that is the gate working.
 
 Layout:
 
 ```
-frontend/     the portal frontend — the part that would move INTO xdg-desktop-portal
-  data/       public interface XML, the .service file for io.github.sjtrotter.portal.Certificate,
-              an example portals.conf
-  src/        request, session, app-info, permission-store, portal-impl, smartcard, grant registry
-backends/gtk/ the reference backend — the part that would live in or beside xdg-desktop-portal-gtk
-  data/       impl interface XML, gtk.portal, the .service file for the impl bus name
-  src/        request, session, smartcard, ui/, tokens/, broker/, export/
-shared/       redaction rules, compiled into both
-docs/         architecture, both interfaces, security, spikes, roadmap, upstreaming, decisions
+src/          the backend: main.c, the impl skeleton, ui/, tokens/, broker/, export/,
+              redact.h
+data/         the impl interface XML (a verbatim copy of the branch's), certificate.portal,
+              the D-Bus service file
+tools/        dev-stack.sh, trigger-certificate.sh
+docs/         architecture, both interfaces, security, spikes, roadmap, upstreaming,
+              decisions
+```
+
+Installed files: `$libexecdir/xdg-desktop-portal-certificate`,
+`$datadir/xdg-desktop-portal/portals/certificate.portal` (the real directory — that is
+where the frontend looks, and it is what every out-of-tree backend does),
+`$datadir/dbus-1/services/org.freedesktop.impl.portal.desktop.certificate.service`, and
+the interface XML in `$datadir/dbus-1/interfaces`. To select it explicitly, put this in
+`portals.conf`:
+
+```ini
+[preferred]
+org.freedesktop.impl.portal.experimental.Certificate=certificate
 ```
 
 ## Documents
@@ -365,11 +241,11 @@ docs/         architecture, both interfaces, security, spikes, roadmap, upstream
 | | |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, the frontend/backend responsibility table, sequences, process model |
-| [docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md) | the interface applications call, in xdg-desktop-portal documentation style |
-| [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) | the private frontend-to-backend interface, and why applications cannot reach it |
-| [docs/UPSTREAMING.md](docs/UPSTREAMING.md) | name-by-name and file-by-file mapping to freedesktop, and what changes at acceptance |
+| [docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md) | a pointer to the branch's XML, and a summary |
+| [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) | the interface this backend implements, why the XML here is a tracking copy, and why applications cannot reach it |
+| [docs/UPSTREAMING.md](docs/UPSTREAMING.md) | where the frontend branch is, what its XML forced this repository to change, and what remains before a PR |
 | [docs/SECURITY.md](docs/SECURITY.md) | threat model, PIN handling, grant scoping, caller identity |
-| [docs/SPIKES.md](docs/SPIKES.md) | the five questions that decide whether this is buildable |
+| [docs/SPIKES.md](docs/SPIKES.md) | the questions that decide whether this is buildable |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | phases, effort estimate, and its assumptions |
 | [docs/decisions/](docs/decisions/) | why the shape is the shape |
 
@@ -378,7 +254,7 @@ docs/         architecture, both interfaces, security, spikes, roadmap, upstream
 GPL-2.0-or-later. The chooser and PIN handling this project intends to build on is derived from
 Remmina's RDP plugin, which is GPL-2.0-or-later; the reasoning, and the Apache-2.0 alternative that
 would require a clean-room rewrite, are in [docs/decisions/0004-license.md](docs/decisions/0004-license.md).
-Consumers only speak D-Bus and PKCS#11, so the licence places no constraint on them.
+Consumers only speak D-Bus, so the licence places no constraint on them.
 
 ## AI assistance
 

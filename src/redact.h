@@ -1,27 +1,26 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef CERTIFICATE_SHARED_REDACT_H
-#define CERTIFICATE_SHARED_REDACT_H
+#ifndef CERTIFICATE_REDACT_H
+#define CERTIFICATE_REDACT_H
 
 #include <glib.h>
 
 /** @file
  *  Structured logging that cannot emit a secret, because it is never handed one.
  *
- *  COMPILED INTO BOTH BINARIES. The rules are identical on the two sides of the impl
- *  boundary and the failure is identical too, so the header is shared rather than
- *  duplicated -- the same reason xdg-desktop-portal keeps shared/ alongside its frontend
- *  and its portals. The two sides log DIFFERENT THINGS, though:
+ *  THIS BACKEND'S HALF ONLY. The rules are identical on the two sides of the impl
+ *  boundary, but only one side lives here now: the frontend is xdg-desktop-portal, and
+ *  its logging is upstream's. The two sides log DIFFERENT THINGS:
  *
- *    FRONTEND: which application asked, at which honesty level, for which purpose,
- *              granted or refused, which backend was selected, which grant, which
- *              operation id. It has no card facts to leak.
- *    BACKEND:  token PRESENCE, mechanism names, PIN outcome codes, facade refusals. It
- *              has no application identity of its own to leak, only the app id string
- *              the frontend handed it -- which is exactly what may be logged.
+ *    FRONTEND (xdg-desktop-portal): which application asked, at which honesty level, for
+ *              which purpose, granted or refused, which backend was selected, which
+ *              grant, which operation id. It has no card facts to leak.
+ *    BACKEND (here): token PRESENCE, mechanism names, PIN outcome codes, facade
+ *              refusals. It has no application identity of its own to leak, only the app
+ *              id string the portal handed it -- which is exactly what may be logged.
  *
- *  At upstreaming this splits: the frontend's copy becomes part of
- *  xdg-desktop-portal's own logging, and the backend's stays with the backend. See
- *  docs/UPSTREAMING.md.
+ *  This file was shared/redact.h while this repository also held a frontend. It is now
+ *  src/redact.h and the frontend's obligations below are recorded as the OTHER side's,
+ *  not as this binary's. See docs/decisions/0010-backend-only-frontend-lives-upstream.md.
  *
  *  REDACTION IS STRUCTURAL, NOT A FILTER. These functions accept only the fields they
  *  are allowed to emit. There is deliberately no certificate_log_printf(): a filter that
@@ -33,8 +32,8 @@
  *  decisions.
  *
  *  NEVER: PINs, PKCS#11 URIs, object labels, key ids, card serials, certificate
- *  subjects, signed data, plaintext, or the contents of the caller's reason and context
- *  strings.
+ *  subjects, signed data, plaintext, or the contents of the caller's `reason` string.
+ *  (`context` is gone: the branch interface has no such option.)
  *
  *  ERROR TEXT FROM LIBRARIES IS TRUNCATED BEFORE ANY EMBEDDED URI. p11-kit, OpenSC and
  *  GnuTLS all put PKCS#11 URIs in error strings, and a URI may carry a pin-value
@@ -44,9 +43,9 @@
  *  The default level records DECISIONS, not data: which caller, which honesty level,
  *  which purpose, granted or refused, and why. That is enough for a user to answer "what
  *  used my card, and when" -- and answering it needs BOTH JOURNALS, because the decision
- *  is in the frontend's and the card event is in the backend's; the grant id and the
- *  operation id are what join them -- which is one of the things this project is for -- without
- *  becoming a record of what they signed.
+ *  is in xdg-desktop-portal's and the card event is in this backend's; the grant id and
+ *  the operation id are what join them -- which is one of the things this project is for
+ *  -- without becoming a record of what they signed.
  *
  *  Sketch only; nothing here is implemented.
  */
@@ -97,4 +96,4 @@ void certificate_log_counts(const char* reason_code, guint tokens, guint candida
  *  through this before it reaches a log or a D-Bus error_message. */
 char* certificate_redact_error_text(const char* text);
 
-#endif /* CERTIFICATE_SHARED_REDACT_H */
+#endif /* CERTIFICATE_REDACT_H */

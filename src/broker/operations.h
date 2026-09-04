@@ -80,7 +80,7 @@ typedef void (*CertificateSignDone)(GByteArray* signature, const GError* error, 
  *  asynchronous and callers were told may_prompt_later at grant time.
  *
  *  Order of checks, all of which must pass: the session exists in this backend and is
- *  bound to this app_id; the caller was the frontend;
+ *  bound to this app_id; the caller owns org.freedesktop.portal.Desktop;
  *  operation is in permitted_operations; mechanism is in the allow-list; parameters
  *  validate against mechanism and key; rate limit not exceeded; consent policy satisfied
  *  (which may show a window); token still present; login performed on THIS SERVICE'S

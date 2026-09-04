@@ -5,12 +5,12 @@
 #include <glib.h>
 
 /** @file
- *  io.github.sjtrotter.impl.portal.Request -- one interactive transaction, BACKEND side.
+ *  org.freedesktop.impl.portal.Request -- one interactive transaction, BACKEND side.
  *
- *  The mirror image of xdg-desktop-portal-gtk's src/request.c, and of
- *  org.freedesktop.impl.portal.Request. The FRONTEND chooses the object path and passes
- *  it as @handle; the BACKEND exports a Request object there for the duration of the
- *  user interaction; the FRONTEND calls Close() on it to end that interaction.
+ *  The mirror image of xdg-desktop-portal-gtk's src/request.c. xdg-desktop-portal
+ *  chooses the object path and passes it as @handle; this BACKEND exports a Request
+ *  object there for the duration of the user interaction; the portal calls Close() on it
+ *  to end that interaction. The interface is upstream's own and is not redefined here.
  *
  *  It has ONE METHOD, Close(), and NO Response signal. The result of an impl call comes
  *  back as the method's own (response, results) return value, not as a signal. This is
@@ -18,10 +18,13 @@
  *  the backend a plain RPC target and keeps exactly one object -- the frontend's --
  *  responsible for the at-most-one-terminal-response rule.
  *
- *  THE APPLICATION CANNOT REACH THIS OBJECT. It holds the frontend's Request, on the
- *  frontend's bus name, and Close() is forwarded. That is the whole reason the split
- *  helps: a cancel arrives here having already been attributed to the caller that is
- *  allowed to send it.
+ *  THE APPLICATION CANNOT REACH THIS OBJECT. It holds the portal's Request, on
+ *  org.freedesktop.portal.Desktop, and Close() is forwarded. That is the whole reason the
+ *  split helps: a cancel arrives here having already been attributed to the caller that
+ *  is allowed to send it. The frontend's side of this is
+ *  xdg-desktop-portal's desktop-portal/xdp-request-dex.c, and note the trap recorded in
+ *  the branch write-up: xdp_request_dex_new() does not export the frontend Request,
+ *  xdp_request_dex_export() must be called separately.
  *
  *  Everything a transaction owns hangs off this object so that one destructor closes all
  *  of it: the chooser window, the PIN window, the discovery cancellable, the in-flight

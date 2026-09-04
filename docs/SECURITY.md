@@ -3,11 +3,22 @@
 Status: EXPERIMENTAL design sketch. Nothing here has been implemented or reviewed by anyone but its
 authors. This document states what the design intends to be true; none of it is true yet.
 
-**Two processes.** A *frontend* establishes who is calling and applies policy; a *backend* draws the
-windows and holds the token. Every rule below says which one it binds, because after
-[0008](decisions/0008-build-to-the-upstream-shape.md) "the service" is not one thing. The division
-is [ARCHITECTURE.md](ARCHITECTURE.md#who-does-what); the private interface between them, and how it
-is kept private, is [IMPL-INTERFACE.md](IMPL-INTERFACE.md).
+**Two processes, one repository.** A *frontend* establishes who is calling and applies policy; a
+*backend* draws the windows and holds the token. Every rule below says which one it binds, because
+after [0008](decisions/0008-build-to-the-upstream-shape.md) "the service" is not one thing — and
+since [0010](decisions/0010-backend-only-frontend-lives-upstream.md) the two things are not even in
+the same project. **The frontend is xdg-desktop-portal**, branch
+`experimental/certificate-webauthentication`; frontend-side rules below are recorded as *provided
+by xdg-desktop-portal*, and are stated here because a backend's obligations only make sense
+alongside them, not because this repository implements them. Backend rules are this repository's
+and are the ones to hold it to. The division is
+[ARCHITECTURE.md](ARCHITECTURE.md#who-does-what); the private interface between them, and how it is
+kept private, is [IMPL-INTERFACE.md](IMPL-INTERFACE.md).
+
+**The public interface is gated.** `org.freedesktop.portal.experimental.Certificate` is not
+exported unless the portal was started with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`.
+With the gate off, no application can reach any of this and this backend is never activated. That
+is a property of the frontend and this repository cannot change it in either direction.
 
 ## What this is a boundary against, and what it is not
 
@@ -69,20 +80,26 @@ later use has misread it, and the interface documentation says so in those words
 **The frontend establishes it. The backend is told.** This is the single security property the
 frontend/backend split buys, and it is worth stating before the mechanics: the process that draws
 the window asserting "this application is asking" is not the process that had to work out which
-application it was. `app_id`, the display name, and the honesty level all arrive at the backend as
-arguments to `AcquireCredential`. A backend cannot derive an app id even by accident, because it is
-not talking to the application.
+application it was. `app_id` and `app_identity_level` arrive at the backend as arguments to
+`AcquireCredential`. A backend cannot derive an app id even by accident, because it is not talking
+to the application.
+
+**There is no `app_display_name` on the wire.** The branch interface carries an app id and a level
+and nothing else about the caller, so a human-readable name is this backend's own to derive from
+the app id — or to omit. It must never be taken from anything the application supplied.
 
 Executable paths are not application identities. A same-UID process can execute another path,
 manipulate launch context, or connect directly to the bus. `/proc/$pid/exe` is a hint.
 
-xdg-desktop-portal's actual approach is the model to follow: sandboxed callers have identities
-supplied by their containment framework; host applications are normally inferred through
-standardised cgroups; and a host registry lets an unsandboxed peer associate itself with a
-desktop-file app ID while the
+xdg-desktop-portal's approach is no longer "the model to follow": it is the implementation, since
+the frontend is xdg-desktop-portal. Sandboxed callers have identities supplied by their containment
+framework; host applications are normally inferred through standardised cgroups; and a host
+registry lets an unsandboxed peer associate itself with a desktop-file app ID while the
 [documentation warns that mechanism is expected to change](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.host.portal.Registry.html).
+`xdp_invocation_get_app_info()` is where it happens.
 
-This service resolves identity into three honesty levels, and **displays which one it got**:
+The frontend resolves identity into three honesty levels, forwards which one it got as
+`app_identity_level`, and **this backend displays it**:
 
 1. **Verified sandboxed** — Flatpak or Snap identity obtained through the containment framework's
    mediation. Treated as authenticated metadata. Displayed as the application, with its sandbox
@@ -94,42 +111,47 @@ This service resolves identity into three honesty levels, and **displays which o
 
 Rules that follow:
 
-- **Identity is derived once, in the frontend, at the start of the transaction**, and travels as an
-  argument from there. There is no second derivation anywhere, and no option, key or header by
-  which a caller can supply one.
-- **The backend must never trust a caller directly.** Its only legitimate caller is the frontend; it
-  checks that the sender owns the frontend's well-known name and refuses everything else. See
+- **Identity is derived once, in the frontend, at the start of the transaction** *(provided by
+  xdg-desktop-portal)*, and travels as an argument from there. There is no second derivation
+  anywhere, and no option, key or header by which a caller can supply one.
+- **The backend must never trust a caller directly.** Its only legitimate caller is
+  xdg-desktop-portal; it checks that the sender owns `org.freedesktop.portal.Desktop` and refuses
+  everything else. See
   [IMPL-INTERFACE.md](IMPL-INTERFACE.md), "Why an application cannot call this" — including the part
   about what that check does *not* protect against.
-- **Bind every grant to the initiating unique D-Bus connection** (plus its delegated endpoint
-  holders — see lifetime).
+- **Bind every grant to the initiating unique D-Bus connection** *(provided by
+  xdg-desktop-portal)*.
 - **Never use an unverified app ID as the sole key** for selection memory, policy, or anything else
-  that persists.
-- **Selection memory is unavailable to level 3**, and to level 2 unless the user opts in explicitly
-  each time it is offered.
+  that persists *(provided by xdg-desktop-portal: it refuses to write the `certificate` permission
+  table for an unidentified app)*.
+- **Selection memory is unavailable to level 3** *(provided by xdg-desktop-portal)*, and the user's
+  own "remember this" answer is required on top of the application's `allow_selection_memory` —
+  this backend reports what the user said as `remember_selection` and stores nothing itself.
 - **First use by an unidentified caller requires explicit confirmation**, and the dialog says the
-  application could not be identified rather than inventing a name for it.
+  application could not be identified rather than inventing a name for it. *(Backend: this is the
+  chooser, and it is this repository's obligation.)*
 - **Rate-limit** background requests, repeated requests, and repeated failures, per caller and
-  globally.
+  globally. **This is not implemented anywhere.** It is on the frontend branch's own open-items
+  list, which means that for now the only place it could happen is this backend.
 - **The trusted identity position in the window is never occupied by caller-supplied text** — not
-  `reason`, not `context`, not a title, not the token label, not the certificate subject.
+  `reason`, not a title, not the token label, not the certificate subject. *(Backend.)* Note that
+  `reason` is the **only** caller-supplied string on the interface: there is no `context` option.
 
-This is now the shape the project is *built* in rather than a thing to hope for later: a frontend
-establishes `app_id` and passes it to a backend applications cannot reach. What acceptance upstream
-would add is not the shape but the **reach** of level 1 — xdg-desktop-portal's own app-info code has
-containment-framework integrations, a maintained host-identity story and a documented Registry
-mechanism, and inheriting those is worth more than reimplementing them.
-[UPSTREAMING.md](UPSTREAMING.md) lists our `app-info.h` among the files that are *deleted* at
-acceptance, for exactly that reason. Levels 2 and 3 do not disappear upstream; they are honestly
-labelled there too.
+This is no longer the shape the project is merely *built* in: the reach of level 1 —
+xdg-desktop-portal's containment-framework integrations, its maintained host-identity story and its
+documented Registry mechanism — is now inherited rather than reimplemented, because the frontend is
+xdg-desktop-portal. The `app-info.h` that used to be in this repository is deleted, not moved.
+Levels 2 and 3 do not disappear; they are honestly labelled there too.
 
 ## The trusted dialog
 
-Drawn by the **backend**, from facts the **frontend** established. The first two items in this list
-arrive as arguments; the backend renders them and may not substitute anything for them. The chooser
-must show all of the following, in backend-owned text:
+**This is the part of the security model this repository owns outright.** Drawn by the backend,
+from facts the frontend established. The first two items in this list arrive as arguments; the
+backend renders them and may not substitute anything for them. The chooser must show all of the
+following, in backend-owned text:
 
-- verified application **name** and **id**, as the frontend established them;
+- the application **id** the frontend established, and a name derived from it if this backend can
+  derive one — there is no display name on the wire;
 - **which honesty level that was** — sandboxed and verified, a derived host label, or unidentified —
   with an explicit warning for the second and the strongest warning the design has for the third. A
   backend that displayed an app id without saying how it was established would be lying by
@@ -141,16 +163,21 @@ must show all of the following, in backend-owned text:
 - the **token and reader** name;
 - the **grant duration**, or "this operation only";
 - **whether further operations may occur without another prompt**;
-- the caller's `reason` and `context`, visibly separated and **labelled as application-provided
-  text**.
+- the caller's `reason`, visibly separated and **labelled as application-provided text**. It is
+  the only string on the interface the application controls.
 
 For client authentication the destination host matters and this service cannot verify it: it sees a
-D-Bus peer, not a TLS connection. `context` carries it and is labelled as *requested* destination.
-Selection memory is keyed only on trusted fields.
+D-Bus peer, not a TLS connection. **The interface no longer has anywhere to put it** — the
+`context` option the earlier sketch specified is not on the branch's XML — so a caller that wants
+to state a destination can only put it in `reason`, which is application-supplied text and is
+labelled as such. Selection memory is keyed by the frontend on the app id and nothing the caller
+supplied.
 
 Accessibility is part of this, not adjacent to it: a security dialog a screen-reader user cannot
 navigate is a security dialog that user cannot give informed consent through. The criteria are in
-[PUBLIC-INTERFACE.md](PUBLIC-INTERFACE.md#accessibility-as-acceptance-criteria) and they are acceptance criteria.
+[PUBLIC-INTERFACE.md](PUBLIC-INTERFACE.md#accessibility-as-acceptance-criteria) and they are
+acceptance criteria for this repository specifically: the frontend draws nothing, so nobody else can
+satisfy them.
 
 ## PIN handling
 
@@ -158,7 +185,7 @@ navigate is a security dialog that user cannot give informed consent through. Th
   process. It never crosses D-Bus in either direction — not on the public interface and **not on the
   impl interface either** — never enters a `GVariant`, a `GError` message, a URI, or a log line. The
   frontend cannot see a PIN: not as a rule it obeys, but because it has no window and no token
-  session.
+  session, and because neither interface has a field one could travel in.
 - **No `pin-value` and no `pin-source` in any PKCS#11 URI this service emits**, ever. Any URI
   arriving from elsewhere carrying one is truncated before it can be logged.
 - **The buffer is wiped on every exit path** — success, failure, cancel, timeout, window destroyed,
@@ -199,14 +226,18 @@ the mechanism against an allow-list, validates the parameters, applies the purpo
 counts the operation and applies a rate limit.
 
 Enforcement is split, and both halves are load-bearing. The **frontend** checks that the grant
-exists, is live, is owned by this caller, permits this operation, permits this mechanism, and is
-inside its rate limit. The **backend** checks the mechanism against the key, validates the
-parameters, applies the per-purpose consent policy, and performs the operation on its own session.
-Neither check is redundant: the frontend is the only side that knows which application is asking,
-and the backend is the only side that knows what the card will accept.
+exists, is live, is owned by this caller, permits this operation and permits this mechanism —
+`check_grant()` in `desktop-portal/certificate.c`, run *before* the backend is called at all. The
+**backend** checks the mechanism against the key, validates the parameters, applies the per-purpose
+consent policy, and performs the operation on its own session. Neither check is redundant: the
+frontend is the only side that knows which application is asking, and the backend is the only side
+that knows what the card will accept. (Rate limiting is in neither yet; see above.)
 
 **The PKCS#11 facade must enforce the same thing at a much harder interface**, which is why it is
-experimental and why it is a separate milestone. The minimum it must do:
+experimental and why it is a separate milestone — and why the frontend branch does not have a
+method that returns an endpoint at all. `OpenPkcs11Endpoint` is on neither interface. What follows
+is therefore the acceptance criteria for a follow-up rather than a description of something
+reachable. The minimum it must do:
 
 - one synthetic slot, one synthetic token;
 - only the granted leaf certificate, its keys, and explicitly selected chain certificates — no
@@ -230,10 +261,11 @@ experimental and why it is a separate milestone. The minimum it must do:
   `C_GetFunctionList` alone leaves `C_GetInterface` as an unfiltered way back in.
 
 This is a security-sensitive PKCS#11 implementation facing a hostile peer over a wire protocol. It
-runs in **its own process** — a child of the backend, since that is where the token session is —
-holding no PIN and reaching the card only through the broker, and it is the first thing that should
-be fuzzed. Its socket is created by the backend and **relayed** by the frontend, which checks the
-grant and the caller and then passes the descriptor through without holding a copy.
+would run in **its own process** — a child of this backend, since that is where the token session
+is — holding no PIN and reaching the card only through the broker, and it is the first thing that
+should be fuzzed. Its socket would be created by this backend and **relayed** by the frontend,
+which checks the grant and the caller and then passes the descriptor through without holding a
+copy. None of that exists on either side today.
 
 **Hiding objects during enumeration is not scoping.** A caller that can use templates, cached
 handles, object creation, key generation, wrapping or derivation does not need `C_FindObjects` to
@@ -242,21 +274,27 @@ allow-by-default path.
 
 ## Card removal, and what happens to a grant
 
-Removal invalidates everything: every synthetic object and session, any in-flight operation
-cancelled, the appropriate PKCS#11 device or token error returned to a facade client,
-`GrantInvalidated` emitted with reason `token_removed`, and the endpoint **poisoned** so it cannot
-silently rebind to a card inserted later. Reinsertion requires explicit reselection **even when the
+Removal invalidates everything: every session, any in-flight operation cancelled, and
+`SessionInvalidated(session_handle, "token_removed")` emitted to the frontend, which turns it into
+`GrantInvalidated` with reason `token_removed` and closes the Session. (Were there a facade, the
+appropriate PKCS#11 device or token error would go to its client and the endpoint would be
+**poisoned** so it cannot silently rebind to a card inserted later.) Reinsertion requires explicit reselection **even when the
 label and slot number are identical**, because a label and a slot number prove nothing about which
 card is in the reader. Tokens are identified by every stable attribute available — manufacturer,
 model, serial, label — never by slot number alone.
 
 ## Grant lifetime and delegation
 
+*(Frontend concern — provided by xdg-desktop-portal, recorded here because the delegation shape is
+what a facade follow-up would have to satisfy.)*
+
 Binding a grant to its owner's D-Bus connection alone is wrong in both directions: the process that
 actually performs the cryptography may be a browser's **network subprocess** with its own connection
 to the endpoint, so killing the grant when the owner's connection drops can kill a valid handshake,
 while keeping it alive for the subprocess lets it be used after the request that authorised it
-ended. The model:
+ended. Today's frontend implements the simple half — a grant is bound to the connection that
+created it and has an expiry — and the delegation model below is what an endpoint would force. The
+model:
 
 - one **owner** connection, which acquired the grant and is the only one that may release it;
 - zero or more **delegated endpoint holders**, connections the owner caused to exist;
@@ -279,21 +317,24 @@ Three things must never be conflated:
    present as a feature;
 3. **remembered authorisation to use the key** — deliberately absent.
 
-Selection memory is keyed on verified application identity, purpose and filter context; it
-**preselects** and never skips the trusted consent step or a PIN prompt; it is unavailable to
-unverified callers; it is session-scoped unless the user makes it durable; and it is listed and
-revocable in the service's own UI. There is no "remember PIN" and there never will be.
+Selection memory is keyed by the frontend on the verified app id, in a permission-store table
+called `certificate`, with this backend's `certificate_id` as the value. It **preselects** and
+never skips the trusted consent step or a PIN prompt; it is unavailable to unverified callers; it
+is written only when the application passed `allow_selection_memory` *and* the user asked to
+remember; and because it is in the real permission store it is listed and revocable in the
+desktop's own UI rather than in a private store nobody can see. There is no "remember PIN" and
+there never will be.
 
 ## Logging
 
-- **Two journals, one story.** The frontend records the decision and the caller; the backend records
-  the card event. The grant id and the operation id are what join them, and neither journal alone
-  answers "what used my card, and when".
+- **Two journals, one story.** xdg-desktop-portal records the decision and the caller; this backend
+  records the card event. The grant id and the operation id are what join them, and neither journal
+  alone answers "what used my card, and when".
 - **Allowed**: counts, stable reason codes, purposes, resolved caller identity and its honesty
   level, grant and operation ids, mechanism names, token presence, timings, and — frontend only —
   which backend was selected.
 - **Never**: PINs, PKCS#11 URIs, object labels, key ids, card serials, certificate subjects, signed
-  data, plaintext, or the contents of `reason` and `context`.
+  data, plaintext, or the contents of `reason`.
 - Error text from p11-kit, OpenSC and GnuTLS is **truncated before any embedded URI**, because those
   libraries put URIs in error strings and a URI may carry a `pin-value`.
 - Redaction is **structural** — a logging helper that accepts only the fields it may emit — not a
@@ -306,22 +347,29 @@ revocable in the service's own UI. There is no "remember PIN" and there never wi
 
 Named because they are unsolved, not because they are minor.
 
-- **Delegation across one hop.** `webauth-portal-gtk` asks on behalf of an RDP client. This service
-  sees only its immediate peer. Version 1 shows the immediate peer, honestly. An attested chain is a
-  protocol neither project has. A shared incubating frontend removes the need for one *inside that
-  one trusted process*; it is not a substitute for attestation across two separate processes. See
+- **Delegation across one hop — mostly closed, and the caveat is the interesting part.**
+  `xdg-desktop-portal-webauth` asks on behalf of an RDP client, and this backend sees only its
+  immediate peer. The fix both projects described as arriving "at acceptance" has arrived early:
+  both portals are now in **one frontend process**, which derives the web-authentication caller's
+  app id and can hand it to the certificate side in-process, with no attestation crossing a bus.
+  What remains open is that the frontend does not actually do this yet, and — permanently — that
+  the fix does not generalise: across two processes, passing an app id would be an unattested
+  assertion of someone else's identity, which is the identity-laundering this document forbids. It
+  is not to be done that way. See
   [0005](decisions/0005-first-consumer-is-the-web-auth-service.md) and
-  [0008](decisions/0008-build-to-the-upstream-shape.md).
-- **Module loading for facade consumers.** If the only workable shape is one permanently registered
-  broker module, then a compromised consumer process shares an already-loaded module with every other
-  consumer in that process, and grant binding must be enforced inside the module by caller identity
-  rather than by socket. That is a different and harder security argument. [SPIKES.md](SPIKES.md) S3.
+  [0010](decisions/0010-backend-only-frontend-lives-upstream.md).
+- **Module loading for facade consumers**, and there is no facade to load. `OpenPkcs11Endpoint` is
+  on neither interface, so every consumer that can only speak PKCS#11 is currently unserved. If the
+  only workable shape turns out to be one permanently registered broker module, then a compromised
+  consumer process shares an already-loaded module with every other consumer in that process, and
+  grant binding must be enforced inside the module by caller identity rather than by socket. That is
+  a different and harder security argument. [SPIKES.md](SPIKES.md) S3.
 - **`purpose` is not enforceable.** Stated everywhere it appears; there is no fix, only honesty.
 - **The impl boundary is not a privilege boundary.** Both processes run as the user. The split makes
   identity derivation and window drawing structurally separate, which is worth a great deal; it does
-  not make the backend safe from a hostile process that can `ptrace` it. A deployment that wants
-  more can add a D-Bus policy rule or a private socket; neither is in v1.
-  [IMPL-INTERFACE.md](IMPL-INTERFACE.md) says so in the same words.
+  not make this backend safe from a hostile process that can `ptrace` it. A deployment that wants
+  more can add a D-Bus policy rule on `org.freedesktop.impl.portal.desktop.certificate`; that is not
+  in v1. [IMPL-INTERFACE.md](IMPL-INTERFACE.md) says so in the same words.
 - **Hardened-desktop assumptions.** How much level-2 and level-3 identity is worth depends on
   `ptrace` scope, compositor input isolation and `/proc` hardening, none of which this service
   controls or can detect reliably.

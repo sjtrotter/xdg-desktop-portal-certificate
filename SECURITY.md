@@ -9,11 +9,20 @@ Three things are worth saying here, where people look first.
 because there is no code yet — and correspondingly, nothing in `docs/SECURITY.md` has been reviewed
 by anyone but its authors.
 
-**There are two processes.** A frontend establishes who is calling and applies policy; a backend
-draws the chooser and the PIN prompt and holds the token. Applications talk only to the frontend,
-and the app id the backend displays is one it was *given* rather than one it guessed — which is the
-point of the arrangement. See [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) for how the private
-interface between them is kept private, including what that does *not* protect against.
+**There are two processes, and only one of them is in this repository.** The frontend is
+xdg-desktop-portal — specifically the branch `experimental/certificate-webauthentication` — and it
+establishes who is calling and applies policy. This repository is the backend: it draws the chooser
+and the PIN prompt and holds the token. Applications talk only to xdg-desktop-portal, and the app
+id this backend displays is one it was *given* rather than one it guessed, which is the point of
+the arrangement. See [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) for how the private interface
+between them is kept private, including what that does *not* protect against, and
+[docs/decisions/0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md) for why the
+frontend is not here.
+
+**The interface is experimental and gated.** The public side is not exported at all unless
+xdg-desktop-portal is started with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`. Installing
+this backend on a machine whose portal does not know the interface adds no attack surface: the
+`.portal` file names an interface nothing matches, and this process is never activated.
 
 **The boundary this intends to provide is narrower than it sounds.** For **sandboxed** applications
 it can be a strong boundary. For ordinary **host** applications it is a useful identity-and-consent

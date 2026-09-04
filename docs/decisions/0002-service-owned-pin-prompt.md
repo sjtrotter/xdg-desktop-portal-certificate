@@ -4,7 +4,7 @@ Date: 2026-09-03
 Status: accepted (for the sketch)
 
 > **Note, after [0008](0008-build-to-the-upstream-shape.md):** "service-owned" now means
-> **backend-owned**. The PIN prompt is drawn by `certificate-portal-gtk`, in the process that holds
+> **backend-owned**. The PIN prompt is drawn by `xdg-desktop-portal-certificate`, in the process that holds
 > the PKCS#11 session, and the frontend cannot see a PIN because it has neither a window nor a
 > token session. Everything below is unchanged in substance: the point was always that the prompt
 > belongs to the system rather than to the application asking, and that a second desktop needs a

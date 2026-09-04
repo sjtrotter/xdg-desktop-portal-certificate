@@ -17,10 +17,11 @@
  *  buys nothing at all, because login state is per application and does not transfer.
  *  See docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md failure mode 3.
  *
- *  THE PIN NEVER LEAVES THIS PROCESS -- and after the frontend/backend split "this
- *  process" is the BACKEND, which is the only side that ever had a reason to hold one.
- *  The frontend cannot see a PIN because the frontend has no window and no token
- *  session; that is not a rule it must obey, it is a thing it cannot do.
+ *  THE PIN NEVER LEAVES THIS PROCESS -- "this process" being the BACKEND, which is the
+ *  only side that ever had a reason to hold one. xdg-desktop-portal cannot see a PIN
+ *  because it has no window and no token session; that is not a rule it must obey, it is
+ *  a thing it cannot do. Neither the public nor the impl interface has a field a PIN
+ *  could travel in.
  *
  *  It never crosses D-Bus in either direction, never
  *  enters a GVariant, a GError message, a PKCS#11 URI, or a log line. NO pin-value and

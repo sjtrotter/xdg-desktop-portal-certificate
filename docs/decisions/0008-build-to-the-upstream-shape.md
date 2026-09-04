@@ -1,7 +1,14 @@
 # 8. Build to the upstream shape now: a portal frontend and a portal backend
 
 Date: 2026-09-03
-Status: accepted (for the sketch), overriding the review advice recorded below
+Status: accepted (for the sketch), overriding the review advice recorded below; its
+*packaging* half is superseded by [0010](0010-backend-only-frontend-lives-upstream.md)
+
+> **Amendment (0010).** The split argued for here is preserved exactly; what changed is
+> that the frontend half is no longer in this repository. It is a branch of
+> xdg-desktop-portal (`experimental/certificate-webauthentication`), which is how upstream
+> asks new portals to be developed, so `frontend/` was deleted and this repository is now
+> an out-of-tree backend only.
 
 ## Context
 
@@ -106,6 +113,13 @@ Every cost the earlier argument listed is real and is now being paid:
   thing [SPIKES.md](../SPIKES.md) says matters most.
 
 ## Per-project bus names during incubation
+
+> **Moot (0010).** This whole section is about two incubating frontends coexisting on one
+> machine. Neither exists any more — both interfaces are on one xdg-desktop-portal branch,
+> on the real `org.freedesktop.portal.Desktop` — so there are no per-project bus names left
+> to coordinate. It is kept as the record of why the shared-name arrangement was dropped,
+> and because its closing argument about the delegation gap is the one 0010 reports as
+> resolved.
 
 Each incubating frontend now claims its own bus name and object path, rather than both
 frontends claiming a shared `io.github.sjtrotter.portal.Desktop` stand-in for the real

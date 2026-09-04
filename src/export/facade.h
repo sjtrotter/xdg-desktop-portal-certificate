@@ -5,7 +5,24 @@
 #include <glib.h>
 
 /** @file
- *  The synthetic PKCS#11 facade. EXPERIMENTAL, OPT-IN, MILESTONE 2.
+ *  The synthetic PKCS#11 facade. EXPERIMENTAL, OPT-IN, MILESTONE 2 --
+ *  AND CURRENTLY UNREACHABLE, BECAUSE THE INTERFACE HAS NO METHOD FOR IT.
+ *
+ *  ================================================================================
+ *  THERE IS NO OpenPkcs11Endpoint ON THE WIRE.
+ *
+ *  The frontend branch (xdg-desktop-portal, experimental/certificate-webauthentication,
+ *  commit 703fb22) deliberately left OpenPkcs11Endpoint out of BOTH
+ *  org.freedesktop.portal.experimental.Certificate and
+ *  org.freedesktop.impl.portal.experimental.Certificate: an fd-returning method needs its
+ *  own review, and a python-dbusmock backend cannot hand back a usable endpoint fd, so a
+ *  first version with it would have shipped untested. It is a follow-up, to land together
+ *  with the facade rules in docs/SECURITY.md.
+ *
+ *  So this file describes a thing that has no method to call it. It is kept because the
+ *  requirements below are the acceptance criteria for that follow-up, and because
+ *  deleting them would mean rediscovering them.
+ *  ================================================================================
  *
  *  ================================================================================
  *  READ THIS BEFORE ASSUMING p11-kit DOES THE WORK.
@@ -66,12 +83,13 @@
  *  handles, object creation, key generation, wrapping or derivation does not need
  *  C_FindObjects to reach the rest of the card. There is no allow-by-default path.
  *
- *  THE FD IS CREATED HERE AND RELAYED BY THE FRONTEND. The facade must reach the token
- *  session, and the token session belongs to this process, so the backend is the only
- *  side that can serve it. The frontend checks the grant, the owner and the policy, calls
- *  io.github.sjtrotter.impl.portal.Certificate1.OpenPkcs11Endpoint, and passes the
- *  descriptor straight through to the application without holding a copy. Upstream
- *  precedent for a descriptor crossing the impl boundary:
+ *  THE FD WOULD BE CREATED HERE AND RELAYED BY THE FRONTEND. The facade must reach the
+ *  token session, and the token session belongs to this process, so the backend is the
+ *  only side that can serve it. The frontend would check the grant, the owner and the
+ *  policy, call an OpenPkcs11Endpoint that does not exist yet on
+ *  org.freedesktop.impl.portal.experimental.Certificate, and pass the descriptor straight
+ *  through to the application without holding a copy. Upstream precedent for a descriptor
+ *  crossing the impl boundary:
  *  org.freedesktop.impl.portal.RemoteDesktop.ConnectToEIS (out) and
  *  org.freedesktop.impl.portal.Secret.RetrieveSecret (in).
  *

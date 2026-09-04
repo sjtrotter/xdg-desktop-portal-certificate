@@ -1,7 +1,17 @@
 # Tests
 
-There are none, because there is no implementation. This file records what the tests will have to
-be, so that the design is written with them in mind rather than retrofitted around them.
+There are none **here**, because there is no implementation here. This file records what the tests
+will have to be, so that the design is written with them in mind rather than retrofitted around
+them.
+
+**Half of tier 1 already exists, in the frontend's repository.** The xdg-desktop-portal branch
+`experimental/certificate-webauthentication` ships `tests/templates/certificate.py` (a
+python-dbusmock backend) and `tests/test_certificate.py` (40 passing cases, each run once as
+`AppInfoHost` and once as `AppInfoFlatpak`), covering the happy path, cancellation from both
+directions, five invalid-option cases, backend over-claiming being clamped, and the experimental
+gate. Everything below that says "the frontend against a fake backend" is that suite. What is left
+for this repository is the other direction — **this backend against a fake frontend** — plus
+everything that needs a card.
 
 Three tiers, in the order they become possible.
 
@@ -14,31 +24,27 @@ argument lives in it.
   caller can subscribe before calling; `handle_token` and `session_handle_token` handling; exactly
   one terminal `Response` per request; `Close()` producing no later success; unknown options
   rejected rather than ignored.
-- **The frontend against a fake backend.** A test backend that implements the impl interface and
-  can be told to misbehave. This tier should be large, because it is where the split earns its
-  keep: that `app_id` is derived once and passed as an argument; that a backend returning a longer
-  `expires_at`, extra mechanisms, or operations the purpose forbids is **clamped and logged**, not
-  believed; that `Close()` reaches the backend's `Request` before the caller is told anything; that
-  a backend vanishing invalidates every grant with `backend_gone`; that a caller naming another
-  caller's session gets `NotPermitted` and no hint about whether the path existed.
-- **The backend against a fake frontend.** That a sender which does not own the frontend's
-  well-known name is refused; that the app id and identity level the backend was given are the ones
-  it renders; that caller-supplied `reason` and `context` never reach the trusted identity
-  position.
-- **Backend discovery.** `.portal` file parsing, `portals.conf` precedence including
-  `DESKTOP-portals.conf`, `none`, `*`, a named backend that is not installed, and the documented
-  fallback order.
-- **Permission store.** Resource-id construction; that an unverified or empty app id never keys an
-  entry; that a stored selection preselects and never suppresses the chooser or the PIN.
-- **Filter logic** (`backends/gtk/src/tokens/filter.h`) against fixture certificates: EKU, key usage, issuer DN
+- **The frontend against a fake backend.** *Upstream's, and largely written* — see above. What it
+  does not yet cover, and the branch says so: `TokenAdded`/`TokenRemoved`/`GrantInvalidated`
+  forwarding, the `SessionInvalidated` → `GrantInvalidated` conversion, and selection memory being
+  read back on a second `AcquireCredential`.
+- **This backend against a fake frontend.** The half nobody has written. That a sender which does
+  not own `org.freedesktop.portal.Desktop` is refused; that the `app_id` and `app_identity_level`
+  the backend was given are the ones it renders, with no display name invented from anything the
+  caller supplied; that the caller-supplied `reason` never reaches the trusted identity position.
+- **Backend discovery**, from this side: that the installed `.portal` file names the interface the
+  installed binary actually implements, and that `tools/dev-stack.sh` gets from a cold private bus
+  to "Providing portal org.freedesktop.portal.experimental.Certificate". `portals.conf` precedence
+  itself is upstream's to test.
+- **Filter logic** (`src/tokens/filter.h`) against fixture certificates: EKU, key usage, issuer DN
   matching, PIV slot, key algorithm. Plus the two non-negotiable rules — expired certificates are
   *offered and marked*, and a single candidate still gets a chooser.
-- **Redaction** (`shared/redact.h`). The important test is the negative one: a fixture library error
+- **Redaction** (`src/redact.h`). The important test is the negative one: a fixture library error
   string carrying a `pkcs11:` URI with a `pin-value` attribute must be truncated before the URI, and
   no logging entry point may accept a free-form format string.
-- **Grant lifetime state machine.** Owner release, all-holders-gone, orphan grace expiry,
+- **Grant lifetime state machine.** The frontend's, not this backend's: owner release,
   `expires_at`, renewal refusing to expand permissions, one atomic terminal state, idempotent
-  release.
+  release. What is testable here is that `Session.Close()` tears down the device state exactly once.
 - **Consent policy table** — which purpose requires per-operation consent, and that `decrypt` is
   never covered by a `client_auth` grant.
 - **Mechanism parameter validation**, above all RSA-PSS hash/MGF/salt combinations, including
@@ -46,7 +52,11 @@ argument lives in it.
 
 ## 2. Facade hostility tests (a software token is enough)
 
-Against `backends/gtk/src/export/facade.h`, driven by a deliberately hostile PKCS#11 client. Every one of these
+**Blocked on there being a facade to test.** `OpenPkcs11Endpoint` is on neither interface — the
+frontend branch deferred it — so nothing can reach `src/export/facade.h`. Kept because this list is
+the acceptance criteria for that follow-up.
+
+Against `src/export/facade.h`, driven by a deliberately hostile PKCS#11 client. Every one of these
 must be **refused**, and each is a test rather than a comment:
 
 `C_CreateObject`, `C_CopyObject`, `C_DestroyObject`, `C_SetAttributeValue`, `C_GenerateKey`,
@@ -65,7 +75,7 @@ publication gates in [../docs/ROADMAP.md](../docs/ROADMAP.md) and the spikes in
 [../docs/SPIKES.md](../docs/SPIKES.md):
 
 - one real GnuTLS mutual-TLS handshake through brokered `Sign`;
-- one real WebKitGTK client-certificate handshake (joint with `webauth-service`);
+- one real WebKitGTK client-certificate handshake (joint with `xdg-desktop-portal-webauth`);
 - wrong PIN, and the final retry, with the count only shown when the token reports it;
 - a protected-authentication-path reader, with no PIN field drawn;
 - card removal during signing, between `C_SignInit` and `C_Sign`, and during the PIN prompt;
@@ -74,8 +84,9 @@ publication gates in [../docs/ROADMAP.md](../docs/ROADMAP.md) and the spikes in
 - caller disconnect mid-handshake with a delegated subprocess still connected.
 
 Tier 1's fake backend and fake frontend are the two most valuable pieces of test infrastructure in
-the project and should be written first: everything about the split that could be wrong is cheap to
-test with them and expensive to discover with a card in a reader.
+the project. The fake backend exists, upstream, in `tests/templates/certificate.py`; the fake
+frontend does not and should be written first here. Everything about the split that could be wrong
+is cheap to test with them and expensive to discover with a card in a reader.
 
 **A test that has only been run against a software token has not been run.** The Remmina work this
 project builds on found every one of its edge cases on hardware, and none of them was predictable

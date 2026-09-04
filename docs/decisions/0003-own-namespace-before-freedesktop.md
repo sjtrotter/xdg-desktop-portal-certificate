@@ -1,7 +1,33 @@
 # 3. A project-controlled namespace, and a name that is expected to change
 
 Date: 2026-09-03
-Status: accepted (for the sketch)
+Status: accepted (for the sketch), amended by [0010](0010-backend-only-frontend-lives-upstream.md)
+
+> **Amendment (0010).** The namespace argument below stands; the names it chose are gone.
+> This repository no longer ships a frontend or a public interface, so it no longer picks
+> an interface name at all: the impl interface it implements is **dictated by the
+> frontend**, which is now the xdg-desktop-portal branch
+> `experimental/certificate-webauthentication`, and is
+> `org.freedesktop.impl.portal.experimental.Certificate`.
+>
+> That is not the squatting this ADR argues against. `org.freedesktop.portal.experimental.*`
+> and `org.freedesktop.impl.portal.experimental.*` are the namespace upstream **set aside
+> for unfinished portals** — see [PR #1889](https://github.com/flatpak/xdg-desktop-portal/pull/1889),
+> quoted in [0010](0010-backend-only-frontend-lives-upstream.md) — and an interface in it
+> carries no claim of acceptance: it is not exported at all unless the portal is started
+> with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`, and it may change or be
+> removed without a version bump. Writing an experimental portal *inside* xdg-desktop-portal
+> is how upstream asks for it to be done; writing one under `io.github.sjtrotter.*` outside
+> it is what this ADR was recommending instead, in the absence of that knowledge.
+>
+> The backend's own bus name, `org.freedesktop.impl.portal.desktop.certificate`, follows the
+> ordinary out-of-tree backend convention (`org.freedesktop.impl.portal.desktop.<backend>`,
+> as `xdg-desktop-portal-gtk` and `xdg-desktop-portal-termfilechooser` use). A backend name
+> has never been a namespace claim; it is how the frontend activates a backend.
+>
+> What survives unchanged is this ADR's actual subject: **a name is not an acceptance**,
+> the rename is still expected, and "the order of conversations" below — talk to the
+> credentials people before freezing anything — is still the ordering constraint.
 
 ## Context
 

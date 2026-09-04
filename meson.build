@@ -1,24 +1,28 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-# smartcard-portal: a cryptographic credential broker for the Linux desktop,
-# built in the shape xdg-desktop-portal uses.
+# xdg-desktop-portal-certificate: an out-of-tree BACKEND for the experimental
+# org.freedesktop.impl.portal.experimental.Certificate portal interface.
 #
-# EXPERIMENTAL DESIGN SKETCH. Nothing is implemented. This build exists so that the
-# skeleton compiles, the dependency picture is visible, and the interface XML has an
-# install path -- not because there is anything to run.
+# EXPERIMENTAL DESIGN SKETCH. Nothing is implemented. This build exists so that
+# the skeleton compiles, the dependency picture is visible, and the interface
+# XML, the .portal file and the D-Bus service file have install paths -- not
+# because there is anything to run.
 #
-# TWO BINARIES, because there are two processes:
+# ONE BINARY, because there is one process:
 #
-#   certificate-portal-frontend   frontend/    the part that would move INTO
-#                                            xdg-desktop-portal when accepted
-#   certificate-portal-gtk        backends/gtk the part that would live in or beside
-#                                            xdg-desktop-portal-gtk
+#   xdg-desktop-portal-certificate   src/   the chooser, the PIN prompt, token
+#                                           discovery and the brokered
+#                                           operations
 #
-# The umbrella exists because they are developed together and the impl interface
-# between them is not stable. At upstreaming they separate; docs/UPSTREAMING.md.
+# There is no frontend here any more. The portal frontend -- app id derivation,
+# option validation, policy, the grant registry, the permission store, Request
+# and Session lifecycle, backend selection -- is a branch of xdg-desktop-portal
+# itself: experimental/certificate-webauthentication, commits 3f46e3c..661e441.
+# See docs/decisions/0010-backend-only-frontend-lives-upstream.md and
+# docs/UPSTREAMING.md.
 
 project(
-  'smartcard-portal',
+  'xdg-desktop-portal-certificate',
   'c',
   version: '0.0.0',
   license: 'GPL-2.0-or-later',
@@ -47,82 +51,106 @@ add_project_arguments(
 
 prefix = get_option('prefix')
 datadir = prefix / get_option('datadir')
-# Both binaries are D-Bus activated and are not meant to be run from a shell, so they
-# belong in libexecdir -- as xdg-desktop-portal and xdg-desktop-portal-gtk both do.
+# The backend is D-Bus activated and is not meant to be run from a shell, so it
+# belongs in libexecdir -- as xdg-desktop-portal-gtk's backend does.
 libexecdir = prefix / get_option('libexecdir')
 dbus_service_dir = datadir / 'dbus-1' / 'services'
 dbus_interfaces_dir = datadir / 'dbus-1' / 'interfaces'
 
-# Where *.portal files and portals.conf live. Our-namespace equivalent of
-# ${datadir}/xdg-desktop-portal/portals; see frontend/src/portal-impl.h and
-# https://flatpak.github.io/xdg-desktop-portal/docs/portals.conf.html
-portal_subdir = 'certificate-portal'
-portal_dir = datadir / portal_subdir / 'portals'
+# THE REAL DIRECTORY. Out-of-tree backends install their .portal file into
+# ${datadir}/xdg-desktop-portal/portals -- that is where the frontend looks
+# (desktop-portal/xdp-portal-config.c:364) and there is nowhere else it would
+# find it. xdg-desktop-portal-termfilechooser and xdg-desktop-portal-gtk both do
+# exactly this.
+portal_dir = datadir / 'xdg-desktop-portal' / 'portals'
 
-# shared/ is header-only for now and is compiled into both binaries, exactly as
-# xdg-desktop-portal's shared/ is compiled into its frontend and its portals.
-shared_inc = include_directories('shared')
-
-# Both stubs need only GLib. Everything else is declared so that the dependency picture
-# is visible in the summary, and is unused: none of the components those libraries
-# would serve exist yet.
+# The stub needs only GLib. Everything else is declared so that the dependency
+# picture is visible in the summary, and is unused: none of the components those
+# libraries would serve exist yet.
 glib_dep = dependency('glib-2.0', version: '>= 2.66')
 gio_dep = dependency('gio-2.0', version: '>= 2.66', required: false)
 
-# BACKEND dependencies. The frontend has none of these and must never grow them: it does
-# not load PKCS#11 modules, does not talk to a card, and does not draw a window.
-#
-# p11-kit is used by the backend for MANAGED MODULE loading and for the RPC transport
-# under the synthetic facade -- NOT for scoping. See
+# p11-kit is used for MANAGED MODULE loading and for the RPC transport under the
+# synthetic facade -- NOT for scoping. See
 # docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md.
 p11kit_dep = dependency('p11-kit-1', required: false)
-# The chooser and the PIN prompt are backend-owned windows and are the controls that
-# carry the security decision; see docs/IMPL-INTERFACE.md.
+# The chooser and the PIN prompt are this backend's own windows and are the
+# controls that carry the security decision; see docs/IMPL-INTERFACE.md.
 gtk_dep = dependency('gtk4', required: false)
 
-# FRONTEND dependency, and only the frontend's: the permission store is where remembered
-# certificate SELECTION lives, keyed by the app id the frontend established. There is no
-# "remember PIN" and there never will be. The real
-# org.freedesktop.impl.portal.PermissionStore is used when present, which needs no
-# library -- libsecret remains listed only as the fallback that was considered and
-# rejected in favour of the store the desktop's own revocation UI already lists.
-secret_dep = dependency('libsecret-1', required: false)
+executable(
+  'xdg-desktop-portal-certificate',
+  sources: ['src/main.c'],
+  dependencies: [glib_dep],
+  install: true,
+  install_dir: libexecdir,
+)
 
-subdir('frontend')
-subdir('backends/gtk')
+# The impl interface description, installed where D-Bus interface XML lives so it
+# can be introspected and reviewed. It is a VERBATIM COPY of the xdg-desktop-portal
+# branch's file and must track it; the header in the file says so. Upstream keeps
+# these in xdg-desktop-portal and backends read them from its pkg-config
+# interfaces directory -- which is where this one comes from the day the branch
+# lands. See docs/IMPL-INTERFACE.md.
+install_data(
+  'data/org.freedesktop.impl.portal.experimental.Certificate.xml',
+  install_dir: dbus_interfaces_dir,
+)
 
-summary(
-  {
-    'glib-2.0 (required, both)': glib_dep.version(),
-    'gio-2.0 (D-Bus, both)': gio_dep.found() ? gio_dep.version() : 'not found',
-    'p11-kit-1 (BACKEND: tokens, RPC transport)': p11kit_dep.found() ? p11kit_dep.version() : 'not found',
-    'gtk4 (BACKEND: chooser and PIN windows)': gtk_dep.found() ? gtk_dep.version() : 'not found',
-    'libsecret-1 (rejected fallback, see above)': secret_dep.found() ? secret_dep.version() : 'not found',
-  },
-  section: 'smartcard-portal dependencies',
+# Backend discovery. Upstream's gtk.portal.in has @-substitutions because its
+# interface list is build-configurable; ours lists one interface unconditionally,
+# so this is a copy. The .in name is kept so the file gains substitutions the day
+# a second impl interface becomes optional.
+configure_file(
+  input: 'data/certificate.portal.in',
+  output: 'certificate.portal',
+  copy: true,
+  install: true,
+  install_dir: portal_dir,
+)
+
+# D-Bus activation. xdg-desktop-portal starts this name when a .portal file
+# selects this backend; applications have no reason to hold it.
+configure_file(
+  input: 'data/org.freedesktop.impl.portal.desktop.certificate.service.in',
+  output: 'org.freedesktop.impl.portal.desktop.certificate.service',
+  configuration: {'libexecdir': libexecdir},
+  install: true,
+  install_dir: dbus_service_dir,
 )
 
 summary(
   {
-    'frontend bus name': 'io.github.sjtrotter.portal.Certificate',
-    'public interface': 'io.github.sjtrotter.portal.Certificate1 (EXPERIMENTAL)',
-    'backend bus name': 'io.github.sjtrotter.impl.portal.Certificate.gtk',
-    'impl interface': 'io.github.sjtrotter.impl.portal.Certificate1 (private)',
-    'object path (both)': '/io/github/sjtrotter/portal/Certificate',
-    'portal files': portal_dir,
-    'core contract': 'credential selection + brokered Sign',
-    'PKCS#11 facade': 'experimental, opt-in, milestone 2, backend-side',
+    'glib-2.0 (required)': glib_dep.version(),
+    'gio-2.0 (D-Bus)': gio_dep.found() ? gio_dep.version() : 'not found',
+    'p11-kit-1 (tokens, RPC transport)': p11kit_dep.found() ? p11kit_dep.version() : 'not found',
+    'gtk4 (chooser and PIN windows)': gtk_dep.found() ? gtk_dep.version() : 'not found',
   },
-  section: 'smartcard-portal interfaces',
+  section: 'dependencies',
+)
+
+summary(
+  {
+    'backend bus name': 'org.freedesktop.impl.portal.desktop.certificate',
+    'impl interface': 'org.freedesktop.impl.portal.experimental.Certificate',
+    'object path': '/org/freedesktop/portal/desktop',
+    'portal file': portal_dir / 'certificate.portal',
+    'frontend': 'xdg-desktop-portal, branch experimental/certificate-webauthentication',
+    'public interface (frontend)': 'org.freedesktop.portal.experimental.Certificate',
+    'frontend gate': 'XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate',
+    'core contract': 'credential selection + brokered Sign',
+    'PKCS#11 facade': 'deferred; OpenPkcs11Endpoint is not in the branch interface',
+  },
+  section: 'interfaces',
 )
 
 summary(
   {
     'implemented': false,
     'feasibility spike run': false,
-    'proposed to freedesktop': false,
+    'frontend branch merged upstream': false,
     'safe to depend on': false,
   },
-  section: 'smartcard-portal status',
+  section: 'status',
   bool_yn: true,
 )

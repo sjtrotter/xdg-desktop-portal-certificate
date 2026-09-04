@@ -41,7 +41,7 @@
 
 /** Token identity. The display fields go in the chooser and in token_display; the
  *  identity fields decide whether two observations are the same token. Neither set is
- *  ever logged: shared/redact.h permits token PRESENCE, not token identity. */
+ *  ever logged: src/redact.h permits token PRESENCE, not token identity. */
 typedef struct
 {
 	char* label;

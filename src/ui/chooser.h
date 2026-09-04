@@ -14,10 +14,17 @@
  *  upstream makes for every portal that asks a question, and it is the one that makes
  *  the answer trustworthy: the side that knows who is calling is not the side that draws
  *  the window, so the window cannot be talked into naming the wrong application by the
- *  application. app_id, the application display name, and HOW WELL THAT NAME IS KNOWN
- *  arrive as arguments to
- *  io.github.sjtrotter.impl.portal.Certificate1.AcquireCredential. The backend renders
- *  them. It never derives them.
+ *  application. app_id and HOW WELL THAT NAME IS KNOWN (the app_identity_level option:
+ *  verified_sandboxed, derived_host or unidentified) arrive as arguments to
+ *  org.freedesktop.impl.portal.experimental.Certificate.AcquireCredential. The backend
+ *  renders them. It never derives them.
+ *
+ *  NOTE WHAT DOES NOT ARRIVE. The branch interface passes app_id and
+ *  app_identity_level and nothing else about the caller: there is no app_display_name
+ *  option, so the human-readable name is this backend's to produce from the app id (a
+ *  desktop file lookup, say) or to omit. There is also no `context` option -- the
+ *  earlier sketch's "requested destination host" hint does not exist on the wire, and
+ *  the only caller-supplied text that does is `reason`.
  *
  *  Not the PIN prompt. The PIN proves the user was present and knew the PIN; it does not
  *  tell them which application asked, for what, or how long the answer lasts. A design

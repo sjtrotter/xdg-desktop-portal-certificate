@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# The backend description file, in xdg-desktop-portal's *.portal format:
+#   https://flatpak.github.io/xdg-desktop-portal/docs/writing-a-new-backend.html
+#
+# Installed as ${datadir}/xdg-desktop-portal/portals/certificate.portal --
+# the real directory the real xdg-desktop-portal scans
+# (desktop-portal/xdp-portal-config.c:364), because this repository is now an
+# out-of-tree BACKEND of xdg-desktop-portal rather than a portal frontend of its
+# own. That is what every out-of-tree backend does; see the README's install
+# section and docs/decisions/0010-backend-only-frontend-lives-upstream.md.
+#
+# The frontend reads DBusName and Interfaces from this file and picks a backend
+# according to portals.conf:
+#   https://flatpak.github.io/xdg-desktop-portal/docs/portals.conf.html
+#
+# The interface named below is EXPERIMENTAL and is gated in the frontend: a
+# stock xdg-desktop-portal has never heard of it, will not match this file
+# against anything, and will simply not use this backend. The frontend that does
+# know it exports the public side only when
+# XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL contains "certificate". Installing this
+# file into the real directory is therefore inert on a machine without that
+# frontend, which is why it is safe -- and why it is the only place it can go if
+# the frontend is ever to find it.
+#
+# UseIn is the legacy mechanism and upstream deprecates it in favour of
+# portals.conf. It is kept here for the same reason upstream keeps it: a system
+# with no configuration file at all should still work.
+
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.certificate
+Interfaces=org.freedesktop.impl.portal.experimental.Certificate;
+UseIn=gnome
