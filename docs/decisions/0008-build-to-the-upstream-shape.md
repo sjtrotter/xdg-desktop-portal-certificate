@@ -105,6 +105,56 @@ Every cost the earlier argument listed is real and is now being paid:
 - **Ten fewer person-days on the spike**, roughly, which is a real trade against the one
   thing [SPIKES.md](../SPIKES.md) says matters most.
 
+## The Desktop bus name
+
+**The problem.** `io.github.sjtrotter.portal.Desktop` is a singleton, and it is the incubating
+stand-in for `org.freedesktop.portal.Desktop`. The sibling `entra-token-helper` repository (working
+title `webauth-portal`) has restructured in parallel into the same shape, and its frontend claims the
+same name. Two incubating frontends cannot both hold it: the second to start fails to acquire the
+name.
+
+That is not a packaging accident to be worked around. It is the architecture stating a fact: **the
+real xdg-desktop-portal hosts every portal interface in one process.** A per-project frontend is not
+a smaller version of that; it is a different, incompatible thing.
+
+**The resolution, in three parts, matching the sibling's own account of this same problem** in its
+`entra-token-helper` repository, `docs/decisions/0008-build-to-the-upstream-shape.md`, "The Desktop
+bus name":
+
+1. **At acceptance, the question disappears.** Both interfaces would be hosted by
+   xdg-desktop-portal itself, on `org.freedesktop.portal.Desktop`, and neither repository would
+   ship a frontend at all.
+2. **Before acceptance, the answer is one shared incubating frontend.** Now that both this
+   project and `webauth-portal` are actually built to the portal shape rather than one of them
+   only arguing for it, a shared `incubating-portal-frontend` — one process, one bus name, one
+   object path, this project's `Smartcard1` and the sibling's `WebAuthentication1` routed side by
+   side to their own impl interfaces, exactly as xdg-desktop-portal's own structure — is no
+   longer a hope contingent on the other side finishing its restructuring. It is the concrete next
+   step, blocked only on agreement between the two projects, not on either project's own shape.
+3. **For now, each repository ships its own frontend stub**, and only one can be installed at a
+   time. Both projects' documents say so rather than papering over it with a per-project bus name,
+   because a per-project bus name would quietly make the two prototypes *look* compatible while
+   removing the one property the shape exists to have.
+
+**It also solves the delegation gap** described in
+[0005](0005-first-consumer-is-the-web-auth-service.md) and [ARCHITECTURE.md](../ARCHITECTURE.md).
+This service derives the app id of *its* caller, which under the sibling's portal adapter is
+`webauth-portal-gtk`, not the application that started the sign-in — so the chooser names the wrong
+thing, and the original app id can only be passed as untrusted text. **Inside one shared frontend,
+both interfaces would already hold the same derived app id, and the sibling could pass the
+*original* application's app id to this project's `AcquireCredential` in-process, with no attestation
+crossing a bus at all.**
+
+That fix is narrower than it sounds, and the narrowness is the point: **it only holds because the two
+portals then run in one trusted process.** In-process, a passed-along app id is exactly as trustworthy
+as the frontend's own derivation, because nothing untrusted touched it in between. Across two
+processes — this project's frontend and a separately-running `webauth-portal-frontend` — the same
+pass-through would be a caller asserting someone else's identity with nothing to back the assertion,
+which is precisely the identity-laundering [SECURITY.md](../SECURITY.md) forbids. It would need an
+attested-delegation protocol neither project has designed, and **it is not to be done that way.**
+Passing an unattested app id across a process boundary is not a smaller version of the shared-frontend
+fix; it is the thing the shared frontend exists to avoid needing.
+
 ## Consequences
 
 - [ARCHITECTURE.md](../ARCHITECTURE.md)'s process-model section is replaced, and says

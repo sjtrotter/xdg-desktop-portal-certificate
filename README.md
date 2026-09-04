@@ -153,13 +153,14 @@ and nothing else.
              (relayed by the frontend)                 │ (created by the backend,
                             │                          │  relayed by the frontend)
             ┌───────────────▼────────────────┐   ┌─────▼───────────────────────────┐
-            │ webauth-service                │   │ TLS applications that can only  │
-            │ io.github.sjtrotter.WebAuth…1  │   │ consume a module. NOT MVP       │
-            │ (WebKit client-cert challenge) │   │ consumers: Firefox, Chromium,   │
-            └───────────────┬────────────────┘   │ Evolution, openconnect, SSH,    │
-                            │                    │ PDF signing each need explicit  │
-                completion URI                   │ integration work of their own.  │
-                            │                    └─────────────────────────────────┘
+            │ webauth-portal-gtk (backend)   │   │ TLS applications that can only  │
+            │ io.github.sjtrotter.portal.    │   │ consume a module. NOT MVP       │
+            │ WebAuthentication1             │   │ consumers: Firefox, Chromium,   │
+            │ (WebKit client-cert challenge) │   │ Evolution, openconnect, SSH,    │
+            └───────────────┬────────────────┘   │ PDF signing each need explicit  │
+                            │                    │ integration work of their own.  │
+                completion URI                   └─────────────────────────────────┘
+
             ┌───────────────▼────────────────┐
             │ entra token client → FreeRDP   │
             │ Remmina / KRDC / sdl-freerdp   │

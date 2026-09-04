@@ -495,10 +495,10 @@ No `--socket=pcsc`. No PIN in the application. No PKCS#11 handle in the applicat
 application does need is a TLS stack that will let it supply a signature rather than a key — which
 is exactly the integration work that makes Firefox and Chromium **not** MVP consumers.
 
-## Sequence — the web-auth service answering a WebKit challenge
+## Sequence — the web-auth portal's backend answering a WebKit challenge
 
 ```
-entra client → webauth-service              FRONTEND                  BACKEND
+entra client → webauth-portal-gtk            FRONTEND                  BACKEND
                     │
                     │ WebKit "authenticate" signal, client certificate,
                     │ host certauth.<authority>
@@ -508,12 +508,12 @@ entra client → webauth-service              FRONTEND                  BACKEND
                     │      operation_policy: {sign}, context: "<origin>",
                     │      certificate_filter: {issuers}}) ─────────►
                     │                            ├─ app_id resolves to
-                    │                            │  webauth-service, NOT to the
-                    │                            │  RDP client behind it
+                    │                            │  webauth-portal-gtk, NOT to
+                    │                            │  the RDP client behind it
                     │                            ├─ impl AcquireCredential(app_id …) ──►
                     │                            │                  ├─ chooser, naming
-                    │                            │                  │  webauth-service and
-                    │                            │                  │  the requested
+                    │                            │                  │  webauth-portal-gtk
+                    │                            │                  │  and the requested
                     │                            │                  │  destination
                     │   ◄─── Response(0, {grant_id, certificate_der, …})
                     │
@@ -541,14 +541,20 @@ one.
 **Two problems are open here and both are called out rather than papered over.**
 
 *Module loading.* This is the weakest link in the entire design and is S3. Until a real WebKitGTK
-mutual-TLS handshake completes through the facade, `webauth-service` must keep its in-process
+mutual-TLS handshake completes through the facade, `webauth-portal-gtk` must keep its in-process
 certificate handling behind an internal adapter, so that it can use either path.
 
-*Delegation.* `webauth-service` asks on behalf of an RDP client that asked on behalf of a user. This
-service sees only its immediate D-Bus peer. Version 1 shows the immediate peer and nothing else,
-honestly. Passing an *attested* original caller through one hop is a protocol both projects would
-have to agree, and neither has. See
-[0005](decisions/0005-first-consumer-is-the-web-auth-service.md).
+*Delegation.* `webauth-portal-gtk` asks on behalf of an RDP client that asked on behalf of a user.
+This service sees only its immediate D-Bus peer — now unambiguously the sibling's *backend* process,
+since both projects have restructured into the frontend/backend shape. Version 1 shows the immediate
+peer and nothing else, honestly. Passing an *attested* original caller through one hop is a protocol
+both projects would have to agree, and neither has; but a **shared incubating frontend** hosting both
+interfaces would not need one, because it would already hold the app id it derived for the web
+authentication request before calling into the smart-card side of itself, and could pass it through
+in-process. That resolution only holds inside one trusted process — across two separate frontend
+processes it is not available, and is not to be attempted without attestation neither project has.
+See [0005](decisions/0005-first-consumer-is-the-web-auth-service.md) and
+[0008](decisions/0008-build-to-the-upstream-shape.md).
 
 ## Process model
 

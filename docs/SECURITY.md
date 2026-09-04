@@ -306,9 +306,12 @@ revocable in the service's own UI. There is no "remember PIN" and there never wi
 
 Named because they are unsolved, not because they are minor.
 
-- **Delegation across one hop.** `webauth-service` asks on behalf of an RDP client. This service sees
-  only its immediate peer. Version 1 shows the immediate peer, honestly. An attested chain is a
-  protocol neither project has.
+- **Delegation across one hop.** `webauth-portal-gtk` asks on behalf of an RDP client. This service
+  sees only its immediate peer. Version 1 shows the immediate peer, honestly. An attested chain is a
+  protocol neither project has. A shared incubating frontend removes the need for one *inside that
+  one trusted process*; it is not a substitute for attestation across two separate processes. See
+  [0005](decisions/0005-first-consumer-is-the-web-auth-service.md) and
+  [0008](decisions/0008-build-to-the-upstream-shape.md).
 - **Module loading for facade consumers.** If the only workable shape is one permanently registered
   broker module, then a compromised consumer process shares an already-loaded module with every other
   consumer in that process, and grant binding must be enforced inside the module by caller identity
