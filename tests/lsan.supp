@@ -10,11 +10,21 @@
 # NOTHING IN src/ IS SUPPRESSED, on purpose. A leak reported against this
 # backend's own code is a defect, and the cancellation tests exist precisely to
 # provoke that class of defect.
+#
+# AND NOTHING BROAD ENOUGH TO COVER src/ EITHER, which is the trap this file fell
+# into. LeakSanitizer matches a suppression against ANY frame of the allocation
+# stack, not the innermost one -- and every allocation in this codebase passes
+# through g_malloc, g_strdup or g_object_new. So `leak:libglib-2.0`,
+# `leak:libgio-2.0` and `leak:libgobject-2.0` did not suppress "GLib's one-time
+# allocations", they suppressed almost every leak this backend can have,
+# including the ones the cancellation suite was written to catch. They are gone;
+# a real leak of a g_strdup() in src/ is reported again.
+#
+# What is left is either a library with its own allocator and its own frames
+# (GTK, GnuTLS, p11-kit, Pango, fontconfig, the GL stacks, dconf), or a NAMED
+# one-shot function that cannot appear in any path of ours.
 leak:libgtk-4
 leak:libgdk
-leak:libgio-2.0
-leak:libglib-2.0
-leak:libgobject-2.0
 leak:libgnutls
 leak:libp11-kit
 leak:libpango
@@ -23,4 +33,19 @@ leak:libEGL
 leak:libGL
 leak:dconf
 leak:g_type_register_static
+leak:g_type_add_interface_static
 leak:g_quark_init
+leak:g_quark_from_static_string
+# GLib's own singletons, by name rather than by module: the thread pools that
+# run every GTask worker, the default GMainContext, and the GIO module registry
+# are all allocated once and freed never, by design.
+leak:g_thread_pool_new
+leak:g_private_set_alloc0
+leak:g_io_module_new
+leak:g_dbus_error_register_error_domain
+# GDBus's WIRE DECODER, on GDBus's own worker thread. A message that has been
+# parsed but not yet dispatched when the process exits is reported as leaked;
+# it belongs to a connection this suite deliberately does not drain. Named
+# rather than `leak:libgio-2.0`, because that module name also covers every
+# g_task_*, g_dbus_* and GVariant allocation this backend makes.
+leak:g_dbus_message_new_from_blob

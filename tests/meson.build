@@ -60,6 +60,10 @@ endforeach
 service_test_cases = {
   'impl-dbus': 'test-impl-dbus.c',
   'cancellation': 'test-cancellation.c',
+  # The consent window's display helpers. The window needs a display and a
+  # person; the strings it renders do not, and they are where a hostile card
+  # label would do its work.
+  'chooser': 'test-chooser.c',
   # The two properties that make Decrypt safe to offer: one error for every
   # failure, and a per-grant budget. Skips itself without a SoftHSM fixture.
   'broker-decrypt': 'test-broker-decrypt.c',

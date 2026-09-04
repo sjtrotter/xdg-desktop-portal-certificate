@@ -239,13 +239,27 @@ static int list_tokens(void)
 	{
 		CertificateToken* token = g_ptr_array_index(present, i);
 		g_autofree char* serial = certificate_redact_serial(token->serial);
+		/* SANITISED LIKE EVERY OTHER CARD STRING. This is the one output path
+		 * that used to print them raw, and docs/TESTING.md 3.2 has an operator
+		 * run it against an unknown card as the first thing they do: a label
+		 * carrying a CSI sequence can rewrite the lines above it, and a bidi
+		 * override can make a serial read backwards, in a terminal where the
+		 * operator is deciding whether to trust the card. */
+		g_autofree char* label =
+		    certificate_display_text(token->label, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "(unnamed)");
+		g_autofree char* manufacturer = certificate_display_text(
+		    token->manufacturer, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "(unknown)");
+		g_autofree char* model =
+		    certificate_display_text(token->model, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "(unknown)");
+		g_autofree char* reader =
+		    certificate_display_text(token->reader_name, CERTIFICATE_DISPLAY_MAX_READER, "(unknown)");
 
 		g_print("Token %u\n", i + 1);
-		g_print("  label         %s\n", token->label);
-		g_print("  manufacturer  %s\n", token->manufacturer);
-		g_print("  model         %s\n", token->model);
+		g_print("  label         %s\n", label);
+		g_print("  manufacturer  %s\n", manufacturer);
+		g_print("  model         %s\n", model);
 		g_print("  serial        %s\n", serial);
-		g_print("  reader        %s\n", token->reader_name);
+		g_print("  reader        %s\n", reader);
 		g_print("  module        %s\n", token->module_name != NULL ? token->module_name : "?");
 		g_print("  login         %s\n", token->login_required ? "required" : "not required");
 		g_print("  PIN entry     %s\n",
@@ -292,8 +306,16 @@ static int list_tokens(void)
 			purpose_list = g_strv_builder_end(purpose_builder);
 			purposes = g_strjoinv(", ", purpose_list);
 
-			g_print("\n  %u. %s\n", i + 1, candidate->subject_display);
-			g_print("     issuer      %s\n", candidate->issuer_display);
+			g_autofree char* subject = certificate_display_text(
+			    candidate->subject_display, CERTIFICATE_DISPLAY_MAX_SUBJECT, "(unnamed)");
+			g_autofree char* issuer = certificate_display_text(
+			    candidate->issuer_display, CERTIFICATE_DISPLAY_MAX_ISSUER, "(unnamed)");
+			g_autofree char* token_label =
+			    certificate_display_text(candidate->token->label,
+			                             CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "(unnamed)");
+
+			g_print("\n  %u. %s\n", i + 1, subject);
+			g_print("     issuer      %s\n", issuer);
 			g_print("     expires     %s%s\n", expiry,
 			        certificate_candidate_is_expired(candidate,
 			                                         g_get_real_time() / G_USEC_PER_SEC)
@@ -306,7 +328,7 @@ static int list_tokens(void)
 			g_print("     purposes    %s\n", *purposes != '\0' ? purposes : "(none)");
 			if (candidate->piv_slot != NULL)
 				g_print("     PIV slot    %s\n", candidate->piv_slot);
-			g_print("     token       %s\n", candidate->token->label);
+			g_print("     token       %s\n", token_label);
 			g_print("     id          %s\n", candidate->certificate_id);
 		}
 

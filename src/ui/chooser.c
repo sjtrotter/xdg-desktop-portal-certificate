@@ -30,7 +30,9 @@ typedef struct
 	GtkWindow* window;
 	GtkWidget* list;
 	GtkWidget* use_button;
+	GtkWidget* cancel_button;
 	GtkWidget* remember;
+	GtkEventController* keys;
 
 	gboolean finished;
 } Chooser;
@@ -98,6 +100,15 @@ static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen, gbool
 		g_signal_handlers_disconnect_by_data(chooser->list, chooser);
 	if (chooser->window != NULL)
 		g_signal_handlers_disconnect_by_data(chooser->window, chooser);
+	/* EVERY handler, not only the two that used to be listed. The `finished`
+	 * guard makes a late callback harmless, but "harmless because the first
+	 * line returns" is a weaker property than "cannot be called". */
+	if (chooser->use_button != NULL)
+		g_signal_handlers_disconnect_by_data(chooser->use_button, chooser);
+	if (chooser->cancel_button != NULL)
+		g_signal_handlers_disconnect_by_data(chooser->cancel_button, chooser);
+	if (chooser->keys != NULL)
+		g_signal_handlers_disconnect_by_data(chooser->keys, chooser);
 
 	if (chooser->window != NULL)
 	{
@@ -228,14 +239,7 @@ static GtkWidget* build_identity(const CertificateCallerIdentity* caller)
 	GtkWidget* name = NULL;
 	GtkWidget* level = NULL;
 	const char* level_text = NULL;
-	const char* display = NULL;
-	/* THE DESKTOP FILE IS NOT TRUSTED INPUT. Name= is read out of
-	 * XDG_DATA_DIRS, which includes ~/.local/share/applications -- writable by
-	 * any unsandboxed process and by any Flatpak with home access -- and
-	 * GKeyFile unescapes \n in it. Sanitised and capped before it can put a
-	 * second line of pseudo-chrome under the identity heading. */
-	g_autofree char* app_name =
-	    certificate_display_text(caller->app_display_name, CERTIFICATE_DISPLAY_MAX_APP_NAME, NULL);
+	g_autofree char* display = certificate_chooser_display_name(caller);
 	g_autofree char* app_id =
 	    certificate_display_text(caller->app_id, CERTIFICATE_DISPLAY_MAX_APP_ID, NULL);
 
@@ -253,13 +257,6 @@ static GtkWidget* build_identity(const CertificateCallerIdentity* caller)
 			             "know what asked.";
 			break;
 	}
-
-	if (app_name != NULL)
-		display = app_name;
-	else if (app_id != NULL)
-		display = app_id;
-	else
-		display = "An unidentified application";
 
 	name = gtk_label_new(display);
 	gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
@@ -293,11 +290,13 @@ static GtkWidget* build_identity(const CertificateCallerIdentity* caller)
 	return box;
 }
 
-static char* format_lifetime(guint32 seconds)
+char* certificate_chooser_format_lifetime(guint32 seconds)
 {
-	if (seconds == 0)
-		return g_strdup("this operation only");
-
+	/* THERE IS NO ZERO CASE. A lifetime of 0 is refused in
+	 * certificate-impl.c's option parsing and an absent one defaults to 300, so
+	 * the "this operation only" wording that used to be here was a string no
+	 * window could ever show. A dead branch in a window that carries a security
+	 * decision is a claim about behaviour that does not exist. */
 	if (seconds < 120)
 		return g_strdup_printf("%u seconds", seconds);
 
@@ -307,28 +306,85 @@ static char* format_lifetime(guint32 seconds)
 	return g_strdup_printf("%u hours", (seconds + 3599) / 3600);
 }
 
+char* certificate_chooser_display_name(const CertificateCallerIdentity* caller)
+{
+	/* THE DESKTOP FILE IS NOT TRUSTED INPUT. Name= is read out of
+	 * XDG_DATA_DIRS, which includes ~/.local/share/applications -- writable by
+	 * any unsandboxed process and by any Flatpak with home access -- and
+	 * GKeyFile unescapes \n in it. Sanitised and capped before it can put a
+	 * second line of pseudo-chrome under the identity heading. */
+	g_autofree char* app_name =
+	    certificate_display_text(caller->app_display_name, CERTIFICATE_DISPLAY_MAX_APP_NAME, NULL);
+	g_autofree char* app_id =
+	    certificate_display_text(caller->app_id, CERTIFICATE_DISPLAY_MAX_APP_ID, NULL);
+
+	if (app_name != NULL)
+		return g_steal_pointer(&app_name);
+
+	if (app_id != NULL)
+		return g_steal_pointer(&app_id);
+
+	return g_strdup("An unidentified application");
+}
+
+char* certificate_chooser_format_expiry(const CertificateCandidate* candidate, gint64 now)
+{
+	g_autoptr(GDateTime) expiry = g_date_time_new_from_unix_local(candidate->not_after);
+	/* OWNED, not inlined into the printf. g_date_time_format() returns a new
+	 * string, and the two call sites this replaces leaked one per certificate
+	 * row per chooser. */
+	g_autofree char* date =
+	    expiry != NULL ? g_date_time_format(expiry, "%x") : g_strdup("an unknown date");
+
+	if (date == NULL)
+		date = g_strdup("an unknown date");
+
+	/* EXPIRY IS A WORD, NOT A COLOUR. "Expired" has to survive a monochrome
+	 * screen and a screen reader; the CSS class is an addition, never the
+	 * carrier of the fact. */
+	if (certificate_candidate_is_expired(candidate, now))
+		return g_strdup_printf("EXPIRED on %s", date);
+
+	if (certificate_candidate_is_not_yet_valid(candidate, now))
+		return g_strdup("NOT YET VALID");
+
+	return g_strdup_printf("Valid until %s", date);
+}
+
+char* certificate_chooser_format_detail(const CertificateCandidate* candidate, gint64 now)
+{
+	/* THE TOKEN LABEL AND READER NAME COME OFF A CARD. Whoever issued it chose
+	 * them, and a token can be handed to a user by somebody who is not a
+	 * friend: inside their own row they could still draw several lines of
+	 * plausible chrome, so both are sanitised and capped. */
+	g_autofree char* expiry_text = certificate_chooser_format_expiry(candidate, now);
+	g_autofree char* token_text = certificate_display_text(
+	    candidate->token->label, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "unnamed token");
+	g_autofree char* reader_text = certificate_display_text(
+	    candidate->token->reader_name, CERTIFICATE_DISPLAY_MAX_READER, NULL);
+
+	return g_strdup_printf("%s  ·  %s %u-bit  ·  %s%s%s", expiry_text,
+	                       candidate->key_type != NULL ? candidate->key_type : "unknown",
+	                       candidate->key_size, token_text, reader_text != NULL ? " in " : "",
+	                       reader_text != NULL ? reader_text : "");
+}
+
 static GtkWidget* build_row(CertificateCandidate* candidate, gint64 now)
 {
 	GtkWidget* row = gtk_list_box_row_new();
 	GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
 	GtkWidget* subject = NULL;
-	g_autoptr(GDateTime) expiry = NULL;
-	g_autofree char* expiry_text = NULL;
-	g_autofree char* detail = NULL;
+	g_autofree char* detail = certificate_chooser_format_detail(candidate, now);
 	g_autoptr(GString) accessible = g_string_new(NULL);
-	/* SUBJECT, ISSUER, TOKEN LABEL AND READER NAME ALL COME OFF A CARD.
-	 * Whoever issued it chose them, and a token can be handed to a user by
-	 * somebody who is not a friend. They do not occupy the trusted identity
-	 * position, but inside their own row they could still draw several lines of
-	 * plausible chrome, so every one of them is sanitised and capped. */
+	/* SUBJECT AND ISSUER COME OFF A CARD, like the token label and reader name
+	 * that certificate_chooser_format_detail() handles. They do not occupy the
+	 * trusted identity position, but inside their own row they could still draw
+	 * several lines of plausible chrome, so every one of them is sanitised and
+	 * capped. */
 	g_autofree char* subject_text = certificate_display_text(
 	    candidate->subject_display, CERTIFICATE_DISPLAY_MAX_SUBJECT, "Unnamed certificate");
 	g_autofree char* issuer_text = certificate_display_text(
 	    candidate->issuer_display, CERTIFICATE_DISPLAY_MAX_ISSUER, "an unnamed issuer");
-	g_autofree char* token_text = certificate_display_text(
-	    candidate->token->label, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "unnamed token");
-	g_autofree char* reader_text = certificate_display_text(
-	    candidate->token->reader_name, CERTIFICATE_DISPLAY_MAX_READER, NULL);
 
 	gtk_widget_set_margin_top(box, 8);
 	gtk_widget_set_margin_bottom(box, 8);
@@ -352,28 +408,6 @@ static GtkWidget* build_row(CertificateCandidate* candidate, gint64 now)
 		gtk_box_append(GTK_BOX(box), label);
 		g_string_append_printf(accessible, ", %s", issuer);
 	}
-
-	expiry = g_date_time_new_from_unix_local(candidate->not_after);
-
-	/* EXPIRY IS A WORD, NOT A COLOUR. "Expired" has to survive a monochrome
-	 * screen and a screen reader; the CSS class is an addition, never the
-	 * carrier of the fact. */
-	if (certificate_candidate_is_expired(candidate, now))
-		expiry_text = g_strdup_printf("EXPIRED on %s",
-		                              expiry != NULL ? g_date_time_format(expiry, "%x") : "an "
-		                                                                                  "unknown "
-		                                                                                  "date");
-	else if (certificate_candidate_is_not_yet_valid(candidate, now))
-		expiry_text = g_strdup("NOT YET VALID");
-	else
-		expiry_text = g_strdup_printf(
-		    "Valid until %s", expiry != NULL ? g_date_time_format(expiry, "%x") : "an unknown date");
-
-	detail = g_strdup_printf("%s  ·  %s %u-bit  ·  %s%s%s", expiry_text,
-	                         candidate->key_type != NULL ? candidate->key_type : "unknown",
-	                         candidate->key_size, token_text,
-	                         reader_text != NULL ? " in " : "",
-	                         reader_text != NULL ? reader_text : "");
 
 	{
 		GtkWidget* label = gtk_label_new(detail);
@@ -518,7 +552,7 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	gtk_widget_set_vexpand(scroller, TRUE);
 	gtk_box_append(GTK_BOX(content), scroller);
 
-	lifetime = format_lifetime(request->lifetime_seconds);
+	lifetime = certificate_chooser_format_lifetime(request->lifetime_seconds);
 	{
 		/* WHETHER FURTHER OPERATIONS MAY HAPPEN WITHOUT ANOTHER PROMPT, stated
 		 * plainly, because this is the part users get wrong. */
@@ -549,6 +583,7 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	gtk_widget_set_halign(buttons, GTK_ALIGN_END);
 
 	cancel = gtk_button_new_with_mnemonic("_Cancel");
+	chooser->cancel_button = cancel;
 	g_signal_connect(cancel, "clicked", G_CALLBACK(on_cancel), chooser);
 	gtk_box_append(GTK_BOX(buttons), cancel);
 
@@ -569,6 +604,7 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	adw_window_set_content(ADW_WINDOW(window), toolbar);
 
 	keys = gtk_event_controller_key_new();
+	chooser->keys = keys;
 	g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key_pressed), chooser);
 	gtk_widget_add_controller(window, keys);
 

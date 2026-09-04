@@ -89,4 +89,32 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
                               GCancellable* cancellable, CertificateChooserDone done,
                               gpointer user_data);
 
+/* ------------------------------------------------------- the display helpers
+ *
+ * EXPOSED SO THEY CAN BE TESTED. The window itself needs a display and a user,
+ * and neither is available to `meson test` -- but the strings it puts in front
+ * of the user are where a hostile card label or a hostile desktop file would do
+ * its work, and those are pure functions. They are not part of any interface
+ * and nothing outside src/ui/chooser.c and tests/ calls them.
+ *
+ * Every one of them returns a NEW string the caller owns, and every one of them
+ * has already passed the card- and desktop-file-sourced parts of its input
+ * through certificate_display_text(). */
+
+/** The name shown in the trusted identity position: the desktop file's Name=,
+ *  or the app id, or a fixed phrase -- sanitised and capped, always non-NULL,
+ *  and never more than one line. */
+char* certificate_chooser_display_name(const CertificateCallerIdentity* caller);
+
+/** "5 minutes". There is no zero case: a zero lifetime is refused before it
+ *  reaches a window. */
+char* certificate_chooser_format_lifetime(guint32 seconds);
+
+/** "Valid until <date>", "EXPIRED on <date>" or "NOT YET VALID" -- a WORD, so
+ *  that the fact survives a monochrome screen and a screen reader. */
+char* certificate_chooser_format_expiry(const CertificateCandidate* candidate, gint64 now);
+
+/** The row's second line: expiry, key type and size, token label and reader. */
+char* certificate_chooser_format_detail(const CertificateCandidate* candidate, gint64 now);
+
 #endif /* CERTIFICATE_UI_CHOOSER_H */
