@@ -87,6 +87,29 @@ gboolean certificate_token_same(const CertificateToken* a, const CertificateToke
 	       g_strcmp0(a->model, b->model) == 0 && g_strcmp0(a->manufacturer, b->manufacturer) == 0;
 }
 
+/* PRESENCE, NOT IDENTITY. certificate_token_same() refuses to call a
+ * serial-less token the same as any other observation, which is right for
+ * re-binding a grant -- there is nothing stable to compare -- and wrong for the
+ * watcher, where it made every poll see a change: the two-poll debounce always
+ * cleared and such a token produced a TokenRemoved/TokenAdded pair every four
+ * seconds forever. Some middleware, and some readers in shared mode, really do
+ * report an empty CK_TOKEN_INFO.serialNumber. */
+gboolean certificate_token_same_presence(const CertificateToken* a, const CertificateToken* b)
+{
+	if (a == NULL || b == NULL)
+		return FALSE;
+
+	if (a->serial != NULL && *a->serial != '\0')
+		return certificate_token_same(a, b);
+
+	if (b->serial != NULL && *b->serial != '\0')
+		return FALSE;
+
+	return a->module == b->module && a->slot == b->slot &&
+	       g_strcmp0(a->label, b->label) == 0 && g_strcmp0(a->model, b->model) == 0 &&
+	       g_strcmp0(a->manufacturer, b->manufacturer) == 0;
+}
+
 char* certificate_token_identity(const CertificateToken* token)
 {
 	return g_strdup_printf("%s\x1f%s\x1f%s\x1f%s", token->manufacturer != NULL ? token->manufacturer : "",
@@ -967,6 +990,46 @@ gboolean certificate_tokens_open_session(CertificateTokens* tokens, const Certif
 	return TRUE;
 }
 
+void certificate_tokens_refresh_flags(CertificateTokens* tokens, CertificateToken* token)
+{
+	g_autoptr(GPtrArray) modules = NULL;
+
+	if (tokens == NULL || token == NULL)
+		return;
+
+	g_mutex_lock(&tokens->lock);
+	modules = module_list(tokens);
+
+	for (guint m = 0; m < modules->len; m++)
+	{
+		CK_FUNCTION_LIST* module = g_ptr_array_index(modules, m);
+		g_autoptr(GPtrArray) slots = slots_with_token(module);
+
+		for (guint s = 0; s < slots->len; s++)
+		{
+			CK_SLOT_ID slot = (CK_SLOT_ID) GPOINTER_TO_SIZE(g_ptr_array_index(slots, s));
+			g_autoptr(CertificateToken) present = token_from_slot(tokens, module, slot);
+
+			if (present == NULL || !certificate_token_same_presence(present, token))
+				continue;
+
+			/* Three booleans, written from the login worker thread and read on
+			 * the main thread after that worker has completed, which is a
+			 * happens-before the GTask completion gives for free. Nothing else
+			 * about the token is touched: this is the PIN state, not a
+			 * re-discovery. */
+			token->pin_count_low = present->pin_count_low;
+			token->pin_final_try = present->pin_final_try;
+			token->pin_locked = present->pin_locked;
+
+			g_mutex_unlock(&tokens->lock);
+			return;
+		}
+	}
+
+	g_mutex_unlock(&tokens->lock);
+}
+
 void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanisms_out,
                                      gboolean* protected_path_out)
 {
@@ -1074,7 +1137,7 @@ static gboolean list_contains_token(GPtrArray* list, const CertificateToken* tok
 {
 	for (guint i = 0; i < list->len; i++)
 	{
-		if (certificate_token_same(g_ptr_array_index(list, i), token))
+		if (certificate_token_same_presence(g_ptr_array_index(list, i), token))
 			return TRUE;
 	}
 

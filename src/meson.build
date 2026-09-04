@@ -66,11 +66,31 @@ certificate_core = static_library(
   install: false,
 )
 
-executable(
-  'xdg-desktop-portal-certificate',
-  ['main.c'] + certificate_service_sources + impl_dbus_sources,
+# The D-Bus and UI half, as a library rather than only as objects inside the
+# binary, so that the integration tests can stand the impl object up on a
+# private bus and drive the real code rather than a copy of it. Every finding in
+# the D-Bus and lifecycle layer of the 2026 review was in code no test linked.
+certificate_service = static_library(
+  'certificate-service',
+  certificate_service_sources + impl_dbus_sources,
   link_with: certificate_core,
   dependencies: certificate_deps + certificate_ui_deps,
+  include_directories: config_inc,
+  install: false,
+)
+
+certificate_service_dep = declare_dependency(
+  link_with: [certificate_service, certificate_core],
+  # The generated header, so that a dependent compiles after codegen has run.
+  sources: impl_dbus_sources[1],
+  include_directories: [config_inc, include_directories('.')],
+  dependencies: certificate_deps + certificate_ui_deps,
+)
+
+executable(
+  'xdg-desktop-portal-certificate',
+  ['main.c'],
+  dependencies: [certificate_service_dep],
   include_directories: config_inc,
   install: true,
   install_dir: libexecdir,

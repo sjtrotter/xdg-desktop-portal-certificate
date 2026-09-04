@@ -87,6 +87,15 @@ gboolean certificate_token_same(const CertificateToken* a, const CertificateToke
  *  logged, never put on the wire. */
 char* certificate_token_identity(const CertificateToken* token);
 
+/** Are these two observations of the same token AS FAR AS PRESENCE GOES?
+ *  Identical to certificate_token_same() for a token with a serial. For one
+ *  WITHOUT a serial it falls back to module, slot and the three name fields --
+ *  enough to stop the presence watcher reporting a removal and an insertion
+ *  every poll, and deliberately NOT enough to re-bind a grant, which still
+ *  requires a serial. */
+gboolean certificate_token_same_presence(const CertificateToken* a, const CertificateToken* b);
+
+
 /** One candidate certificate, before filtering. */
 typedef struct
 {
@@ -187,6 +196,12 @@ void certificate_tokens_stop_watch(CertificateTokens* tokens);
 /** The mechanisms, in the frontend's vocabulary, that at least one present
  *  token supports; and whether any present token has a protected
  *  authentication path. Both feed GetCapabilities. */
+/** Re-read @token's CKF_USER_PIN_COUNT_LOW / FINAL_TRY / LOCKED flags from the
+ *  hardware, in place. Called from the PIN prompt's worker thread after a
+ *  refused PIN: FINAL_TRY is normally set BY the attempt that just failed, and
+ *  the flags captured at discovery would never warn anyone. */
+void certificate_tokens_refresh_flags(CertificateTokens* tokens, CertificateToken* token);
+
 void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanisms_out,
                                      gboolean* protected_path_out);
 

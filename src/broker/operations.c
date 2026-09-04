@@ -11,8 +11,16 @@
 #include "../redact.h"
 #include "../ui/pin.h"
 
+/* REFERENCE COUNTED, because more than one thing outlives the call that made
+ * it: the worker task, the PIN prompt that is waiting on a card, and the
+ * waiter list of a second Sign that arrived while the first was logging in. An
+ * Operation freed while a C_Login is reading through it was the worst bug in
+ * this file's history. */
 typedef struct
 {
+	int refs;
+	gboolean answered;
+
 	CertificateTokens* tokens;
 	CertificateImplSession* session;
 	gboolean decrypt;
@@ -38,20 +46,84 @@ static void operation_free(Operation* operation)
 	g_free(operation);
 }
 
+static Operation* operation_ref(Operation* operation)
+{
+	operation->refs++;
+	return operation;
+}
+
+static void operation_unref(gpointer data)
+{
+	Operation* operation = data;
+
+	if (operation == NULL)
+		return;
+
+	if (--operation->refs > 0)
+		return;
+
+	operation_free(operation);
+}
+
+/* THE CALLER IS ANSWERED EXACTLY ONCE. Every path that can produce an answer
+ * goes through these two, and the guard is here rather than at each call site
+ * because there are six of them. Neither touches the reference count: the
+ * operation lives as long as the task, prompt or waiter list holding it does.
+ */
 static void operation_fail(Operation* operation, GError* error)
 {
 	g_autoptr(GError) owned = error;
 
+	if (operation->answered)
+		return;
+
+	operation->answered = TRUE;
 	operation->done(NULL, owned, operation->user_data);
-	operation_free(operation);
 }
 
 static void operation_succeed(Operation* operation, GBytes* result)
 {
 	g_autoptr(GBytes) owned = result;
 
+	if (operation->answered)
+		return;
+
+	operation->answered = TRUE;
 	operation->done(owned, NULL, operation->user_data);
-	operation_free(operation);
+}
+
+/* Closed, expired, cancelled: checked before the device lock is taken and
+ * again with it held, immediately before the operation is submitted. Expiry
+ * cannot revoke a call the card has already accepted -- PKCS#11 has no way to
+ * take one back -- so the value of the second check is that the window in
+ * which one can be STARTED after the authorisation ended is as small as the
+ * lock discipline allows. */
+static gboolean operation_still_authorised(Operation* operation, GError** error)
+{
+	CertificateImplSession* session = operation->session;
+
+	if (operation->cancellable != NULL && g_cancellable_is_cancelled(operation->cancellable))
+	{
+		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_CANCELLED,
+		                    "The request was cancelled");
+		return FALSE;
+	}
+
+	if (session->closed)
+	{
+		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
+		                    "The session was closed");
+		return FALSE;
+	}
+
+	if (certificate_impl_session_is_expired(session))
+	{
+		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
+		                    "The grant has expired");
+		return FALSE;
+	}
+
+	return TRUE;
 }
 
 /* ------------------------------------------------- opening the card session */
@@ -76,10 +148,28 @@ static gboolean do_login(const char* pin, gpointer user_data, GError** error)
 	gboolean ok;
 
 	g_mutex_lock(&session->device_lock);
+
+	/* A second Sign may have logged the session in while this prompt was on
+	 * screen. Spending an attempt to prove what is already true would be one
+	 * more countdown on the user's card for nothing. */
+	if (session->device.logged_in)
+	{
+		g_mutex_unlock(&session->device_lock);
+		return TRUE;
+	}
+
 	ok = certificate_device_login(&session->device, session->candidate, pin, error);
 	g_mutex_unlock(&session->device_lock);
 
 	return ok;
+}
+
+/* Runs on the same worker thread, right after a refused PIN. */
+static void do_refresh_flags(CertificateToken* token, gpointer user_data)
+{
+	Operation* operation = user_data;
+
+	certificate_tokens_refresh_flags(operation->tokens, token);
 }
 
 /* ------------------------------------------------------- the operation itself */
@@ -92,7 +182,23 @@ static void sign_thread(GTask* task, gpointer source, gpointer task_data,
 	g_autoptr(GError) error = NULL;
 	GBytes* result = NULL;
 
+	if (!operation_still_authorised(operation, &error))
+	{
+		g_task_return_error(task, g_steal_pointer(&error));
+		return;
+	}
+
 	g_mutex_lock(&session->device_lock);
+
+	/* Again, with the lock held: the check above and C_SignInit below are the
+	 * two ends of the only window that matters. */
+	if (!operation_still_authorised(operation, &error))
+	{
+		g_mutex_unlock(&session->device_lock);
+		g_task_return_error(task, g_steal_pointer(&error));
+		return;
+	}
+
 	result = certificate_device_perform(&session->device, operation->decrypt,
 	                                    &operation->mechanism, operation->payload, &error);
 	g_mutex_unlock(&session->device_lock);
@@ -146,14 +252,14 @@ static void run_operation(Operation* operation)
 {
 	g_autoptr(GTask) task = g_task_new(NULL, operation->cancellable, on_signed, operation);
 
-	g_task_set_task_data(task, operation, NULL);
+	g_task_set_task_data(task, operation_ref(operation), operation_unref);
 	g_task_run_in_thread(task, sign_thread);
 }
 
-static void on_pin_done(CertificatePinOutcome outcome, gpointer user_data)
+/* One login outcome, applied to one operation. Called for the operation that
+ * put the window up and for every operation that arrived while it was up. */
+static void apply_login_outcome(Operation* operation, CertificatePinOutcome outcome)
 {
-	Operation* operation = user_data;
-
 	switch (outcome)
 	{
 		case CERTIFICATE_PIN_OK:
@@ -161,38 +267,64 @@ static void on_pin_done(CertificatePinOutcome outcome, gpointer user_data)
 			return;
 
 		case CERTIFICATE_PIN_CANCELLED:
-			operation_fail(operation,
-			               g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
+			operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
 			                                   CERTIFICATE_PKCS11_ERROR_CANCELLED,
 			                                   "The user cancelled the PIN prompt"));
 			return;
 
 		case CERTIFICATE_PIN_LOCKED:
 			operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
-			                                              CERTIFICATE_PKCS11_ERROR_PIN_LOCKED,
-			                                              "The token is locked"));
+			                                   CERTIFICATE_PKCS11_ERROR_PIN_LOCKED,
+			                                   "The token is locked"));
 			return;
 
 		case CERTIFICATE_PIN_TOKEN_REMOVED:
 			certificate_impl_session_invalidate(operation->session, "token_removed");
 			operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
-			                                              CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
-			                                              "The token was removed"));
+			                                   CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
+			                                   "The token was removed"));
 			return;
 
 		case CERTIFICATE_PIN_NO_DISPLAY:
-			operation_fail(operation,
-			               g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
+			operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
 			                                   CERTIFICATE_PKCS11_ERROR_FAILED,
 			                                   "A PIN is needed and there is no display to ask on"));
 			return;
 
 		default:
 			operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
-			                                              CERTIFICATE_PKCS11_ERROR_FAILED,
-			                                              "The token refused the login"));
+			                                   CERTIFICATE_PKCS11_ERROR_FAILED,
+			                                   "The token refused the login"));
 			return;
 	}
+}
+
+static void on_pin_done(CertificatePinOutcome outcome, gpointer user_data)
+{
+	Operation* operation = user_data;
+	CertificateImplSession* session = operation->session;
+	GPtrArray* waiters = NULL;
+
+	g_mutex_lock(&session->device_lock);
+	session->login_in_progress = FALSE;
+	waiters = g_steal_pointer(&session->login_waiters);
+	g_mutex_unlock(&session->device_lock);
+
+	apply_login_outcome(operation, outcome);
+
+	/* ONE PROMPT, ONE ANSWER, EVERY WAITER. Two Sign calls on a logged-out
+	 * grant used to produce two windows for the same token, which is exactly
+	 * the "type your PIN whenever asked" habit this project exists to end. */
+	if (waiters != NULL)
+	{
+		for (guint i = 0; i < waiters->len; i++)
+			apply_login_outcome(g_ptr_array_index(waiters, i), outcome);
+
+		g_ptr_array_unref(waiters);
+	}
+
+	/* The reference taken for the PIN interaction. */
+	operation_unref(operation);
 }
 
 static void open_thread(GTask* task, gpointer source, gpointer task_data,
@@ -202,6 +334,12 @@ static void open_thread(GTask* task, gpointer source, gpointer task_data,
 	CertificateImplSession* session = operation->session;
 	g_autoptr(GError) error = NULL;
 	gboolean ok;
+
+	if (!operation_still_authorised(operation, &error))
+	{
+		g_task_return_error(task, g_steal_pointer(&error));
+		return;
+	}
 
 	g_mutex_lock(&session->device_lock);
 	ok = ensure_session_locked(operation, &error);
@@ -219,6 +357,7 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 	CertificateImplSession* session = operation->session;
 	g_autoptr(GError) error = NULL;
 	gboolean needs_login;
+	gboolean wait_for_login = FALSE;
 
 	if (!g_task_propagate_boolean(G_TASK(result), &error))
 	{
@@ -231,10 +370,30 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 	}
 
 	/* THE LOGIN IS LAZY: it happens at first private-key use, not at grant
-	 * time. Logging in early spends the user's presence before it is needed. */
+	 * time. Logging in early spends the user's presence before it is needed.
+	 * The state it is decided from is written by worker threads, so it is read
+	 * under the same lock they write it under. */
+	g_mutex_lock(&session->device_lock);
 	needs_login = !session->device.logged_in &&
 	              (session->candidate->token->login_required ||
 	               session->device.private_key == CK_INVALID_HANDLE);
+
+	if (needs_login && session->login_in_progress)
+	{
+		if (session->login_waiters == NULL)
+			session->login_waiters = g_ptr_array_new_with_free_func(operation_unref);
+
+		g_ptr_array_add(session->login_waiters, operation_ref(operation));
+		wait_for_login = TRUE;
+	}
+	else if (needs_login)
+	{
+		session->login_in_progress = TRUE;
+	}
+	g_mutex_unlock(&session->device_lock);
+
+	if (wait_for_login)
+		return;
 
 	if (!needs_login)
 	{
@@ -242,9 +401,12 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 		return;
 	}
 
+	/* The prompt outlives this callback and the worker outlives the prompt, so
+	 * the operation is handed a reference of its own. */
 	certificate_pin_login(session->candidate->token, operation->parent_window,
 	                      operation->caller_display, operation->purpose_display, do_login,
-	                      operation, operation->cancellable, on_pin_done, operation);
+	                      do_refresh_flags, operation_ref(operation), operation->cancellable,
+	                      on_pin_done, operation);
 }
 
 void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSession* session,
@@ -264,6 +426,14 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 	{
 		g_set_error_literal(&error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
 		                    "This session does not hold a credential");
+		done(NULL, error, user_data);
+		return;
+	}
+
+	if (session->closed)
+	{
+		g_set_error_literal(&error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
+		                    "The session was closed");
 		done(NULL, error, user_data);
 		return;
 	}
@@ -306,6 +476,7 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 	}
 
 	operation = g_new0(Operation, 1);
+	operation->refs = 1;
 	operation->tokens = tokens;
 	operation->session = g_object_ref(session);
 	operation->decrypt = decrypt;
@@ -321,6 +492,10 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 	certificate_log_operation(CERTIFICATE_REASON_REQUEST_RECEIVED, NULL, NULL, mechanism.name);
 
 	task = g_task_new(NULL, operation->cancellable, on_opened, operation);
-	g_task_set_task_data(task, operation, NULL);
+	g_task_set_task_data(task, operation_ref(operation), operation_unref);
 	g_task_run_in_thread(task, open_thread);
+
+	/* The creation reference is handed to the task chain; every later stage
+	 * takes one of its own. */
+	operation_unref(operation);
 }

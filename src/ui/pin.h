@@ -32,9 +32,20 @@
  *  performed. The PIN is never returned, never copied into a GVariant, a GError
  *  or a log line, and never reaches the caller.
  *
- *  THE BUFFER is allocated page-aligned and mlock()ed where the platform
- *  allows, and is wiped with explicit_bzero() on EVERY exit path: success,
- *  failure, cancel, window destroyed, backend shutdown.
+ *  THE BUFFER is allocated page-aligned, mlock()ed where the platform allows,
+ *  marked MADV_DONTDUMP, and wiped with explicit_bzero() on EVERY exit path:
+ *  success, failure, cancel, window destroyed, backend shutdown. The login
+ *  worker is handed a PRIVATE COPY that it owns and wipes itself, so that
+ *  cancelling the window cannot pull the buffer out from under a C_Login.
+ *
+ *  WHAT THIS MODULE DOES NOT CLAIM: that the PIN exists in exactly one place.
+ *  It is typed into a GtkPasswordEntry, which GTK backs with a
+ *  GtkPasswordEntryBuffer from its secure-memory pool -- zeroed when freed, and
+ *  in non-pageable memory "if the underlying platform allows it" -- but GTK
+ *  guarantees nothing about the copies a text widget, an input method or a
+ *  Pango layout may have made. The entry is cleared the moment this module has
+ *  its own copy, and that copy is in one locked, non-dumpable, wiped page. That
+ *  is the whole of the claim.
  *
  *  NOTHING PERSISTS A PIN. There is no "remember PIN", no keyring entry, no
  *  option, and no configuration key. Storing a PIN converts a two-factor
@@ -49,9 +60,16 @@
  *  RETRIES: displayed only when the token reports them RELIABLY through
  *  CKF_USER_PIN_COUNT_LOW / CKF_USER_PIN_FINAL_TRY / CKF_USER_PIN_LOCKED, and
  *  NEVER INVENTED -- a wrong count is worse than none, and PKCS#11 has no
- *  portable way to ask for the number itself. Retries are USER-INITIATED ONLY.
- *  Prompts are SERIALISED process-wide, so two grants cannot race two windows
- *  at the user.
+ *  portable way to ask for the number itself. The flags are RE-READ after every
+ *  refusal, because FINAL_TRY is normally set by the attempt that just failed.
+ *  Once FINAL_TRY is set, the window requires a SECOND, EXPLICIT Unlock before
+ *  the attempt is spent. Retries are USER-INITIATED ONLY and one window offers
+ *  at most three of them. Prompts are SERIALISED process-wide, so two grants
+ *  cannot race two windows at the user.
+ *
+ *  CANCELLING WHILE THE CARD IS BUSY hides the window at once and answers the
+ *  caller when the worker returns: nothing the login is reading is freed while
+ *  it is reading it, and the caller is answered exactly once.
  *
  *  HEADLESS: NEVER READ A PIN FROM STDIN. With no display the caller gets
  *  CERTIFICATE_PIN_NO_DISPLAY.
@@ -76,8 +94,20 @@ typedef enum
 
 /** Perform the login. Called ON A WORKER THREAD with the PIN this module
  *  collected, or with NULL for a protected authentication path. The
- *  implementation must not copy the PIN anywhere. */
+ *  implementation must not copy the PIN anywhere.
+ *
+ *  IT CANNOT BE CANCELLED. PKCS#11 has no way to withdraw a C_Login, so an
+ *  attempt that has been submitted is spent whatever the user does with the
+ *  window. Cancelling hides the window and defers the answer until this
+ *  function has returned; it never frees anything under it. */
 typedef gboolean (*CertificatePinLoginFunc)(const char* pin, gpointer user_data, GError** error);
+
+/** Re-read @token's CKF_USER_PIN_COUNT_LOW / FINAL_TRY / LOCKED flags in place.
+ *  Called ON THE SAME WORKER THREAD immediately after a refused PIN, because
+ *  FINAL_TRY is normally set BY the attempt that just failed: a window still
+ *  showing the flags captured at discovery would never warn anybody before the
+ *  last attempt. Optional; NULL means the flags are never refreshed. */
+typedef void (*CertificatePinRefreshFunc)(CertificateToken* token, gpointer user_data);
 
 typedef void (*CertificatePinDone)(CertificatePinOutcome outcome, gpointer user_data);
 
@@ -88,8 +118,9 @@ typedef void (*CertificatePinDone)(CertificatePinOutcome outcome, gpointer user_
  *  tree, while the "incorrect PIN" state IS announced. */
 void certificate_pin_login(CertificateToken* token, const char* parent_window,
                            const char* caller_display, const char* purpose_display,
-                           CertificatePinLoginFunc login, gpointer login_data,
-                           GCancellable* cancellable, CertificatePinDone done, gpointer user_data);
+                           CertificatePinLoginFunc login, CertificatePinRefreshFunc refresh,
+                           gpointer login_data, GCancellable* cancellable, CertificatePinDone done,
+                           gpointer user_data);
 
 /** Whether a display was available when the process started. With none, every
  *  window-drawing path answers CERTIFICATE_PIN_NO_DISPLAY instead of hanging. */

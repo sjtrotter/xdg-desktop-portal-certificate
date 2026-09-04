@@ -57,6 +57,14 @@ struct _CertificateImplSession
 	gboolean closed;
 	char* id;     /**< the object path the frontend chose */
 	char* app_id; /**< as the FRONTEND established it */
+	char* owner;  /**< the unique name that owned the frontend name at CreateSession */
+
+	/* The identity level this session has been used at. It may fall -- the
+	 * frontend can legitimately know less about a caller later -- and it may
+	 * NEVER RISE: a session created for an unidentified caller does not become
+	 * a session for a verified one because a later call said so. */
+	CertificateIdentityLevel identity_level;
+	gboolean identity_seen;
 
 	/* The grant, once AcquireCredential has filled it in. */
 	gboolean granted;
@@ -72,6 +80,13 @@ struct _CertificateImplSession
 	 * GObject itself is only ever created and destroyed on the main thread. */
 	GMutex device_lock;
 	CertificateDevice device;
+
+	/* ONE PIN PROMPT PER SESSION AT A TIME, under device_lock. Two Sign calls
+	 * on a logged-out grant used to produce two windows for the same token;
+	 * the second and later ones now wait here for the first one's answer.
+	 * broker/operations.c owns the contents. */
+	gboolean login_in_progress;
+	GPtrArray* login_waiters;
 };
 
 CertificateImplSession* certificate_impl_session_new(const char* session_handle,
@@ -91,8 +106,9 @@ void certificate_impl_session_grant(CertificateImplSession* session,
  *  the caller asked for. */
 void certificate_impl_session_release_device(CertificateImplSession* session);
 
-/** Close(): tear the device state down and take the object off the bus.
- *  Idempotent. */
+/** Tear the device state down and mark the session closed. Idempotent, and it
+ *  leaves the skeleton EXPORTED so that a Close() arriving afterwards is
+ *  answered rather than returning UnknownObject. */
 void certificate_impl_session_close(CertificateImplSession* session);
 
 /** The hardware went away, or the lifetime ran out. Emits the "invalidated"

@@ -17,12 +17,15 @@
 
 typedef struct
 {
+	int refs;
+
 	GPtrArray* candidates;
 	CertificateChooserDone done;
 	gpointer user_data;
 
 	GCancellable* cancellable;
 	gulong cancel_id;
+	guint cancel_idle;
 
 	GtkWindow* window;
 	GtkWidget* list;
@@ -39,6 +42,25 @@ static void chooser_free(Chooser* chooser)
 	g_free(chooser);
 }
 
+static Chooser* chooser_ref(Chooser* chooser)
+{
+	chooser->refs++;
+	return chooser;
+}
+
+static void chooser_unref(gpointer data)
+{
+	Chooser* chooser = data;
+
+	if (chooser == NULL)
+		return;
+
+	if (--chooser->refs > 0)
+		return;
+
+	chooser_free(chooser);
+}
+
 static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen, gboolean remember)
 {
 	CertificateChooserResult result = { chosen, remember };
@@ -50,10 +72,19 @@ static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen, gbool
 
 	chooser->finished = TRUE;
 
+	/* THE ORDER MATTERS: disconnect first, so that a cancellation being
+	 * delivered on another thread cannot queue an idle behind the removal
+	 * below. g_cancellable_disconnect() blocks until such a handler returns. */
 	if (chooser->cancel_id != 0)
 	{
 		g_cancellable_disconnect(chooser->cancellable, chooser->cancel_id);
 		chooser->cancel_id = 0;
+	}
+
+	if (chooser->cancel_idle != 0)
+	{
+		g_source_remove(chooser->cancel_idle);
+		chooser->cancel_idle = 0;
 	}
 
 	if (chosen != NULL)
@@ -65,6 +96,8 @@ static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen, gbool
 	 * already gone. */
 	if (chooser->list != NULL)
 		g_signal_handlers_disconnect_by_data(chooser->list, chooser);
+	if (chooser->window != NULL)
+		g_signal_handlers_disconnect_by_data(chooser->window, chooser);
 
 	if (chooser->window != NULL)
 	{
@@ -76,12 +109,14 @@ static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen, gbool
 	                                        : CERTIFICATE_REASON_CHOOSER_CANCELLED,
 	                         NULL, NULL, NULL, chosen != NULL);
 
-	chooser_free(chooser);
-
 	done(&result, user_data);
 
 	if (chosen != NULL)
 		certificate_candidate_unref(chosen);
+
+	/* The creation reference. A queued cancellation idle holding one of its own
+	 * keeps the object alive until it is dispatched and finds it finished. */
+	chooser_unref(chooser);
 }
 
 static CertificateCandidate* selected_candidate(Chooser* chooser)
@@ -134,13 +169,28 @@ static gboolean on_key_pressed(GtkEventControllerKey* controller, guint keyval, 
 
 static gboolean on_cancelled_idle(gpointer user_data)
 {
-	chooser_finish(user_data, NULL, FALSE);
+	Chooser* chooser = user_data;
+
+	chooser->cancel_idle = 0;
+	chooser_finish(chooser, NULL, FALSE);
 	return G_SOURCE_REMOVE;
 }
 
+/* Close() arrives on whichever thread GDBus felt like using, and a queued idle
+ * outlives the window: a pending click is dispatched at G_PRIORITY_DEFAULT
+ * before an idle at G_PRIORITY_DEFAULT_IDLE, so "the user chose, the window
+ * closed, the idle then ran on freed memory" was the LIKELY ordering rather
+ * than the unlucky one. The idle now holds a reference and the source is
+ * removed in chooser_finish(). */
 static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 {
-	g_idle_add(on_cancelled_idle, user_data);
+	Chooser* chooser = user_data;
+
+	if (chooser->cancel_idle != 0)
+		return;
+
+	chooser->cancel_idle = g_idle_add_full(G_PRIORITY_DEFAULT, on_cancelled_idle,
+	                                       chooser_ref(chooser), chooser_unref);
 }
 
 static void on_row_selected(GtkListBox* list, GtkListBoxRow* row, gpointer user_data)
@@ -179,6 +229,15 @@ static GtkWidget* build_identity(const CertificateCallerIdentity* caller)
 	GtkWidget* level = NULL;
 	const char* level_text = NULL;
 	const char* display = NULL;
+	/* THE DESKTOP FILE IS NOT TRUSTED INPUT. Name= is read out of
+	 * XDG_DATA_DIRS, which includes ~/.local/share/applications -- writable by
+	 * any unsandboxed process and by any Flatpak with home access -- and
+	 * GKeyFile unescapes \n in it. Sanitised and capped before it can put a
+	 * second line of pseudo-chrome under the identity heading. */
+	g_autofree char* app_name =
+	    certificate_display_text(caller->app_display_name, CERTIFICATE_DISPLAY_MAX_APP_NAME, NULL);
+	g_autofree char* app_id =
+	    certificate_display_text(caller->app_id, CERTIFICATE_DISPLAY_MAX_APP_ID, NULL);
 
 	switch (caller->level)
 	{
@@ -195,10 +254,10 @@ static GtkWidget* build_identity(const CertificateCallerIdentity* caller)
 			break;
 	}
 
-	if (caller->app_display_name != NULL && *caller->app_display_name != '\0')
-		display = caller->app_display_name;
-	else if (caller->app_id != NULL && *caller->app_id != '\0')
-		display = caller->app_id;
+	if (app_name != NULL)
+		display = app_name;
+	else if (app_id != NULL)
+		display = app_id;
 	else
 		display = "An unidentified application";
 
@@ -211,10 +270,9 @@ static GtkWidget* build_identity(const CertificateCallerIdentity* caller)
 	/* The raw app id is always shown as well, even when a display name was
 	 * resolved: the name comes from a desktop file and the id is the thing the
 	 * frontend actually established. */
-	if (caller->app_id != NULL && *caller->app_id != '\0' &&
-	    g_strcmp0(caller->app_id, display) != 0)
+	if (app_id != NULL && g_strcmp0(app_id, display) != 0)
 	{
-		GtkWidget* id_label = gtk_label_new(caller->app_id);
+		GtkWidget* id_label = gtk_label_new(app_id);
 
 		gtk_label_set_xalign(GTK_LABEL(id_label), 0.0f);
 		gtk_label_set_selectable(GTK_LABEL(id_label), TRUE);
@@ -258,21 +316,34 @@ static GtkWidget* build_row(CertificateCandidate* candidate, gint64 now)
 	g_autofree char* expiry_text = NULL;
 	g_autofree char* detail = NULL;
 	g_autoptr(GString) accessible = g_string_new(NULL);
+	/* SUBJECT, ISSUER, TOKEN LABEL AND READER NAME ALL COME OFF A CARD.
+	 * Whoever issued it chose them, and a token can be handed to a user by
+	 * somebody who is not a friend. They do not occupy the trusted identity
+	 * position, but inside their own row they could still draw several lines of
+	 * plausible chrome, so every one of them is sanitised and capped. */
+	g_autofree char* subject_text = certificate_display_text(
+	    candidate->subject_display, CERTIFICATE_DISPLAY_MAX_SUBJECT, "Unnamed certificate");
+	g_autofree char* issuer_text = certificate_display_text(
+	    candidate->issuer_display, CERTIFICATE_DISPLAY_MAX_ISSUER, "an unnamed issuer");
+	g_autofree char* token_text = certificate_display_text(
+	    candidate->token->label, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "unnamed token");
+	g_autofree char* reader_text = certificate_display_text(
+	    candidate->token->reader_name, CERTIFICATE_DISPLAY_MAX_READER, NULL);
 
 	gtk_widget_set_margin_top(box, 8);
 	gtk_widget_set_margin_bottom(box, 8);
 	gtk_widget_set_margin_start(box, 10);
 	gtk_widget_set_margin_end(box, 10);
 
-	subject = gtk_label_new(candidate->subject_display);
+	subject = gtk_label_new(subject_text);
 	gtk_label_set_xalign(GTK_LABEL(subject), 0.0f);
 	gtk_label_set_ellipsize(GTK_LABEL(subject), PANGO_ELLIPSIZE_END);
 	gtk_widget_add_css_class(subject, "heading");
 	gtk_box_append(GTK_BOX(box), subject);
-	g_string_append(accessible, candidate->subject_display);
+	g_string_append(accessible, subject_text);
 
 	{
-		g_autofree char* issuer = g_strdup_printf("Issued by %s", candidate->issuer_display);
+		g_autofree char* issuer = g_strdup_printf("Issued by %s", issuer_text);
 		GtkWidget* label = gtk_label_new(issuer);
 
 		gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
@@ -300,16 +371,9 @@ static GtkWidget* build_row(CertificateCandidate* candidate, gint64 now)
 
 	detail = g_strdup_printf("%s  ·  %s %u-bit  ·  %s%s%s", expiry_text,
 	                         candidate->key_type != NULL ? candidate->key_type : "unknown",
-	                         candidate->key_size,
-	                         candidate->token->label != NULL && *candidate->token->label != '\0'
-	                             ? candidate->token->label
-	                             : "unnamed token",
-	                         candidate->token->reader_name != NULL &&
-	                                 *candidate->token->reader_name != '\0'
-	                             ? " in "
-	                             : "",
-	                         candidate->token->reader_name != NULL ? candidate->token->reader_name
-	                                                               : "");
+	                         candidate->key_size, token_text,
+	                         reader_text != NULL ? " in " : "",
+	                         reader_text != NULL ? reader_text : "");
 
 	{
 		GtkWidget* label = gtk_label_new(detail);
@@ -361,6 +425,7 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	}
 
 	chooser = g_new0(Chooser, 1);
+	chooser->refs = 1;
 	chooser->candidates = g_ptr_array_ref(candidates);
 	chooser->done = done;
 	chooser->user_data = user_data;

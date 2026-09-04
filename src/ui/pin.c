@@ -4,7 +4,8 @@
  * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
  */
 
-/* explicit_bzero(), posix_memalign(), mlock(): the PIN buffer needs all three. */
+/* explicit_bzero(), posix_memalign(), mlock(), madvise(): the PIN buffer needs
+ * all four. */
 #define _GNU_SOURCE 1
 
 #include "pin.h"
@@ -16,6 +17,7 @@
 #include <adwaita.h>
 #include <gtk/gtk.h>
 
+#include "../certificate.h"
 #include "../redact.h"
 #include "external-window.h"
 
@@ -33,11 +35,19 @@ gboolean certificate_ui_has_display(void)
 
 /* ------------------------------------------------------------- PIN buffer */
 
-/* Page-aligned, mlock()ed where the kernel and the rlimit allow, and wiped with
- * explicit_bzero() on every exit path. mlock() failing is not fatal -- the
- * default RLIMIT_MEMLOCK is small and a desktop session may have spent it --
- * but it is the difference between "not written to swap" and "probably not
- * written to swap", so it is attempted every time. */
+/* Page-aligned, mlock()ed where the kernel and the rlimit allow, marked
+ * MADV_DONTDUMP so that it is left out of a core dump even if one is somehow
+ * produced, and wiped with explicit_bzero() on every exit path.
+ *
+ * MLOCK FAILURE POLICY, stated because it is a real one: mlock() failing is NOT
+ * fatal and does not refuse the login. The default RLIMIT_MEMLOCK is small and a
+ * desktop session may have spent it, and refusing to unlock a card because the
+ * kernel would not pin one page would be a denial of service with no security
+ * gain -- the page is still wiped, and the process still has core dumps and
+ * ptrace attach disabled (see main.c). It is warned about ONCE per process, at
+ * message level, so that the difference between "not written to swap" and
+ * "probably not written to swap" is in the journal rather than assumed.
+ * docs/SECURITY.md says the same thing in the same words. */
 typedef struct
 {
 	char* data;
@@ -45,7 +55,16 @@ typedef struct
 	gboolean locked;
 } PinBuffer;
 
+/* The longest PIN this backend will send to a token. It is the ENFORCED
+ * maximum, not a hint: pin_buffer_set() refuses anything longer. */
 #define PIN_BUFFER_CAPACITY 512
+
+/* Attempts one window may spend before it gives up and hands the outcome back
+ * to the caller. A PIN prompt that offers unbounded retries is a window in
+ * which a card can be walked all the way to locked. */
+#define PIN_MAX_ATTEMPTS 3
+
+static gboolean pin_mlock_warned = FALSE;
 
 static PinBuffer* pin_buffer_new(void)
 {
@@ -62,6 +81,20 @@ static PinBuffer* pin_buffer_new(void)
 	buffer->capacity = size;
 	memset(buffer->data, 0, buffer->capacity);
 	buffer->locked = mlock(buffer->data, buffer->capacity) == 0;
+
+	if (!buffer->locked && !pin_mlock_warned)
+	{
+		pin_mlock_warned = TRUE;
+		g_message("pin-buffer-unlocked detail=mlock-failed: the PIN page could not be "
+		          "pinned in memory; it is still wiped and excluded from core dumps");
+	}
+
+	/* Best effort and unchecked on purpose: an older kernel that does not know
+	 * the advice simply keeps the page dumpable, which main.c has already made
+	 * moot by disabling dumps outright. */
+#ifdef MADV_DONTDUMP
+	(void) madvise(buffer->data, buffer->capacity, MADV_DONTDUMP);
+#endif
 
 	return buffer;
 }
@@ -88,13 +121,18 @@ static void pin_buffer_free(PinBuffer* buffer)
 	g_free(buffer);
 }
 
+static gsize pin_buffer_limit(const PinBuffer* buffer)
+{
+	return MIN(buffer->capacity, (gsize) PIN_BUFFER_CAPACITY);
+}
+
 static gboolean pin_buffer_set(PinBuffer* buffer, const char* text)
 {
 	gsize length = text != NULL ? strlen(text) : 0;
 
 	pin_buffer_wipe(buffer);
 
-	if (length + 1 > buffer->capacity)
+	if (length + 1 > pin_buffer_limit(buffer))
 		return FALSE;
 
 	memcpy(buffer->data, text, length);
@@ -102,16 +140,39 @@ static gboolean pin_buffer_set(PinBuffer* buffer, const char* text)
 	return TRUE;
 }
 
+/* A PRIVATE COPY FOR THE WORKER. The login task owns this one and wipes and
+ * frees it itself, so that cancelling the window cannot pull the buffer out
+ * from under a C_Login that is already in flight -- which would hand the card a
+ * truncated PIN and spend an attempt on it. */
+static PinBuffer* pin_buffer_dup(const PinBuffer* source)
+{
+	PinBuffer* copy = pin_buffer_new();
+
+	if (copy == NULL)
+		return NULL;
+
+	if (!pin_buffer_set(copy, source->data))
+	{
+		pin_buffer_free(copy);
+		return NULL;
+	}
+
+	return copy;
+}
+
 /* -------------------------------------------------------------- the prompt */
 
 typedef struct
 {
+	int refs;
+
 	CertificateToken* token;
 	char* parent_window;
 	char* caller_display;
 	char* purpose_display;
 
 	CertificatePinLoginFunc login;
+	CertificatePinRefreshFunc refresh;
 	gpointer login_data;
 	GCancellable* cancellable;
 	gulong cancel_id;
@@ -122,11 +183,25 @@ typedef struct
 	GtkWidget* entry;
 	GtkWidget* unlock_button;
 	GtkWidget* status;
+	GtkWidget* hint;
 	GtkWidget* spinner;
 
 	PinBuffer* buffer;
 	gboolean finished;
 	gboolean busy;
+
+	/* THE CANCEL-WHILE-BUSY STATE. login_in_flight is true from the moment the
+	 * worker is started until its completion callback runs on the main thread.
+	 * A cancel arriving in that window hides the window immediately and records
+	 * what to answer, and nothing at all is freed until the worker has
+	 * returned. */
+	gboolean login_in_flight;
+	gboolean cancel_deferred;
+	CertificatePinOutcome deferred_outcome;
+
+	guint cancel_idle;
+	guint attempts;
+	gboolean final_try_confirmed;
 } PinPrompt;
 
 /* PROMPTS ARE SERIALISED PROCESS-WIDE. Two grants must not race two PIN windows
@@ -148,20 +223,77 @@ static void pin_prompt_free(PinPrompt* prompt)
 	g_free(prompt);
 }
 
+static PinPrompt* pin_prompt_ref(PinPrompt* prompt)
+{
+	prompt->refs++;
+	return prompt;
+}
+
+static void pin_prompt_unref(gpointer data)
+{
+	PinPrompt* prompt = data;
+
+	if (prompt == NULL)
+		return;
+
+	if (--prompt->refs > 0)
+		return;
+
+	pin_prompt_free(prompt);
+}
+
+/* Everything that has to happen on the main thread once the answer is known,
+ * and NOT ONE STEP OF IT while a worker is still reading this object. */
 static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
 {
-	CertificatePinDone done = prompt->done;
-	gpointer user_data = prompt->user_data;
+	CertificatePinDone done = NULL;
+	gpointer user_data = NULL;
 
 	if (prompt->finished)
 		return;
 
-	prompt->finished = TRUE;
+	/* A CANCEL WHILE C_LOGIN IS IN FLIGHT. The window goes away, because that
+	 * is what the user asked for, but the callback, the buffer free and the
+	 * object free all wait for the worker: the alternative is a use-after-free
+	 * across two threads on a page the token is reading a PIN out of.
+	 *
+	 * The card operation itself is NOT cancellable. PKCS#11 has no way to
+	 * withdraw a C_Login, so the attempt that was submitted is spent whatever
+	 * the user does with the window. */
+	if (prompt->login_in_flight)
+	{
+		if (!prompt->cancel_deferred)
+		{
+			prompt->cancel_deferred = TRUE;
+			prompt->deferred_outcome = outcome;
 
+			if (prompt->window != NULL)
+				gtk_widget_set_visible(GTK_WIDGET(prompt->window), FALSE);
+
+			certificate_log_grant(CERTIFICATE_REASON_CHOOSER_CANCELLED, NULL,
+			                      "cancel-deferred-login-in-flight");
+		}
+
+		return;
+	}
+
+	prompt->finished = TRUE;
+	done = prompt->done;
+	user_data = prompt->user_data;
+
+	/* THE ORDER MATTERS: disconnect first, so that no new idle can be queued
+	 * behind the removal below. g_cancellable_disconnect() blocks until a
+	 * handler already running on another thread has returned. */
 	if (prompt->cancel_id != 0)
 	{
 		g_cancellable_disconnect(prompt->cancellable, prompt->cancel_id);
 		prompt->cancel_id = 0;
+	}
+
+	if (prompt->cancel_idle != 0)
+	{
+		g_source_remove(prompt->cancel_idle);
+		prompt->cancel_idle = 0;
 	}
 
 	/* The buffer is wiped before anything else can run, including the caller's
@@ -195,31 +327,53 @@ static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
 		g_queue_remove(&pin_queue, prompt);
 	}
 
-	pin_prompt_free(prompt);
-
 	done(outcome, user_data);
+
+	/* The creation reference. Any worker or queued idle still holding one keeps
+	 * the object alive until it drops it. */
+	pin_prompt_unref(prompt);
 }
 
 typedef struct
 {
-	PinPrompt* prompt;
-	PinBuffer* buffer; /* borrowed */
+	PinPrompt* prompt; /* a reference the task owns */
+	PinBuffer* buffer; /* a PRIVATE COPY the task owns and wipes */
 	gboolean protected_path;
 } LoginTask;
+
+static void login_task_free(gpointer data)
+{
+	LoginTask* task = data;
+
+	g_clear_pointer(&task->buffer, pin_buffer_free);
+	g_clear_pointer(&task->prompt, pin_prompt_unref);
+	g_free(task);
+}
 
 static void login_thread(GTask* task, gpointer source, gpointer task_data,
                          GCancellable* cancellable)
 {
 	LoginTask* data = task_data;
 	g_autoptr(GError) error = NULL;
-	const char* pin = data->protected_path ? NULL : data->buffer->data;
+	const char* pin = data->protected_path || data->buffer == NULL ? NULL : data->buffer->data;
 
 	/* C_Login on a card takes hundreds of milliseconds and can block for as
 	 * long as the middleware wants. It never runs on the main thread. */
 	if (data->prompt->login(pin, data->prompt->login_data, &error))
+	{
 		g_task_return_boolean(task, TRUE);
-	else
-		g_task_return_error(task, g_steal_pointer(&error));
+		return;
+	}
+
+	/* THE FLAGS ARE RE-READ HERE, on this thread, while the failure is fresh:
+	 * CKF_USER_PIN_FINAL_TRY is normally set BY the attempt that just failed,
+	 * and a window that keeps showing the flags captured at discovery will
+	 * never warn anybody. */
+	if (data->prompt->refresh != NULL &&
+	    g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT))
+		data->prompt->refresh(data->prompt->token, data->prompt->login_data);
+
+	g_task_return_error(task, g_steal_pointer(&error));
 }
 
 static void set_status(PinPrompt* prompt, const char* text, gboolean is_error)
@@ -235,8 +389,9 @@ static void set_status(PinPrompt* prompt, const char* text, gboolean is_error)
 		gtk_widget_add_css_class(prompt->status, "error");
 		/* The failure state IS announced: a screen-reader user must learn that
 		 * an attempt was spent. The PIN itself never enters this tree. */
-		gtk_accessible_announce(GTK_ACCESSIBLE(prompt->window), text,
-		                        GTK_ACCESSIBLE_ANNOUNCEMENT_PRIORITY_HIGH);
+		if (prompt->window != NULL)
+			gtk_accessible_announce(GTK_ACCESSIBLE(prompt->window), text,
+			                        GTK_ACCESSIBLE_ANNOUNCEMENT_PRIORITY_HIGH);
 	}
 	else
 	{
@@ -256,15 +411,58 @@ static void set_busy(PinPrompt* prompt, gboolean busy)
 		gtk_widget_set_visible(prompt->spinner, busy);
 }
 
+/* The remaining-attempts hint, and NOTHING ELSE. PKCS#11 has no portable way to
+ * ask a token how many tries are left, so this reports only the three flags the
+ * standard defines, and never a number. A wrong count is worse than none. */
+static const char* retry_hint(const CertificateToken* token)
+{
+	if (token->pin_locked)
+		return "This token is locked. It cannot be unlocked here.";
+	if (token->pin_final_try)
+		return "This is the last attempt before the token locks.";
+	if (token->pin_count_low)
+		return "There have been recent failed attempts on this token.";
+
+	return NULL;
+}
+
+static void update_retry_hint(PinPrompt* prompt)
+{
+	const char* hint = retry_hint(prompt->token);
+
+	if (prompt->hint == NULL)
+		return;
+
+	gtk_label_set_text(GTK_LABEL(prompt->hint), hint != NULL ? hint : "");
+	gtk_widget_set_visible(prompt->hint, hint != NULL);
+}
+
 static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_data)
 {
 	PinPrompt* prompt = user_data;
 	g_autoptr(GError) error = NULL;
+	gboolean ok = g_task_propagate_boolean(G_TASK(result), &error);
+
+	prompt->login_in_flight = FALSE;
+
+	/* The window was closed, Escape was pressed, or Close() arrived while the
+	 * card was busy. The answer the user asked for is given now that nothing is
+	 * reading the buffer any more. */
+	if (prompt->cancel_deferred)
+	{
+		prompt->cancel_deferred = FALSE;
+
+		if (ok)
+			certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, NULL, "cancelled-after-login");
+
+		pin_prompt_finish(prompt, prompt->deferred_outcome);
+		return;
+	}
 
 	if (prompt->finished)
 		return;
 
-	if (g_task_propagate_boolean(G_TASK(result), &error))
+	if (ok)
 	{
 		certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, NULL, "pin-accepted");
 		pin_prompt_finish(prompt, CERTIFICATE_PIN_OK);
@@ -277,10 +475,32 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 	{
 		certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, NULL, "retry-offered");
 
+		/* The flags were re-read on the worker thread after the refusal, so the
+		 * warning below is about the state the token is in NOW. */
+		update_retry_hint(prompt);
+		prompt->final_try_confirmed = FALSE;
+
+		if (prompt->token->pin_locked)
+		{
+			certificate_log_grant(CERTIFICATE_REASON_PIN_LOCKED, NULL, "terminal");
+			pin_prompt_finish(prompt, CERTIFICATE_PIN_LOCKED);
+			return;
+		}
+
 		if (prompt->entry == NULL)
 		{
 			/* A protected authentication path cannot be retried from here: the
 			 * reader owns the interaction. */
+			pin_prompt_finish(prompt, CERTIFICATE_PIN_INCORRECT);
+			return;
+		}
+
+		/* THE PROMPT DOES NOT OFFER UNBOUNDED RETRIES. Three refused attempts
+		 * is where this window stops asking; the caller can ask again, which
+		 * makes a new decision rather than a habit. */
+		if (prompt->attempts >= PIN_MAX_ATTEMPTS)
+		{
+			certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, NULL, "attempt-cap");
 			pin_prompt_finish(prompt, CERTIFICATE_PIN_INCORRECT);
 			return;
 		}
@@ -315,14 +535,32 @@ static void run_login(PinPrompt* prompt, gboolean protected_path)
 	g_autoptr(GTask) task = NULL;
 	LoginTask* data = g_new0(LoginTask, 1);
 
-	data->prompt = prompt;
-	data->buffer = prompt->buffer;
+	data->prompt = pin_prompt_ref(prompt);
 	data->protected_path = protected_path;
 
+	if (!protected_path)
+	{
+		data->buffer = pin_buffer_dup(prompt->buffer);
+
+		if (data->buffer == NULL)
+		{
+			login_task_free(data);
+			set_status(prompt, "The PIN could not be held in locked memory.", TRUE);
+			return;
+		}
+
+		/* From here the PIN is in the task's own page and nowhere else this
+		 * module owns. GTK's GtkPasswordEntry keeps its own copy in the
+		 * secure-memory buffer it allocates; see the comment in on_unlock(). */
+		pin_buffer_wipe(prompt->buffer);
+	}
+
+	prompt->attempts++;
+	prompt->login_in_flight = TRUE;
 	set_busy(prompt, TRUE);
 
 	task = g_task_new(NULL, NULL, on_login_done, prompt);
-	g_task_set_task_data(task, data, g_free);
+	g_task_set_task_data(task, data, login_task_free);
 	g_task_run_in_thread(task, login_thread);
 }
 
@@ -331,7 +569,7 @@ static void on_unlock(GtkWidget* widget, gpointer user_data)
 	PinPrompt* prompt = user_data;
 	const char* text = NULL;
 
-	if (prompt->busy || prompt->finished)
+	if (prompt->busy || prompt->finished || prompt->login_in_flight)
 		return;
 
 	text = gtk_editable_get_text(GTK_EDITABLE(prompt->entry));
@@ -341,15 +579,32 @@ static void on_unlock(GtkWidget* widget, gpointer user_data)
 		return;
 	}
 
+	/* THE LAST ATTEMPT IS NOT SPENT ON A SINGLE CLICK. When the token says
+	 * CKF_USER_PIN_FINAL_TRY, the next refusal locks the card, so the window
+	 * says so and requires the user to ask a second time. */
+	if (prompt->token->pin_final_try && !prompt->final_try_confirmed)
+	{
+		prompt->final_try_confirmed = TRUE;
+		set_status(prompt,
+		           "This is the LAST attempt before the token locks. Press Unlock again to "
+		           "use it, or Cancel.",
+		           TRUE);
+		return;
+	}
+
 	if (!pin_buffer_set(prompt->buffer, text))
 	{
 		set_status(prompt, "That is longer than any PIN this backend will send.", TRUE);
 		return;
 	}
 
-	/* The entry is cleared the moment the value is in the locked buffer, so the
-	 * PIN exists in exactly one place from here on. GTK's own text buffer is
-	 * not locked memory and is not something this process can wipe. */
+	/* The entry is cleared the moment the value is in the locked buffer. GTK's
+	 * own storage is a GtkPasswordEntryBuffer, which GTK allocates from its
+	 * secure-memory pool and zeroes when it frees it -- but GTK guarantees
+	 * nothing about the intermediate copies a text widget, an input method or a
+	 * Pango layout may have made, so this backend does not claim the PIN
+	 * existed in exactly one place. It claims what is true: THIS module holds
+	 * it in one wiped, locked, non-dumpable page. */
 	gtk_editable_set_text(GTK_EDITABLE(prompt->entry), "");
 	set_status(prompt, NULL, FALSE);
 
@@ -389,30 +644,25 @@ static gboolean on_cancelled_idle(gpointer user_data)
 {
 	PinPrompt* prompt = user_data;
 
+	prompt->cancel_idle = 0;
 	pin_prompt_finish(prompt, CERTIFICATE_PIN_CANCELLED);
 	return G_SOURCE_REMOVE;
 }
 
 static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 {
+	PinPrompt* prompt = user_data;
+
 	/* Close() can arrive on any thread GDBus feels like; the window is only
-	 * ever touched from the main context. */
-	g_idle_add(on_cancelled_idle, user_data);
-}
+	 * ever touched from the main context. g_cancellable_disconnect() in
+	 * pin_prompt_finish() blocks until this returns, so the prompt is alive
+	 * here -- and the idle takes its own reference, because the object may be
+	 * finished and freed before the idle is dispatched. */
+	if (prompt->cancel_idle != 0)
+		return;
 
-/* The remaining-attempts hint, and NOTHING ELSE. PKCS#11 has no portable way to
- * ask a token how many tries are left, so this reports only the three flags the
- * standard defines, and never a number. A wrong count is worse than none. */
-static const char* retry_hint(const CertificateToken* token)
-{
-	if (token->pin_locked)
-		return "This token is locked. It cannot be unlocked here.";
-	if (token->pin_final_try)
-		return "This is the last attempt before the token locks.";
-	if (token->pin_count_low)
-		return "There have been recent failed attempts on this token.";
-
-	return NULL;
+	prompt->cancel_idle = g_idle_add_full(G_PRIORITY_DEFAULT, on_cancelled_idle,
+	                                      pin_prompt_ref(prompt), pin_prompt_unref);
 }
 
 static GtkWidget* label_row(const char* title, const char* value)
@@ -445,7 +695,6 @@ static void pin_prompt_start(PinPrompt* prompt)
 	GtkWidget* cancel = NULL;
 	GtkEventController* keys = NULL;
 	gboolean protected_path = prompt->token->protected_authentication_path;
-	const char* hint = retry_hint(prompt->token);
 
 	pin_active = prompt;
 
@@ -477,17 +726,28 @@ static void pin_prompt_start(PinPrompt* prompt)
 	}
 
 	/* The window restates the verified caller and the purpose from the chooser,
-	 * so that a PIN prompt arriving on its own is still attributable. */
-	if (prompt->caller_display != NULL)
-		gtk_box_append(GTK_BOX(content), label_row("Application", prompt->caller_display));
-	if (prompt->purpose_display != NULL)
-		gtk_box_append(GTK_BOX(content), label_row("In order to", prompt->purpose_display));
-	gtk_box_append(GTK_BOX(content),
-	               label_row("Token", prompt->token->label != NULL && *prompt->token->label != '\0'
-	                                      ? prompt->token->label
-	                                      : "Unnamed token"));
-	if (prompt->token->reader_name != NULL && *prompt->token->reader_name != '\0')
-		gtk_box_append(GTK_BOX(content), label_row("Reader", prompt->token->reader_name));
+	 * so that a PIN prompt arriving on its own is still attributable. EVERY
+	 * VALUE BELOW IS SANITISED AND CAPPED: the caller display comes from a
+	 * desktop file and the token label and reader name come off the card, and
+	 * none of the three may draw chrome of its own inside this window. */
+	{
+		g_autofree char* caller = certificate_display_text(prompt->caller_display,
+		                                                   CERTIFICATE_DISPLAY_MAX_APP_NAME, NULL);
+		g_autofree char* purpose = certificate_display_text(prompt->purpose_display,
+		                                                    CERTIFICATE_DISPLAY_MAX_PURPOSE, NULL);
+		g_autofree char* label = certificate_display_text(
+		    prompt->token->label, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "Unnamed token");
+		g_autofree char* reader = certificate_display_text(prompt->token->reader_name,
+		                                                   CERTIFICATE_DISPLAY_MAX_READER, NULL);
+
+		if (caller != NULL)
+			gtk_box_append(GTK_BOX(content), label_row("Application", caller));
+		if (purpose != NULL)
+			gtk_box_append(GTK_BOX(content), label_row("In order to", purpose));
+		gtk_box_append(GTK_BOX(content), label_row("Token", label));
+		if (reader != NULL)
+			gtk_box_append(GTK_BOX(content), label_row("Reader", reader));
+	}
 
 	if (!protected_path)
 	{
@@ -517,15 +777,15 @@ static void pin_prompt_start(PinPrompt* prompt)
 	gtk_widget_set_visible(prompt->status, FALSE);
 	gtk_box_append(GTK_BOX(content), prompt->status);
 
-	if (hint != NULL)
-	{
-		GtkWidget* warning = gtk_label_new(hint);
-
-		gtk_label_set_wrap(GTK_LABEL(warning), TRUE);
-		gtk_label_set_xalign(GTK_LABEL(warning), 0.0f);
-		gtk_widget_add_css_class(warning, "warning");
-		gtk_box_append(GTK_BOX(content), warning);
-	}
+	/* Created whether or not there is a hint to show right now: the flags are
+	 * re-read after every refusal, and a warning that only exists if it was
+	 * needed at window-open time is a warning that arrives too late. */
+	prompt->hint = gtk_label_new(NULL);
+	gtk_label_set_wrap(GTK_LABEL(prompt->hint), TRUE);
+	gtk_label_set_xalign(GTK_LABEL(prompt->hint), 0.0f);
+	gtk_widget_add_css_class(prompt->hint, "warning");
+	gtk_box_append(GTK_BOX(content), prompt->hint);
+	update_retry_hint(prompt);
 
 	prompt->spinner = gtk_spinner_new();
 	gtk_spinner_set_spinning(GTK_SPINNER(prompt->spinner), TRUE);
@@ -574,8 +834,9 @@ static void pin_prompt_start(PinPrompt* prompt)
 
 void certificate_pin_login(CertificateToken* token, const char* parent_window,
                            const char* caller_display, const char* purpose_display,
-                           CertificatePinLoginFunc login, gpointer login_data,
-                           GCancellable* cancellable, CertificatePinDone done, gpointer user_data)
+                           CertificatePinLoginFunc login, CertificatePinRefreshFunc refresh,
+                           gpointer login_data, GCancellable* cancellable, CertificatePinDone done,
+                           gpointer user_data)
 {
 	PinPrompt* prompt = NULL;
 
@@ -594,11 +855,13 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
 	}
 
 	prompt = g_new0(PinPrompt, 1);
+	prompt->refs = 1;
 	prompt->token = certificate_token_ref(token);
 	prompt->parent_window = g_strdup(parent_window);
 	prompt->caller_display = g_strdup(caller_display);
 	prompt->purpose_display = g_strdup(purpose_display);
 	prompt->login = login;
+	prompt->refresh = refresh;
 	prompt->login_data = login_data;
 	prompt->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
 	prompt->done = done;
@@ -607,7 +870,7 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
 
 	if (prompt->buffer == NULL)
 	{
-		pin_prompt_free(prompt);
+		pin_prompt_unref(prompt);
 		done(CERTIFICATE_PIN_DEVICE_ERROR, user_data);
 		return;
 	}

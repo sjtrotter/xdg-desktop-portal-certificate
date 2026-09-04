@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# LeakSanitizer suppressions for the test suite.
+#
+# EVERY ENTRY HERE IS A LIBRARY THAT ALLOCATES ONCE AND KEEPS IT for the life of
+# the process: GTK's type system and settings, GLib's quarks and thread pools,
+# GnuTLS's globals, p11-kit's module registry. None of them is a leak this
+# repository can fix and all of them would otherwise bury the ones it can.
+#
+# NOTHING IN src/ IS SUPPRESSED, on purpose. A leak reported against this
+# backend's own code is a defect, and the cancellation tests exist precisely to
+# provoke that class of defect.
+leak:libgtk-4
+leak:libgdk
+leak:libgio-2.0
+leak:libglib-2.0
+leak:libgobject-2.0
+leak:libgnutls
+leak:libp11-kit
+leak:libpango
+leak:libfontconfig
+leak:libEGL
+leak:libGL
+leak:dconf
+leak:g_type_register_static
+leak:g_quark_init
