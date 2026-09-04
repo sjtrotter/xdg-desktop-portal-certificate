@@ -134,6 +134,17 @@ $ XVFB=~/scratch/usr/bin/Xvfb XDOTOOL=~/scratch/usr/bin/xdotool tools/ui-smoke.s
 
 SoftHSM itself can be unpacked the same way and pointed at with `SOFTHSM_MODULE`.
 
+And the cancellation path, where the point is that **nothing** touches the windows:
+
+```console
+$ tools/ui-smoke.sh --no-drive -- --cancel-after 3000 --expect-cancelled
+```
+
+The client calls `org.freedesktop.portal.Request.Close()` on the in-flight `AcquireCredential`
+three seconds after making it. The backend log must show `chooser-cancelled` at that moment, and
+**no `Response` signal follows the `Close()`** — the frontend unexports its own Request before
+forwarding the Close, so the application, which asked for it, is not told again.
+
 To see the windows on your own display instead of driving them:
 
 ```console
@@ -230,6 +241,10 @@ keeping the logs for: it means the wrong key signed, or the digest was wrapped w
 Each of these is a separate run. **The first one spends a PIN attempt.**
 
 ```console
+# cancel from the application's side while the chooser is up: the window must
+# vanish and no grant may be issued
+$ tools/dev-stack.sh -- --purpose client_auth --cancel-after 5000 --expect-cancelled
+
 # wrong PIN, then the right one: the window must say the PIN was not accepted
 # and let you try again, WITHOUT the request failing
 $ tools/dev-stack.sh -- --purpose client_auth

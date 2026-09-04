@@ -93,7 +93,26 @@ class Portal:
             None,
         )
 
-    def request(self, method, build_parameters, prefix):
+    def close_request(self, path):
+        """org.freedesktop.portal.Request.Close on an in-flight request. This is
+        what an application does when the user gives up on it, and the frontend
+        forwards it to the backend's own Request object."""
+        try:
+            self.bus.call_sync(
+                BUS_NAME,
+                path,
+                REQUEST_IFACE,
+                "Close",
+                None,
+                None,
+                Gio.DBusCallFlags.NONE,
+                5000,
+                None,
+            )
+        except GLib.Error as error:
+            print(f"note: Close said {error.message}", file=sys.stderr)
+
+    def request(self, method, build_parameters, prefix, cancel_after=0):
         """Make a Request call and wait for its single Response signal."""
         handle_token = self.token(prefix)
         path = request_path(self.bus, handle_token)
@@ -141,7 +160,33 @@ class Portal:
                 return GLib.SOURCE_REMOVE
 
             source = GLib.timeout_add(self.timeout, on_timeout)
+
+            cancel_source = None
+            if cancel_after > 0:
+                def do_close():
+                    print(f"closing {returned} after {cancel_after} ms")
+                    self.close_request(returned)
+
+                    # UPSTREAM UNEXPORTS THE FRONTEND REQUEST BEFORE FORWARDING
+                    # Close() to the backend, so no Response signal follows a
+                    # Close: the application asked, so it already knows. The
+                    # grace period below is there to catch a backend that
+                    # answers anyway with a grant, which would mean the window
+                    # was never torn down.
+                    def give_up():
+                        answer["closed"] = True
+                        loop.quit()
+                        return GLib.SOURCE_REMOVE
+
+                    GLib.timeout_add(2000, give_up)
+                    return GLib.SOURCE_REMOVE
+
+                cancel_source = GLib.timeout_add(cancel_after, do_close)
+
             loop.run()
+
+            if cancel_source is not None:
+                GLib.source_remove(cancel_source)
             if not answer.get("timeout"):
                 GLib.source_remove(source)
         finally:
@@ -149,6 +194,9 @@ class Portal:
 
         if answer.get("timeout"):
             raise TimeoutError(f"{method} produced no Response within {self.timeout} ms")
+
+        if answer.get("closed"):
+            return None, {}
 
         return answer["response"], answer["results"]
 
@@ -257,7 +305,7 @@ def acquire(portal, session, args):
             values["certificate_filter"] = GLib.Variant("a{sv}", filter_options)
         return GLib.Variant("(osa{sv})", (session, args.parent_window, values))
 
-    return portal.request("AcquireCredential", options, "c")
+    return portal.request("AcquireCredential", options, "c", args.cancel_after)
 
 
 def sign(portal, session, args, mechanism, digest, hash_name):
@@ -412,6 +460,13 @@ def parse_args(argv):
                         help="print GetCapabilities and exit")
     parser.add_argument("--close", action="store_true",
                         help="acquire a grant, release it, and exit without signing")
+    parser.add_argument("--cancel-after", type=int, default=0, metavar="MS",
+                        help="call Request.Close() on the AcquireCredential request after this "
+                        "many milliseconds; the chooser must close and the response must be 1 "
+                        "or 2, never a grant")
+    parser.add_argument("--expect-cancelled", action="store_true",
+                        help="PASS when AcquireCredential comes back cancelled rather than with "
+                        "a grant; use it with --cancel-after")
     parser.add_argument("--expect-no-certificate", action="store_true",
                         help="PASS when AcquireCredential fails cleanly with no token or no "
                         "matching certificate; this is the no-card plumbing check")
@@ -438,6 +493,18 @@ def main(argv):
 
     response, results = acquire(portal, session, args)
 
+    if args.expect_cancelled:
+        if response == 0:
+            die(EXIT_FAIL, "expected a cancellation, but a grant was issued")
+        if response is None:
+            print("\nClose() returned and no Response followed it, which is what upstream's "
+                  "Request does: it unexports before forwarding the Close.")
+        else:
+            print(f"\nAcquireCredential answered {response} after Close().")
+        print("PASS (the frontend's Close() reached the backend; check the backend log for "
+              "chooser-cancelled)")
+        return EXIT_PASS
+
     if args.expect_no_certificate:
         # THE NO-CARD PLUMBING CHECK. The point is that the frontend routed to
         # this backend, the backend answered, and the answer was a clean refusal
@@ -449,6 +516,8 @@ def main(argv):
               "cleanly)")
         return EXIT_PASS
 
+    if response is None:
+        die(EXIT_FAIL, "the request was closed and produced no grant")
     if response == 1:
         print("\nAcquireCredential was cancelled by the user.")
         return EXIT_CANCELLED

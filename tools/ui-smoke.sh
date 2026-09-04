@@ -30,6 +30,10 @@
 #
 #     tools/ui-smoke.sh
 #     tools/ui-smoke.sh --purpose signing --key-algorithm EC --der
+#
+# --no-drive leaves the windows alone, so that the client can cancel instead:
+#
+#     tools/ui-smoke.sh --no-drive -- --cancel-after 3000 --expect-cancelled
 
 set -u
 
@@ -95,6 +99,16 @@ export XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate
 
 MODULE="$(cat "$SOFTHSM_DIR/module-path")"
 
+# --no-drive: put the windows up and touch nothing, for the paths where the
+# point is that something else ends the interaction -- Request.Close() from the
+# frontend, or a timeout.
+DRIVE_WINDOWS=1
+if [ "${1:-}" = "--no-drive" ]; then
+	DRIVE_WINDOWS=0
+	shift
+fi
+[ "${1:-}" = "--" ] && shift
+
 inner() {
 	"$XDP_BUILD/document-portal/xdg-permission-store" >"$LOGDIR/permission-store.log" 2>&1 &
 	PERM=$!
@@ -139,8 +153,12 @@ inner() {
 		done
 	}
 
-	drive "Use a Certificate" Down Return
-	drive "Unlock Security Token" "type:$PIN" Return
+	if [ "$DRIVE_WINDOWS" = 1 ]; then
+		drive "Use a Certificate" Down Return
+		drive "Unlock Security Token" "type:$PIN" Return
+	else
+		echo "ui-smoke: --no-drive: the windows are up and nothing will touch them"
+	fi
 
 	wait "$E2E"
 	rc=$?
@@ -149,7 +167,7 @@ inner() {
 	return "$rc"
 }
 
-dbus-run-session -- bash -c "$(declare -f inner); LOGDIR='$LOGDIR' REPO='$REPO' XDP_BUILD='$XDP_BUILD' BACKEND='$BACKEND' MODULE='$MODULE' XDOTOOL='$XDOTOOL' PIN='$PIN' inner \"\$@\"" -- "$@"
+dbus-run-session -- bash -c "$(declare -f inner); LOGDIR='$LOGDIR' REPO='$REPO' XDP_BUILD='$XDP_BUILD' BACKEND='$BACKEND' MODULE='$MODULE' XDOTOOL='$XDOTOOL' PIN='$PIN' DRIVE_WINDOWS='$DRIVE_WINDOWS' inner \"\$@\"" -- "$@"
 rc=$?
 
 echo
