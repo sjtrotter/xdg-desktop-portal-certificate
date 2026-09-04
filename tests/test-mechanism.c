@@ -173,6 +173,27 @@ static void test_pss_defaults_and_limits(void)
 	g_assert_false(certificate_mechanism_parse("RSA_PSS", bad_salt_type, "RSA", 2048, FALSE,
 	                                           &mechanism, &salt_error));
 	g_assert_error(salt_error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+
+	/* THE SPELLING IS THE INTERFACE'S: "MGF1-<hash>", or plain "MGF1" meaning
+	 * MGF1 over `hash`. A bare hash name used to be accepted, which was
+	 * leniency the interface does not describe and a second backend would not
+	 * implement -- so a caller that relied on it here would have found its
+	 * requests refused elsewhere. */
+	{
+		g_autoptr(GVariant) plain = params("{'hash': <'SHA384'>, 'mgf': <'mgf1'>}");
+		g_autoptr(GVariant) bare_hash = params("{'hash': <'SHA256'>, 'mgf': <'SHA256'>}");
+		g_autoptr(GError) plain_error = NULL;
+		g_autoptr(GError) bare_error = NULL;
+
+		g_assert_true(certificate_mechanism_parse("RSA_PSS", plain, "RSA", 2048, FALSE,
+		                                          &mechanism, &plain_error));
+		g_assert_cmpuint(mechanism.pss.mgf, ==, CKG_MGF1_SHA384);
+		certificate_mechanism_clear(&mechanism);
+
+		g_assert_false(certificate_mechanism_parse("RSA_PSS", bare_hash, "RSA", 2048, FALSE,
+		                                           &mechanism, &bare_error));
+		g_assert_error(bare_error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	}
 }
 
 static void test_rsa_key_too_small(void)
@@ -231,26 +252,184 @@ static void test_signature_encoding_option(void)
 	g_assert_error(bad_error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
 }
 
-/* THERE IS NO DECRYPTION VOCABULARY, and that is the point. The interface's
- * three mechanisms are RSA_PKCS1_V1_5, RSA_PSS and ECDSA; the only one that
- * decrypts anything is v1.5, and answering "padding valid" or "padding invalid"
- * for a card key over D-Bus is a Bleichenbacher oracle -- the same capability
- * the digest-only Sign policy exists to withhold, through a different door.
- * Every spelling is refused until the interface grows OAEP. */
-static void test_decrypt_is_refused(void)
+/* RSA_OAEP IS THE ONLY DECRYPTION MECHANISM, and the three signing mechanisms
+ * are refused for Decrypt by name. PKCS#1 v1.5 is the one that matters: a
+ * decryption whose outcome the caller can observe is a Bleichenbacher oracle
+ * over the card's key, which is the capability the digest-only Sign policy
+ * exists to withhold, offered through a different door. */
+static void test_only_oaep_may_decrypt(void)
 {
-	g_autoptr(GVariant) parameters = params("{}");
+	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
 	CertificateMechanism mechanism;
-	static const char* const names[] = { "RSA_PKCS1_V1_5", "RSA_PSS", "ECDSA", "RSA_OAEP",
-		                                 NULL };
+	static const char* const refused_names[] = { "RSA_PKCS1_V1_5", "RSA_PSS", "ECDSA",
+		                                         "RSA_SOMETHING", NULL };
+	g_autoptr(GError) error = NULL;
 
-	for (gsize i = 0; names[i] != NULL; i++)
+	for (gsize i = 0; refused_names[i] != NULL; i++)
 	{
 		g_autoptr(GError) refused = NULL;
 
-		g_assert_false(certificate_mechanism_parse(names[i], parameters, "RSA", 2048, TRUE,
+		g_assert_false(certificate_mechanism_parse(refused_names[i], parameters, "RSA", 2048,
+		                                           TRUE, &mechanism, &refused));
+		g_assert_error(refused, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+	}
+
+	/* And the one that is allowed to decrypt may not sign. */
+	{
+		g_autoptr(GError) refused = NULL;
+
+		g_assert_false(certificate_mechanism_parse("RSA_OAEP", parameters, "RSA", 2048, FALSE,
 		                                           &mechanism, &refused));
 		g_assert_error(refused, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+	}
+
+	g_assert_true(certificate_mechanism_parse("RSA_OAEP", parameters, "RSA", 2048, TRUE,
+	                                          &mechanism, &error));
+	g_assert_no_error(error);
+	g_assert_cmpuint(mechanism.type, ==, CKM_RSA_PKCS_OAEP);
+	g_assert_true(mechanism.has_oaep);
+	g_assert_cmpuint(mechanism.oaep.hashAlg, ==, CKM_SHA256);
+	g_assert_cmpuint(mechanism.oaep.mgf, ==, CKG_MGF1_SHA256);
+	g_assert_cmpuint(mechanism.oaep.source, ==, CKZ_DATA_SPECIFIED);
+	g_assert_null(mechanism.oaep.pSourceData);
+	g_assert_cmpuint(mechanism.oaep.ulSourceDataLen, ==, 0);
+	certificate_mechanism_clear(&mechanism);
+}
+
+/* THE CIPHERTEXT IS EXACTLY ONE MODULUS. It is the only length an RSA
+ * ciphertext can have, and the frontend cannot check it because it does not
+ * know the modulus size. */
+static void test_oaep_ciphertext_length(void)
+{
+	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+	guint8 buffer[256];
+	g_autoptr(GBytes) exact = NULL;
+	g_autoptr(GBytes) prepared = NULL;
+
+	g_assert_true(certificate_mechanism_parse("RSA_OAEP", parameters, "RSA", 2048, TRUE,
+	                                          &mechanism, &error));
+	g_assert_no_error(error);
+	g_assert_cmpuint(mechanism.expected_input, ==, 256);
+
+	memset(buffer, 0x5a, sizeof(buffer));
+	exact = g_bytes_new(buffer, sizeof(buffer));
+	prepared = certificate_mechanism_prepare(&mechanism, exact, &error);
+	g_assert_no_error(error);
+
+	/* PASSED THROUGH UNCHANGED: nothing wraps or pads a ciphertext. */
+	g_assert_cmpuint(g_bytes_get_size(prepared), ==, sizeof(buffer));
+	g_assert_true(g_bytes_equal(prepared, exact));
+
+	for (gsize length = 0; length < sizeof(buffer); length += 85)
+	{
+		g_autoptr(GError) refused = NULL;
+		g_autoptr(GBytes) wrong = g_bytes_new(buffer, length);
+
+		g_assert_null(certificate_mechanism_prepare(&mechanism, wrong, &refused));
+		g_assert_error(refused, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	}
+
+	certificate_mechanism_clear(&mechanism);
+}
+
+/* The OAEP parameters are validated rather than forwarded: pParameter goes
+ * straight into the module. */
+static void test_oaep_parameters(void)
+{
+	CertificateMechanism mechanism;
+	static const char* const refused[] = {
+		"{}",                                            /* no hash */
+		"{'hash': <'SHA3-256'>}",                        /* not a hash this backend knows */
+		"{'hash': <'SHA256'>, 'mgf1_hash': <'SHA1'>}",   /* must be the same hash */
+		"{'hash': <'SHA256'>, 'mgf1_hash': <'nope'>}",   /* not a hash at all */
+		"{'hash': <'SHA256'>, 'label': <'a string'>}",   /* must be a byte array */
+		"{'hash': <'SHA256'>, 'salt_length': <uint32 8>}", /* a signing parameter */
+		"{'hash': <'SHA256'>, 'signature_encoding': <'der'>}",
+		NULL,
+	};
+
+	for (gsize i = 0; refused[i] != NULL; i++)
+	{
+		g_autoptr(GVariant) parameters = params(refused[i]);
+		g_autoptr(GError) error = NULL;
+
+		if (certificate_mechanism_parse("RSA_OAEP", parameters, "RSA", 2048, TRUE, &mechanism,
+		                                &error))
+			g_error("RSA_OAEP accepted %s", refused[i]);
+
+		g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	}
+
+	/* A label longer than the interface's 256 bytes. Built rather than parsed,
+	 * because a 257-byte literal in a table is unreadable. */
+	{
+		g_autofree guint8* big = g_malloc0(257);
+		g_autoptr(GVariant) parameters = NULL;
+		GVariantBuilder builder;
+		g_autoptr(GError) error = NULL;
+
+		g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+		g_variant_builder_add(&builder, "{sv}", "hash", g_variant_new_string("SHA256"));
+		g_variant_builder_add(&builder, "{sv}", "label",
+		                      g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, big, 257, 1));
+		parameters = g_variant_ref_sink(g_variant_builder_end(&builder));
+
+		g_assert_false(certificate_mechanism_parse("RSA_OAEP", parameters, "RSA", 2048, TRUE,
+		                                           &mechanism, &error));
+		g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	}
+
+	/* Accepted: the SHA-256 spelling, a matching mgf1_hash, and a label that
+	 * reaches the mechanism parameter as the module will see it. */
+	{
+		/* The label is written out as bytes rather than as b'...', which
+		 * would carry a trailing NUL into the mechanism parameter. */
+		static const guint8 label[] = { 0x63, 0x74, 0x78 };
+		g_autoptr(GVariant) parameters = params("{'hash': <'SHA-256'>, 'mgf1_hash': <'sha256'>, "
+		                                        "'label': <[byte 0x63, 0x74, 0x78]>}");
+		g_autoptr(GError) error = NULL;
+
+		g_assert_true(certificate_mechanism_parse("RSA_OAEP", parameters, "RSA", 2048, TRUE,
+		                                          &mechanism, &error));
+		g_assert_no_error(error);
+		g_assert_cmpuint(mechanism.oaep.hashAlg, ==, CKM_SHA256);
+		g_assert_cmpuint(mechanism.oaep.ulSourceDataLen, ==, sizeof(label));
+		g_assert_nonnull(mechanism.oaep.pSourceData);
+		g_assert_cmpint(memcmp(mechanism.oaep.pSourceData, label, sizeof(label)), ==, 0);
+
+		/* The CK_MECHANISM points at the struct's own storage. */
+		{
+			CK_MECHANISM ck;
+
+			certificate_mechanism_to_ck(&mechanism, &ck);
+			g_assert_cmpuint(ck.mechanism, ==, CKM_RSA_PKCS_OAEP);
+			g_assert_true(ck.pParameter == &mechanism.oaep);
+			g_assert_cmpuint(ck.ulParameterLen, ==, sizeof(mechanism.oaep));
+		}
+
+		certificate_mechanism_clear(&mechanism);
+	}
+
+	/* A key too small to hold 2*hLen+2 for the named hash. */
+	{
+		g_autoptr(GVariant) parameters = params("{'hash': <'SHA512'>}");
+		g_autoptr(GError) error = NULL;
+
+		g_assert_false(certificate_mechanism_parse("RSA_OAEP", parameters, "RSA", 1024, TRUE,
+		                                           &mechanism, &error));
+		g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	}
+
+	/* And OAEP needs an RSA key. */
+	{
+		g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
+		g_autoptr(GError) error = NULL;
+
+		g_assert_false(certificate_mechanism_parse("RSA_OAEP", parameters, "EC", 256, TRUE,
+		                                           &mechanism, &error));
+		g_assert_error(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
 	}
 }
 
@@ -324,7 +503,9 @@ int main(int argc, char** argv)
 	g_test_add_func("/mechanism/rsa-key-too-small", test_rsa_key_too_small);
 	g_test_add_func("/mechanism/ecdsa-digest-passthrough", test_ecdsa_passes_the_digest_through);
 	g_test_add_func("/mechanism/signature-encoding", test_signature_encoding_option);
-	g_test_add_func("/mechanism/decrypt-is-refused", test_decrypt_is_refused);
+	g_test_add_func("/mechanism/only-oaep-may-decrypt", test_only_oaep_may_decrypt);
+	g_test_add_func("/mechanism/oaep-ciphertext-length", test_oaep_ciphertext_length);
+	g_test_add_func("/mechanism/oaep-parameters", test_oaep_parameters);
 	g_test_add_func("/mechanism/unknown-parameter", test_unknown_parameter);
 	g_test_add_func("/mechanism/ecdsa-raw-to-der", test_ecdsa_raw_to_der);
 	g_test_add_func("/mechanism/hash-spellings", test_hash_spellings);

@@ -674,32 +674,62 @@ static void test_sign_without_grant(Fixture* fixture, gconstpointer user_data)
 	g_assert_cmpuint(response, ==, 2);
 }
 
-/* Decrypt is refused before the card is touched, whatever is asked for. */
-static void test_decrypt_is_refused(Fixture* fixture, gconstpointer user_data)
+/* v1.5 IS REFUSED BEFORE THE CARD IS TOUCHED, and so is every other signing
+ * mechanism, and so is a malformed OAEP request. RSA_OAEP is the only thing
+ * Decrypt will look at, and a well-formed OAEP request on a session with no
+ * grant is refused for that reason instead -- which is the point: the two are
+ * different refusals, and neither reaches the token. */
+static void test_decrypt_takes_oaep_only(Fixture* fixture, gconstpointer user_data)
 {
-	g_autoptr(GError) error = NULL;
-	g_autoptr(GVariant) reply = NULL;
-	g_autoptr(GVariant) results = NULL;
-	g_autoptr(GVariant) options =
-	    g_variant_parse(G_VARIANT_TYPE_VARDICT,
-	                    "{'mechanism': <'RSA_PKCS1_V1_5'>, 'ciphertext': <b'0123456789abcdef'>}",
-	                    NULL, NULL, NULL);
-	guint32 response = 0;
+	static const char* const refused[] = {
+		"{'mechanism': <'RSA_PKCS1_V1_5'>, 'parameters': <{'hash': <'SHA256'>}>, "
+		"'ciphertext': <b'0123456789abcdef'>}",
+		"{'mechanism': <'RSA_PSS'>, 'parameters': <{'hash': <'SHA256'>}>, "
+		"'ciphertext': <b'0123456789abcdef'>}",
+		"{'mechanism': <'ECDSA'>, 'parameters': <{'hash': <'SHA256'>}>, "
+		"'ciphertext': <b'0123456789abcdef'>}",
+		/* OAEP with parameters this backend refuses to forward. */
+		"{'mechanism': <'RSA_OAEP'>, 'ciphertext': <b'0123456789abcdef'>}",
+		"{'mechanism': <'RSA_OAEP'>, 'parameters': <{'hash': <'SHA3-256'>}>, "
+		"'ciphertext': <b'0123456789abcdef'>}",
+		"{'mechanism': <'RSA_OAEP'>, 'parameters': <{'hash': <'SHA256'>, "
+		"'mgf1_hash': <'SHA1'>}>, 'ciphertext': <b'0123456789abcdef'>}",
+		/* A well-formed OAEP request. Refused too, because this session holds
+		 * no grant -- but by the grant check, not the mechanism one. */
+		"{'mechanism': <'RSA_OAEP'>, 'parameters': <{'hash': <'SHA256'>}>, "
+		"'ciphertext': <b'0123456789abcdef'>}",
+		NULL,
+	};
 
 	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
 
-	reply = impl_call(fixture->frontend, "Decrypt",
-	                  g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "",
-	                                g_steal_pointer(&options)),
-	                  &error);
-	g_assert_no_error(error);
-	g_variant_get(reply, "(u@a{sv})", &response, &results);
-	g_assert_cmpuint(response, ==, 2);
+	for (gsize i = 0; refused[i] != NULL; i++)
+	{
+		g_autoptr(GError) error = NULL;
+		g_autoptr(GVariant) reply = NULL;
+		g_autoptr(GVariant) results = NULL;
+		GVariant* options = g_variant_parse(G_VARIANT_TYPE_VARDICT, refused[i], NULL, NULL, NULL);
+		guint32 response = 0;
+
+		g_assert_nonnull(options);
+
+		reply = impl_call(fixture->frontend, "Decrypt",
+		                  g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "",
+		                                options),
+		                  &error);
+		g_assert_no_error(error);
+		g_variant_get(reply, "(u@a{sv})", &response, &results);
+
+		if (response != 2)
+			g_error("Decrypt options %s answered %u, expected 2", refused[i], response);
+	}
 }
 
-/* GetCapabilities must not advertise a decryption this backend refuses, and it
- * must answer while the main loop is free -- it runs the PKCS#11 calls on a
- * worker now, and this test is what proves it still answers at all. */
+/* GetCapabilities advertises what this backend implements, and it must answer
+ * while the main loop is free -- it runs the PKCS#11 calls on a worker, and
+ * this test is what proves it still answers at all. Decrypt is now among them,
+ * with RSA_OAEP in `mechanisms` as the only thing it will decrypt with; the
+ * pairing is what an application reads to decide whether to ask. */
 static void test_capabilities(Fixture* fixture, gconstpointer user_data)
 {
 	g_autoptr(GError) error = NULL;
@@ -714,7 +744,14 @@ static void test_capabilities(Fixture* fixture, gconstpointer user_data)
 
 	g_assert_true(g_variant_lookup(capabilities, "operations", "^as", &operations));
 	g_assert_true(g_strv_contains((const char* const*) operations, "sign"));
-	g_assert_false(g_strv_contains((const char* const*) operations, "decrypt"));
+	g_assert_true(g_strv_contains((const char* const*) operations, "decrypt"));
+
+	{
+		g_auto(GStrv) mechanisms = NULL;
+
+		g_assert_true(g_variant_lookup(capabilities, "mechanisms", "^as", &mechanisms));
+		g_assert_true(g_strv_contains((const char* const*) mechanisms, "RSA_OAEP"));
+	}
 }
 
 /* THE NAME CHANGES HANDS AND THE OLD OWNER IS STILL CONNECTED. This is the
@@ -849,7 +886,7 @@ int main(int argc, char** argv)
 	ADD("/impl/results-types", test_results_types);
 	ADD("/impl/token-presence-carries-no-identity", test_token_presence_carries_no_identity);
 	ADD("/impl/sign-without-grant", test_sign_without_grant);
-	ADD("/impl/decrypt-is-refused", test_decrypt_is_refused);
+	ADD("/impl/decrypt-takes-oaep-only", test_decrypt_takes_oaep_only);
 	ADD("/impl/capabilities", test_capabilities);
 	ADD("/impl/replaced-frontend-is-refused", test_replaced_frontend_is_refused);
 	ADD("/impl/close-mid-flight", test_close_mid_flight);

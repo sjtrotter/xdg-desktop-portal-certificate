@@ -61,7 +61,7 @@ Every one of these is xdg-desktop-portal's, and none of them is an improvement o
 | `CreateSession(o handle, o session_handle, s app_id, a{sv} options) → (u, a{sv})` | non-interactive | Creates the backend-side state for a grant. `options` is unused and `results` is empty. Fails early when there is no p11-kit, no reader, no display. |
 | `AcquireCredential(o handle, o session_handle, s app_id, s parent_window, a{sv} options) → (u, a{sv})` | **interactive** | Discovery, filtering, and **the chooser**. |
 | `Sign(o handle, o session_handle, s app_id, s parent_window, a{sv} options) → (u, a{sv})` | **interactive** | The signature, and the PIN prompt if this is the first private-key use. |
-| `Decrypt(...)` | **interactive** | As `Sign`, with `ciphertext` in place of `data` and `plaintext` in place of `signature`. **Refused in v1** — see "Decrypt is refused" below. |
+| `Decrypt(...)` | **interactive** | As `Sign`, with `ciphertext` in place of `data` and `plaintext` in place of `signature`. `RSA_OAEP` only — see "Decrypt is RSA_OAEP, and nothing else" below. |
 | `GetCapabilities(s app_id, a{sv} options) → a{sv}` | non-interactive | What this backend can do on this hardware. **Note the `app_id`** — see below. |
 | `TokenAdded(a{sv})`, `TokenRemoved(a{sv})` | signals | To the frontend, which re-emits them to every client. **Presence only**: see "The token signals carry presence, not identity". |
 | `SessionInvalidated(o session_handle, s reason)` | signal | A grant can no longer be honoured. `reason` is one of the interface's eight and nothing else: see "`SessionInvalidated` speaks the public vocabulary". The frontend turns it into `GrantInvalidated` and closes the Session. |
@@ -156,9 +156,28 @@ parameters = {'hash': <'SHA256'>, 'signature_encoding': <'der'>}
 ```
 
 `signature_encoding` is `raw` (the default) or `der`; anything else is an error rather than a
-silent fallback. It is an addition to the interface's `parameters` vardict, which the frontend
-passes through unexamined, so it needs no change on the frontend side — but it is an addition, and
-if the interface ever grows an opinion of its own, the interface wins.
+silent fallback. It began as this backend's own addition to the `parameters` vardict, which the
+frontend passed through unexamined. **It is now in both XML files**, with `raw` as the documented
+default and a requirement that a backend implementing ECDSA implement both — the frontend
+validates the enum value as well. The interface grew the opinion, and it agrees with what was
+here.
+
+### `RSA_PSS` takes `mgf` and `salt_length`, spelled the interface's way
+
+Neither can be checked without the modulus size, so the frontend forwards both untouched and this
+backend is where they are validated:
+
+- **`mgf` (`s`)** is `MGF1-<hash>`, for example `MGF1-SHA256`. Plain `MGF1` means MGF1 over
+  `hash`, and so does leaving the key out. Anything else is an error. A bare hash name — `SHA256`
+  — used to be accepted here as well; it was leniency the interface does not describe and a second
+  backend would not implement, so a caller relying on it would have found its requests refused
+  elsewhere. It is now refused here too.
+- **`salt_length` (`u`)** defaults to the digest's length, and is checked against RFC 8017 9.1.1
+  step 3: `emLen >= hLen + sLen + 2`.
+
+The `mgf` spelling was added to both XML files on the frontend branch, because a value that goes
+straight into a PKCS#11 mechanism parameter is not a good thing for each backend to name for
+itself.
 
 ### `interaction_mode` never skips the chooser
 
@@ -208,27 +227,62 @@ mid-operation fails that operation and keeps the grant, because the card may sti
 is still closed and the card session released, but nothing is emitted: there is no longer anybody
 subscribed to hear it.
 
-### `Decrypt` is refused, and `GetCapabilities` does not offer it
+### `Decrypt` is `RSA_OAEP`, and nothing else
 
-The XML has a `Decrypt` method and this backend implements it by **refusing it**, with the
-`invalid_request` shape, and by leaving `decrypt` out of the `operations` it reports from
-`GetCapabilities`.
+`Decrypt` was refused outright until the frontend branch grew a decryption mechanism. It now has
+one, and only one, and this backend implements exactly that.
 
-The interface's mechanism vocabulary is `RSA_PKCS1_V1_5`, `RSA_PSS` and `ECDSA`. Exactly one of
-those decrypts anything, and `C_Decrypt` under `CKM_RSA_PKCS` answers "padding valid, here is the
-plaintext" or "that failed" — two outcomes that are distinguishable on the wire. Against a key the
-user consented to once, repeated, that is Bleichenbacher's attack: it recovers plaintext and can
-forge a signature with the same key, for as long as the grant lasts, with no further consent and
-no rate limit on either side of the boundary.
+**Why v1.5 is not on the list.** `C_Decrypt` under `CKM_RSA_PKCS` answers "padding valid, here is
+the plaintext" or "that failed" — two outcomes that are distinguishable on the wire. Against a key
+the user consented to once, repeated, that is Bleichenbacher's attack: it recovers plaintext and
+can forge a signature with the same key, for as long as the grant lasts, with no further consent
+and no rate limit on either side of the boundary. `Sign` is deliberately constrained to a digest of
+a named length so that it cannot be a signing oracle; letting `Decrypt` hand over the equivalent
+capability through a different door would make that constraint decorative. The impl XML says a
+backend **must not implement v1.5 decryption behind some other mechanism name either**, and the one
+branch in `src/broker/mechanism.c` that decrypts accepts one name.
 
-`Sign` is deliberately constrained to a digest of a named length so that it cannot be a signing
-oracle. Letting `Decrypt` hand over the equivalent capability through a different door would make
-that constraint decorative, so it does not.
+**The parameters**, validated here against the key rather than forwarded, because `pParameter` goes
+straight into the module:
 
-**What would change this**: an `RSA_OAEP` entry in the frontend's mechanism allow list, with a hash,
-an MGF and a label that this backend validates the way it already validates the PSS parameters.
-That is a frontend change; until it lands, "Decrypt is not in v1" is true again, which is what this
-document said all along.
+| Key | |
+|---|---|
+| `hash` (`s`) | Required. `SHA1`, `SHA224`, `SHA256`, `SHA384` or `SHA512`; the `SHA-256` spelling too. Becomes `CK_RSA_PKCS_OAEP_PARAMS.hashAlg`. |
+| `mgf1_hash` (`s`) | Optional, and must name the same hash. PKCS#1 allows them to differ; this interface does not. `mgf` is `CKG_MGF1_<hash>`. |
+| `label` (`ay`) | Optional, at most 256 bytes — the frontend's cap, applied again here so a request it accepted is not refused for a reason it could have applied itself. `source` is `CKZ_DATA_SPECIFIED` with the label, or with nothing, which is the empty label OAEP defaults to. |
+
+**The ciphertext must be exactly one modulus long.** It is the only length an RSA ciphertext can
+have, and the frontend cannot check it, because it does not know the modulus size. This is the same
+class of check as the PSS salt.
+
+**Every other failure is one error.** The module distinguishes a malformed encoding from wrong
+parameters from a device fault; the caller is told "the decryption failed", in the same words, every
+time, and the real reason goes to the journal. OAEP is not a padding oracle the way v1.5 is, but
+that is a property of OAEP rather than of this code, and it survives only as long as nobody rebuilds
+the distinction by hand. This equalises the *answer*, not the time it took to produce it — nothing
+here can equalise a card's timing.
+
+**A grant buys 32 decryptions.** Every practical attack on RSA decryption — padding oracles, fault
+injection, timing — needs thousands to millions of queries against one key, and nothing on either
+side of the portal boundary counts them. Real use of a card decryption key is unwrapping: one
+`C_Decrypt`, occasionally a handful when a client retries or a message has several recipients.
+Thirty-two is far above that and four orders of magnitude below what an attack needs. It is charged
+per *attempt*, not per success — a failed decryption is exactly the query an attacker wants — and it
+is per grant rather than per unit time on purpose: re-consenting is what buys more, and a user who
+is asked again is a user who finds out. The number is
+`CERTIFICATE_MAX_DECRYPTS_PER_GRANT` in `src/session-impl.h`.
+
+**`GetCapabilities` now reports `decrypt`** alongside `sign`. Whether a *particular* card can do it
+is a separate question, answered by `mechanisms` — `RSA_OAEP` appears there only where a token
+really has `CKM_RSA_PKCS_OAEP` — and, per grant, by `permitted_operations`, which is the key's
+`CKA_DECRYPT` intersected with the caller's `operation_policy`.
+
+**What is not covered by an automated test.** SoftHSM 2.x implements OAEP with SHA-1 and no label
+and refuses everything else at `C_DecryptInit`, so the round-trip test in
+`tests/test-broker-device.c` runs SHA-1 without a label; the SHA-256 mapping and the label are
+asserted against `CK_RSA_PKCS_OAEP_PARAMS` in `tests/test-mechanism.c` instead, and the labelled
+half of the round trip skips itself with a message. A real card is
+[TESTING.md](TESTING.md) tier 3.
 
 ### The token signals carry presence, not identity
 

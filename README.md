@@ -131,10 +131,11 @@ key's type and mechanisms, the permitted operations, and an expiry. The applicat
 frontend to **`Sign`**; the frontend checks the grant and forwards; this backend prompts for the PIN in its own window, logs into its own PKCS#11 session,
 performs the operation and returns the result.
 The PIN never crosses D-Bus, the private key never leaves the card, and the application never holds
-a PKCS#11 handle. `Decrypt` is on the interface and this backend **refuses it**: the only decryption
-mechanism the interface has is RSA PKCS#1 v1.5, and answering "padding valid" or "padding invalid"
-for a card key over D-Bus is an oracle against that key. [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md)
-says what would have to change first.
+a PKCS#11 handle. `Decrypt` works the same way and takes **`RSA_OAEP` and nothing else**: PKCS#1
+v1.5 decryption is refused by name, because answering "padding valid" or "padding invalid" for a
+card key over D-Bus is an oracle against that key. Every OAEP failure comes back in the same words,
+and one grant buys 32 decryptions.
+[docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) has the detail.
 
 ## Interfaces
 

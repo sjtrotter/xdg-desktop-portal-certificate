@@ -60,6 +60,9 @@ endforeach
 service_test_cases = {
   'impl-dbus': 'test-impl-dbus.c',
   'cancellation': 'test-cancellation.c',
+  # The two properties that make Decrypt safe to offer: one error for every
+  # failure, and a per-grant budget. Skips itself without a SoftHSM fixture.
+  'broker-decrypt': 'test-broker-decrypt.c',
 }
 
 foreach name, source : service_test_cases

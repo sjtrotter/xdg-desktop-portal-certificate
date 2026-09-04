@@ -18,6 +18,7 @@
 #include <gnutls/abstract.h>
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
+#include <glib/gstdio.h>
 #include <string.h>
 
 #include "broker/device.h"
@@ -244,45 +245,307 @@ static void test_ecdsa(Fixture* fixture, gconstpointer user_data)
 	sign_and_verify(fixture, "EC", "ECDSA", "SHA256", GNUTLS_SIGN_ECDSA_SHA256);
 }
 
-/* DECRYPT IS REFUSED, and this test exists to keep it refused. The interface's
- * mechanism vocabulary has exactly one mechanism that decrypts anything --
- * RSA_PKCS1_V1_5 -- and answering "padding valid" or "padding invalid" over
- * D-Bus for a key the user consented to once is a Bleichenbacher oracle against
- * the card. Sign is constrained to a digest of a named length so that it cannot
- * be a signing oracle; Decrypt must not hand over the same capability through
- * another door. See docs/IMPL-INTERFACE.md for what would have to change on the
- * frontend (an OAEP mechanism) before this can be implemented. */
-static void test_decrypt_is_refused(Fixture* fixture, gconstpointer user_data)
+/* Encrypt to the certificate's public key with RSA-OAEP, using openssl(1).
+ *
+ * WHY A SUBPROCESS AND NOT GNUTLS. The ciphertext has to come from something
+ * that is not this backend -- if the two disagree about how OAEP is spelled,
+ * the round trip has to fail rather than agree with itself. GnuTLS is here
+ * already and would have done, except that its RSA-OAEP will not use SHA-1 and
+ * SoftHSM 2.x will not use anything else, so the two cannot meet. openssl
+ * does both, is present wherever a card is being tested, and being a separate
+ * implementation is the property that was wanted in the first place.
+ *
+ * Returns NULL and skips the test when openssl is not installed or refuses. */
+static GBytes* oaep_encrypt(CertificateCandidate* candidate, const char* hash_name,
+                            const guint8* label, gsize label_length, const char* plaintext)
+{
+	g_autofree char* directory = NULL;
+	g_autofree char* certificate_path = NULL;
+	g_autofree char* pubkey_path = NULL;
+	g_autofree char* plaintext_path = NULL;
+	g_autofree char* ciphertext_path = NULL;
+	g_autofree char* md_option = NULL;
+	g_autofree char* mgf_option = NULL;
+	g_autofree char* label_option = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autofree char* contents = NULL;
+	gsize length = 0;
+	GBytes* out = NULL;
+	int status = 0;
+
+	if (g_find_program_in_path("openssl") == NULL)
+	{
+		g_test_skip("openssl(1) is not installed; it is what produces the OAEP ciphertext");
+		return NULL;
+	}
+
+	directory = g_dir_make_tmp("xdp-certificate-oaep-XXXXXX", &error);
+	g_assert_no_error(error);
+
+	certificate_path = g_build_filename(directory, "certificate.der", NULL);
+	pubkey_path = g_build_filename(directory, "public.pem", NULL);
+	plaintext_path = g_build_filename(directory, "plaintext.bin", NULL);
+	ciphertext_path = g_build_filename(directory, "ciphertext.bin", NULL);
+
+	g_assert_true(g_file_set_contents(certificate_path, (const char*) candidate->der->data,
+	                                  candidate->der->len, &error));
+	g_assert_no_error(error);
+	g_assert_true(g_file_set_contents(plaintext_path, plaintext, (gssize) strlen(plaintext),
+	                                  &error));
+	g_assert_no_error(error);
+
+	{
+		const char* argv[] = { "openssl",     "x509", "-inform", "DER",  "-in",
+			                   certificate_path, "-pubkey", "-noout", "-out", pubkey_path,
+			                   NULL };
+
+		g_assert_true(g_spawn_sync(NULL, (char**) argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
+		                           NULL, NULL, &status, &error));
+		g_assert_no_error(error);
+		g_assert_cmpint(status, ==, 0);
+	}
+
+	md_option = g_strdup_printf("rsa_oaep_md:%s", hash_name);
+	mgf_option = g_strdup_printf("rsa_mgf1_md:%s", hash_name);
+
+	if (label != NULL && label_length > 0)
+	{
+		GString* hex = g_string_new("rsa_oaep_label:");
+
+		for (gsize i = 0; i < label_length; i++)
+			g_string_append_printf(hex, "%02x", label[i]);
+
+		label_option = g_string_free(hex, FALSE);
+	}
+
+	{
+		const char* argv[] = { "openssl",
+			                   "pkeyutl",
+			                   "-encrypt",
+			                   "-pubin",
+			                   "-inkey",
+			                   pubkey_path,
+			                   "-pkeyopt",
+			                   "rsa_padding_mode:oaep",
+			                   "-pkeyopt",
+			                   md_option,
+			                   "-pkeyopt",
+			                   mgf_option,
+			                   label_option != NULL ? "-pkeyopt" : "-in",
+			                   label_option != NULL ? label_option : plaintext_path,
+			                   label_option != NULL ? "-in" : "-out",
+			                   label_option != NULL ? plaintext_path : ciphertext_path,
+			                   label_option != NULL ? "-out" : NULL,
+			                   label_option != NULL ? ciphertext_path : NULL,
+			                   NULL };
+
+		if (!g_spawn_sync(NULL, (char**) argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL,
+		                  &status, &error) ||
+		    status != 0)
+		{
+			g_test_skip_printf("openssl would not encrypt with RSA-OAEP/%s%s", hash_name,
+			                   label_option != NULL ? " and a label" : "");
+			g_clear_error(&error);
+			goto out;
+		}
+	}
+
+	if (g_file_get_contents(ciphertext_path, &contents, &length, &error))
+		out = g_bytes_new(contents, length);
+	else
+		g_assert_no_error(error);
+
+out:
+	g_unlink(certificate_path);
+	g_unlink(pubkey_path);
+	g_unlink(plaintext_path);
+	g_unlink(ciphertext_path);
+	g_rmdir(directory);
+
+	return out;
+}
+
+/* Set up the RSA candidate's device, logged in, or skip. */
+static CertificateCandidate* logged_in_rsa(Fixture* fixture, CertificateDevice* device)
 {
 	CertificateCandidate* candidate = NULL;
-	CertificateMechanism mechanism;
 	g_autoptr(GError) error = NULL;
-	g_autoptr(GVariant) parameters = NULL;
 
 	if (fixture->tokens == NULL)
-		return;
+		return NULL;
 
 	candidate = candidate_of_type(fixture, "RSA");
 	if (candidate == NULL)
 	{
 		g_test_skip("the fixture has no RSA key");
+		return NULL;
+	}
+
+	g_assert_true(certificate_device_open(device, fixture->tokens, candidate, &error));
+	g_assert_no_error(error);
+	g_assert_true(certificate_device_login(device, candidate, FIXTURE_PIN, &error));
+	g_assert_no_error(error);
+
+	return candidate;
+}
+
+static CertificateMechanism oaep_mechanism(CertificateCandidate* candidate, const char* parameters_text)
+{
+	g_autoptr(GVariant) parameters =
+	    g_variant_parse(G_VARIANT_TYPE_VARDICT, parameters_text, NULL, NULL, NULL);
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+
+	g_assert_nonnull(parameters);
+	g_assert_true(certificate_mechanism_parse("RSA_OAEP", parameters, candidate->key_type,
+	                                          candidate->key_size, TRUE, &mechanism, &error));
+	g_assert_no_error(error);
+
+	return mechanism;
+}
+
+/* THE ROUND TRIP. GnuTLS encrypts with RSA-OAEP to the public key in the
+ * certificate the token handed back; this backend decrypts with the private key
+ * on the token; the plaintext has to come back byte for byte. The ciphertext
+ * comes from an implementation that is not this one, which is the point: if the
+ * two disagree about how OAEP is spelled, the round trip fails.
+ *
+ * SHA-1 AND NO LABEL, because that is all SoftHSM 2.x implements -- it refuses
+ * any other hashAlg, any other mgf, and any pSourceData at C_DecryptInit. That
+ * is a limitation of the software token and not of this backend or of the
+ * interface, and it is why the SHA-256 mapping and the label are covered by
+ * tests/test-mechanism.c against CK_RSA_PKCS_OAEP_PARAMS rather than against a
+ * module. A card that implements the rest is docs/TESTING.md tier 3.
+ *
+ * The labelled half runs anyway and skips itself if the module says no, so it
+ * starts covering the label the day it runs against something that has one. */
+static void test_oaep_round_trip(Fixture* fixture, gconstpointer user_data)
+{
+	static const char* const plaintext = "a session key would go here";
+	static const guint8 label[] = { 'x', 'd', 'p', '-', 'c', 'e', 'r', 't' };
+	CertificateDevice device = { 0 };
+	CertificateCandidate* candidate = logged_in_rsa(fixture, &device);
+	CertificateMechanism mechanism;
+	g_autoptr(GBytes) ciphertext = NULL;
+	g_autoptr(GBytes) labelled_ciphertext = NULL;
+	g_autoptr(GBytes) payload = NULL;
+	g_autoptr(GBytes) plain = NULL;
+	g_autoptr(GError) error = NULL;
+
+	if (candidate == NULL)
+		return;
+
+	ciphertext = oaep_encrypt(candidate, "sha1", NULL, 0, plaintext);
+	if (ciphertext == NULL)
+	{
+		certificate_device_close(&device);
 		return;
 	}
 
-	parameters = g_variant_parse(G_VARIANT_TYPE_VARDICT, "{}", NULL, NULL, NULL);
+	mechanism = oaep_mechanism(candidate, "{'hash': <'SHA1'>}");
+	payload = certificate_mechanism_prepare(&mechanism, ciphertext, &error);
+	g_assert_no_error(error);
 
-	g_assert_false(certificate_mechanism_parse("RSA_PKCS1_V1_5", parameters, candidate->key_type,
-	                                           candidate->key_size, TRUE, &mechanism, &error));
-	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
-	g_clear_error(&error);
+	plain = certificate_device_perform(&device, TRUE, &mechanism, payload, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(plain);
+	g_assert_cmpuint(g_bytes_get_size(plain), ==, strlen(plaintext));
+	g_assert_cmpint(memcmp(g_bytes_get_data(plain, NULL), plaintext, strlen(plaintext)), ==, 0);
+	certificate_mechanism_clear(&mechanism);
+	g_clear_pointer(&payload, g_bytes_unref);
+	g_clear_pointer(&plain, g_bytes_unref);
 
-	/* And no other spelling gets in either. */
-	g_assert_false(certificate_mechanism_parse("RSA_OAEP", parameters, candidate->key_type,
-	                                           candidate->key_size, TRUE, &mechanism, &error));
-	g_clear_error(&error);
-	g_assert_false(certificate_mechanism_parse("RSA_PSS", parameters, candidate->key_type,
-	                                           candidate->key_size, TRUE, &mechanism, &error));
-	g_clear_error(&error);
+	/* And with a label on both sides, where the module has one. */
+	labelled_ciphertext = oaep_encrypt(candidate, "sha1", label, sizeof(label), plaintext);
+	if (labelled_ciphertext != NULL)
+	{
+		mechanism = oaep_mechanism(
+		    candidate, "{'hash': <'SHA1'>, 'label': <[byte 0x78, 0x64, 0x70, 0x2d, "
+		               "0x63, 0x65, 0x72, 0x74]>}");
+		payload = certificate_mechanism_prepare(&mechanism, labelled_ciphertext, &error);
+		g_assert_no_error(error);
+
+		plain = certificate_device_perform(&device, TRUE, &mechanism, payload, &error);
+		if (plain == NULL)
+		{
+			g_test_message("this module does not implement a labelled OAEP: %s",
+			               error->message);
+			g_clear_error(&error);
+		}
+		else
+		{
+			g_assert_cmpint(memcmp(g_bytes_get_data(plain, NULL), plaintext, strlen(plaintext)),
+			                ==, 0);
+		}
+
+		certificate_mechanism_clear(&mechanism);
+	}
+
+	certificate_device_close(&device);
+}
+
+/* A ciphertext that is not one modulus long never reaches the card, and one
+ * that is the right length but is not a valid OAEP encoding comes back as a
+ * failure rather than as a plaintext.
+ *
+ * The length check is the one the frontend cannot make: it does not know the
+ * modulus. Making the two failures INDISTINGUISHABLE TO THE CALLER is
+ * broker/operations.c's job, not this layer's, and tests/test-broker-decrypt.c
+ * is what asserts it. */
+static void test_oaep_bad_input_is_refused(Fixture* fixture, gconstpointer user_data)
+{
+	static const char* const plaintext = "a session key would go here";
+	CertificateDevice device = { 0 };
+	CertificateCandidate* candidate = logged_in_rsa(fixture, &device);
+	CertificateMechanism mechanism;
+	g_autoptr(GBytes) ciphertext = NULL;
+	g_autoptr(GBytes) payload = NULL;
+	g_autoptr(GError) error = NULL;
+
+	if (candidate == NULL)
+		return;
+
+	ciphertext = oaep_encrypt(candidate, "sha1", NULL, 0, plaintext);
+	if (ciphertext == NULL)
+	{
+		certificate_device_close(&device);
+		return;
+	}
+
+	/* The right length, and not a ciphertext. */
+	{
+		gsize length = candidate->key_size / 8;
+		g_autofree guint8* garbage = g_malloc0(length);
+		g_autoptr(GBytes) not_a_ciphertext = NULL;
+
+		memset(garbage, 0x42, length);
+		garbage[0] = 0x00; /* keep it below the modulus */
+		not_a_ciphertext = g_bytes_new(garbage, length);
+
+		mechanism = oaep_mechanism(candidate, "{'hash': <'SHA1'>}");
+		payload = certificate_mechanism_prepare(&mechanism, not_a_ciphertext, &error);
+		g_assert_no_error(error);
+		g_assert_null(certificate_device_perform(&device, TRUE, &mechanism, payload, &error));
+		g_assert_nonnull(error);
+		g_clear_error(&error);
+		certificate_mechanism_clear(&mechanism);
+		g_clear_pointer(&payload, g_bytes_unref);
+	}
+
+	/* A byte short. Refused while the payload is prepared; the card is never
+	 * asked. */
+	{
+		g_autoptr(GBytes) truncated =
+		    g_bytes_new_from_bytes(ciphertext, 0, g_bytes_get_size(ciphertext) - 1);
+
+		mechanism = oaep_mechanism(candidate, "{'hash': <'SHA1'>}");
+		g_assert_null(certificate_mechanism_prepare(&mechanism, truncated, &error));
+		g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+		g_clear_error(&error);
+		certificate_mechanism_clear(&mechanism);
+	}
+
+	certificate_device_close(&device);
 }
 
 /* The wrong PIN must come back as PIN_INCORRECT and nothing else: collapsing
@@ -361,7 +624,8 @@ int main(int argc, char** argv)
 	ADD("/device/rsa-pkcs1-sha384", test_rsa_pkcs1_sha384);
 	ADD("/device/rsa-pss-sha256", test_rsa_pss);
 	ADD("/device/ecdsa-sha256", test_ecdsa);
-	ADD("/device/decrypt-is-refused", test_decrypt_is_refused);
+	ADD("/device/oaep-round-trip", test_oaep_round_trip);
+	ADD("/device/oaep-bad-input-is-refused", test_oaep_bad_input_is_refused);
 	ADD("/device/wrong-pin", test_wrong_pin);
 
 #undef ADD

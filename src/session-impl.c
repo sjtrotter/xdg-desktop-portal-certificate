@@ -175,6 +175,7 @@ void certificate_impl_session_grant(CertificateImplSession* session,
 	session->purpose = purpose;
 	session->may_sign = may_sign;
 	session->may_decrypt = may_decrypt;
+	session->decrypt_count = 0;
 	session->lifetime = lifetime;
 	session->expires_at = (g_get_real_time() / G_USEC_PER_SEC) + lifetime;
 	session->granted = TRUE;

@@ -25,6 +25,19 @@
  *  RSA-PSS hash, MGF and salt length are the case that matters: a caller that
  *  can choose them freely can choose badly.
  *
+ *  DECRYPTION IS RSA_OAEP AND NOTHING ELSE. PKCS#1 v1.5 decryption tells the
+ *  caller whether the padding was well formed -- response 0 with a plaintext,
+ *  or a failure -- and that is a Bleichenbacher oracle over the key on the
+ *  card, worth more than the signing oracle every other rule in this file
+ *  exists to prevent. The interface refuses v1.5 for Decrypt and says a backend
+ *  must not implement it behind another mechanism name either. This one does
+ *  not: certificate_mechanism_parse() with @for_decrypt accepts one name.
+ *
+ *  OAEP itself is not an oracle -- a failure says nothing an attacker can
+ *  iterate on -- but this module still reports EVERY decryption failure as one
+ *  error, because "which failure" is exactly the thing that made v1.5
+ *  dangerous and it costs nothing to never build the habit.
+ *
  *  WHAT `data` IS. The public interface says "the digest or the message, as the
  *  mechanism requires" and leaves it there. This backend resolves that
  *  ambiguity one way, for every mechanism, and docs/IMPL-INTERFACE.md records
@@ -37,6 +50,11 @@
  *   - RSA_PSS: CKM_RSA_PKCS_PSS with CK_RSA_PKCS_PSS_PARAMS built from the
  *     parameters. The caller supplies the bare digest.
  *   - ECDSA: CKM_ECDSA over the bare digest, which is what PKCS#11 wants.
+ *   - RSA_OAEP (decryption only): CKM_RSA_PKCS_OAEP with
+ *     CK_RSA_PKCS_OAEP_PARAMS built from the parameters. `data` is the
+ *     CIPHERTEXT here, and its length must be exactly one modulus -- the only
+ *     length an RSA ciphertext can have, and a check the frontend cannot make
+ *     because it does not know the modulus.
  *
  *  Refusing to sign a caller-supplied blob of arbitrary length under a raw
  *  mechanism is deliberate: a signing oracle over unstructured bytes is a
@@ -80,6 +98,17 @@ typedef struct
 	/* Storage the CK_MECHANISM's pParameter points into. */
 	CK_RSA_PKCS_PSS_PARAMS pss;
 	gboolean has_pss;
+	CK_RSA_PKCS_OAEP_PARAMS oaep;
+	gboolean has_oaep;
+
+	/* The OAEP label, owned here because oaep.pSourceData points at it. */
+	guint8* label;
+	gsize label_length;
+
+	/* How long the input has to be: the digest length for a signature, one
+	 * modulus for an OAEP ciphertext. Zero means unconstrained, which nothing
+	 * currently is. */
+	gsize expected_input;
 
 	/* For RSA_PKCS1_V1_5 signing: the DigestInfo prefix this module puts in
 	 * front of the caller's digest. */
@@ -99,9 +128,10 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 /** Fill in a CK_MECHANISM pointing at @mechanism's own storage. */
 void certificate_mechanism_to_ck(CertificateMechanism* mechanism, CK_MECHANISM* out);
 
-/** The bytes actually handed to C_Sign: the caller's digest for ECDSA and PSS,
- *  the DigestInfo-wrapped digest for RSA_PKCS1_V1_5. Fails when the digest is
- *  not the length the named hash produces. */
+/** The bytes actually handed to C_Sign or C_Decrypt: the caller's digest for
+ *  ECDSA and PSS, the DigestInfo-wrapped digest for RSA_PKCS1_V1_5, the
+ *  ciphertext unchanged for RSA_OAEP. Fails when the input is not the length
+ *  the mechanism requires -- the named hash's digest, or one modulus. */
 GBytes* certificate_mechanism_prepare(const CertificateMechanism* mechanism, GBytes* data,
                                       GError** error);
 

@@ -72,6 +72,11 @@ struct _CertificateImplSession
 	CertificatePurpose purpose;
 	gboolean may_sign;
 	gboolean may_decrypt;
+
+	/* Decryptions this grant has been charged for. See
+	 * CERTIFICATE_MAX_DECRYPTS_PER_GRANT and the comment in
+	 * broker/operations.c that explains the number. */
+	guint decrypt_count;
 	guint32 lifetime;
 	gint64 expires_at;
 	guint expiry_source;
@@ -132,6 +137,14 @@ void certificate_impl_session_close(CertificateImplSession* session);
  *  a word nobody can act on delivered as though it were part of the contract.
  *  Anything else is g_critical()ed and sent as "error". */
 void certificate_impl_session_invalidate(CertificateImplSession* session, const char* reason);
+
+/** How many Decrypt calls one grant may make. A raw private-key operation on
+ *  caller-chosen bytes is the input to every practical attack on RSA
+ *  decryption -- padding oracles, fault injection, timing -- and all of them
+ *  need thousands to millions of queries against one key. Real use is
+ *  unwrapping: one C_Decrypt, occasionally a handful. Nothing else on either
+ *  side of the boundary counts them. */
+#define CERTIFICATE_MAX_DECRYPTS_PER_GRANT 32
 
 gboolean certificate_impl_session_is_expired(CertificateImplSession* session);
 

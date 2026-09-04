@@ -21,9 +21,10 @@ Six suites:
 | Suite | Needs | What it covers |
 |---|---|---|
 | `filter` | nothing | purpose and `certificate_filter` matching against fixture certificates |
-| `mechanism` | nothing | the mechanism mapping, the digest-length rule, the PSS parameters, **that `Decrypt` is refused** |
+| `mechanism` | nothing | the mechanism mapping, the digest-length rule, the PSS parameters and the `MGF1-<hash>` spelling, the OAEP parameters and `CK_RSA_PKCS_OAEP_PARAMS`, **that only `RSA_OAEP` may decrypt and only the three signing mechanisms may sign** |
 | `redact` | nothing | the redactor, the display-text sanitiser, that a newline in an app id cannot forge a journal line |
-| `broker-device` | a SoftHSM fixture | `C_Login`, `C_Sign`, signature verification. **Skips itself** without one; see tier 2 |
+| `broker-device` | a SoftHSM fixture, and `openssl(1)` for the OAEP half | `C_Login`, `C_Sign`, signature verification, and an **RSA-OAEP round trip** against a ciphertext `openssl pkeyutl` produced. **Skips itself** without one; see tier 2 |
+| `broker-decrypt` | a SoftHSM fixture | the two properties that make `Decrypt` safe to offer: **one indistinguishable error** for every failure, and the **per-grant budget**. **Skips itself** without one |
 | `impl-dbus` | nothing (it stands up its own `GTestDBus`) | the D-Bus boundary: a stranger calling every method including both `Close()`s, cross-`app_id` session use, session-path reuse, strict option validation, the results vardict's types |
 | `cancellation` | a display for two of three, a SoftHSM fixture for the third | cancelling while `C_Login` is in flight, cancelling before the window is up, cancelling a signature |
 
@@ -110,14 +111,14 @@ then, from the backend:
 ** Message: no-matching-certificate tokens=0 candidates=0
 ```
 
-and from the client (**`operations` is `['sign']`**: this backend refuses `Decrypt`, and
-[IMPL-INTERFACE.md](IMPL-INTERFACE.md) says why):
+and from the client (`operations` is `['sign', 'decrypt']`; `RSA_OAEP` is the only mechanism
+`Decrypt` will take, and [IMPL-INTERFACE.md](IMPL-INTERFACE.md) says why):
 
 ```
 GetCapabilities:
   max_grant_lifetime               3600
-  mechanisms                       ['RSA_PKCS1_V1_5', 'RSA_PSS', 'ECDSA']
-  operations                       ['sign']
+  mechanisms                       ['RSA_PKCS1_V1_5', 'RSA_PSS', 'RSA_OAEP', 'ECDSA']
+  operations                       ['sign', 'decrypt']
   protected_authentication_path    False
   purposes                         ['client_auth', 'signing', 'email', 'ssh']
   selection_memory                 True
@@ -297,8 +298,11 @@ depends on:
 - **The PIN flags are re-read after every refusal**, so `CKF_USER_PIN_FINAL_TRY` appearing mid-run
   is shown. Once it is set the window demands a **second, explicit Unlock** before spending the
   attempt, and one window offers at most three attempts.
-- **`Decrypt` is refused**, so there is nothing to test against a card there and nothing that could
-  expose the key to a padding oracle.
+- **`Decrypt` takes `RSA_OAEP` and nothing else.** PKCS#1 v1.5 decryption is refused by name, so
+  there is no path that could expose the key to a padding oracle. What a card can tell you that
+  SoftHSM cannot: whether OAEP works with a hash other than SHA-1, and whether it accepts a label.
+  SoftHSM 2.x refuses both at `C_DecryptInit`, so those two paths have never run against a module.
+  `tools/certificate-e2e.py --decrypt` drives the round trip end to end.
 
 ```console
 # cancel from the application's side while the chooser is up: the window must
@@ -402,6 +406,8 @@ backend's. That is a consequence of the split, and the session handle is what jo
 | `AcquireCredential` answers 2 with `no_token` | no token is present |
 | `AcquireCredential` answers 2 with `no_matching_certificate` | a token is present but nothing on it fits the purpose and filter. `--list-tokens` says which purposes each certificate fits |
 | `Sign` answers 2 with `invalid_request` | the mechanism, the `hash` parameter or the digest length did not validate. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) |
-| `Decrypt` answers 2 with `invalid_request` | that is the answer. Decryption is refused; [IMPL-INTERFACE.md](IMPL-INTERFACE.md) says what would have to change on the frontend |
+| `Decrypt` answers 2 with `invalid_request` | the mechanism was not `RSA_OAEP`, or its `hash`/`mgf1_hash`/`label` did not validate, or the ciphertext was not exactly one modulus long. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) |
+| `Decrypt` answers 2 and says only "the decryption failed" | by design: every failure of a well-formed request is reported in the same words so that it cannot be used as an oracle. The reason is in the backend's journal |
+| `Decrypt` answers 2 and mentions a new grant | the grant has spent its 32 decryptions. Acquire again |
 | `AcquireCredential` answers 2 with `no_such_session` and the session obviously exists | the call named a different `app_id` than `CreateSession` did, or a higher `app_identity_level` than the session has already been used at |
 | a second `CreateSession` on the same path answers 2 | there is a live session there. Close it first; a **closed** one is replaced |

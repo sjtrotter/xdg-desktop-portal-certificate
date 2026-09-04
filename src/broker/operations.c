@@ -204,9 +204,36 @@ static void sign_thread(GTask* task, gpointer source, gpointer task_data,
 	g_mutex_unlock(&session->device_lock);
 
 	if (result == NULL)
+	{
+		/* ONE ANSWER FOR EVERY DECRYPTION FAILURE. The module distinguishes a
+		 * malformed OAEP encoding from a device fault from a key that will not
+		 * do this, and the caller must not: "which failure" is precisely the
+		 * signal that makes PKCS#1 v1.5 a Bleichenbacher oracle, and OAEP is
+		 * only safe from it as long as nobody rebuilds the distinction by
+		 * hand. The real reason is in the journal, where the user can see it
+		 * and the caller cannot.
+		 *
+		 * This equalises the ANSWER, not the time it took to produce it.
+		 * Nothing here can equalise a card's timing, which is why the
+		 * per-grant budget in certificate_broker_perform() is the other half:
+		 * an attack that needs thousands of queries does not get thousands of
+		 * queries. */
+		if (operation->decrypt)
+		{
+			certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL,
+			                          operation->mechanism.name);
+			g_debug("decryption failed: %s", error->message);
+			g_clear_error(&error);
+			g_set_error_literal(&error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
+			                    "The decryption failed");
+		}
+
 		g_task_return_error(task, g_steal_pointer(&error));
+	}
 	else
+	{
 		g_task_return_pointer(task, result, (GDestroyNotify) g_bytes_unref);
+	}
 }
 
 static void on_signed(GObject* source, GAsyncResult* result, gpointer user_data)
@@ -446,6 +473,35 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 		return;
 	}
 
+	/* A PER-GRANT BUDGET ON DECRYPTIONS, and none on signatures. The
+	 * difference is what one query is worth. A signature is over a digest the
+	 * caller had to name the length of, and the interesting attacks on it need
+	 * a chosen structure rather than a large number of tries. A decryption is a
+	 * raw private-key operation on caller-chosen bytes: OAEP makes it safe to
+	 * answer, but the whole family of attacks on RSA decryption -- padding
+	 * oracles, fault injection, timing -- is built on making thousands to
+	 * millions of queries against one key, and nothing else in either process
+	 * counts them.
+	 *
+	 * 32 IS THE NUMBER, and the reasoning is that real decryption with a card
+	 * key is unwrapping: an S/MIME message key, a TLS pre-master secret, a
+	 * stored file key. That is one C_Decrypt, occasionally a handful when a
+	 * client retries or a message has several recipients. Thirty-two is well
+	 * over any of those and four orders of magnitude short of what an attack
+	 * needs, so the honest client never sees it and the hostile one runs out.
+	 * It is per grant rather than per unit time on purpose: re-consenting is
+	 * what buys more, and a user who is asked again is a user who finds out. */
+	if (decrypt && session->decrypt_count >= CERTIFICATE_MAX_DECRYPTS_PER_GRANT)
+	{
+		certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL,
+		                          mechanism_name);
+		g_set_error(&error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED,
+		            "This grant has spent its %d decryptions; a further one needs a new grant",
+		            CERTIFICATE_MAX_DECRYPTS_PER_GRANT);
+		done(NULL, error, user_data);
+		return;
+	}
+
 	if (decrypt ? !session->may_decrypt : !session->may_sign)
 	{
 		certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL,
@@ -488,6 +544,12 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 	operation->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
 	operation->done = done;
 	operation->user_data = user_data;
+
+	/* COUNTED WHEN IT IS ACCEPTED, not when it succeeds. A failed decryption is
+	 * exactly the query an attacker wants; charging only for the successful
+	 * ones would leave the budget unspent by the traffic it exists to bound. */
+	if (decrypt)
+		session->decrypt_count++;
 
 	certificate_log_operation(CERTIFICATE_REASON_REQUEST_RECEIVED, NULL, NULL, mechanism.name);
 

@@ -29,7 +29,7 @@ about where the saving landed without pretending the rest of the numbers got any
 | The chooser | **Done**. Identity level in words, caller text quoted and labelled, expiry as a word |
 | The PIN prompt | **Done**, including protected authentication path, retry, and locked-token handling |
 | Brokered `Sign`, lazy login, one PKCS#11 session per grant | **Done**. Verified against SoftHSM for RSA PKCS#1 v1.5, RSA-PSS and ECDSA |
-| Brokered `Decrypt` | **Refused, deliberately.** The only decryption mechanism the interface has is RSA PKCS#1 v1.5, which over D-Bus is a padding oracle against the card's key. It needs `RSA_OAEP` on the frontend's allow list first; see [IMPL-INTERFACE.md](IMPL-INTERFACE.md) |
+| Brokered `Decrypt` | **`RSA_OAEP` only**, now that the frontend's allow list has it. PKCS#1 v1.5 decryption stays refused: over D-Bus it is a padding oracle against the card's key. Every failure is one error and a grant buys 32 attempts; see [IMPL-INTERFACE.md](IMPL-INTERFACE.md) |
 | Token insertion and removal watching, `SessionInvalidated` | **Done**, polled, debounced. Never tested with a card actually leaving a reader |
 | The end-to-end client, the private-bus stack, the headless UI run | **Done** |
 | Chain building | **Not done.** `chain_status` is always `leaf_only` |

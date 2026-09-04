@@ -1327,12 +1327,14 @@ static void on_capabilities(GObject* source, GAsyncResult* result, gpointer user
 	CapabilitiesQuery* query = g_task_get_task_data(G_TASK(result));
 	GVariantBuilder builder;
 	static const char* const purposes[] = { "client_auth", "signing", "email", "ssh", NULL };
-	/* DECRYPT IS NOT ADVERTISED. The interface's mechanism vocabulary has no
-	 * OAEP entry and this backend refuses RSA PKCS#1 v1.5 decryption, so there
-	 * is no decryption it can perform; saying otherwise would have applications
-	 * build a UI on a capability that answers invalid_request. See
-	 * docs/IMPL-INTERFACE.md. */
-	static const char* const operations[] = { "sign", NULL };
+	/* BOTH, now that there is an OAEP mechanism to decrypt with. `operations`
+	 * says what this backend implements; whether a particular card can do it is
+	 * `mechanisms` (RSA_OAEP appears only where a token really has
+	 * CKM_RSA_PKCS_OAEP) and, per grant, `permitted_operations`. Advertising
+	 * decrypt while refusing every request would have applications build a UI
+	 * on a capability that answers invalid_request, which is why it was absent
+	 * until the mechanism existed. See docs/IMPL-INTERFACE.md. */
+	static const char* const operations[] = { "sign", "decrypt", NULL };
 
 	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
 	g_variant_builder_add(&builder, "{sv}", "purposes", g_variant_new_strv(purposes, -1));

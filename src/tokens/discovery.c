@@ -644,6 +644,12 @@ static char** mechanisms_for(CK_FUNCTION_LIST* module, CK_SLOT_ID slot, const ch
 			g_strv_builder_add(builder, "RSA_PKCS1_V1_5");
 		if (certificate_pkcs11_has_mechanism(module, slot, CKM_RSA_PKCS_PSS))
 			g_strv_builder_add(builder, "RSA_PSS");
+		/* Decryption only, and only where the token really has it. A card that
+		 * cannot do OAEP must not be offered for a Decrypt grant: the
+		 * interface has no other decryption mechanism, so the alternative is a
+		 * grant that says it may decrypt and fails at the first attempt. */
+		if (certificate_pkcs11_has_mechanism(module, slot, CKM_RSA_PKCS_OAEP))
+			g_strv_builder_add(builder, "RSA_OAEP");
 	}
 	else if (g_strcmp0(key_type, "EC") == 0)
 	{
@@ -1037,6 +1043,7 @@ void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanism
 	g_autoptr(GPtrArray) modules = NULL;
 	gboolean rsa_pkcs = FALSE;
 	gboolean rsa_pss = FALSE;
+	gboolean rsa_oaep = FALSE;
 	gboolean ecdsa = FALSE;
 	gboolean protected_path = FALSE;
 	gboolean any_token = FALSE;
@@ -1061,6 +1068,8 @@ void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanism
 			protected_path = protected_path || token->protected_authentication_path;
 			rsa_pkcs = rsa_pkcs || certificate_pkcs11_has_mechanism(module, slot, CKM_RSA_PKCS);
 			rsa_pss = rsa_pss || certificate_pkcs11_has_mechanism(module, slot, CKM_RSA_PKCS_PSS);
+			rsa_oaep =
+			    rsa_oaep || certificate_pkcs11_has_mechanism(module, slot, CKM_RSA_PKCS_OAEP);
 			ecdsa = ecdsa || certificate_pkcs11_has_mechanism(module, slot, CKM_ECDSA);
 		}
 	}
@@ -1076,6 +1085,7 @@ void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanism
 	{
 		rsa_pkcs = TRUE;
 		rsa_pss = TRUE;
+		rsa_oaep = TRUE;
 		ecdsa = TRUE;
 	}
 
@@ -1083,6 +1093,8 @@ void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanism
 		g_strv_builder_add(builder, "RSA_PKCS1_V1_5");
 	if (rsa_pss)
 		g_strv_builder_add(builder, "RSA_PSS");
+	if (rsa_oaep)
+		g_strv_builder_add(builder, "RSA_OAEP");
 	if (ecdsa)
 		g_strv_builder_add(builder, "ECDSA");
 
