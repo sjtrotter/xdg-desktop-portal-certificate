@@ -23,8 +23,10 @@ Specifically valuable:
 
 - **Anything about PKCS#11 semantics** we have got wrong — login state, session scope, handle
   lifetime, mechanism parameters, v3 interface tables.
-- **Hardware results.** Which cards, which readers, which middleware, what breaks. The spikes in
-  [docs/SPIKES.md](docs/SPIKES.md) are all questions about real hardware and none has been run.
+- **Hardware results.** Which cards, which readers, which middleware, what breaks. One PIV card in
+  one reader has been through [docs/TESTING.md](docs/TESTING.md) tiers 3.1–3.4, once; that is a
+  first run, not a result. The spikes in [docs/SPIKES.md](docs/SPIKES.md) are all questions about
+  real hardware and none has been run.
 - **Consumer perspectives.** If you maintain something that would use this — a browser, a mail
   client, a VPN client, an SSH agent — the most useful thing you can say is whether brokered `Sign`
   is integrable in your codebase, or whether only a PKCS#11 module would work. That answer decides

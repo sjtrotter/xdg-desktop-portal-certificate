@@ -1,11 +1,12 @@
 # Go / no-go spikes
 
-Status: EXPERIMENTAL. **None of these have been run on hardware, and the project should not exist
-as a production repository until S1 and S3 have answers.** That has not changed, and building the
-backend did not change it: what the backend proves is that brokered `Sign` works, which was never
-the doubtful part.
+Status: EXPERIMENTAL. **None of these have been run, and the project should not exist as a
+production repository until S1 and S3 have answers.** That has not changed, and neither building
+the backend nor reading one real card changed it: what the backend proves is that brokered `Sign`
+works, which was never the doubtful part.
 
-What the implementation has answered, partially and against a software token only:
+What the implementation has answered, partially — against a software token, and since 2026-09-04
+against one PIV card in one reader as well ([TESTING.md](TESTING.md) tiers 3.1–3.4):
 
 - **S2's backend half.** The login model is settled in code: this backend keeps its own PKCS#11
   session per grant, logs in lazily at first private-key use, and the PIN prompt is its own window.
@@ -16,7 +17,8 @@ What the implementation has answered, partially and against a software token onl
   and re-resolved on every use, so a different card in the same slot is a different token by
   construction. The insertion and removal watcher polls every two seconds and debounces over two
   polls. **Both numbers are guesses**, and S4 exists to replace them with measurements from real
-  readers. Nothing has been pulled out of a reader mid-signature.
+  readers; the one card that has been read was inserted before the run and left there. Nothing has
+  been pulled out of a reader mid-signature.
 - **S5's non-fd half.** Answered by the branch's own pytest suite, plus this repository's
   private-bus run: a real frontend and a real backend complete `CreateSession`,
   `AcquireCredential`, `Sign` and `Close` on a private bus, and a backend crash surfaces as

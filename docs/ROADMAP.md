@@ -2,9 +2,11 @@
 
 Status: EXPERIMENTAL. **The backend is built.** The chooser, the PIN prompt, token discovery,
 certificate filtering and brokered `Sign`/`Decrypt` exist, build clean, and have been driven end to
-end through the real frontend against a software token. What has *not* happened is the thing the
-whole list below was gated on: **nothing has touched a smart card.** The facade is still not
-reachable, and the spikes that decide whether it can exist are still unrun.
+end through the real frontend against a software token. The thing the whole list below was gated
+on has now happened once: **one PIV card, in one reader, on 2026-09-04**, through
+[TESTING.md](TESTING.md) tiers 3.1–3.4. One card is a first run and not a claim about hardware;
+the rest of tier 3 is unrun, the facade is still not reachable, and the spikes that decide whether
+it can exist are still unrun.
 
 Read the table under "Where the code actually is" before the effort figures: the figures were
 written when none of this existed and have not been re-derived.

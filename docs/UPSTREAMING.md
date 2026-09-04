@@ -146,9 +146,11 @@ The three "open items" the previous version of this document listed have all mov
    `SessionInvalidated` → `GrantInvalidated` conversion is untested; selection memory is
    written but never read back in a test; rate limiting is not implemented at all.
 6. **Everything in [ROADMAP.md](ROADMAP.md) phase 0 and 1**, which is about hardware and has
-   not moved. Nothing on the branch has ever been run against a smartcard, a reader or a
-   web engine; the python-dbusmock templates are the only implementations that have ever
-   answered these interfaces.
+   barely moved. The branch has now driven one PIV card in one reader, on 2026-09-04, through
+   this repository's backend ([TESTING.md](TESTING.md) tiers 3.2–3.4) — one card, one reader,
+   and not a hardware claim. It has never been run against a **web engine**, and apart from that
+   one run the python-dbusmock templates are the only implementations that have ever answered
+   these interfaces.
 
 ## What does not change, and must not
 

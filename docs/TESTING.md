@@ -354,10 +354,11 @@ reuse it.**
 Clean up with `tools/softhsm-fixture.sh --clean`.
 
 ---
-## 3. A real PIV card. This is the run that has never happened.
+## 3. A real PIV card. Tiers 3.1–3.4 have been run, once.
 
 **Read this whole section before inserting the card.** One step deliberately spends a PIN attempt
-and one step replaces the system portal. Nothing above this line has ever touched hardware.
+and one step replaces the system portal. Nothing above this line touches hardware, and nothing
+below it has been run against more than one card in one reader — see the note under §3.4.
 
 ### 3.0 The shortest sequence that would change that
 

@@ -2,7 +2,8 @@
 
 Status: EXPERIMENTAL. **Some of this is now implemented and some of it is still an intention**, and
 the checklist below says which is which. Nothing here has been reviewed by anyone but its authors,
-and nothing here has been run against a real smart card.
+and only a narrow slice of it has been run against a real smart card: one PIV card in one reader,
+on 2026-09-04, through [TESTING.md](TESTING.md) tiers 3.1–3.4.
 
 The rules in the body of this document are unchanged: they are what the design intends to be true.
 The checklist immediately below is what the code in this repository does today, so that a reader
@@ -106,7 +107,7 @@ such throughout the rest of this document.
 | Any claim that `--pin-prompt=system` keeps the PIN out of this process | it does not, and the section below says so: `C_Login` takes a PIN. What it moves is where the PIN is **typed** |
 | Interrupting a `C_Login` | PKCS#11 has no way to. `--login-timeout` gives up on the interaction; the module call runs to completion and the attempt is spent |
 | Decryption with anything but `RSA_OAEP` | and it never will be. PKCS#1 v1.5 decryption is a padding oracle over the card's key, and the interface refuses it on both sides |
-| Any hardware assurance at all | **no real smart card has ever been read by this code.** [TESTING.md](TESTING.md) tier 3 is the run that would change that |
+| Any hardware assurance beyond a single card | **one PIV card, in one reader, once**: [TESTING.md](TESTING.md) tiers 3.1–3.4 passed on 2026-09-04 — discovery and certificate parsing, the private-bus happy path, a cancel, and the live run through the shell's own prompter. One card, one reader, one middleware, one desktop. The rest of tier 3 is unrun: one PIN per grant, the wrong-PIN and `FINAL_TRY` run, removal during an operation, a PIN-pad reader, a second card |
 
 ## What this is a boundary against, and what it is not
 

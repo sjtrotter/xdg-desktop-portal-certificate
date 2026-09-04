@@ -9,8 +9,9 @@ Three things are worth saying here, where people look first.
 PKCS#11 modules, draws a consent window and a PIN prompt, holds a logged-in card session, and
 performs signatures. `docs/SECURITY.md` opens with a checklist of which of its rules are enforced by
 code today and which are still intentions. Nothing in it has been reviewed by anyone but its
-authors, and **no real smart card has ever been read by this code** — see
-[docs/TESTING.md](docs/TESTING.md), tier 3, for the run that would change that.
+authors, and **exactly one real smart card has ever been read by this code**: one PIV card in one
+reader, on 2026-09-04, through [docs/TESTING.md](docs/TESTING.md) tiers 3.1–3.4. That is a first
+run rather than a hardware claim, and the rest of tier 3 is unrun.
 
 **There are two processes, and only one of them is in this repository.** The frontend is
 xdg-desktop-portal — specifically the branch `experimental/certificate-webauthentication` — and it
