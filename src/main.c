@@ -26,14 +26,17 @@
  * docs/decisions/0010-backend-only-frontend-lives-upstream.md.
  *
  * The main() shape -- gtk_init plus a plain GMainLoop rather than GtkApplication,
- * g_bus_own_name with ALLOW_REPLACEMENT always and REPLACE under --replace, and
- * quitting on name-lost -- is xdg-desktop-portal-gtk's, LGPL-2.1-or-later,
- * Copyright (C) 2016 Red Hat, Inc.
+ * g_bus_own_name with REPLACE under --replace, and quitting on name-lost -- is
+ * xdg-desktop-portal-gtk's, LGPL-2.1-or-later, Copyright (C) 2016 Red Hat, Inc.
+ * ALLOW_REPLACEMENT is where this backend deliberately differs from it; see
+ * harden() and claim_name() below.
  */
 
 #include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 
 #include <adwaita.h>
 #include <gio/gio.h>
@@ -57,10 +60,12 @@ static gboolean opt_verbose = FALSE;
 static gboolean opt_version = FALSE;
 static gboolean opt_list_tokens = FALSE;
 static gboolean opt_no_activate = FALSE;
+static gboolean opt_allow_core = FALSE;
 static char** opt_modules = NULL;
 
 static const GOptionEntry entries[] = {
-	{ "replace", 'r', 0, G_OPTION_ARG_NONE, &opt_replace, "Replace a running instance", NULL },
+	{ "replace", 'r', 0, G_OPTION_ARG_NONE, &opt_replace,
+	  "Replace a running instance, and allow being replaced in turn", NULL },
 	{ "verbose", 'v', 0, G_OPTION_ARG_NONE, &opt_verbose, "Log decisions and breadcrumbs on stderr",
 	  NULL },
 	{ "module", 'm', 0, G_OPTION_ARG_FILENAME_ARRAY, &opt_modules,
@@ -69,6 +74,8 @@ static const GOptionEntry entries[] = {
 	  "List the security tokens visible to this user and exit", NULL },
 	{ "no-activate", 0, 0, G_OPTION_ARG_NONE, &opt_no_activate,
 	  "Do not request the bus name; start, check the modules, and exit", NULL },
+	{ "debug-allow-core", 0, 0, G_OPTION_ARG_NONE, &opt_allow_core,
+	  "DEVELOPMENT ONLY: leave core dumps and ptrace attach enabled", NULL },
 	{ "version", 0, 0, G_OPTION_ARG_NONE, &opt_version, "Print the version and exit", NULL },
 	{ NULL, 0, 0, 0, NULL, NULL, NULL },
 };
@@ -127,6 +134,47 @@ static const char* description =
     "  The PKCS#11 compatibility endpoint is NOT part of it: OpenPkcs11Endpoint\n"
     "  was deliberately left out of the frontend branch, because an fd-returning\n"
     "  method needs its own review.";
+
+/* THREE LINES THAT DECIDE WHERE THE PIN CAN END UP, run before anything else
+ * can crash.
+ *
+ * PR_SET_DUMPABLE(0) stops a core dump being written at all AND makes
+ * /proc/self/mem, /proc/self/maps and the rest root-owned, which is what blocks
+ * a same-uid ptrace attach on a normal kernel. docs/SECURITY.md is careful to
+ * say the split does not defend against a hostile process running as the user;
+ * this converts part of that from "open problem" to "partial mitigation", and
+ * the document says which part.
+ *
+ * RLIMIT_CORE 0 is the belt to that braces: dumpability can be re-enabled by a
+ * later execve or by a kernel that treats the flag differently, and a zero core
+ * limit is checked independently.
+ *
+ * WHY IT MATTERS HERE MORE THAN ELSEWHERE: between the moment the PIN is
+ * copied into the locked page and the moment it is wiped, a SIGSEGV would hand
+ * systemd-coredump a file containing it, kept under /var/lib/systemd/coredump
+ * for days by default. */
+static void harden(void)
+{
+	struct rlimit no_core = { 0, 0 };
+
+	/* THE ONE WAY OUT, and it is a command-line flag rather than an environment
+	 * variable on purpose: an installed service file's Exec line is fixed, so
+	 * nothing that merely shares the session can turn the hardening off the way
+	 * dbus-update-activation-environment could. It exists because a
+	 * non-dumpable process cannot be attached to by gdb either, and
+	 * docs/TESTING.md has to be able to tell somebody how to debug a crash. */
+	if (opt_allow_core)
+	{
+		g_message("process-not-hardened detail=debug-allow-core");
+		return;
+	}
+
+	if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0)
+		g_message("process-not-hardened detail=prctl-dumpable-failed");
+
+	if (setrlimit(RLIMIT_CORE, &no_core) != 0)
+		g_message("process-not-hardened detail=rlimit-core-failed");
+}
 
 static gboolean on_signal(gpointer user_data)
 {
@@ -291,6 +339,11 @@ int main(int argc, char** argv)
 		return CERTIFICATE_EXIT_USAGE;
 	}
 
+	/* AS EARLY AS THE OPTIONS ALLOW. Everything before this point is
+	 * g_option_context_parse() on a fixed argv, which cannot fault on anything
+	 * a PIN could be next to, because there is no PIN yet. */
+	harden();
+
 	if (opt_version)
 	{
 		g_print("xdg-desktop-portal-certificate " PACKAGE_VERSION
@@ -356,11 +409,24 @@ int main(int argc, char** argv)
 	g_unix_signal_add(SIGINT, on_signal, NULL);
 	g_unix_signal_add(SIGTERM, on_signal, NULL);
 
-	/* ALLOW_REPLACEMENT is always set so that a newer instance can take over;
-	 * REPLACE only under --replace. */
+	/* REPLACEMENT IS NOT OFFERED TO EVERYONE. xdg-desktop-portal-gtk sets
+	 * ALLOW_REPLACEMENT unconditionally, and for a file chooser that is
+	 * reasonable. Here it means any process running as the user can take
+	 * org.freedesktop.impl.portal.desktop.certificate at will and become the
+	 * thing the portal calls -- receiving AcquireCredential and Sign with a
+	 * real app id and identity level, and drawing the window that asks for the
+	 * PIN. The trusted dialog is the one thing docs/SECURITY.md says this
+	 * repository owns outright, so the name is only offered up when an operator
+	 * says so: --replace both allows a replacement and asks to be one, so an
+	 * in-place upgrade still works (start the new instance with --replace) and
+	 * an arbitrary peer cannot simply ask for the name.
+	 *
+	 * It is not a boundary against a determined local process -- nothing here
+	 * is -- but it removes the one-call version. */
 	owner_id = g_bus_own_name_on_connection(
 	    connection, CERTIFICATE_IMPL_BUS_NAME,
-	    G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT | (opt_replace ? G_BUS_NAME_OWNER_FLAGS_REPLACE : 0),
+	    opt_replace ? (G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT | G_BUS_NAME_OWNER_FLAGS_REPLACE)
+	                : G_BUS_NAME_OWNER_FLAGS_NONE,
 	    on_name_acquired, on_name_lost, NULL, NULL);
 
 	on_bus_acquired(connection, CERTIFICATE_IMPL_BUS_NAME, NULL);
