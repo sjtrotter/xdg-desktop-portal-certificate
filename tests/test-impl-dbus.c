@@ -98,10 +98,15 @@ static void fixture_set_up(Fixture* fixture, gconstpointer user_data)
 	fixture->stranger = open_connection(fixture->bus);
 	backend_name = g_dbus_connection_get_unique_name(fixture->backend);
 
+	/* ALLOW_REPLACEMENT from the start, so that the replacement test can take
+	 * the name over WITHOUT the fixture first giving it up: unowning it fires
+	 * NameOwnerChanged(... -> '') and destroys every session before the
+	 * successor exists, which made the old version of that test assert
+	 * something its own teardown had already produced. */
 	fixture->owner_id =
 	    g_bus_own_name_on_connection(fixture->frontend, FRONTEND_NAME,
-	                                 G_BUS_NAME_OWNER_FLAGS_NONE, on_name_acquired, NULL,
-	                                 &acquired, NULL);
+	                                 G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT, on_name_acquired,
+	                                 NULL, &acquired, NULL);
 
 	while (!acquired)
 		g_main_context_iteration(NULL, TRUE);
@@ -145,7 +150,9 @@ static void fixture_tear_down(Fixture* fixture, gconstpointer user_data)
 	certificate_impl_free(fixture->impl);
 	g_clear_pointer(&fixture->tokens, certificate_tokens_free);
 
-	g_bus_unown_name(fixture->owner_id);
+	/* A test may have given the name up on purpose. */
+	if (fixture->owner_id != 0)
+		g_bus_unown_name(fixture->owner_id);
 	g_dbus_connection_close_sync(fixture->frontend, NULL, NULL);
 	g_dbus_connection_close_sync(fixture->stranger, NULL, NULL);
 	g_dbus_connection_close_sync(fixture->backend, NULL, NULL);
@@ -214,6 +221,9 @@ static GVariant* acquire_options(const char* extra)
 	g_autofree char* text =
 	    g_strdup_printf("{'purpose': <'client_auth'>, 'app_identity_level': <'derived_host'>%s%s}",
 	                    extra != NULL ? ", " : "", extra != NULL ? extra : "");
+	/* A FULL reference, which is what g_variant_parse() returns. Callers own
+	 * it; acquire() consumes it, and anything passing it to g_variant_new()
+	 * itself has to drop its own reference afterwards. */
 	GVariant* options = g_variant_parse(G_VARIANT_TYPE_VARDICT, text, NULL, NULL, NULL);
 
 	g_assert_nonnull(options);
@@ -235,16 +245,21 @@ static guint32 create_session(Fixture* fixture, const char* path, const char* ap
 	return response;
 }
 
+/* TAKES OWNERSHIP of @options. g_variant_parse() hands back a FULL reference,
+ * not a floating one, so g_variant_new("@a{sv}", ...) adds a second reference
+ * rather than adopting it -- and every one of those was a leak the old
+ * lsan.supp hid behind `leak:libglib-2.0`. */
 static void acquire(Fixture* fixture, const char* session_path, const char* app_id,
                     GVariant* options, guint32* response, char** code)
 {
+	g_autoptr(GVariant) owned = options;
 	g_autoptr(GError) error = NULL;
 	g_autoptr(GVariant) reply = NULL;
 	g_autoptr(GVariant) results = NULL;
 
 	reply = impl_call(fixture->frontend, "AcquireCredential",
 	                  g_variant_new("(ooss@a{sv})", REQUEST_PATH, session_path, app_id, "",
-	                                options),
+	                                owned),
 	                  &error);
 	g_assert_no_error(error);
 	g_variant_get(reply, "(u@a{sv})", response, &results);
@@ -665,9 +680,10 @@ static void test_sign_without_grant(Fixture* fixture, gconstpointer user_data)
 	g_assert_nonnull(options);
 	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
 
+	/* NOT g_steal_pointer(): the reference is full, so g_variant_new() takes
+	 * one of its own and this one still has to be dropped. */
 	reply = impl_call(fixture->frontend, "Sign",
-	                  g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "",
-	                                g_steal_pointer(&options)),
+	                  g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "", options),
 	                  &error);
 	g_assert_no_error(error);
 	g_variant_get(reply, "(u@a{sv})", &response, &results);
@@ -708,7 +724,8 @@ static void test_decrypt_takes_oaep_only(Fixture* fixture, gconstpointer user_da
 		g_autoptr(GError) error = NULL;
 		g_autoptr(GVariant) reply = NULL;
 		g_autoptr(GVariant) results = NULL;
-		GVariant* options = g_variant_parse(G_VARIANT_TYPE_VARDICT, refused[i], NULL, NULL, NULL);
+		g_autoptr(GVariant) options =
+		    g_variant_parse(G_VARIANT_TYPE_VARDICT, refused[i], NULL, NULL, NULL);
 		guint32 response = 0;
 
 		g_assert_nonnull(options);
@@ -754,78 +771,173 @@ static void test_capabilities(Fixture* fixture, gconstpointer user_data)
 	}
 }
 
-/* THE NAME CHANGES HANDS AND THE OLD OWNER IS STILL CONNECTED. This is the
- * race the cached-owner check could not see: D-Bus does not order
- * NameOwnerChanged against the messages of the process that lost the name, so
- * the former frontend -- which is still on the bus, and in this test still
- * holding its connection open -- must be refused as soon as somebody else owns
- * the name, whether or not this process has processed the change yet. */
+/* A round trip that does not involve the backend, made SYNCHRONOUSLY on
+ * @connection. GDBus services its own I/O on a worker thread, so this returns
+ * without the caller's main context turning even once -- which is the whole
+ * trick below. Because the bus daemon processes one connection's messages in
+ * order, its answer to this proves it has already routed everything that
+ * connection sent before it. */
+static void bus_round_trip(GDBusConnection* connection)
+{
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GVariant) reply = g_dbus_connection_call_sync(
+	    connection, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+	    "GetId", NULL, G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+
+	g_assert_no_error(error);
+	g_assert_nonnull(reply);
+}
+
+/* THE NAME CHANGES HANDS WHILE THE OLD OWNER'S CALL IS ALREADY IN THE
+ * BACKEND'S QUEUE, which is the race a cached owner cannot see: D-Bus does not
+ * order NameOwnerChanged against the messages of the process that lost the
+ * name, so by the time the backend reads the call, the cache still names the
+ * sender as the frontend and the bus no longer does.
+ *
+ * It is reproduced rather than hoped for. Nothing here turns the backend's main
+ * loop until the very end:
+ *
+ *   1. the old owner's CreateSession is SENT (async, no loop iteration);
+ *   2. a round trip on the same connection proves the daemon has routed it;
+ *   3. the successor takes the name with a synchronous RequestName;
+ *   4. only now does the loop turn -- and the backend dispatches the
+ *      CreateSession first, from a cache that still says the sender is the
+ *      frontend.
+ *
+ * A positive answer is never served from that cache, so it is refused. */
 static void test_replaced_frontend_is_refused(Fixture* fixture, gconstpointer user_data)
 {
 	g_autoptr(GDBusConnection) successor = open_connection(fixture->bus);
 	g_autoptr(GError) error = NULL;
 	g_autoptr(GVariant) reply = NULL;
-	gboolean acquired = FALSE;
-	guint owner_id;
+	g_autoptr(GVariant) results = NULL;
+	Call call = { NULL, NULL, FALSE };
+	guint32 response = 0;
 
-	/* The original owner works. */
+	/* The original owner works, and its session exists. */
 	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
 
-	/* The fixture took the name with NONE, so it cannot be replaced; take it
-	 * again from this connection with ALLOW_REPLACEMENT so the successor can. */
-	g_bus_unown_name(fixture->owner_id);
-	fixture->owner_id = g_bus_own_name_on_connection(
-	    fixture->frontend, FRONTEND_NAME, G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT,
-	    on_name_acquired, NULL, &acquired, NULL);
-	while (!acquired)
+	/* (1) sent, not answered: nothing iterates the main context here. */
+	g_dbus_connection_call(fixture->frontend, backend_name, IMPL_PATH, IMPL_INTERFACE,
+	                       "CreateSession",
+	                       g_variant_new("(oos@a{sv})", REQUEST_PATH,
+	                                     "/org/freedesktop/portal/desktop/session/test/two", APP_A,
+	                                     empty_options()),
+	                       NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, on_call_done, &call);
+
+	/* (2) the daemon has now routed it to the backend. */
+	bus_round_trip(fixture->frontend);
+
+	/* (3) the name moves. RequestName by hand rather than g_bus_own_name(),
+	 * which would need the main loop to deliver its callback. */
+	{
+		g_autoptr(GError) request_error = NULL;
+		g_autoptr(GVariant) request = g_dbus_connection_call_sync(
+		    successor, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+		    "RequestName",
+		    g_variant_new("(su)", FRONTEND_NAME, (guint32) 2 /* REPLACE_EXISTING */),
+		    G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &request_error);
+		guint32 result = 0;
+
+		g_assert_no_error(request_error);
+		g_variant_get(request, "(u)", &result);
+		/* 1 = DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER */
+		g_assert_cmpuint(result, ==, 1);
+	}
+
+	/* (4) and only now does the backend get to run. */
+	while (!call.done)
 		g_main_context_iteration(NULL, TRUE);
 
-	acquired = FALSE;
-	owner_id = g_bus_own_name_on_connection(successor, FRONTEND_NAME,
-	                                        G_BUS_NAME_OWNER_FLAGS_REPLACE, on_name_acquired,
-	                                        NULL, &acquired, NULL);
-	while (!acquired)
-		g_main_context_iteration(NULL, TRUE);
+	g_assert_null(call.reply);
+	g_assert_error(call.error, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED);
+	g_clear_error(&call.error);
 
-	/* The old owner's connection is still open and it is no longer the
-	 * frontend. */
-	reply = impl_call(fixture->frontend, "CreateSession",
-	                  g_variant_new("(oos@a{sv})", REQUEST_PATH,
-	                                "/org/freedesktop/portal/desktop/session/test/two", APP_A,
-	                                empty_options()),
-	                  &error);
-	g_assert_null(reply);
-	g_assert_error(error, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED);
-	g_clear_error(&error);
-
-	/* And the successor is. */
+	/* The successor is the frontend now. */
 	reply = impl_call(successor, "GetCapabilities",
 	                  g_variant_new("(s@a{sv})", APP_A, empty_options()), &error);
 	g_assert_no_error(error);
 	g_assert_nonnull(reply);
 
-	/* The old owner's session went with it: the successor cannot use it, and
-	 * neither can anybody. */
+	/* AND THE OLD OWNER'S GRANT WENT WITH THE NAME. Nothing in this test gave
+	 * the name up, so this is the replacement doing it and not a teardown: a
+	 * successor portal is a different process with different callers and must
+	 * not inherit a session it never created. */
 	{
-		guint32 response = 0;
+		guint32 acquire_response = 0;
 		g_autofree char* code = NULL;
 		g_autoptr(GVariant) options = acquire_options(NULL);
 		g_autoptr(GError) call_error = NULL;
 		g_autoptr(GVariant) answer =
 		    impl_call(successor, "AcquireCredential",
-		              g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "",
-		                            g_steal_pointer(&options)),
+		              g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "", options),
 		              &call_error);
-		g_autoptr(GVariant) results = NULL;
+		g_autoptr(GVariant) acquire_results = NULL;
 
 		g_assert_no_error(call_error);
-		g_variant_get(answer, "(u@a{sv})", &response, &results);
-		g_variant_lookup(results, "error", "s", &code);
-		g_assert_cmpuint(response, ==, 2);
+		g_variant_get(answer, "(u@a{sv})", &acquire_response, &acquire_results);
+		g_variant_lookup(acquire_results, "error", "s", &code);
+		g_assert_cmpuint(acquire_response, ==, 2);
 		g_assert_cmpstr(code, ==, "no_such_session");
 	}
 
-	g_bus_unown_name(owner_id);
+	/* And the old owner is still refused now that the change has been seen. */
+	reply = impl_call(fixture->frontend, "GetCapabilities",
+	                  g_variant_new("(s@a{sv})", APP_A, empty_options()), &error);
+	g_assert_null(reply);
+	g_assert_error(error, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED);
+	g_clear_error(&error);
+
+	(void) response;
+	(void) results;
+}
+
+/* THE FRONTEND GOES AWAY WHILE A CALL IS IN FLIGHT. Every window this backend
+ * has up belongs to a request the frontend made; if the frontend is gone, the
+ * request has no caller and a trusted window asking the user to consent on its
+ * behalf is the worst thing this process could leave on screen. The pending
+ * call is answered -- with owner_gone, which is NOT response 1: an application
+ * told "cancelled" is entitled to read that as "the user said no". */
+static void test_frontend_vanishing_answers_pending_calls(Fixture* fixture,
+                                                          gconstpointer user_data)
+{
+	Call call = { NULL, NULL, FALSE };
+	g_autoptr(GVariant) results = NULL;
+	g_autofree char* code = NULL;
+	guint32 response = 0;
+
+	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
+
+	{
+		g_autoptr(GVariant) options = acquire_options(NULL);
+
+		g_dbus_connection_call(fixture->frontend, backend_name, IMPL_PATH, IMPL_INTERFACE,
+		                       "AcquireCredential",
+		                       g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "",
+		                                     options),
+		                       NULL, G_DBUS_CALL_FLAGS_NONE, 20000, NULL, on_call_done, &call);
+	}
+
+	/* One turn, so the handler has run, exported the Request and put discovery
+	 * on its worker. */
+	g_main_context_iteration(NULL, TRUE);
+
+	/* The name goes. The connection stays open, so the reply can still be
+	 * delivered and this test can read it. */
+	g_bus_unown_name(fixture->owner_id);
+	fixture->owner_id = 0;
+
+	while (!call.done)
+		g_main_context_iteration(NULL, TRUE);
+
+	g_assert_no_error(call.error);
+	g_variant_get(call.reply, "(u@a{sv})", &response, &results);
+	g_variant_lookup(results, "error", "s", &code);
+
+	g_assert_cmpuint(response, ==, 2);
+	g_assert_cmpstr(code, ==, "owner_gone");
+
+	g_variant_unref(call.reply);
 }
 
 /* Request.Close() while the call is genuinely in flight. What is asserted is
@@ -841,11 +953,15 @@ static void test_close_mid_flight(Fixture* fixture, gconstpointer user_data)
 
 	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
 
-	g_dbus_connection_call(fixture->frontend, backend_name, IMPL_PATH, IMPL_INTERFACE,
-	                       "AcquireCredential",
-	                       g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "",
-	                                     acquire_options(NULL)),
-	                       NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, on_call_done, &call);
+	{
+		g_autoptr(GVariant) options = acquire_options(NULL);
+
+		g_dbus_connection_call(fixture->frontend, backend_name, IMPL_PATH, IMPL_INTERFACE,
+		                       "AcquireCredential",
+		                       g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "",
+		                                     options),
+		                       NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, on_call_done, &call);
+	}
 
 	/* One turn of the loop, so the method handler has run and exported the
 	 * Request, and discovery is on its worker. */
@@ -857,14 +973,25 @@ static void test_close_mid_flight(Fixture* fixture, gconstpointer user_data)
 	 * already finished and taken it down. Never AccessDenied. */
 	if (error != NULL)
 		g_assert_false(g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED));
-	g_clear_error(&error);
 
 	while (!call.done)
 		g_main_context_iteration(NULL, TRUE);
 
 	g_assert_no_error(call.error);
 	g_variant_get(call.reply, "(u@a{sv})", &response, &results);
-	g_assert_cmpuint(response, !=, 0);
+
+	/* A CONTROL, not just "not success". If the Close() went through, the
+	 * request WAS still in flight and the only correct answer is 1: response 2
+	 * is what an ordinary no_display refusal returns, so asserting != 0 would
+	 * pass with the cancellation path deleted. When Close() came back an error
+	 * the request had already answered itself, and there is nothing to
+	 * assert. */
+	if (error == NULL)
+		g_assert_cmpuint(response, ==, 1);
+	else
+		g_assert_cmpuint(response, !=, 0);
+
+	g_clear_error(&error);
 	g_variant_unref(call.reply);
 }
 
@@ -890,6 +1017,8 @@ int main(int argc, char** argv)
 	ADD("/impl/capabilities", test_capabilities);
 	ADD("/impl/replaced-frontend-is-refused", test_replaced_frontend_is_refused);
 	ADD("/impl/close-mid-flight", test_close_mid_flight);
+	ADD("/impl/frontend-vanishing-answers-pending-calls",
+	    test_frontend_vanishing_answers_pending_calls);
 	ADD("/impl/shutdown-reason-is-in-the-vocabulary", test_shutdown_reason_is_in_the_vocabulary);
 
 #undef ADD

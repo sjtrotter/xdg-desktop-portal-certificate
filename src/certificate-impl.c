@@ -25,11 +25,6 @@
 static void on_session_invalidated(CertificateImplSession* session, const char* reason,
                                    gpointer user_data);
 
-/* How long a GetNameOwner answer is reused. It is short enough that an accepted
- * call is never more than this stale and long enough that a burst of calls
- * inside one transaction is one round trip rather than five. */
-#define CERTIFICATE_OWNER_CACHE_US (100 * 1000)
-
 struct CertificateImpl
 {
 	GDBusConnection* connection;
@@ -38,10 +33,19 @@ struct CertificateImpl
 
 	/* The unique name that currently owns org.freedesktop.portal.Desktop. NULL
 	 * when nothing does, in which case every method is refused: with no
-	 * frontend on the bus there is nobody who may legitimately call. */
+	 * frontend on the bus there is nobody who may legitimately call.
+	 *
+	 * IT IS A CACHE THAT MAY ONLY SAY NO. See
+	 * certificate_impl_sender_is_frontend(). */
 	char* frontend_owner;
-	gint64 owner_checked_at;
+	gboolean owner_resolved;
 	guint frontend_watch;
+
+	/* Every AcquireCredential, Sign and Decrypt that has a window or a worker
+	 * still running. Borrowed pointers: a transaction removes itself when it
+	 * answers, which is the only way one is destroyed. The list exists so that
+	 * the frontend going away can take the windows down with it. */
+	GPtrArray* transactions;
 
 	GHashTable* sessions; /* char *object_path -> CertificateImplSession* (owned) */
 };
@@ -57,6 +61,8 @@ static CertificateImpl* certificate_impl_singleton = NULL;
 /* ------------------------------------------------------------ peer identity */
 
 static void invalidate_foreign_sessions(CertificateImpl* impl, const char* owner);
+static void cancel_transactions(CertificateImpl* impl, CertificateImplSession* session,
+                                const char* code);
 
 static void set_frontend_owner(CertificateImpl* impl, const char* owner)
 {
@@ -80,27 +86,20 @@ static void set_frontend_owner(CertificateImpl* impl, const char* owner)
 /* THE WATCHER IS FOR CLEANUP; THE BUS IS THE AUTHORITY. D-Bus does not order
  * NameOwnerChanged against the messages of the process that lost the name, so a
  * cached owner alone would accept calls from a former frontend that is still
- * connected. Every authorisation therefore resolves the owner from the bus,
- * with a short cache so that a burst of calls inside one transaction is not a
- * round trip each.
+ * connected.
  *
  * WHAT THIS STILL DOES NOT PROVIDE: the answer is a snapshot. A name can change
  * hands between the check and the work the call authorises, exactly as it can
  * for every other check-then-use on a bus. A deployment that wants more can
  * deny this backend's name to everything but the portal's uid in D-Bus policy;
  * see docs/IMPL-INTERFACE.md. */
-static const char* resolve_frontend_owner(CertificateImpl* impl, gboolean force)
+static const char* resolve_frontend_owner(CertificateImpl* impl)
 {
 	g_autoptr(GVariant) reply = NULL;
 	g_autoptr(GError) error = NULL;
 	const char* owner = NULL;
-	gint64 now = g_get_monotonic_time();
 
-	if (!force && impl->owner_checked_at != 0 &&
-	    now - impl->owner_checked_at < CERTIFICATE_OWNER_CACHE_US)
-		return impl->frontend_owner;
-
-	impl->owner_checked_at = now;
+	impl->owner_resolved = TRUE;
 
 	reply = g_dbus_connection_call_sync(
 	    impl->connection, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
@@ -117,22 +116,44 @@ static const char* resolve_frontend_owner(CertificateImpl* impl, gboolean force)
 	return impl->frontend_owner;
 }
 
+/* A NEGATIVE MAY COME OUT OF THE CACHE. A POSITIVE MAY NOT.
+ *
+ * The asymmetry is the whole of the rule, and both halves are load-bearing:
+ *
+ *   ACCEPTING a sender is a decision that hands it AcquireCredential and Sign
+ *   with an app id and an identity level of its choosing, so it is never made
+ *   from a remembered answer. Every accept asks the bus who owns the name now.
+ *
+ *   REFUSING one is free and cannot be wrong in a dangerous direction, so it is
+ *   made from the cached owner with no bus call at all. That matters because
+ *   anything on the session bus can send this backend a message: a
+ *   GetNameOwner round trip per stranger's message, on the main thread, IS the
+ *   denial of service -- an open PIN window stops accepting input for the
+ *   duration. A stranger's unique name cannot be the cached owner's (the bus
+ *   assigns unique names and never reuses one), so a stranger never reaches the
+ *   bus call at all.
+ *
+ * The cost of the asymmetry is one refused call at the moment a replacement
+ * portal takes the name over before this process has processed
+ * NameOwnerChanged. The frontend retries; the alternative is a bus call per
+ * hostile message, which is worse. */
 gboolean certificate_impl_sender_is_frontend(CertificateImpl* impl, const char* sender)
 {
-	const char* owner = NULL;
-
 	if (impl == NULL || sender == NULL)
 		return FALSE;
 
-	owner = resolve_frontend_owner(impl, FALSE);
-	if (owner != NULL && g_strcmp0(sender, owner) == 0)
-		return TRUE;
+	/* Nothing has ever been resolved -- the watcher's first callback has not
+	 * arrived yet -- so there is no cache to refuse from. */
+	if (!impl->owner_resolved)
+		resolve_frontend_owner(impl);
 
-	/* A mismatch may be a stale cache rather than a stranger, so a REFUSAL is
-	 * always decided on a fresh answer. */
-	owner = resolve_frontend_owner(impl, TRUE);
+	if (impl->frontend_owner == NULL || g_strcmp0(sender, impl->frontend_owner) != 0)
+		return FALSE;
 
-	return owner != NULL && g_strcmp0(sender, owner) == 0;
+	/* The cache says yes, which is exactly when it may not be believed. */
+	resolve_frontend_owner(impl);
+
+	return impl->frontend_owner != NULL && g_strcmp0(sender, impl->frontend_owner) == 0;
 }
 
 gboolean certificate_impl_sender_is_frontend_default(const char* sender)
@@ -211,6 +232,9 @@ static void invalidate_foreign_sessions(CertificateImpl* impl, const char* owner
 		CertificateImplSession* session = g_ptr_array_index(doomed, i);
 
 		certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "frontend-gone");
+		/* Windows first: the transaction answers with owner_gone, and only then
+		 * does the session it names go away. */
+		cancel_transactions(impl, session, "owner_gone");
 		/* owner_gone, not silence. The connection that created this grant no
 		 * longer owns the portal name, and whoever owns it now is listening:
 		 * a successor frontend that is told a session it does not know has
@@ -228,7 +252,7 @@ static void on_frontend_appeared(GDBusConnection* connection, const char* name, 
 	CertificateImpl* impl = user_data;
 
 	set_frontend_owner(impl, owner);
-	impl->owner_checked_at = g_get_monotonic_time();
+	impl->owner_resolved = TRUE;
 }
 
 static void on_frontend_vanished(GDBusConnection* connection, const char* name, gpointer user_data)
@@ -239,18 +263,33 @@ static void on_frontend_vanished(GDBusConnection* connection, const char* name, 
 	 * bus can legitimately ask for an operation on one, and a logged-in card
 	 * session held past that point is a capability nobody can account for. */
 	set_frontend_owner(impl, NULL);
-	impl->owner_checked_at = g_get_monotonic_time();
+	impl->owner_resolved = TRUE;
 
 	/* NULL: the name has no owner, so SessionInvalidated has no reader. The
 	 * grants still go, because a logged-in card session held past the death of
 	 * the only process allowed to ask for an operation on it is a capability
 	 * nobody can account for. */
 	close_and_forget_all(impl, NULL);
+
+	/* AND THE WINDOWS GO WITH THEM. set_frontend_owner() above has already
+	 * cancelled the transactions of the sessions it invalidated; this catches
+	 * any that were left -- and is the belt to that braces, because a chooser
+	 * still on screen asking the user to consent on behalf of a process that no
+	 * longer exists is the worst thing this backend could leave behind. */
+	cancel_transactions(impl, NULL, "owner_gone");
 }
 
 void certificate_impl_session_forget(CertificateImplSession* session)
 {
 	CertificateImpl* impl = certificate_impl_singleton;
+
+	/* A CLOSED SESSION HAS NO WINDOWS. Session.Close() used to leave a chooser
+	 * or a PIN prompt for that session on screen: the user could still type a
+	 * PIN into it, and was then told the token had been removed, about a card
+	 * that was in the reader. The pending call is answered no_such_session,
+	 * which is what it now is. */
+	if (impl != NULL)
+		cancel_transactions(impl, session, "no_such_session");
 
 	certificate_impl_session_unexport(session);
 
@@ -369,6 +408,14 @@ typedef struct
 	CertificateImplSession* session; /* a reference of our own */
 	gulong close_id;
 	gboolean answered;
+	gboolean registered;
+
+	/* Why this transaction was cancelled, when it was not the user: a static
+	 * string from the interface's diagnostic vocabulary, or NULL for an
+	 * ordinary Close()/Escape. It decides whether the pending call is answered
+	 * 1 ("the user said no", which an application is entitled to act on) or 2
+	 * with a code that says what actually happened. */
+	const char* cancelled_code;
 
 	/* AcquireCredential state */
 	CertificateCallerIdentity caller;
@@ -398,6 +445,10 @@ typedef enum
 
 static void transaction_free(Transaction* transaction)
 {
+	if (transaction->registered && transaction->impl != NULL &&
+	    transaction->impl->transactions != NULL)
+		g_ptr_array_remove_fast(transaction->impl->transactions, transaction);
+
 	if (transaction->close_id != 0 && transaction->request != NULL)
 		g_signal_handler_disconnect(transaction->request, transaction->close_id);
 
@@ -410,6 +461,52 @@ static void transaction_free(Transaction* transaction)
 	g_free(transaction->reason);
 	g_free(transaction->preselect);
 	g_free(transaction);
+}
+
+/* A TRANSACTION IS TRACKED FOR EXACTLY AS LONG AS IT CAN HAVE A WINDOW UP.
+ * Nothing else in this file needs the list; on_frontend_vanished does, because
+ * a chooser or a PIN prompt that outlives the process that asked for it is a
+ * trusted window with nobody behind it -- the single thing this repository
+ * exists to make impossible. */
+static void transaction_register(Transaction* transaction)
+{
+	g_ptr_array_add(transaction->impl->transactions, transaction);
+	transaction->registered = TRUE;
+}
+
+/* Cancel every live transaction, or every one belonging to @session, and say
+ * why. The cancellable is the Request's, which the chooser, the PIN window, the
+ * discovery worker and the in-flight operation are all tied to, so one call
+ * takes all of them down and each answers its own pending call. */
+static void cancel_transactions(CertificateImpl* impl, CertificateImplSession* session,
+                                const char* code)
+{
+	g_autoptr(GPtrArray) doomed = g_ptr_array_new();
+
+	if (impl->transactions == NULL)
+		return;
+
+	for (guint i = 0; i < impl->transactions->len; i++)
+	{
+		Transaction* transaction = g_ptr_array_index(impl->transactions, i);
+
+		if (session != NULL && transaction->session != session)
+			continue;
+
+		g_ptr_array_add(doomed, transaction);
+	}
+
+	/* Over a copy: answering a cancelled transaction destroys it, and with it
+	 * its entry in impl->transactions. */
+	for (guint i = 0; i < doomed->len; i++)
+	{
+		Transaction* transaction = g_ptr_array_index(doomed, i);
+
+		transaction->cancelled_code = code;
+
+		if (transaction->request != NULL)
+			g_cancellable_cancel(certificate_impl_request_get_cancellable(transaction->request));
+	}
 }
 
 /* THE ORDER IS LOAD-BEARING: unexport the Request first, then complete the
@@ -508,6 +605,16 @@ static void answer_early(XdpImplExperimentalCertificate* object,
 static gboolean on_request_close(XdpImplRequest* object, GDBusMethodInvocation* invocation,
                                  gpointer user_data)
 {
+	/* AUTHORISED BEFORE IT IS LOGGED, even though this handler decides nothing:
+	 * signal emission reaches here before the class closure that refuses a
+	 * stranger, so logging unconditionally let anything on the bus write
+	 * "close-from-frontend" into the journal by calling a Close() it was then
+	 * denied. A line in an audit trail that says the frontend did something the
+	 * frontend did not do is worth less than no line. */
+	if (!certificate_impl_sender_is_frontend_default(
+	        g_dbus_method_invocation_get_sender(invocation)))
+		return FALSE;
+
 	certificate_log_debug(CERTIFICATE_REASON_CHOOSER_CANCELLED, "close-from-frontend");
 	return FALSE;
 }
@@ -802,12 +909,29 @@ static void finish_acquire(Transaction* transaction, CertificateCandidate* candi
 	                                                     transaction->may_decrypt, remember));
 }
 
+/* A CANCELLATION THAT THE USER DID NOT ASK FOR IS NOT A CANCELLATION. When the
+ * frontend leaves the bus this backend cancels every window it has up, and the
+ * pending call has to say which of the two happened: response 1 means "the user
+ * said no", and an application is entitled to treat it that way. */
+static gboolean respond_if_owner_gone(Transaction* transaction, TransactionKind kind)
+{
+	if (transaction->cancelled_code == NULL)
+		return FALSE;
+
+	transaction_respond(transaction, kind, CERTIFICATE_RESPONSE_OTHER,
+	                    error_results(transaction->cancelled_code));
+	return TRUE;
+}
+
 static void on_chooser_done(const CertificateChooserResult* result, gpointer user_data)
 {
 	Transaction* transaction = user_data;
 
 	if (result->chosen == NULL)
 	{
+		if (respond_if_owner_gone(transaction, TRANSACTION_ACQUIRE))
+			return;
+
 		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_CANCELLED,
 		                    empty_results());
 		return;
@@ -834,6 +958,9 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 	{
 		if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
 		{
+			if (respond_if_owner_gone(transaction, TRANSACTION_ACQUIRE))
+				return;
+
 			transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_CANCELLED,
 			                    empty_results());
 			return;
@@ -1115,6 +1242,10 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object
 		return TRUE;
 	}
 
+	/* From here it can have a window, so from here the frontend going away has
+	 * to be able to take it down. */
+	transaction_register(transaction);
+
 	certificate_log_decision(CERTIFICATE_REASON_DISCOVERY_STARTED, arg_app_id,
 	                         certificate_identity_level_to_string(transaction->caller.level),
 	                         certificate_purpose_to_string(purpose), FALSE);
@@ -1140,6 +1271,9 @@ static void on_operation_done(GBytes* result, const GError* error, gpointer user
 	{
 		guint32 response = CERTIFICATE_RESPONSE_OTHER;
 		const char* code = "device_error";
+
+		if (respond_if_owner_gone(transaction, TRANSACTION_OPERATION))
+			return;
 
 		/* A CANCEL IS A CANCEL, not a device failure. The GTask carries the
 		 * request's cancellable, so a Close() while the card is signing comes
@@ -1257,6 +1391,8 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 		                    error_results("invalid_request"));
 		return TRUE;
 	}
+
+	transaction_register(transaction);
 
 	caller_display = certificate_app_display_name(arg_app_id);
 
@@ -1401,7 +1537,12 @@ static void on_token_event(CertificateToken* token, gboolean added, gpointer use
 	{
 		GHashTableIter iter;
 		gpointer value = NULL;
-		g_autoptr(GPtrArray) doomed = g_ptr_array_new();
+		/* REFERENCED, like the identical loop in invalidate_foreign_sessions():
+		 * invalidating one session runs signal handlers and can close another,
+		 * and a list of borrowed pointers into a table that is being modified
+		 * is a bug waiting for the first deployment that has two grants on one
+		 * card. */
+		g_autoptr(GPtrArray) doomed = g_ptr_array_new_with_free_func(g_object_unref);
 
 		g_hash_table_iter_init(&iter, impl->sessions);
 		while (g_hash_table_iter_next(&iter, NULL, &value))
@@ -1410,7 +1551,7 @@ static void on_token_event(CertificateToken* token, gboolean added, gpointer use
 
 			if (session->candidate != NULL &&
 			    certificate_token_same(session->candidate->token, token))
-				g_ptr_array_add(doomed, session);
+				g_ptr_array_add(doomed, g_object_ref(session));
 		}
 
 		/* Invalidated but NOT removed from the table: the frontend answers
@@ -1440,6 +1581,7 @@ CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTo
 	impl->connection = g_object_ref(connection);
 	impl->tokens = tokens;
 	impl->sessions = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
+	impl->transactions = g_ptr_array_new();
 	impl->skeleton = XDP_IMPL_EXPERIMENTAL_CERTIFICATE(
 	    xdp_impl_experimental_certificate_skeleton_new());
 
@@ -1494,6 +1636,10 @@ void certificate_impl_shutdown(CertificateImpl* impl)
 
 	close_and_forget_all(impl, NULL);
 
+	/* Anything still on screen is asking a question nobody is left to receive
+	 * the answer to. */
+	cancel_transactions(impl, NULL, "backend_gone");
+
 	certificate_tokens_stop_watch(impl->tokens);
 }
 
@@ -1509,6 +1655,7 @@ void certificate_impl_free(CertificateImpl* impl)
 		certificate_impl_singleton = NULL;
 
 	g_clear_pointer(&impl->sessions, g_hash_table_unref);
+	g_clear_pointer(&impl->transactions, g_ptr_array_unref);
 	g_clear_pointer(&impl->frontend_owner, g_free);
 	g_clear_object(&impl->skeleton);
 	g_clear_object(&impl->connection);

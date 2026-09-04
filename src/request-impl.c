@@ -40,7 +40,14 @@ G_DEFINE_FINAL_TYPE_WITH_CODE(CertificateImplRequest, certificate_impl_request,
 static gboolean certificate_impl_request_handle_close(XdpImplRequest* object,
                                                       GDBusMethodInvocation* invocation)
 {
-	CertificateImplRequest* request = CERTIFICATE_IMPL_REQUEST(object);
+	/* THE REFERENCE COMES FIRST, before the authorisation check, for the reason
+	 * session-impl.c's handle_close() takes one: resolving who owns the
+	 * frontend name can discover that it has changed hands, and the first thing
+	 * that discovery does is cancel every transaction the previous owner
+	 * created -- which is the one holding the other reference to this Request.
+	 * The unexport below drops the export's reference too, and the invocation
+	 * is completed after it. */
+	g_autoptr(CertificateImplRequest) request = g_object_ref(CERTIFICATE_IMPL_REQUEST(object));
 
 	/* CLOSE IS AUTHORISED LIKE EVERY OTHER METHOD. A request path is
 	 * /org/freedesktop/portal/desktop/request/<sender>/<handle_token> and the
