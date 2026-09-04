@@ -1,0 +1,316 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * xdg-desktop-portal-certificate
+ * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
+ *
+ * The mechanism mapping and its parameter validation. The frontend cannot do
+ * these checks: it does not know the modulus size, so it cannot know that a
+ * salt does not fit.
+ */
+
+#include <glib.h>
+#include <string.h>
+
+#include "broker/mechanism.h"
+
+static GVariant* params(const char* text)
+{
+	GVariant* value = g_variant_parse(G_VARIANT_TYPE_VARDICT, text, NULL, NULL, NULL);
+
+	g_assert_nonnull(value);
+	return value;
+}
+
+static void test_rsa_pkcs1_maps_and_wraps(void)
+{
+	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+	guint8 digest[32];
+	g_autoptr(GBytes) data = NULL;
+	g_autoptr(GBytes) prepared = NULL;
+	gsize size = 0;
+	const guint8* bytes = NULL;
+	static const guint8 sha256_prefix[] = { 0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60,
+		                                    0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+		                                    0x01, 0x05, 0x00, 0x04, 0x20 };
+
+	g_assert_true(certificate_mechanism_parse("RSA_PKCS1_V1_5", parameters, "RSA", 2048, FALSE,
+	                                          &mechanism, &error));
+	g_assert_no_error(error);
+	g_assert_cmpuint(mechanism.type, ==, CKM_RSA_PKCS);
+
+	memset(digest, 0xab, sizeof(digest));
+	data = g_bytes_new(digest, sizeof(digest));
+
+	/* THE DIGESTINFO IS BUILT HERE. The caller supplies the bare digest and
+	 * never a DigestInfo, which is what makes "data is always the digest" a
+	 * rule rather than a convention. */
+	prepared = certificate_mechanism_prepare(&mechanism, data, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(prepared);
+
+	bytes = g_bytes_get_data(prepared, &size);
+	g_assert_cmpuint(size, ==, sizeof(sha256_prefix) + sizeof(digest));
+	g_assert_cmpint(memcmp(bytes, sha256_prefix, sizeof(sha256_prefix)), ==, 0);
+	g_assert_cmpint(memcmp(bytes + sizeof(sha256_prefix), digest, sizeof(digest)), ==, 0);
+
+	certificate_mechanism_clear(&mechanism);
+}
+
+/* A digest that is not the length the named hash produces is refused. Signing
+ * an arbitrary blob under a raw mechanism is a signing oracle, and a much larger
+ * thing to consent to than a signature over a digest of known length. */
+static void test_wrong_digest_length_is_refused(void)
+{
+	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+	guint8 digest[20];
+	g_autoptr(GBytes) data = NULL;
+	GBytes* prepared = NULL;
+
+	g_assert_true(certificate_mechanism_parse("RSA_PKCS1_V1_5", parameters, "RSA", 2048, FALSE,
+	                                          &mechanism, &error));
+
+	memset(digest, 0, sizeof(digest));
+	data = g_bytes_new(digest, sizeof(digest));
+
+	prepared = certificate_mechanism_prepare(&mechanism, data, &error);
+	g_assert_null(prepared);
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+
+	certificate_mechanism_clear(&mechanism);
+}
+
+/* `hash` is REQUIRED. Without it there is no way to know what the bytes are, and
+ * guessing from their length is how a SHA-256 digest becomes a SHA3-256 one. */
+static void test_hash_is_required(void)
+{
+	g_autoptr(GVariant) parameters = params("{}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+
+	g_assert_false(certificate_mechanism_parse("RSA_PKCS1_V1_5", parameters, "RSA", 2048, FALSE,
+	                                           &mechanism, &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+}
+
+static void test_mechanism_must_match_the_key(void)
+{
+	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) rsa_on_ec = NULL;
+	g_autoptr(GError) ecdsa_on_rsa = NULL;
+
+	g_assert_false(certificate_mechanism_parse("RSA_PKCS1_V1_5", parameters, "EC", 256, FALSE,
+	                                           &mechanism, &rsa_on_ec));
+	g_assert_error(rsa_on_ec, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+
+	g_assert_false(certificate_mechanism_parse("ECDSA", parameters, "RSA", 2048, FALSE, &mechanism,
+	                                           &ecdsa_on_rsa));
+	g_assert_error(ecdsa_on_rsa, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+}
+
+static void test_unknown_mechanism_and_hash(void)
+{
+	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
+	g_autoptr(GVariant) bad_hash = params("{'hash': <'MD5'>}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) unknown = NULL;
+	g_autoptr(GError) hash_error = NULL;
+
+	g_assert_false(certificate_mechanism_parse("RSA_RAW", parameters, "RSA", 2048, FALSE,
+	                                           &mechanism, &unknown));
+	g_assert_error(unknown, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+
+	g_assert_false(certificate_mechanism_parse("RSA_PSS", bad_hash, "RSA", 2048, FALSE, &mechanism,
+	                                           &hash_error));
+	g_assert_error(hash_error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+}
+
+static void test_pss_defaults_and_limits(void)
+{
+	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
+	g_autoptr(GVariant) big_salt = params("{'hash': <'SHA512'>, 'salt_length': <uint32 200>}");
+	g_autoptr(GVariant) explicit_mgf = params("{'hash': <'SHA256'>, 'mgf': <'MGF1-SHA1'>}");
+	g_autoptr(GVariant) bad_mgf = params("{'hash': <'SHA256'>, 'mgf': <'MGF2'>}");
+	g_autoptr(GVariant) bad_salt_type = params("{'hash': <'SHA256'>, 'salt_length': <'32'>}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GError) too_big = NULL;
+	g_autoptr(GError) mgf_error = NULL;
+	g_autoptr(GError) salt_error = NULL;
+
+	/* Default salt length is the hash length, and MGF1 over the same hash. */
+	g_assert_true(
+	    certificate_mechanism_parse("RSA_PSS", parameters, "RSA", 2048, FALSE, &mechanism, &error));
+	g_assert_no_error(error);
+	g_assert_cmpuint(mechanism.type, ==, CKM_RSA_PKCS_PSS);
+	g_assert_true(mechanism.has_pss);
+	g_assert_cmpuint(mechanism.pss.hashAlg, ==, CKM_SHA256);
+	g_assert_cmpuint(mechanism.pss.mgf, ==, CKG_MGF1_SHA256);
+	g_assert_cmpuint(mechanism.pss.sLen, ==, 32);
+	certificate_mechanism_clear(&mechanism);
+
+	/* RFC 8017 9.1.1 step 3: emLen >= hLen + sLen + 2. A 1024-bit key holds
+	 * 128 bytes; 64 + 200 + 2 does not fit. THE FRONTEND CANNOT CHECK THIS. */
+	g_assert_false(certificate_mechanism_parse("RSA_PSS", big_salt, "RSA", 1024, FALSE, &mechanism,
+	                                           &too_big));
+	g_assert_error(too_big, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+
+	g_assert_true(certificate_mechanism_parse("RSA_PSS", explicit_mgf, "RSA", 2048, FALSE,
+	                                          &mechanism, &error));
+	g_assert_cmpuint(mechanism.pss.mgf, ==, CKG_MGF1_SHA1);
+	certificate_mechanism_clear(&mechanism);
+
+	/* An MGF this backend does not know is refused, not forwarded: pParameter
+	 * goes straight into the module. */
+	g_assert_false(certificate_mechanism_parse("RSA_PSS", bad_mgf, "RSA", 2048, FALSE, &mechanism,
+	                                           &mgf_error));
+	g_assert_error(mgf_error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+
+	g_assert_false(certificate_mechanism_parse("RSA_PSS", bad_salt_type, "RSA", 2048, FALSE,
+	                                           &mechanism, &salt_error));
+	g_assert_error(salt_error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+}
+
+static void test_rsa_key_too_small(void)
+{
+	g_autoptr(GVariant) parameters = params("{'hash': <'SHA512'>}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+
+	/* 512 bits is 64 bytes; a SHA-512 DigestInfo plus the digest plus the
+	 * minimum padding does not fit. */
+	g_assert_false(certificate_mechanism_parse("RSA_PKCS1_V1_5", parameters, "RSA", 512, FALSE,
+	                                           &mechanism, &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+}
+
+static void test_ecdsa_passes_the_digest_through(void)
+{
+	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+	guint8 digest[32];
+	g_autoptr(GBytes) data = NULL;
+	g_autoptr(GBytes) prepared = NULL;
+
+	g_assert_true(
+	    certificate_mechanism_parse("ECDSA", parameters, "EC", 256, FALSE, &mechanism, &error));
+	g_assert_cmpuint(mechanism.type, ==, CKM_ECDSA);
+	g_assert_cmpint(mechanism.encoding, ==, CERTIFICATE_SIGNATURE_RAW);
+
+	memset(digest, 0x5a, sizeof(digest));
+	data = g_bytes_new(digest, sizeof(digest));
+	prepared = certificate_mechanism_prepare(&mechanism, data, &error);
+
+	g_assert_no_error(error);
+	g_assert_cmpuint(g_bytes_get_size(prepared), ==, sizeof(digest));
+	g_assert_cmpint(
+	    memcmp(g_bytes_get_data(prepared, NULL), digest, sizeof(digest)), ==, 0);
+
+	certificate_mechanism_clear(&mechanism);
+}
+
+static void test_signature_encoding_option(void)
+{
+	g_autoptr(GVariant) der = params("{'hash': <'SHA256'>, 'signature_encoding': <'der'>}");
+	g_autoptr(GVariant) bad = params("{'hash': <'SHA256'>, 'signature_encoding': <'pem'>}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GError) bad_error = NULL;
+
+	g_assert_true(certificate_mechanism_parse("ECDSA", der, "EC", 256, FALSE, &mechanism, &error));
+	g_assert_cmpint(mechanism.encoding, ==, CERTIFICATE_SIGNATURE_DER);
+	certificate_mechanism_clear(&mechanism);
+
+	g_assert_false(
+	    certificate_mechanism_parse("ECDSA", bad, "EC", 256, FALSE, &mechanism, &bad_error));
+	g_assert_error(bad_error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+}
+
+static void test_decrypt_vocabulary(void)
+{
+	g_autoptr(GVariant) parameters = params("{}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GError) refused = NULL;
+
+	/* Of the frontend's three mechanisms exactly one decrypts anything. Naming a
+	 * signature mechanism in a Decrypt call is refused, not reinterpreted. */
+	g_assert_true(certificate_mechanism_parse("RSA_PKCS1_V1_5", parameters, "RSA", 2048, TRUE,
+	                                          &mechanism, &error));
+	g_assert_cmpuint(mechanism.type, ==, CKM_RSA_PKCS);
+	g_assert_cmpint(mechanism.hash, ==, CERTIFICATE_HASH_NONE);
+	certificate_mechanism_clear(&mechanism);
+
+	g_assert_false(certificate_mechanism_parse("RSA_PSS", parameters, "RSA", 2048, TRUE,
+	                                           &mechanism, &refused));
+	g_assert_error(refused, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+}
+
+static void test_ecdsa_raw_to_der(void)
+{
+	g_autoptr(GError) error = NULL;
+	/* r has its top bit set, so DER has to prepend a zero byte; s does not. */
+	static const guint8 raw[] = { 0xf0, 0x01, 0x02, 0x03, 0x11, 0x22, 0x33, 0x44 };
+	static const guint8 expected[] = { 0x30, 0x0d, 0x02, 0x05, 0x00, 0xf0, 0x01,
+		                               0x02, 0x03, 0x02, 0x04, 0x11, 0x22, 0x33, 0x44 };
+	g_autoptr(GBytes) der = certificate_ecdsa_raw_to_der(raw, sizeof(raw), &error);
+	g_autoptr(GBytes) odd = NULL;
+	g_autoptr(GError) odd_error = NULL;
+	static const guint8 leading_zero[] = { 0x00, 0x01, 0x00, 0x02 };
+	static const guint8 leading_zero_der[] = { 0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02 };
+	g_autoptr(GBytes) stripped = NULL;
+
+	g_assert_no_error(error);
+	g_assert_cmpuint(g_bytes_get_size(der), ==, sizeof(expected));
+	g_assert_cmpint(memcmp(g_bytes_get_data(der, NULL), expected, sizeof(expected)), ==, 0);
+
+	/* Leading zeroes are stripped, because a DER integer is not a fixed-width
+	 * field. */
+	stripped = certificate_ecdsa_raw_to_der(leading_zero, sizeof(leading_zero), &error);
+	g_assert_no_error(error);
+	g_assert_cmpuint(g_bytes_get_size(stripped), ==, sizeof(leading_zero_der));
+	g_assert_cmpint(
+	    memcmp(g_bytes_get_data(stripped, NULL), leading_zero_der, sizeof(leading_zero_der)), ==,
+	    0);
+
+	odd = certificate_ecdsa_raw_to_der(raw, 7, &odd_error);
+	g_assert_null(odd);
+	g_assert_error(odd_error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+}
+
+static void test_hash_spellings(void)
+{
+	CertificateHash hash;
+
+	g_assert_true(certificate_hash_parse("SHA256", &hash));
+	g_assert_cmpint(hash, ==, CERTIFICATE_HASH_SHA256);
+	g_assert_true(certificate_hash_parse("sha-256", &hash));
+	g_assert_cmpint(hash, ==, CERTIFICATE_HASH_SHA256);
+	g_assert_cmpuint(certificate_hash_length(CERTIFICATE_HASH_SHA384), ==, 48);
+	g_assert_false(certificate_hash_parse("SHA3-256", &hash));
+}
+
+int main(int argc, char** argv)
+{
+	g_test_init(&argc, &argv, NULL);
+
+	g_test_add_func("/mechanism/rsa-pkcs1-maps-and-wraps", test_rsa_pkcs1_maps_and_wraps);
+	g_test_add_func("/mechanism/wrong-digest-length", test_wrong_digest_length_is_refused);
+	g_test_add_func("/mechanism/hash-is-required", test_hash_is_required);
+	g_test_add_func("/mechanism/must-match-the-key", test_mechanism_must_match_the_key);
+	g_test_add_func("/mechanism/unknown", test_unknown_mechanism_and_hash);
+	g_test_add_func("/mechanism/pss-defaults-and-limits", test_pss_defaults_and_limits);
+	g_test_add_func("/mechanism/rsa-key-too-small", test_rsa_key_too_small);
+	g_test_add_func("/mechanism/ecdsa-digest-passthrough", test_ecdsa_passes_the_digest_through);
+	g_test_add_func("/mechanism/signature-encoding", test_signature_encoding_option);
+	g_test_add_func("/mechanism/decrypt-vocabulary", test_decrypt_vocabulary);
+	g_test_add_func("/mechanism/ecdsa-raw-to-der", test_ecdsa_raw_to_der);
+	g_test_add_func("/mechanism/hash-spellings", test_hash_spellings);
+
+	return g_test_run();
+}
