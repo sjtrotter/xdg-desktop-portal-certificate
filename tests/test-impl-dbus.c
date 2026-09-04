@@ -592,6 +592,120 @@ static void test_capabilities(Fixture* fixture, gconstpointer user_data)
 	g_assert_false(g_strv_contains((const char* const*) operations, "decrypt"));
 }
 
+/* THE NAME CHANGES HANDS AND THE OLD OWNER IS STILL CONNECTED. This is the
+ * race the cached-owner check could not see: D-Bus does not order
+ * NameOwnerChanged against the messages of the process that lost the name, so
+ * the former frontend -- which is still on the bus, and in this test still
+ * holding its connection open -- must be refused as soon as somebody else owns
+ * the name, whether or not this process has processed the change yet. */
+static void test_replaced_frontend_is_refused(Fixture* fixture, gconstpointer user_data)
+{
+	g_autoptr(GDBusConnection) successor = open_connection(fixture->bus);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GVariant) reply = NULL;
+	gboolean acquired = FALSE;
+	guint owner_id;
+
+	/* The original owner works. */
+	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
+
+	/* The fixture took the name with NONE, so it cannot be replaced; take it
+	 * again from this connection with ALLOW_REPLACEMENT so the successor can. */
+	g_bus_unown_name(fixture->owner_id);
+	fixture->owner_id = g_bus_own_name_on_connection(
+	    fixture->frontend, FRONTEND_NAME, G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT,
+	    on_name_acquired, NULL, &acquired, NULL);
+	while (!acquired)
+		g_main_context_iteration(NULL, TRUE);
+
+	acquired = FALSE;
+	owner_id = g_bus_own_name_on_connection(successor, FRONTEND_NAME,
+	                                        G_BUS_NAME_OWNER_FLAGS_REPLACE, on_name_acquired,
+	                                        NULL, &acquired, NULL);
+	while (!acquired)
+		g_main_context_iteration(NULL, TRUE);
+
+	/* The old owner's connection is still open and it is no longer the
+	 * frontend. */
+	reply = impl_call(fixture->frontend, "CreateSession",
+	                  g_variant_new("(oos@a{sv})", REQUEST_PATH,
+	                                "/org/freedesktop/portal/desktop/session/test/two", APP_A,
+	                                empty_options()),
+	                  &error);
+	g_assert_null(reply);
+	g_assert_error(error, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED);
+	g_clear_error(&error);
+
+	/* And the successor is. */
+	reply = impl_call(successor, "GetCapabilities",
+	                  g_variant_new("(s@a{sv})", APP_A, empty_options()), &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(reply);
+
+	/* The old owner's session went with it: the successor cannot use it, and
+	 * neither can anybody. */
+	{
+		guint32 response = 0;
+		g_autofree char* code = NULL;
+		g_autoptr(GVariant) options = acquire_options(NULL);
+		g_autoptr(GError) call_error = NULL;
+		g_autoptr(GVariant) answer =
+		    impl_call(successor, "AcquireCredential",
+		              g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "",
+		                            g_steal_pointer(&options)),
+		              &call_error);
+		g_autoptr(GVariant) results = NULL;
+
+		g_assert_no_error(call_error);
+		g_variant_get(answer, "(u@a{sv})", &response, &results);
+		g_variant_lookup(results, "error", "s", &code);
+		g_assert_cmpuint(response, ==, 2);
+		g_assert_cmpstr(code, ==, "no_such_session");
+	}
+
+	g_bus_unown_name(owner_id);
+}
+
+/* Request.Close() while the call is genuinely in flight. What is asserted is
+ * the invariant, not the timing: the pending AcquireCredential is answered
+ * exactly once, and never with success. */
+static void test_close_mid_flight(Fixture* fixture, gconstpointer user_data)
+{
+	Call call = { NULL, NULL, FALSE };
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GVariant) closed = NULL;
+	g_autoptr(GVariant) results = NULL;
+	guint32 response = 0;
+
+	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
+
+	g_dbus_connection_call(fixture->frontend, backend_name, IMPL_PATH, IMPL_INTERFACE,
+	                       "AcquireCredential",
+	                       g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "",
+	                                     acquire_options(NULL)),
+	                       NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, on_call_done, &call);
+
+	/* One turn of the loop, so the method handler has run and exported the
+	 * Request, and discovery is on its worker. */
+	g_main_context_iteration(NULL, TRUE);
+
+	closed = call_sync(fixture->frontend, REQUEST_PATH, "org.freedesktop.impl.portal.Request",
+	                   "Close", NULL, &error);
+	/* Either the Request was still exported and answered, or discovery had
+	 * already finished and taken it down. Never AccessDenied. */
+	if (error != NULL)
+		g_assert_false(g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED));
+	g_clear_error(&error);
+
+	while (!call.done)
+		g_main_context_iteration(NULL, TRUE);
+
+	g_assert_no_error(call.error);
+	g_variant_get(call.reply, "(u@a{sv})", &response, &results);
+	g_assert_cmpuint(response, !=, 0);
+	g_variant_unref(call.reply);
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -610,6 +724,8 @@ int main(int argc, char** argv)
 	ADD("/impl/sign-without-grant", test_sign_without_grant);
 	ADD("/impl/decrypt-is-refused", test_decrypt_is_refused);
 	ADD("/impl/capabilities", test_capabilities);
+	ADD("/impl/replaced-frontend-is-refused", test_replaced_frontend_is_refused);
+	ADD("/impl/close-mid-flight", test_close_mid_flight);
 
 #undef ADD
 
