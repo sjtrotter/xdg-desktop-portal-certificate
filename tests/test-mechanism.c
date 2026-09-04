@@ -231,24 +231,40 @@ static void test_signature_encoding_option(void)
 	g_assert_error(bad_error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
 }
 
-static void test_decrypt_vocabulary(void)
+/* THERE IS NO DECRYPTION VOCABULARY, and that is the point. The interface's
+ * three mechanisms are RSA_PKCS1_V1_5, RSA_PSS and ECDSA; the only one that
+ * decrypts anything is v1.5, and answering "padding valid" or "padding invalid"
+ * for a card key over D-Bus is a Bleichenbacher oracle -- the same capability
+ * the digest-only Sign policy exists to withhold, through a different door.
+ * Every spelling is refused until the interface grows OAEP. */
+static void test_decrypt_is_refused(void)
 {
 	g_autoptr(GVariant) parameters = params("{}");
 	CertificateMechanism mechanism;
+	static const char* const names[] = { "RSA_PKCS1_V1_5", "RSA_PSS", "ECDSA", "RSA_OAEP",
+		                                 NULL };
+
+	for (gsize i = 0; names[i] != NULL; i++)
+	{
+		g_autoptr(GError) refused = NULL;
+
+		g_assert_false(certificate_mechanism_parse(names[i], parameters, "RSA", 2048, TRUE,
+		                                           &mechanism, &refused));
+		g_assert_error(refused, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+	}
+}
+
+/* An unknown parameter is refused rather than ignored: a caller that spelled
+ * `salt_len` and got the default salt length would have been told nothing. */
+static void test_unknown_parameter(void)
+{
+	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>, 'salt_len': <uint32 8>}");
+	CertificateMechanism mechanism;
 	g_autoptr(GError) error = NULL;
-	g_autoptr(GError) refused = NULL;
 
-	/* Of the frontend's three mechanisms exactly one decrypts anything. Naming a
-	 * signature mechanism in a Decrypt call is refused, not reinterpreted. */
-	g_assert_true(certificate_mechanism_parse("RSA_PKCS1_V1_5", parameters, "RSA", 2048, TRUE,
-	                                          &mechanism, &error));
-	g_assert_cmpuint(mechanism.type, ==, CKM_RSA_PKCS);
-	g_assert_cmpint(mechanism.hash, ==, CERTIFICATE_HASH_NONE);
-	certificate_mechanism_clear(&mechanism);
-
-	g_assert_false(certificate_mechanism_parse("RSA_PSS", parameters, "RSA", 2048, TRUE,
-	                                           &mechanism, &refused));
-	g_assert_error(refused, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+	g_assert_false(certificate_mechanism_parse("RSA_PSS", parameters, "RSA", 2048, FALSE,
+	                                           &mechanism, &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
 }
 
 static void test_ecdsa_raw_to_der(void)
@@ -308,7 +324,8 @@ int main(int argc, char** argv)
 	g_test_add_func("/mechanism/rsa-key-too-small", test_rsa_key_too_small);
 	g_test_add_func("/mechanism/ecdsa-digest-passthrough", test_ecdsa_passes_the_digest_through);
 	g_test_add_func("/mechanism/signature-encoding", test_signature_encoding_option);
-	g_test_add_func("/mechanism/decrypt-vocabulary", test_decrypt_vocabulary);
+	g_test_add_func("/mechanism/decrypt-is-refused", test_decrypt_is_refused);
+	g_test_add_func("/mechanism/unknown-parameter", test_unknown_parameter);
 	g_test_add_func("/mechanism/ecdsa-raw-to-der", test_ecdsa_raw_to_der);
 	g_test_add_func("/mechanism/hash-spellings", test_hash_spellings);
 

@@ -157,6 +157,33 @@ static gboolean parse_hash(GVariant* parameters, CertificateHash* out, GError** 
 	return TRUE;
 }
 
+/* An unknown key in `parameters` is refused rather than ignored. The four
+ * below are the whole vocabulary; anything else is either a caller expecting a
+ * constraint this backend does not apply, or a caller probing for one. */
+static gboolean parameters_are_known(GVariant* parameters, GError** error)
+{
+	static const char* const known[] = { "hash", "mgf", "salt_length", "signature_encoding",
+		                                 NULL };
+	GVariantIter iter;
+	const char* key = NULL;
+
+	if (parameters == NULL)
+		return TRUE;
+
+	g_variant_iter_init(&iter, parameters);
+	while (g_variant_iter_next(&iter, "{&sv}", &key, NULL))
+	{
+		if (g_strv_contains(known, key))
+			continue;
+
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+		            "Unknown parameter '%s'", key);
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
 gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, const char* key_type,
                                      guint key_size, gboolean for_decrypt,
                                      CertificateMechanism* out, GError** error)
@@ -170,30 +197,40 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		return FALSE;
 	}
 
+	if (!parameters_are_known(parameters, error))
+		return FALSE;
+
 	if (for_decrypt)
 	{
-		/* The frontend's allow list is RSA_PKCS1_V1_5, RSA_PSS and ECDSA. Of
-		 * those, exactly one decrypts anything. Naming a signature mechanism in
-		 * a Decrypt call is refused rather than reinterpreted. */
-		if (g_strcmp0(name, "RSA_PKCS1_V1_5") != 0)
-		{
-			g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-			            "'%s' is not a decryption mechanism", name);
-			return FALSE;
-		}
-
-		if (g_strcmp0(key_type, "RSA") != 0)
-		{
-			g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-			                    "RSA_PKCS1_V1_5 decryption needs an RSA key");
-			return FALSE;
-		}
-
-		out->name = g_strdup(name);
-		out->type = CKM_RSA_PKCS;
-		out->hash = CERTIFICATE_HASH_NONE;
-		out->encoding = CERTIFICATE_SIGNATURE_RAW;
-		return TRUE;
+		/* THERE IS NO DECRYPTION MECHANISM ON THIS INTERFACE, so there is no
+		 * decryption. The frontend's allow list is RSA_PKCS1_V1_5, RSA_PSS and
+		 * ECDSA; the only one of those that decrypts anything is PKCS#1 v1.5,
+		 * and a v1.5 decryption oracle is a worse capability than the signing
+		 * oracle every other rule in this file exists to prevent.
+		 *
+		 * WHY IT IS AN ORACLE. C_Decrypt answers "padding valid, here is the
+		 * plaintext" or "that failed", and those two answers are
+		 * distinguishable on the wire. Repeated against a key the user
+		 * consented to once, that is Bleichenbacher's attack: it recovers
+		 * plaintext and can forge a signature with the same key, for as long as
+		 * the grant lasts, with no further consent and no rate limit on either
+		 * side of the boundary. Sign is carefully constrained to a digest of a
+		 * named length precisely so that it cannot be used that way; letting
+		 * Decrypt hand over the equivalent capability through a different door
+		 * would make that constraint decorative.
+		 *
+		 * WHAT WOULD MAKE DECRYPTION POSSIBLE: an RSA_OAEP entry in the
+		 * interface's mechanism vocabulary, with a hash, an MGF and a label
+		 * this backend validates the way it validates the PSS parameters. That
+		 * is a frontend change; docs/IMPL-INTERFACE.md records it as the
+		 * condition. Until then Decrypt is refused honestly rather than
+		 * implemented dangerously. */
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+		            "This backend does not decrypt: '%s' would be an RSA PKCS#1 v1.5 padding "
+		            "oracle over the card's key, and the interface has no OAEP mechanism to "
+		            "offer instead",
+		            name);
+		return FALSE;
 	}
 
 	if (!parse_encoding(parameters, &out->encoding, error))
@@ -439,13 +476,22 @@ GBytes* certificate_ecdsa_raw_to_der(const guint8* raw, gsize length, GError** e
 
 		g_byte_array_append(out, header, 1);
 	}
-	else
+	else if (body->len <= 0xff)
 	{
-		/* A P-521 signature body is over 127 bytes, so the long form is
-		 * reachable with the curves this backend supports. */
+		/* A P-521 signature body is over 127 bytes, so the one-byte long form
+		 * is reachable with the curves this backend supports. */
 		guint8 header[2] = { 0x81, (guint8) body->len };
 
 		g_byte_array_append(out, header, 2);
+	}
+	else
+	{
+		/* Not reachable with any curve in use, but truncating a length into a
+		 * guint8 here would silently produce malformed DER the first time a
+		 * module returned an oversized raw signature. */
+		guint8 header[3] = { 0x82, (guint8) (body->len >> 8), (guint8) (body->len & 0xff) };
+
+		g_byte_array_append(out, header, 3);
 	}
 
 	g_byte_array_append(out, body->data, body->len);

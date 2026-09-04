@@ -30,7 +30,13 @@ typedef enum
 	CERTIFICATE_PKCS11_ERROR_PIN_LOCKED,
 	CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
 	CERTIFICATE_PKCS11_ERROR_CANCELLED,
-	CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED
+	CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED,
+	/* The token is present and the session is open, but the private key object
+	 * for this certificate cannot be seen even after logging in. Distinct from
+	 * TOKEN_REMOVED, which used to carry it: reporting a card that is sitting
+	 * in the reader as removed made the backend emit
+	 * SessionInvalidated("token_removed") about healthy hardware. */
+	CERTIFICATE_PKCS11_ERROR_NO_PRIVATE_KEY
 } CertificatePkcs11ErrorCode;
 
 /** Turn @rv into a GError. The message is p11_kit_strerror()'s, already passed

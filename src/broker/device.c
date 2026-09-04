@@ -98,10 +98,22 @@ GBytes* certificate_device_perform(CertificateDevice* device, gboolean decrypt,
 	CK_ULONG length = 0;
 	CK_RV rv;
 
-	if (device->module == NULL || device->private_key == CK_INVALID_HANDLE)
+	if (device->module == NULL)
 	{
 		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR,
 		                    CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
+		                    "The security token is no longer present");
+		return NULL;
+	}
+
+	if (device->private_key == CK_INVALID_HANDLE)
+	{
+		/* NOT "token removed". The card is in the reader; what is missing is a
+		 * private key object for this certificate, which is a different thing
+		 * to tell a user and must not invalidate the grant as though the
+		 * hardware had gone. */
+		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR,
+		                    CERTIFICATE_PKCS11_ERROR_NO_PRIVATE_KEY,
 		                    "No private key is available on this token");
 		return NULL;
 	}
