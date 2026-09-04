@@ -39,6 +39,17 @@ $ meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
 $ meson test -C build-asan
 ```
 
+**If every suite exits 127**, the sanitizer runtime is missing rather than the tests being broken:
+`ldd build-asan/tests/test-mechanism` says `libasan.so.8 => not found`. It ships in `libasan` /
+`libubsan`, which do not have to be installed system wide either — unpack them beside everything
+else and point the loader at them, which wins over the binary's own `RUNPATH`:
+
+```console
+$ dnf download --arch=x86_64 libasan libubsan
+$ mkdir -p ~/scratch/asan-rt && cd ~/scratch/asan-rt && for f in ../*.rpm; do rpm2cpio "$f" | cpio -idmu; done
+$ LD_LIBRARY_PATH=~/scratch/asan-rt/usr/lib64 meson test -C build-asan
+```
+
 `tests/lsan.supp` suppresses the one-time allocations GTK, GnuTLS and p11-kit keep for the life of
 the process. **Nothing under `src/` is suppressed**: a leak reported against this backend's own
 code is a defect.
@@ -168,15 +179,30 @@ Then the whole thing including the windows, in a headless X server:
 $ tools/ui-smoke.sh                                        # RSA
 $ tools/ui-smoke.sh --key-algorithm EC                     # ECDSA, raw r||s
 $ tools/ui-smoke.sh --key-algorithm EC --der               # ECDSA, DER
+$ tools/ui-smoke.sh -- --decrypt --oaep-hash SHA1          # and the OAEP round trip
 ```
+
+`--decrypt` asks for a grant that may decrypt, encrypts a short plaintext to the public key in the
+certificate the portal returned — with python `cryptography`, or `openssl pkeyutl` if that is not
+installed, because the ciphertext has to come from something that is not this backend — and checks
+that `Decrypt` gives the plaintext back byte for byte. `--oaep-hash SHA1` is there because
+**SoftHSM 2.x implements OAEP with SHA-1 and no label and refuses everything else** at
+`C_DecryptInit`; against a card, drop it and use `--oaep-label` too.
 
 It needs `Xvfb` and `xdotool`. Neither has to be installed system wide:
 
 ```console
 $ dnf download --arch=x86_64 --resolve xorg-x11-server-Xvfb xdotool
 $ mkdir -p ~/scratch && cd ~/scratch && for f in *.rpm; do rpm2cpio "$f" | cpio -idmu; done
-$ XVFB=~/scratch/usr/bin/Xvfb XDOTOOL=~/scratch/usr/bin/xdotool tools/ui-smoke.sh
+$ XVFB=~/scratch/usr/bin/Xvfb XDOTOOL=~/scratch/usr/bin/xdotool \
+    LD_LIBRARY_PATH=~/scratch/usr/lib64 tools/ui-smoke.sh
 ```
+
+**`LD_LIBRARY_PATH` is not optional for an unpacked `xdotool`**: it needs `libxdo.so.3`, which came
+out of the same rpm. The script searches for the window with `xdotool ... 2>/dev/null`, so a
+loader failure there looks exactly like a window that never appeared — `ui-smoke: no window titled
+'Use a Certificate'` while the backend log says `chooser-shown`. Run `xdotool search --name .`
+by hand if you see that.
 
 SoftHSM itself can be unpacked the same way and pointed at with `SOFTHSM_MODULE`.
 
