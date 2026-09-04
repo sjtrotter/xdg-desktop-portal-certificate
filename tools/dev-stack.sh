@@ -28,14 +28,23 @@
 #     tools/dev-stack.sh --live -- --purpose client_auth
 #     tools/dev-stack.sh --softhsm                # against a SoftHSM fixture token
 #     tools/dev-stack.sh --pin-prompt=gtk         # this backend draws the PIN window
+#     tools/dev-stack.sh --live --pin-prompt=system   # the shell draws it
 #
-#   WHERE THE PIN IS TYPED. --pin-prompt is passed straight to the backend.
-#   "system" needs org.gnome.keyring.SystemPrompter on the bus the backend is
-#   using, and on a PRIVATE bus there is no shell to own it -- so this script
-#   refuses --pin-prompt=system unless --live. The system prompter is covered
-#   headlessly by `meson test pin-system` and by
-#   `tools/ui-smoke.sh --pin-prompt=system`, both of which stand up gcr's own
-#   server half on their private bus; docs/TESTING.md says so in one place.
+#   WHERE THE PIN IS TYPED. --pin-prompt is passed straight to the backend, and
+#   a PRIVATE run defaults it to gtk rather than leaving it at the backend's
+#   own "auto". Auto asks the bus whether org.gnome.keyring.SystemPrompter has
+#   an owner or IS ACTIVATABLE, and dbus-run-session reads the same service
+#   directories the session bus does -- so on a machine with gnome-keyring
+#   installed, org.gnome.keyring.SystemPrompter.service activates
+#   /usr/libexec/gcr-prompter on the private bus and auto picks the system
+#   prompter there too. "No shell" is not "no prompter".
+#
+#   --pin-prompt=system is refused outside --live for the opposite reason: the
+#   prompter it would reach on a private bus is an activated gcr-prompter with
+#   no session to draw in. The system prompter is covered headlessly by
+#   `meson test pin-system` and by `tools/ui-smoke.sh --pin-prompt=system`,
+#   both of which stand up gcr's own server half on their private bus;
+#   docs/TESTING.md says so in one place.
 #
 # WHAT IT NEEDS
 #
@@ -157,16 +166,13 @@ preflight() {
 		echo "${0##*/}: the frontend cannot resolve its libraries:" >&2
 		ldd "$FRONTEND_BIN" | grep 'not found' >&2
 		echo >&2
-		echo "The branch needs libdex, which Fedora does not install by default." >&2
-		echo "Point XDP_ENV at a file that sets LD_LIBRARY_PATH for the scratch" >&2
-		echo "prefix it was built against, or put one at $REPO/.xdp-env." >&2
-		echo "docs/TESTING.md has the recipe." >&2
+		echo "set XDP_ENV to a file exporting LD_LIBRARY_PATH for libdex, or put one at $REPO/.xdp-env (docs/TESTING.md)" >&2
 		exit 40
 	fi
 }
 
 write_devdir() {
-	xdp_write_portal_dir "$DEVDIR" "$REPO"
+	xdp_write_portal_dir "$DEVDIR" "$REPO" "$MODE"
 
 	echo "${0##*/}: dev portal dir $DEVDIR"
 	echo "--- certificate.portal"
@@ -200,7 +206,7 @@ softhsm_env() {
 	# naming a module is the same act -- but a flag in the command line is what
 	# makes the difference between the rehearsal and a card run readable.
 	BACKEND_ARGS+=(--module "$(cat "$SOFTHSM_DIR/module-path")" --allow-software-tokens)
-	echo "${0##*/}: using the SoftHSM fixture in $SOFTHSM_DIR"
+	echo "${0##*/}: softhsm fixture $SOFTHSM_DIR"
 }
 
 start_stack() {
@@ -227,10 +233,13 @@ start_stack() {
 	# name this script's frontend was about to take. The development frontend
 	# quits with "Terminated because dbus name was lost", and the run fails in a
 	# way that reads like a portal configuration problem and is not one.
+	# Captured as well as shown, so that the check after start-up greps a file
+	# rather than telling the reader what to look for.
+	FRONTEND_LOG="$DEVDIR/frontend.log"
 	if [ "$MODE" = live ]; then
-		"$FRONTEND_BIN" -r -v &
+		"$FRONTEND_BIN" -r -v > >(tee "$FRONTEND_LOG") 2>&1 &
 	else
-		"$FRONTEND_BIN" -v &
+		"$FRONTEND_BIN" -v > >(tee "$FRONTEND_LOG") 2>&1 &
 	fi
 	FRONTEND_PID=$!
 
@@ -247,6 +256,28 @@ start_stack() {
 
 	xdp_wait_for_name org.freedesktop.impl.portal.desktop.certificate "$BACKEND_PID" ||
 		die "the backend never took org.freedesktop.impl.portal.desktop.certificate"
+}
+
+# Grep the captured frontend log for the two lines that say this backend was
+# found and routed to. The frontend takes a moment to print them after taking
+# its name.
+check_frontend_log() {
+	local configured="no" provided="no" i
+
+	for i in $(seq 1 20); do
+		grep -q "in configuration for org.freedesktop.impl.portal.experimental.Certificate" \
+			"$FRONTEND_LOG" 2>/dev/null && configured="yes"
+		grep -q "Providing portal org.freedesktop.portal.experimental.Certificate" \
+			"$FRONTEND_LOG" 2>/dev/null && provided="yes"
+		[ "$configured" = yes ] && [ "$provided" = yes ] && break
+		sleep 0.25
+	done
+
+	if [ "$configured" = yes ] && [ "$provided" = yes ]; then
+		echo "${0##*/}: frontend: certificate portal provided"
+	else
+		echo "${0##*/}: frontend: certificate portal MISSING (configured=$configured provided=$provided; see $FRONTEND_LOG)"
+	fi
 }
 
 stop_stack() {
@@ -269,6 +300,15 @@ inner() {
 		BACKEND_ARGS+=(--replace --allow-replacement)
 	fi
 
+	# ALWAYS EXPLICIT ON A PRIVATE BUS. The backend's own default is "auto",
+	# and auto asks the bus whether org.gnome.keyring.SystemPrompter has an
+	# owner OR IS ACTIVATABLE -- and dbus-run-session reads the same service
+	# directories the session bus does, so the installed
+	# org.gnome.keyring.SystemPrompter.service activates /usr/libexec/gcr-prompter
+	# on a private bus too. "No shell" is not "no prompter", and a private run
+	# left at auto was not testing the window it looked like it was testing.
+	[ -n "$PIN_PROMPT" ] || [ "$MODE" = live ] || PIN_PROMPT=gtk
+
 	if [ -n "$PIN_PROMPT" ]; then
 		BACKEND_ARGS+=(--pin-prompt "$PIN_PROMPT")
 	fi
@@ -276,11 +316,7 @@ inner() {
 	softhsm_env
 	start_stack
 
-	echo
-	echo "=== expected in the frontend log above:"
-	echo "===   Found 'certificate' in configuration for org.freedesktop.impl.portal.experimental.Certificate"
-	echo "===   Providing portal org.freedesktop.portal.experimental.Certificate"
-	echo
+	check_frontend_log
 
 	rc=0
 	if [ "$RUN_E2E" = 1 ]; then
@@ -292,13 +328,10 @@ inner() {
 
 	if [ "$KEEP" = 1 ]; then
 		echo
-		echo "${0##*/}: --keep: the stack is up."
+		echo "${0##*/}: --keep: stack up"
 		echo "  DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
 		echo "  XDG_DESKTOP_PORTAL_DIR=$XDG_DESKTOP_PORTAL_DIR"
-		echo "  run tools/certificate-e2e.py from another shell with that address,"
-		echo "  or gdbus introspect --session --dest org.freedesktop.portal.Desktop \\"
-		echo "      --object-path /org/freedesktop/portal/desktop"
-		echo "  Ctrl-C to tear it down."
+		echo "  Ctrl-C to tear it down"
 		wait "$FRONTEND_PID"
 	fi
 
@@ -331,15 +364,16 @@ main() {
 	write_devdir
 
 	if [ "$MODE" = live ]; then
-		echo "${0##*/}: --live: taking org.freedesktop.portal.Desktop on the REAL session bus."
-		echo "${0##*/}: the system portal returns by activation when this exits; see docs/TESTING.md."
+		echo "${0##*/}: --live: taking org.freedesktop.portal.Desktop on the real session bus"
+		echo "${0##*/}: --live: system portal returns by activation on exit (docs/TESTING.md)"
 		echo
 		trap 'fixture_remove "$DEVDIR" dev-stack' EXIT
 		DEV_STACK_INNER=1 DEVDIR="$DEVDIR" XDP_BUILD="$XDP_BUILD" BACKEND="$BACKEND" \
 			XDP_ENV="$XDP_ENV" SOFTHSM="$SOFTHSM" \
 			"${BASH_SOURCE[0]}" $([ "$KEEP" = 1 ] && echo --keep) \
 			$([ "$RUN_E2E" = 0 ] && echo --no-e2e) --live \
-			$([ "$SOFTHSM" = 1 ] && echo --softhsm) -- "${E2E_ARGS[@]}"
+			$([ "$SOFTHSM" = 1 ] && echo --softhsm) \
+			$([ -n "$PIN_PROMPT" ] && echo "--pin-prompt=$PIN_PROMPT") -- "${E2E_ARGS[@]}"
 		return $?
 	fi
 
