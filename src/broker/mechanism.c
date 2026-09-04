@@ -119,17 +119,52 @@ void certificate_mechanism_clear(CertificateMechanism* mechanism)
 	mechanism->digest_info_length = 0;
 }
 
-static gboolean parse_encoding(GVariant* parameters, CertificateSignatureEncoding* out,
-                               GError** error)
+/* PRESENT WITH THE WRONG TYPE IS AN ERROR, NEVER "ABSENT" -- the same rule the
+ * option parsing in certificate-impl.c applies, and for the same reason.
+ * g_variant_lookup(..., "&s", ...) cannot tell a missing key from one holding a
+ * uint32, so every optional string in this file goes through here: a mistyped
+ * `signature_encoding` used to mean "raw", a mistyped `mgf` used to mean "MGF1
+ * over the signature hash", and a mistyped `mgf1_hash` used to mean "no need to
+ * check it against `hash`". None of those defaults is dangerous on its own; a
+ * caller whose parameters were silently discarded rather than refused is.
+ *
+ * Returns FALSE with @error set for a present non-string. @out is left NULL for
+ * a key that is genuinely absent. */
+static gboolean lookup_string(GVariant* parameters, const char* key, GVariant** holder,
+                              const char** out, GError** error)
 {
-	const char* text = NULL;
-
-	*out = CERTIFICATE_SIGNATURE_RAW;
+	*out = NULL;
 
 	if (parameters == NULL)
 		return TRUE;
 
-	if (!g_variant_lookup(parameters, "signature_encoding", "&s", &text))
+	*holder = g_variant_lookup_value(parameters, key, NULL);
+	if (*holder == NULL)
+		return TRUE;
+
+	if (!g_variant_is_of_type(*holder, G_VARIANT_TYPE_STRING))
+	{
+		g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+		            "The '%s' parameter must be a string", key);
+		return FALSE;
+	}
+
+	*out = g_variant_get_string(*holder, NULL);
+	return TRUE;
+}
+
+static gboolean parse_encoding(GVariant* parameters, CertificateSignatureEncoding* out,
+                               GError** error)
+{
+	g_autoptr(GVariant) holder = NULL;
+	const char* text = NULL;
+
+	*out = CERTIFICATE_SIGNATURE_RAW;
+
+	if (!lookup_string(parameters, "signature_encoding", &holder, &text, error))
+		return FALSE;
+
+	if (text == NULL)
 		return TRUE;
 
 	if (g_strcmp0(text, "raw") == 0)
@@ -220,6 +255,7 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		const HashEntry* entry = NULL;
 		const char* mgf1_name = NULL;
 		CertificateHash mgf1_hash;
+		g_autoptr(GVariant) mgf1_holder = NULL;
 		g_autoptr(GVariant) label = NULL;
 
 		/* RSA_OAEP AND NOTHING ELSE, and the refusal names the reason rather
@@ -265,8 +301,10 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		 * for that on purpose, the value goes straight into the module's
 		 * mechanism parameter, and the frontend already refuses a mismatch --
 		 * so this refuses it too rather than trusting that it did. */
-		if (parameters != NULL &&
-		    g_variant_lookup(parameters, "mgf1_hash", "&s", &mgf1_name))
+		if (!lookup_string(parameters, "mgf1_hash", &mgf1_holder, &mgf1_name, error))
+			return FALSE;
+
+		if (mgf1_name != NULL)
 		{
 			if (!certificate_hash_parse(mgf1_name, &mgf1_hash))
 			{
@@ -386,6 +424,7 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		const HashEntry* entry = NULL;
 		const char* mgf_name = NULL;
 		CertificateHash mgf_hash;
+		g_autoptr(GVariant) mgf_holder = NULL;
 		guint32 salt_length = 0;
 		gsize em_length;
 
@@ -405,7 +444,10 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 
 		/* An MGF that is not MGF1-over-a-hash-this-backend-knows is refused,
 		 * not passed through: pParameter goes straight into the module. */
-		if (parameters != NULL && g_variant_lookup(parameters, "mgf", "&s", &mgf_name))
+		if (!lookup_string(parameters, "mgf", &mgf_holder, &mgf_name, error))
+			return FALSE;
+
+		if (mgf_name != NULL)
 		{
 			const char* rest = NULL;
 
@@ -448,8 +490,12 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		/* RFC 8017 9.1.1 step 3: emLen >= hLen + sLen + 2, with
 		 * emLen = ceil((modBits - 1) / 8). The frontend cannot check this: it
 		 * does not know the modulus size. */
+		/* gsize on BOTH sides. entry->length + salt_length + 2 in the operands'
+		 * own types wraps on a 32-bit build for salt_length near G_MAXUINT32,
+		 * and a wrapped sum passes the check and sends sLen = 0xFFFFFFFF into
+		 * the module. */
 		em_length = (key_size - 1 + 7) / 8;
-		if (em_length < entry->length + salt_length + 2)
+		if (em_length < (gsize) entry->length + (gsize) salt_length + 2)
 		{
 			g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
 			            "A salt of %u bytes does not fit in a %u-bit RSA-PSS signature over %s",

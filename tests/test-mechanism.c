@@ -478,6 +478,130 @@ static void test_ecdsa_raw_to_der(void)
 	g_assert_error(odd_error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
 }
 
+/* PRESENT WITH THE WRONG TYPE IS AN ERROR, NEVER "ABSENT". Every one of these
+ * used to be silently discarded and replaced by the default, because
+ * g_variant_lookup(..., "&s", ...) cannot tell a missing key from one holding a
+ * uint32. None of the defaults is dangerous by itself, which is exactly why it
+ * had to be caught by a test rather than by an incident: a caller whose
+ * parameters vanished got an answer computed from parameters it did not send. */
+static void test_mistyped_parameters_are_refused(void)
+{
+	static const struct
+	{
+		const char* name;
+		const char* parameters;
+		gboolean for_decrypt;
+	} cases[] = {
+		{ "RSA_PSS", "{'hash': <'SHA256'>, 'signature_encoding': <uint32 1>}", FALSE },
+		{ "RSA_PKCS1_V1_5", "{'hash': <'SHA256'>, 'signature_encoding': <true>}", FALSE },
+		{ "ECDSA", "{'hash': <'SHA256'>, 'signature_encoding': <b'der'>}", FALSE },
+		{ "RSA_PSS", "{'hash': <'SHA256'>, 'mgf': <true>}", FALSE },
+		{ "RSA_PSS", "{'hash': <'SHA256'>, 'mgf': <uint32 1>}", FALSE },
+		{ "RSA_OAEP", "{'hash': <'SHA256'>, 'mgf1_hash': <uint32 1>}", TRUE },
+		{ "RSA_OAEP", "{'hash': <'SHA256'>, 'mgf1_hash': <b'SHA256'>}", TRUE },
+		/* And the hash itself, which was already right and is a control. */
+		{ "RSA_PSS", "{'hash': <uint32 256>}", FALSE },
+	};
+
+	for (gsize i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		g_autoptr(GVariant) parameters = params(cases[i].parameters);
+		CertificateMechanism mechanism;
+		g_autoptr(GError) error = NULL;
+		const char* key_type = g_str_has_prefix(cases[i].name, "RSA") ? "RSA" : "EC";
+
+		if (certificate_mechanism_parse(cases[i].name, parameters, key_type, 2048,
+		                                cases[i].for_decrypt, &mechanism, &error))
+			g_error("%s %s was accepted", cases[i].name, cases[i].parameters);
+
+		g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+	}
+}
+
+/* THE SPELLING IS THE INTERFACE'S: "MGF1-<hash>", or bare "MGF1" meaning MGF1
+ * over `hash`. It is enforced only here -- the frontend passes `parameters`
+ * through with no validator for `mgf` -- so this is the only place the
+ * interface's claim about the vocabulary is checked at all. */
+static void test_pss_mgf_vocabulary(void)
+{
+	static const struct
+	{
+		const char* parameters;
+		gboolean accepted;
+	} cases[] = {
+		{ "{'hash': <'SHA256'>, 'mgf': <'MGF1'>}", TRUE },
+		{ "{'hash': <'SHA256'>, 'mgf': <'MGF1-SHA256'>}", TRUE },
+		{ "{'hash': <'SHA256'>, 'mgf': <'mgf1-sha256'>}", TRUE },
+		/* A DIFFERENT hash is permitted by PKCS#1 and accepted here: the pairing
+		 * is what goes into pParameter, and both halves come out of one table so
+		 * they cannot disagree with each other. */
+		{ "{'hash': <'SHA256'>, 'mgf': <'MGF1-SHA384'>}", TRUE },
+		/* A bare hash name is NOT the spelling. It used to be accepted, which
+		 * was leniency the interface does not describe. */
+		{ "{'hash': <'SHA256'>, 'mgf': <'SHA256'>}", FALSE },
+		{ "{'hash': <'SHA256'>, 'mgf': <'MGF1-SHA3-256'>}", FALSE },
+		{ "{'hash': <'SHA256'>, 'mgf': <'MGF2-SHA256'>}", FALSE },
+		{ "{'hash': <'SHA256'>, 'mgf': <'MGF1-'>}", FALSE },
+		{ "{'hash': <'SHA256'>, 'mgf': <''>}", FALSE },
+	};
+
+	for (gsize i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		g_autoptr(GVariant) parameters = params(cases[i].parameters);
+		CertificateMechanism mechanism;
+		g_autoptr(GError) error = NULL;
+		gboolean ok = certificate_mechanism_parse("RSA_PSS", parameters, "RSA", 2048, FALSE,
+		                                          &mechanism, &error);
+
+		if (ok != cases[i].accepted)
+			g_error("RSA_PSS %s was %s", cases[i].parameters, ok ? "accepted" : "refused");
+
+		if (ok)
+		{
+			g_assert_true(mechanism.has_pss);
+			g_assert_cmpuint(mechanism.pss.mgf, !=, 0);
+			certificate_mechanism_clear(&mechanism);
+		}
+	}
+
+	/* The pairing that reaches the module: MGF1-SHA384 over a SHA-256 signature
+	 * sets the SHA-384 mask function and leaves hashAlg alone. */
+	{
+		g_autoptr(GVariant) parameters =
+		    params("{'hash': <'SHA256'>, 'mgf': <'MGF1-SHA384'>}");
+		CertificateMechanism mechanism;
+		g_autoptr(GError) error = NULL;
+
+		g_assert_true(certificate_mechanism_parse("RSA_PSS", parameters, "RSA", 2048, FALSE,
+		                                          &mechanism, &error));
+		g_assert_cmpuint(mechanism.pss.hashAlg, ==, (guint) CKM_SHA256);
+		g_assert_cmpuint(mechanism.pss.mgf, ==, (guint) CKG_MGF1_SHA384);
+		certificate_mechanism_clear(&mechanism);
+	}
+}
+
+/* An mgf1_hash that names a different hash than `hash` is refused: the two go
+ * into one CK_RSA_PKCS_OAEP_PARAMS and the interface says they must agree. */
+static void test_oaep_mgf1_hash_must_match(void)
+{
+	g_autoptr(GVariant) mismatched =
+	    params("{'hash': <'SHA256'>, 'mgf1_hash': <'SHA1'>}");
+	g_autoptr(GVariant) matching = params("{'hash': <'SHA256'>, 'mgf1_hash': <'SHA256'>}");
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GError) ok_error = NULL;
+
+	g_assert_false(certificate_mechanism_parse("RSA_OAEP", mismatched, "RSA", 2048, TRUE,
+	                                           &mechanism, &error));
+	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
+
+	g_assert_true(certificate_mechanism_parse("RSA_OAEP", matching, "RSA", 2048, TRUE, &mechanism,
+	                                          &ok_error));
+	g_assert_cmpuint(mechanism.oaep.hashAlg, ==, (guint) CKM_SHA256);
+	g_assert_cmpuint(mechanism.oaep.mgf, ==, (guint) CKG_MGF1_SHA256);
+	certificate_mechanism_clear(&mechanism);
+}
+
 static void test_hash_spellings(void)
 {
 	CertificateHash hash;
@@ -508,6 +632,9 @@ int main(int argc, char** argv)
 	g_test_add_func("/mechanism/oaep-parameters", test_oaep_parameters);
 	g_test_add_func("/mechanism/unknown-parameter", test_unknown_parameter);
 	g_test_add_func("/mechanism/ecdsa-raw-to-der", test_ecdsa_raw_to_der);
+	g_test_add_func("/mechanism/mistyped-parameters", test_mistyped_parameters_are_refused);
+	g_test_add_func("/mechanism/pss-mgf-vocabulary", test_pss_mgf_vocabulary);
+	g_test_add_func("/mechanism/oaep-mgf1-hash-must-match", test_oaep_mgf1_hash_must_match);
 	g_test_add_func("/mechanism/hash-spellings", test_hash_spellings);
 
 	return g_test_run();
