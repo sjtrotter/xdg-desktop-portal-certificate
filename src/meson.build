@@ -28,8 +28,15 @@ certificate_core_sources = files(
   'broker/mechanism.c',
 )
 
-# The D-Bus service and its windows land in the next commit.
-certificate_service_sources = []
+certificate_service_sources = files(
+  'certificate-impl.c',
+  'request-impl.c',
+  'session-impl.c',
+  'broker/operations.c',
+  'ui/chooser.c',
+  'ui/pin.c',
+  'ui/external-window.c',
+)
 
 certificate_deps = [
   glib_dep,

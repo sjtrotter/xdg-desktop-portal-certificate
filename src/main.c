@@ -35,15 +35,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <adwaita.h>
 #include <gio/gio.h>
 #include <glib-unix.h>
+#include <gtk/gtk.h>
 
 #include "certificate.h"
+#include "certificate-impl.h"
 #include "config.h"
 #include "redact.h"
 #include "tokens/discovery.h"
 #include "tokens/filter.h"
+#include "ui/pin.h"
 
+static GMainLoop* loop = NULL;
+static CertificateImpl* impl = NULL;
 static CertificateTokens* tokens = NULL;
 
 static gboolean opt_replace = FALSE;
@@ -121,6 +127,39 @@ static const char* description =
     "  The PKCS#11 compatibility endpoint is NOT part of it: OpenPkcs11Endpoint\n"
     "  was deliberately left out of the frontend branch, because an fd-returning\n"
     "  method needs its own review.";
+
+static gboolean on_signal(gpointer user_data)
+{
+	g_debug("terminating on a signal");
+	g_main_loop_quit(loop);
+	return G_SOURCE_REMOVE;
+}
+
+static void on_bus_acquired(GDBusConnection* connection, const char* name, gpointer user_data)
+{
+	g_autoptr(GError) error = NULL;
+
+	impl = certificate_impl_new(connection, tokens, &error);
+	if (impl == NULL)
+	{
+		g_warning("Could not export the backend interface: %s", error->message);
+		g_main_loop_quit(loop);
+	}
+}
+
+static void on_name_acquired(GDBusConnection* connection, const char* name, gpointer user_data)
+{
+	g_debug("owning %s", name);
+}
+
+static void on_name_lost(GDBusConnection* connection, const char* name, gpointer user_data)
+{
+	/* Either another instance replaced this one, or the name could not be
+	 * taken. Either way this process is done: a backend that stays running
+	 * without the name is a backend holding a card session nobody can reach. */
+	g_debug("lost %s", name);
+	g_main_loop_quit(loop);
+}
 
 static int list_tokens(void)
 {
@@ -228,10 +267,9 @@ int main(int argc, char** argv)
 {
 	g_autoptr(GOptionContext) context = NULL;
 	g_autoptr(GError) error = NULL;
+	g_autoptr(GDBusConnection) connection = NULL;
+	guint owner_id = 0;
 	int status = CERTIFICATE_EXIT_SUCCESS;
-
-	(void) opt_replace;
-	(void) opt_no_activate;
 
 	setlocale(LC_ALL, "");
 
@@ -279,14 +317,70 @@ int main(int argc, char** argv)
 		return status;
 	}
 
-	/* THE SERVICE ITSELF IS NOT HERE YET. This commit is the half that needs no
-	 * display and no bus: module loading, token discovery, certificate parsing
-	 * and the purpose rules, reachable through --list-tokens so that the author
-	 * can check a card before anything is wired to xdg-desktop-portal. */
-	g_printerr("xdg-desktop-portal-certificate: the D-Bus backend is not built yet; "
-	           "try --list-tokens\n");
+	/* A display is not required to START: GetCapabilities has to answer on a
+	 * headless machine, and the honest answer there is has_display = false plus
+	 * a clean refusal of anything that would need a window. gtk_init() would
+	 * abort instead, so the check is the _check() form. */
+	if (gtk_init_check())
+	{
+		adw_init();
+		certificate_ui_set_has_display(TRUE);
+	}
+	else
+	{
+		g_message("no display: this backend will answer GetCapabilities and refuse "
+		          "anything that needs a window");
+		certificate_ui_set_has_display(FALSE);
+	}
+
+	loop = g_main_loop_new(NULL, FALSE);
+
+	connection = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
+	if (connection == NULL)
+	{
+		g_printerr("xdg-desktop-portal-certificate: no session bus: %s\n", error->message);
+		g_clear_pointer(&tokens, certificate_tokens_free);
+		return CERTIFICATE_EXIT_UNAVAILABLE;
+	}
+
+	if (opt_no_activate)
+	{
+		g_print("xdg-desktop-portal-certificate " PACKAGE_VERSION
+		        ": modules loaded, session bus reachable, display %s. "
+		        "Not requesting the bus name.\n",
+		        certificate_ui_has_display() ? "available" : "absent");
+		g_clear_pointer(&tokens, certificate_tokens_free);
+		return CERTIFICATE_EXIT_SUCCESS;
+	}
+
+	g_unix_signal_add(SIGINT, on_signal, NULL);
+	g_unix_signal_add(SIGTERM, on_signal, NULL);
+
+	/* ALLOW_REPLACEMENT is always set so that a newer instance can take over;
+	 * REPLACE only under --replace. */
+	owner_id = g_bus_own_name_on_connection(
+	    connection, CERTIFICATE_IMPL_BUS_NAME,
+	    G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT | (opt_replace ? G_BUS_NAME_OWNER_FLAGS_REPLACE : 0),
+	    on_name_acquired, on_name_lost, NULL, NULL);
+
+	on_bus_acquired(connection, CERTIFICATE_IMPL_BUS_NAME, NULL);
+
+	if (impl != NULL)
+		g_main_loop_run(loop);
+	else
+		status = CERTIFICATE_EXIT_INTERNAL;
+
+	certificate_impl_shutdown(impl);
+
+	/* The invalidations emitted above have to reach the bus before the process
+	 * goes away, or the frontend learns about the loss by timing out. */
+	g_dbus_connection_flush_sync(connection, NULL, NULL);
+
+	certificate_impl_free(impl);
+	g_bus_unown_name(owner_id);
+	g_main_loop_unref(loop);
 	g_clear_pointer(&tokens, certificate_tokens_free);
 	g_strfreev(opt_modules);
 
-	return CERTIFICATE_EXIT_INTERNAL;
+	return status;
 }

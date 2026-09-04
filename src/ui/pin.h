@@ -1,66 +1,68 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * xdg-desktop-portal-certificate
+ * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
+ */
 #ifndef CERTIFICATE_UI_PIN_H
 #define CERTIFICATE_UI_PIN_H
 
+#include <gio/gio.h>
 #include <glib.h>
 
 #include "../tokens/discovery.h"
 
 /** @file
- *  The PIN prompt. The only place in the system where a PIN is typed for a transaction.
+ *  The PIN prompt. The only place in the system where a PIN is typed for a
+ *  transaction.
  *
  *  A PIN PROMPT IS NOT CONSENT. Consent is ui/chooser.h. This window unlocks a
  *  token that consent has already authorised the use of.
  *
- *  WHEN IT APPEARS: at FIRST PRIVATE-KEY USE, not at grant time. Logging in early spends
- *  the user's presence before it is needed, and across a PKCS#11 forwarding boundary it
- *  buys nothing at all, because login state is per application and does not transfer.
- *  See docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md failure mode 3.
+ *  WHEN IT APPEARS: at FIRST PRIVATE-KEY USE, not at grant time. Logging in
+ *  early spends the user's presence before it is needed.
  *
- *  THE PIN NEVER LEAVES THIS PROCESS -- "this process" being the BACKEND, which is the
- *  only side that ever had a reason to hold one. xdg-desktop-portal cannot see a PIN
- *  because it has no window and no token session; that is not a rule it must obey, it is
- *  a thing it cannot do. Neither the public nor the impl interface has a field a PIN
- *  could travel in.
+ *  THE PIN NEVER LEAVES THIS PROCESS -- "this process" being the BACKEND, which
+ *  is the only side that ever had a reason to hold one. xdg-desktop-portal
+ *  cannot see a PIN because it has no window and no token session; that is not
+ *  a rule it must obey, it is a thing it cannot do. Neither the public nor the
+ *  impl interface has a field a PIN could travel in.
  *
- *  It never crosses D-Bus in either direction, never
- *  enters a GVariant, a GError message, a PKCS#11 URI, or a log line. NO pin-value and
- *  NO pin-source ever appears in a URI this service emits.
+ *  THERE IS NO "GET THE PIN" ENTRY POINT, on purpose. The caller hands this
+ *  module a login function and receives the OUTCOME of a login this module
+ *  performed. The PIN is never returned, never copied into a GVariant, a GError
+ *  or a log line, and never reaches the caller.
  *
- *  THE BUFFER is allocated in locked, non-swappable memory where the platform allows,
- *  and is wiped on EVERY exit path: success, failure, cancel, timeout, window destroyed,
- *  crash handler. Core dumps are disabled for the process where practical.
+ *  THE BUFFER is allocated page-aligned and mlock()ed where the platform
+ *  allows, and is wiped with explicit_bzero() on EVERY exit path: success,
+ *  failure, cancel, window destroyed, backend shutdown.
  *
- *  NOTHING PERSISTS A PIN. There is no "remember PIN", no keyring entry, no option, and
- *  no configuration key. Storing a PIN converts a two-factor credential into a
- *  one-factor one.
+ *  NOTHING PERSISTS A PIN. There is no "remember PIN", no keyring entry, no
+ *  option, and no configuration key. Storing a PIN converts a two-factor
+ *  credential into a one-factor one.
  *
- *  PROTECTED AUTHENTICATION PATH: when the token sets CKF_PROTECTED_AUTHENTICATION_PATH
- *  -- PIN pad readers, biometric tokens -- the login is made with a NULL PIN and the
- *  token or reader collects the secret itself. This module shows an INSTRUCTIONAL DIALOG
- *  WITH NO EDITABLE PIN FIELD and never receives the PIN. Emulating a PIN field for such
- *  a token would be a lie about where the secret goes.
+ *  PROTECTED AUTHENTICATION PATH: when the token sets
+ *  CKF_PROTECTED_AUTHENTICATION_PATH -- PIN pad readers, biometric tokens --
+ *  the login is made with a NULL PIN and the token or reader collects the
+ *  secret itself. This module shows an INSTRUCTIONAL WINDOW WITH NO EDITABLE
+ *  PIN FIELD and never receives the PIN.
  *
- *  RETRIES: displayed only when the token reports them RELIABLY, and NEVER INVENTED --
- *  a wrong count is worse than none. Warn before the final known attempt. Retries are
- *  USER-INITIATED ONLY; this service never retries on its own, and never after an
- *  ambiguous transport failure. Prompts for the SAME TOKEN ARE SERIALISED, so two grants
- *  cannot race two windows at the user.
+ *  RETRIES: displayed only when the token reports them RELIABLY through
+ *  CKF_USER_PIN_COUNT_LOW / CKF_USER_PIN_FINAL_TRY / CKF_USER_PIN_LOCKED, and
+ *  NEVER INVENTED -- a wrong count is worse than none, and PKCS#11 has no
+ *  portable way to ask for the number itself. Retries are USER-INITIATED ONLY.
+ *  Prompts are SERIALISED process-wide, so two grants cannot race two windows
+ *  at the user.
  *
- *  HEADLESS: NEVER READ A PIN FROM STDIN. With no display, or with interaction_mode
- *  "forbidden", the caller gets NoDisplay or InteractionRequired. A trusted agent
- *  protocol for headless use would be a separate, separately configured, separately
- *  reviewed mechanism.
+ *  HEADLESS: NEVER READ A PIN FROM STDIN. With no display the caller gets
+ *  CERTIFICATE_PIN_NO_DISPLAY.
  *
  *  WE CANNOT FORCE FORGETTING. Some tokens and middleware cache authentication
- *  internally, for a duration this service does not control. C_Logout is issued at grant
- *  end; nothing here may claim the card has forgotten.
- *
- *  Sketch only; nothing here is implemented.
+ *  internally, for a duration this service does not control. C_Logout is issued
+ *  at grant end; nothing here may claim the card has forgotten.
  */
 
-/** Distinguished deliberately. Collapsing these is how a user blocks a card while being
- *  told "authentication failed". */
+/** Distinguished deliberately. Collapsing these is how a user blocks a card
+ *  while being told "authentication failed". */
 typedef enum
 {
 	CERTIFICATE_PIN_OK,
@@ -72,23 +74,26 @@ typedef enum
 	CERTIFICATE_PIN_NO_DISPLAY
 } CertificatePinOutcome;
 
+/** Perform the login. Called ON A WORKER THREAD with the PIN this module
+ *  collected, or with NULL for a protected authentication path. The
+ *  implementation must not copy the PIN anywhere. */
+typedef gboolean (*CertificatePinLoginFunc)(const char* pin, gpointer user_data, GError** error);
+
 typedef void (*CertificatePinDone)(CertificatePinOutcome outcome, gpointer user_data);
 
-/** Prompt and log in. There is no "get the PIN" entry point on purpose: the caller never
- *  receives the PIN, only the outcome of a login this module performed. The window
- *  restates the verified caller, purpose and operation class from the chooser, and names
- *  the token being unlocked.
+/** Prompt and log in. The window restates the verified caller and the purpose
+ *  from the chooser, and names the token being unlocked.
  *
- *  The PIN field is never echoed and its contents never enter the accessibility tree,
- *  while the "incorrect PIN, N attempts remaining" state IS announced. */
-void certificate_pin_login(const char* parent_window, const CertificateToken* token,
-                         const char* caller_display, const char* purpose_display,
-                         GCancellable* cancellable, CertificatePinDone done, gpointer user_data);
+ *  The PIN field is never echoed and its contents never enter the accessibility
+ *  tree, while the "incorrect PIN" state IS announced. */
+void certificate_pin_login(CertificateToken* token, const char* parent_window,
+                           const char* caller_display, const char* purpose_display,
+                           CertificatePinLoginFunc login, gpointer login_data,
+                           GCancellable* cancellable, CertificatePinDone done, gpointer user_data);
 
-/** Show the instruction window for a token with a protected authentication path, while
- *  the underlying null-PIN login runs. No editable field. */
-void certificate_pin_protected_path(const char* parent_window, const CertificateToken* token,
-                                  GCancellable* cancellable, CertificatePinDone done,
-                                  gpointer user_data);
+/** Whether a display was available when the process started. With none, every
+ *  window-drawing path answers CERTIFICATE_PIN_NO_DISPLAY instead of hanging. */
+void certificate_ui_set_has_display(gboolean has_display);
+gboolean certificate_ui_has_display(void);
 
 #endif /* CERTIFICATE_UI_PIN_H */
