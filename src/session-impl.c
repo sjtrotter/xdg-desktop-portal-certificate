@@ -30,7 +30,11 @@ G_DEFINE_FINAL_TYPE_WITH_CODE(CertificateImplSession, certificate_impl_session,
  * path secrecy is not an access control. */
 static gboolean handle_close(XdpImplSession* object, GDBusMethodInvocation* invocation)
 {
-	CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(object);
+	/* THE REFERENCE COMES FIRST, before the authorisation check: resolving who
+	 * owns the frontend name can discover that it has changed hands, and the
+	 * first thing that discovery does is invalidate and drop every session the
+	 * previous owner created -- which is this one. */
+	g_autoptr(CertificateImplSession) session = g_object_ref(CERTIFICATE_IMPL_SESSION(object));
 
 	if (!certificate_impl_sender_is_frontend_default(
 	        g_dbus_method_invocation_get_sender(invocation)))
@@ -49,15 +53,11 @@ static gboolean handle_close(XdpImplSession* object, GDBusMethodInvocation* invo
 	 * failed. */
 	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "closed-by-portal");
 
-	{
-		/* forget() drops the table's reference, which is the only one, so the
-		 * invocation is completed while a reference of our own is still held. */
-		g_autoptr(CertificateImplSession) held = g_object_ref(session);
-
-		certificate_impl_session_close(session);
-		certificate_impl_session_forget(session);
-		xdp_impl_session_complete_close(object, invocation);
-	}
+	/* forget() drops the table's reference, which is the only other one, so the
+	 * invocation is completed under the reference taken above. */
+	certificate_impl_session_close(session);
+	certificate_impl_session_forget(session);
+	xdp_impl_session_complete_close(object, invocation);
 
 	return TRUE;
 }
