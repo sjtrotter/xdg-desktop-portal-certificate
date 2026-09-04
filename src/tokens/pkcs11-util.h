@@ -36,7 +36,12 @@ typedef enum
 	 * TOKEN_REMOVED, which used to carry it: reporting a card that is sitting
 	 * in the reader as removed made the backend emit
 	 * SessionInvalidated("token_removed") about healthy hardware. */
-	CERTIFICATE_PKCS11_ERROR_NO_PRIVATE_KEY
+	CERTIFICATE_PKCS11_ERROR_NO_PRIVATE_KEY,
+	/* C_Login was submitted and the module has not answered within the login
+	 * timeout. Distinct from FAILED because the attempt may still be spent and
+	 * may still succeed: PKCS#11 cannot withdraw a submitted login, so this
+	 * says "we stopped waiting", not "the token said no". */
+	CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT
 } CertificatePkcs11ErrorCode;
 
 /** Turn @rv into a GError. The message is p11_kit_strerror()'s, already passed

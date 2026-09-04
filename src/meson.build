@@ -36,8 +36,15 @@ certificate_service_sources = files(
   'broker/operations.c',
   'ui/chooser.c',
   'ui/pin.c',
+  'ui/pin-gtk.c',
   'ui/external-window.c',
 )
+
+# The second PIN prompt, when the build found gcr-4. ui/pin.c compiles either
+# way: what the option removes is an implementation, not the contract.
+if gcr_dep.found()
+  certificate_service_sources += files('ui/pin-system.c')
+endif
 
 certificate_deps = [
   glib_dep,
@@ -49,6 +56,9 @@ certificate_deps = [
 ]
 
 certificate_ui_deps = [gtk_dep, adw_dep]
+if gcr_dep.found()
+  certificate_ui_deps += gcr_dep
+endif
 if gtk_wayland_dep.found()
   certificate_ui_deps += gtk_wayland_dep
 endif

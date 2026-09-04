@@ -65,6 +65,9 @@
 #define CERTIFICATE_REASON_PIN_PROMPTED "pin-prompted"
 #define CERTIFICATE_REASON_PIN_INCORRECT "pin-incorrect"
 #define CERTIFICATE_REASON_PIN_LOCKED "pin-locked"
+/* A C_Login that never came back. The window is gone and the interaction is
+ * failed; the module call itself cannot be withdrawn. See --login-timeout. */
+#define CERTIFICATE_REASON_PIN_TIMEOUT "pin-timeout"
 #define CERTIFICATE_REASON_LOGIN_OK "login-ok"
 #define CERTIFICATE_REASON_GRANT_CREATED "grant-created"
 #define CERTIFICATE_REASON_GRANT_INVALIDATED "grant-invalidated"

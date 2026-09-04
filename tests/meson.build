@@ -86,3 +86,39 @@ foreach name, source : service_test_cases
   # worker threads, and a sanitized build is slow.
   test(name, exe, protocol: 'tap', env: test_env, timeout: 120)
 endforeach
+
+# THE SYSTEM-PROMPTER PATH. Only when the build found gcr-4, because without it
+# there is no second implementation to test.
+#
+# It needs no display and no card: tests/pin-prompter.c stands up gcr's OWN
+# server half on a private GTestDBus bus and answers from a script, so the
+# retry, warning, final-try, attempt-cap and login-timeout rules are checked
+# deterministically -- which is more than the GTK path can be without a person
+# at a keyboard. It must never reach the session's real prompter; the module
+# default is the in-process window and only this suite asks for "auto", on a bus
+# it created itself.
+if gcr_dep.found()
+  pin_prompter = files('pin-prompter.c')
+
+  exe = executable(
+    'test-pin-system',
+    ['test-pin-system.c'] + pin_prompter + fixture_util,
+    dependencies: [certificate_service_dep, gcr_dep],
+    include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+    c_args: test_args,
+    install: false,
+  )
+
+  test('pin-system', exe, protocol: 'tap', env: test_env, timeout: 180)
+
+  # The same prompter with a main() around it, so that tools/ui-smoke.sh can
+  # run the whole stack -- frontend, backend, client -- against the
+  # system-prompter path on its private bus. Not a test of its own.
+  executable(
+    'certificate-test-prompter',
+    ['test-prompter-main.c'] + pin_prompter,
+    dependencies: [glib_dep, gio_dep, gcr_dep],
+    include_directories: [config_inc, include_directories('.')],
+    install: false,
+  )
+endif

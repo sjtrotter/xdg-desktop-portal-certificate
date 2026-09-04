@@ -85,6 +85,12 @@ adw_dep = dependency('libadwaita-1', version: '>= 1.4')
 # Parenting a dialog to the requesting application's window. Both are optional:
 # a backend on a display server it was not built for simply draws an unparented
 # window, which the chooser is required to do anyway for an invalid handle.
+# THE SYSTEM PROMPTER. Optional, and the option it enables does not exist
+# without it: with gcr-4 present the backend can hand the PIN FIELD to the
+# desktop shell (org.gnome.keyring.SystemPrompter) instead of drawing it
+# itself. What that moves and what it does not is docs/SECURITY.md.
+gcr_dep = dependency('gcr-4', version: '>= 4.0', required: get_option('gcr'))
+
 gtk_wayland_dep = dependency('gtk4-wayland', required: false)
 gtk_x11_dep = dependency('gtk4-x11', required: false)
 x11_dep = dependency('x11', required: false)
@@ -93,6 +99,7 @@ config = configuration_data()
 config.set_quoted('PACKAGE_VERSION', meson.project_version())
 config.set('HAVE_GTK_WAYLAND', gtk_wayland_dep.found() ? 1 : 0)
 config.set('HAVE_GTK_X11', (gtk_x11_dep.found() and x11_dep.found()) ? 1 : 0)
+config.set('HAVE_GCR', gcr_dep.found() ? 1 : 0)
 configure_file(output: 'config.h', configuration: config)
 
 config_inc = include_directories('.')
@@ -117,6 +124,7 @@ summary(
     'libadwaita-1': adw_dep.version(),
     'gtk4-wayland (xdg_foreign parenting)': gtk_wayland_dep.found() ? gtk_wayland_dep.version() : 'not found',
     'gtk4-x11 (XID parenting)': (gtk_x11_dep.found() and x11_dep.found()) ? gtk_x11_dep.version() : 'not found',
+    'gcr-4 (--pin-prompt=system)': gcr_dep.found() ? gcr_dep.version() : 'not found',
   },
   section: 'dependencies',
 )

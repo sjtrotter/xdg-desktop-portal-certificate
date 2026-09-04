@@ -65,6 +65,8 @@ static gboolean opt_list_tokens = FALSE;
 static gboolean opt_no_activate = FALSE;
 static gboolean opt_allow_core = FALSE;
 static char** opt_modules = NULL;
+static char* opt_pin_prompt = NULL;
+static int opt_login_timeout = -1;
 
 static const GOptionEntry entries[] = {
 	{ "replace", 'r', 0, G_OPTION_ARG_NONE, &opt_replace,
@@ -75,6 +77,8 @@ static const GOptionEntry entries[] = {
 	  NULL },
 	{ "module", 'm', 0, G_OPTION_ARG_FILENAME_ARRAY, &opt_modules,
 	  "Use only this PKCS#11 module; repeatable", "PATH" },
+	{ "login-timeout", 0, 0, G_OPTION_ARG_INT, &opt_login_timeout,
+	  "Give up on a C_Login that has not returned after N seconds (0 disables)", "N" },
 	{ "list-tokens", 0, 0, G_OPTION_ARG_NONE, &opt_list_tokens,
 	  "List the security tokens visible to this user and exit", NULL },
 	{ "no-activate", 0, 0, G_OPTION_ARG_NONE, &opt_no_activate,
@@ -84,6 +88,16 @@ static const GOptionEntry entries[] = {
 	{ "version", 0, 0, G_OPTION_ARG_NONE, &opt_version, "Print the version and exit", NULL },
 	{ NULL, 0, 0, 0, NULL, NULL, NULL },
 };
+
+#if HAVE_GCR
+/* ONLY WHEN THE BUILD HAS GCR. An option that names a prompt this binary cannot
+ * draw would be an option that fails at the worst moment. */
+static const GOptionEntry gcr_entries[] = {
+	{ "pin-prompt", 0, 0, G_OPTION_ARG_STRING, &opt_pin_prompt,
+	  "Where the PIN is typed: auto (default), gtk, or system", "WHICH" },
+	{ NULL, 0, 0, 0, NULL, NULL, NULL },
+};
+#endif
 
 static const char* description =
     "WHAT THIS IS\n"
@@ -357,6 +371,9 @@ int main(int argc, char** argv)
 
 	context = g_option_context_new("- a backend for the experimental Certificate portal");
 	g_option_context_add_main_entries(context, entries, NULL);
+#if HAVE_GCR
+	g_option_context_add_main_entries(context, gcr_entries, NULL);
+#endif
 	g_option_context_set_description(context, description);
 
 	if (!g_option_context_parse(context, &argc, &argv, &error))
@@ -383,12 +400,29 @@ int main(int argc, char** argv)
 	if (!opt_verbose)
 		g_log_writer_default_set_debug_domains(NULL);
 
+	/* WHERE THE PIN IS TYPED. The module default is the in-process window; the
+	 * PROGRAM default is auto, which is the system prompter when the session
+	 * has one. Set before anything can prompt, and refused rather than
+	 * defaulted when it is misspelt -- for the same reason a mistyped mechanism
+	 * parameter is an error. */
+	if (!certificate_pin_set_prompt_kind(opt_pin_prompt != NULL ? opt_pin_prompt : "auto",
+	                                     &error))
+	{
+		g_printerr("xdg-desktop-portal-certificate: %s\n", error->message);
+		return CERTIFICATE_EXIT_USAGE;
+	}
+
 	tokens = certificate_tokens_new((const char* const*) opt_modules, &error);
 	if (tokens == NULL)
 	{
 		g_printerr("xdg-desktop-portal-certificate: %s\n", error->message);
 		return CERTIFICATE_EXIT_UNAVAILABLE;
 	}
+
+	/* Negative means "not given", which is how a default of 60 and an explicit
+	 * 0 stay different things. */
+	if (opt_login_timeout >= 0)
+		certificate_pin_set_login_timeout((guint) opt_login_timeout);
 
 	if (opt_list_tokens)
 	{
@@ -491,6 +525,7 @@ int main(int argc, char** argv)
 	g_main_loop_unref(loop);
 	g_clear_pointer(&tokens, certificate_tokens_free);
 	g_strfreev(opt_modules);
+	g_free(opt_pin_prompt);
 
 	return status;
 }

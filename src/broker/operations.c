@@ -18,7 +18,11 @@
  * this file's history. */
 typedef struct
 {
-	int refs;
+	/* ATOMIC. The worker task drops its reference from the thread pool, the
+	 * waiter list drops its from the main thread, and a cancellation handler
+	 * takes one on whichever thread cancelled; g_atomic_int_* costs nothing
+	 * measurable and removes an argument about which of those coincide today. */
+	gint refs;
 	gboolean answered;
 
 	CertificateTokens* tokens;
@@ -54,7 +58,7 @@ static void operation_free(Operation* operation)
 
 static Operation* operation_ref(Operation* operation)
 {
-	operation->refs++;
+	g_atomic_int_inc(&operation->refs);
 	return operation;
 }
 
@@ -65,7 +69,7 @@ static void operation_unref(gpointer data)
 	if (operation == NULL)
 		return;
 
-	if (--operation->refs > 0)
+	if (!g_atomic_int_dec_and_test(&operation->refs))
 		return;
 
 	operation_free(operation);
@@ -419,6 +423,18 @@ static void apply_login_outcome(Operation* operation, CertificatePinOutcome outc
 			operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
 			                                   CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
 			                                   "The token was removed"));
+			return;
+
+		case CERTIFICATE_PIN_TIMED_OUT:
+			/* A DISTINCT REASON, because it is a distinct situation: the token
+			 * was sent a login and never answered. The attempt may still be
+			 * spent and the login may still land -- ui/pin.h says why nothing
+			 * can withdraw it -- in which case the abandon path logs the
+			 * session out again on a worker. */
+			operation_fail(operation,
+			               g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
+			                                   CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT,
+			                                   "The token did not answer the login in time"));
 			return;
 
 		case CERTIFICATE_PIN_NO_DISPLAY:

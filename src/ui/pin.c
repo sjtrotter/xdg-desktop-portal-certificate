@@ -2,6 +2,13 @@
  *
  * xdg-desktop-portal-certificate
  * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
+ *
+ * THE PIN PROMPT, MINUS THE WINDOW. Everything that decides anything is here:
+ * the locked buffer, the login worker, the attempt cap, the FINAL_TRY rule, the
+ * flag re-read, the serialisation queue, the deferred cancel and the login
+ * timeout. The two implementations that actually ask a human -- ui/pin-gtk.c
+ * and ui/pin-system.c -- collect characters and draw warnings, and decide
+ * nothing.
  */
 
 /* explicit_bzero(), posix_memalign(), mlock(), madvise(): the PIN buffer needs
@@ -14,12 +21,10 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#include <adwaita.h>
-#include <gtk/gtk.h>
-
 #include "../certificate.h"
 #include "../redact.h"
-#include "external-window.h"
+#include "config.h"
+#include "pin-internal.h"
 
 static gboolean ui_has_display = FALSE;
 
@@ -31,6 +36,83 @@ void certificate_ui_set_has_display(gboolean has_display)
 gboolean certificate_ui_has_display(void)
 {
 	return ui_has_display;
+}
+
+/* ------------------------------------------------------- choosing a prompt */
+
+/* THE MODULE DEFAULT IS THE IN-PROCESS WINDOW, and that is a safety property
+ * rather than a preference: a test, or anything else that links this code
+ * without asking, must not start putting prompts on the operator's real
+ * session shell because a name happened to be on the bus. main() is the only
+ * caller that opts in to AUTO. */
+static CertificatePinPromptKind pin_prompt_kind = CERTIFICATE_PIN_PROMPT_GTK;
+static const PinPromptImpl* pin_prompt_resolved = NULL;
+
+gboolean certificate_pin_set_prompt_kind(const char* name, GError** error)
+{
+	if (name == NULL || g_ascii_strcasecmp(name, "auto") == 0)
+		pin_prompt_kind = CERTIFICATE_PIN_PROMPT_AUTO;
+	else if (g_ascii_strcasecmp(name, "gtk") == 0)
+		pin_prompt_kind = CERTIFICATE_PIN_PROMPT_GTK;
+	else if (g_ascii_strcasecmp(name, "system") == 0)
+		pin_prompt_kind = CERTIFICATE_PIN_PROMPT_SYSTEM;
+	else
+	{
+		g_set_error(error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+		            "Unknown PIN prompt '%s'; expected auto, gtk or system", name);
+		return FALSE;
+	}
+
+	pin_prompt_resolved = NULL;
+	return TRUE;
+}
+
+/* RESOLVED ONCE, AND THE ANSWER IS LOGGED. Which process drew the window the
+ * user typed a PIN into is exactly the sort of thing that must not be a
+ * mystery afterwards. */
+static const PinPromptImpl* pin_impl(void)
+{
+	if (pin_prompt_resolved != NULL)
+		return pin_prompt_resolved;
+
+	switch (pin_prompt_kind)
+	{
+		case CERTIFICATE_PIN_PROMPT_SYSTEM:
+#if HAVE_GCR
+			pin_prompt_resolved = certificate_pin_impl_system();
+			break;
+#else
+			/* --pin-prompt=system does not exist in a build without gcr, so
+			 * this is unreachable from the command line; it stays as the
+			 * answer for anything that sets the kind programmatically. */
+			pin_prompt_resolved = certificate_pin_impl_gtk();
+			break;
+#endif
+
+		case CERTIFICATE_PIN_PROMPT_AUTO:
+#if HAVE_GCR
+			if (certificate_pin_impl_system_available())
+			{
+				pin_prompt_resolved = certificate_pin_impl_system();
+				break;
+			}
+#endif
+			pin_prompt_resolved = certificate_pin_impl_gtk();
+			break;
+
+		case CERTIFICATE_PIN_PROMPT_GTK:
+		default:
+			pin_prompt_resolved = certificate_pin_impl_gtk();
+			break;
+	}
+
+	g_message("pin-prompt-selected detail=%s", pin_prompt_resolved->name);
+	return pin_prompt_resolved;
+}
+
+const char* certificate_pin_prompt_name(void)
+{
+	return pin_impl()->name;
 }
 
 /* ------------------------------------------------------------- PIN buffer */
@@ -59,8 +141,8 @@ typedef struct
  * maximum, not a hint: pin_buffer_set() refuses anything longer. */
 #define PIN_BUFFER_CAPACITY 512
 
-/* Attempts one window may spend before it gives up and hands the outcome back
- * to the caller. A PIN prompt that offers unbounded retries is a window in
+/* Attempts one prompt may spend before it gives up and hands the outcome back
+ * to the caller. A PIN prompt that offers unbounded retries is a prompt in
  * which a card can be walked all the way to locked. */
 #define PIN_MAX_ATTEMPTS 3
 
@@ -141,7 +223,7 @@ static gboolean pin_buffer_set(PinBuffer* buffer, const char* text)
 }
 
 /* A PRIVATE COPY FOR THE WORKER. The login task owns this one and wipes and
- * frees it itself, so that cancelling the window cannot pull the buffer out
+ * frees it itself, so that cancelling the prompt cannot pull the buffer out
  * from under a C_Login that is already in flight -- which would hand the card a
  * truncated PIN and spend an attempt on it. */
 static PinBuffer* pin_buffer_dup(const PinBuffer* source)
@@ -160,61 +242,40 @@ static PinBuffer* pin_buffer_dup(const PinBuffer* source)
 	return copy;
 }
 
+/* --------------------------------------------------------- the login timeout */
+
+/* HOW LONG A SUBMITTED C_Login MAY GO UNANSWERED before the interaction is
+ * given up on. Zero disables it. A wedged middleware daemon is a normal
+ * Tuesday, and before this the prompt simply stayed on the screen forever with
+ * a spinner in it.
+ *
+ * WHAT IT DOES NOT DO, and docs/SECURITY.md says the same: it does not
+ * interrupt the module. PKCS#11 has no way to withdraw a C_Login, so the
+ * attempt is spent whatever happens here, and the CALLER IS STILL ANSWERED ONLY
+ * WHEN THE MODULE RETURNS -- answering earlier would mean freeing, on the main
+ * thread, the interaction a worker thread is still reading through. What the
+ * timeout buys is that the prompt comes down at a known moment, the failure has
+ * a reason of its own, and a login that lands afterwards is ABANDONED rather
+ * than being handed to whoever is still waiting. */
+#define PIN_LOGIN_TIMEOUT_DEFAULT_SECONDS 60
+
+static guint pin_login_timeout_seconds = PIN_LOGIN_TIMEOUT_DEFAULT_SECONDS;
+
+void certificate_pin_set_login_timeout(guint seconds)
+{
+	pin_login_timeout_seconds = seconds;
+}
+
+guint certificate_pin_login_timeout(void)
+{
+	return pin_login_timeout_seconds;
+}
+
 /* -------------------------------------------------------------- the prompt */
 
-typedef struct
-{
-	int refs;
-
-	CertificateToken* token;
-	char* parent_window;
-	char* caller_display;
-	char* purpose_display;
-
-	CertificatePinLoginFunc login;
-	CertificatePinRefreshFunc refresh;
-	CertificatePinAbandonFunc abandon;
-	gpointer login_data;
-	GCancellable* cancellable;
-	gulong cancel_id;
-	CertificatePinDone done;
-	gpointer user_data;
-
-	GtkWindow* window;
-	GtkWidget* entry;
-	GtkWidget* unlock_button;
-	GtkWidget* cancel_button;
-	GtkEventController* keys;
-	GtkWidget* status;
-	GtkWidget* hint;
-	GtkWidget* spinner;
-
-	PinBuffer* buffer;
-	gboolean finished;
-	gboolean busy;
-
-	/* THE CANCEL-WHILE-BUSY STATE. login_in_flight is true from the moment the
-	 * worker is started until its completion callback runs on the main thread.
-	 * A cancel arriving in that window hides the window immediately and records
-	 * what to answer, and nothing at all is freed until the worker has
-	 * returned. */
-	gboolean login_in_flight;
-	gboolean cancel_deferred;
-	CertificatePinOutcome deferred_outcome;
-
-	/* A login that went through. It matters after the fact only when the answer
-	 * given is NOT "unlocked": that is a login the caller never asked for and
-	 * has to be able to undo. */
-	gboolean login_succeeded;
-
-	guint cancel_idle;
-	guint attempts;
-	gboolean final_try_confirmed;
-} PinPrompt;
-
-/* PROMPTS ARE SERIALISED PROCESS-WIDE. Two grants must not race two PIN windows
- * at the user: whichever arrives second waits, and a user who is asked for one
- * PIN is never looking at two windows wondering which is real. */
+/* PROMPTS ARE SERIALISED PROCESS-WIDE. Two grants must not race two PIN
+ * prompts at the user: whichever arrives second waits, and a user who is asked
+ * for one PIN is never looking at two prompts wondering which is real. */
 static GQueue pin_queue = G_QUEUE_INIT;
 static PinPrompt* pin_active = NULL;
 
@@ -222,7 +283,12 @@ static void pin_prompt_start(PinPrompt* prompt);
 
 static void pin_prompt_free(PinPrompt* prompt)
 {
-	g_clear_pointer(&prompt->buffer, pin_buffer_free);
+	if (prompt->impl_data != NULL && prompt->impl_data_free != NULL)
+		prompt->impl_data_free(prompt->impl_data);
+	prompt->impl_data = NULL;
+
+	pin_buffer_free(prompt->buffer_opaque);
+	prompt->buffer_opaque = NULL;
 	g_clear_pointer(&prompt->token, certificate_token_unref);
 	g_free(prompt->parent_window);
 	g_free(prompt->caller_display);
@@ -233,7 +299,7 @@ static void pin_prompt_free(PinPrompt* prompt)
 
 static PinPrompt* pin_prompt_ref(PinPrompt* prompt)
 {
-	prompt->refs++;
+	g_atomic_int_inc(&prompt->refs);
 	return prompt;
 }
 
@@ -244,15 +310,25 @@ static void pin_prompt_unref(gpointer data)
 	if (prompt == NULL)
 		return;
 
-	if (--prompt->refs > 0)
+	if (!g_atomic_int_dec_and_test(&prompt->refs))
 		return;
 
 	pin_prompt_free(prompt);
 }
 
+PinPrompt* certificate_pin_prompt_ref(PinPrompt* prompt)
+{
+	return pin_prompt_ref(prompt);
+}
+
+void certificate_pin_prompt_unref(PinPrompt* prompt)
+{
+	pin_prompt_unref(prompt);
+}
+
 /* Everything that has to happen on the main thread once the answer is known,
  * and NOT ONE STEP OF IT while a worker is still reading this object. */
-static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
+void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outcome)
 {
 	CertificatePinDone done = NULL;
 	gpointer user_data = NULL;
@@ -262,14 +338,15 @@ static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
 	if (prompt->finished)
 		return;
 
-	/* A CANCEL WHILE C_LOGIN IS IN FLIGHT. The window goes away, because that
-	 * is what the user asked for, but the callback, the buffer free and the
-	 * object free all wait for the worker: the alternative is a use-after-free
-	 * across two threads on a page the token is reading a PIN out of.
+	/* A CANCEL OR A TIMEOUT WHILE C_LOGIN IS IN FLIGHT. The prompt goes away,
+	 * because that is what was asked for, but the callback, the buffer free and
+	 * the object free all wait for the worker: the alternative is a
+	 * use-after-free across two threads on a page the token is reading a PIN
+	 * out of.
 	 *
 	 * The card operation itself is NOT cancellable. PKCS#11 has no way to
 	 * withdraw a C_Login, so the attempt that was submitted is spent whatever
-	 * the user does with the window. */
+	 * the user does with the prompt. */
 	if (prompt->login_in_flight)
 	{
 		if (!prompt->cancel_deferred)
@@ -277,11 +354,13 @@ static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
 			prompt->cancel_deferred = TRUE;
 			prompt->deferred_outcome = outcome;
 
-			if (prompt->window != NULL)
-				gtk_widget_set_visible(GTK_WIDGET(prompt->window), FALSE);
+			if (prompt->impl->hide != NULL)
+				prompt->impl->hide(prompt);
 
-			certificate_log_grant(CERTIFICATE_REASON_CHOOSER_CANCELLED, NULL,
-			                      "cancel-deferred-login-in-flight");
+			certificate_log_grant(outcome == CERTIFICATE_PIN_TIMED_OUT
+			                          ? CERTIFICATE_REASON_PIN_TIMEOUT
+			                          : CERTIFICATE_REASON_CHOOSER_CANCELLED,
+			                      NULL, "deferred-login-in-flight");
 		}
 
 		return;
@@ -308,33 +387,17 @@ static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
 		prompt->cancel_idle = 0;
 	}
 
+	if (prompt->login_timeout_id != 0)
+	{
+		g_source_remove(prompt->login_timeout_id);
+		prompt->login_timeout_id = 0;
+	}
+
 	/* The buffer is wiped before anything else can run, including the caller's
 	 * callback. */
-	if (prompt->buffer != NULL)
-		pin_buffer_wipe(prompt->buffer);
+	pin_buffer_wipe(prompt->buffer_opaque);
 
-	/* Disconnected before the destroy, for the same reason the chooser does it:
-	 * tearing a window down emits signals at a point where the widgets those
-	 * handlers touch have already been disposed. */
-	if (prompt->entry != NULL)
-		g_signal_handlers_disconnect_by_data(prompt->entry, prompt);
-	if (prompt->window != NULL)
-		g_signal_handlers_disconnect_by_data(prompt->window, prompt);
-	/* EVERY handler, not only the two that used to be listed. The `finished`
-	 * guard makes a late callback harmless, but "harmless because the first
-	 * line returns" is a weaker property than "cannot be called". */
-	if (prompt->unlock_button != NULL)
-		g_signal_handlers_disconnect_by_data(prompt->unlock_button, prompt);
-	if (prompt->cancel_button != NULL)
-		g_signal_handlers_disconnect_by_data(prompt->cancel_button, prompt);
-	if (prompt->keys != NULL)
-		g_signal_handlers_disconnect_by_data(prompt->keys, prompt);
-
-	if (prompt->window != NULL)
-	{
-		gtk_window_destroy(prompt->window);
-		prompt->window = NULL;
-	}
+	prompt->impl->close(prompt);
 
 	if (pin_active == prompt)
 	{
@@ -352,7 +415,7 @@ static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
 
 	/* A LOGIN NOBODY IS GOING TO USE IS A LOGIN THAT HAS TO BE UNDONE. The card
 	 * is slower than the Escape key: an attempt submitted before the cancel can
-	 * succeed after it, and PKCS#11 has no way to withdraw one. The window said
+	 * succeed after it, and PKCS#11 has no way to withdraw one. The prompt said
 	 * the request was cancelled, so the token must not be left authenticated
 	 * for the rest of the grant -- the next Sign would otherwise go through
 	 * with no prompt and no consent. Called AFTER done(), so that the caller
@@ -401,7 +464,7 @@ static void login_thread(GTask* task, gpointer source, gpointer task_data,
 
 	/* THE FLAGS ARE RE-READ HERE, on this thread, while the failure is fresh:
 	 * CKF_USER_PIN_FINAL_TRY is normally set BY the attempt that just failed,
-	 * and a window that keeps showing the flags captured at discovery will
+	 * and a prompt that keeps showing the flags captured at discovery will
 	 * never warn anybody. */
 	if (data->prompt->refresh != NULL &&
 	    g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT))
@@ -410,65 +473,56 @@ static void login_thread(GTask* task, gpointer source, gpointer task_data,
 	g_task_return_error(task, g_steal_pointer(&error));
 }
 
-static void set_status(PinPrompt* prompt, const char* text, gboolean is_error)
-{
-	if (prompt->status == NULL)
-		return;
-
-	gtk_label_set_text(GTK_LABEL(prompt->status), text != NULL ? text : "");
-	gtk_widget_set_visible(prompt->status, text != NULL && *text != '\0');
-
-	if (is_error)
-	{
-		gtk_widget_add_css_class(prompt->status, "error");
-		/* The failure state IS announced: a screen-reader user must learn that
-		 * an attempt was spent. The PIN itself never enters this tree. */
-		if (prompt->window != NULL)
-			gtk_accessible_announce(GTK_ACCESSIBLE(prompt->window), text,
-			                        GTK_ACCESSIBLE_ANNOUNCEMENT_PRIORITY_HIGH);
-	}
-	else
-	{
-		gtk_widget_remove_css_class(prompt->status, "error");
-	}
-}
-
 static void set_busy(PinPrompt* prompt, gboolean busy)
 {
 	prompt->busy = busy;
 
-	if (prompt->entry != NULL)
-		gtk_widget_set_sensitive(prompt->entry, !busy);
-	if (prompt->unlock_button != NULL)
-		gtk_widget_set_sensitive(prompt->unlock_button, !busy);
-	if (prompt->spinner != NULL)
-		gtk_widget_set_visible(prompt->spinner, busy);
+	if (prompt->impl->busy != NULL)
+		prompt->impl->busy(prompt, busy);
 }
 
 /* The remaining-attempts hint, and NOTHING ELSE. PKCS#11 has no portable way to
  * ask a token how many tries are left, so this reports only the three flags the
  * standard defines, and never a number. A wrong count is worse than none. */
-static const char* retry_hint(const CertificateToken* token)
+const char* certificate_pin_prompt_retry_hint(const PinPrompt* prompt)
 {
-	if (token->pin_locked)
+	if (prompt->token->pin_locked)
 		return "This token is locked. It cannot be unlocked here.";
-	if (token->pin_final_try)
+	if (prompt->token->pin_final_try)
 		return "This is the last attempt before the token locks.";
-	if (token->pin_count_low)
+	if (prompt->token->pin_count_low)
 		return "There have been recent failed attempts on this token.";
 
 	return NULL;
 }
 
-static void update_retry_hint(PinPrompt* prompt)
+const char* certificate_pin_prompt_final_try_warning(void)
 {
-	const char* hint = retry_hint(prompt->token);
+	return "This is the LAST attempt before the token locks. Confirm to use it, or Cancel.";
+}
 
-	if (prompt->hint == NULL)
-		return;
+const char* certificate_pin_prompt_heading(const PinPrompt* prompt)
+{
+	return prompt->protected_path ? "Enter your PIN on the reader"
+	                              : "Enter your PIN to unlock this token";
+}
 
-	gtk_label_set_text(GTK_LABEL(prompt->hint), hint != NULL ? hint : "");
-	gtk_widget_set_visible(prompt->hint, hint != NULL);
+const char* certificate_pin_prompt_protected_note(void)
+{
+	return "This reader collects the PIN itself. Follow the instructions on the reader; "
+	       "nothing typed on screen is sent to the token.";
+}
+
+gboolean certificate_pin_prompt_needs_final_confirm(PinPrompt* prompt)
+{
+	/* THE LAST ATTEMPT IS NOT SPENT ON A SINGLE PRESS. When the token says
+	 * CKF_USER_PIN_FINAL_TRY, the next refusal locks the card, so the prompt
+	 * says so and requires the user to ask a second time. */
+	if (!prompt->token->pin_final_try || prompt->final_try_confirmed)
+		return FALSE;
+
+	prompt->final_try_confirmed = TRUE;
+	return TRUE;
 }
 
 static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_data)
@@ -479,20 +533,29 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 	prompt->login_in_flight = FALSE;
 
+	if (prompt->login_timeout_id != 0)
+	{
+		g_source_remove(prompt->login_timeout_id);
+		prompt->login_timeout_id = 0;
+	}
+
 	if (ok)
 		prompt->login_succeeded = TRUE;
 
-	/* The window was closed, Escape was pressed, or Close() arrived while the
-	 * card was busy. The answer the user asked for is given now that nothing is
-	 * reading the buffer any more. */
+	/* The prompt was closed, Escape was pressed, Close() arrived, or the login
+	 * timeout ran out while the card was busy. The answer that was asked for is
+	 * given now that nothing is reading the buffer any more. */
 	if (prompt->cancel_deferred)
 	{
 		prompt->cancel_deferred = FALSE;
 
 		if (ok)
-			certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, NULL, "cancelled-after-login");
+			certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, NULL,
+			                      prompt->deferred_outcome == CERTIFICATE_PIN_TIMED_OUT
+			                          ? "login-landed-after-timeout"
+			                          : "cancelled-after-login");
 
-		pin_prompt_finish(prompt, prompt->deferred_outcome);
+		certificate_pin_prompt_answer(prompt, prompt->deferred_outcome);
 		return;
 	}
 
@@ -502,7 +565,7 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 	if (ok)
 	{
 		certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, NULL, "pin-accepted");
-		pin_prompt_finish(prompt, CERTIFICATE_PIN_OK);
+		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_OK);
 		return;
 	}
 
@@ -513,168 +576,125 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 		certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, NULL, "retry-offered");
 
 		/* The flags were re-read on the worker thread after the refusal, so the
-		 * warning below is about the state the token is in NOW. */
-		update_retry_hint(prompt);
+		 * warning the implementation is about to draw is about the state the
+		 * token is in NOW. */
 		prompt->final_try_confirmed = FALSE;
 
 		if (prompt->token->pin_locked)
 		{
 			certificate_log_grant(CERTIFICATE_REASON_PIN_LOCKED, NULL, "terminal");
-			pin_prompt_finish(prompt, CERTIFICATE_PIN_LOCKED);
+			certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_LOCKED);
 			return;
 		}
 
-		if (prompt->entry == NULL)
+		if (prompt->protected_path)
 		{
 			/* A protected authentication path cannot be retried from here: the
 			 * reader owns the interaction. */
-			pin_prompt_finish(prompt, CERTIFICATE_PIN_INCORRECT);
+			certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_INCORRECT);
 			return;
 		}
 
 		/* THE PROMPT DOES NOT OFFER UNBOUNDED RETRIES. Three refused attempts
-		 * is where this window stops asking; the caller can ask again, which
-		 * makes a new decision rather than a habit. */
+		 * is where it stops asking; the caller can ask again, which makes a new
+		 * decision rather than a habit. */
 		if (prompt->attempts >= PIN_MAX_ATTEMPTS)
 		{
 			certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, NULL, "attempt-cap");
-			pin_prompt_finish(prompt, CERTIFICATE_PIN_INCORRECT);
+			certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_INCORRECT);
 			return;
 		}
 
-		/* RETRIES ARE USER-INITIATED. The window stays up with the field
-		 * cleared; nothing here spends another attempt on its own. */
-		pin_buffer_wipe(prompt->buffer);
-		gtk_editable_set_text(GTK_EDITABLE(prompt->entry), "");
-		set_status(prompt, "That PIN was not accepted. Try again.", TRUE);
-		gtk_widget_grab_focus(prompt->entry);
+		/* RETRIES ARE USER-INITIATED. The implementation asks again with the
+		 * field cleared; nothing here spends another attempt on its own. */
+		pin_buffer_wipe(prompt->buffer_opaque);
+		prompt->impl->retry(prompt, "That PIN was not accepted. Try again.");
 		return;
 	}
 
 	if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_PIN_LOCKED))
 	{
 		certificate_log_grant(CERTIFICATE_REASON_PIN_LOCKED, NULL, "terminal");
-		pin_prompt_finish(prompt, CERTIFICATE_PIN_LOCKED);
+		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_LOCKED);
 		return;
 	}
 
 	if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED))
 	{
-		pin_prompt_finish(prompt, CERTIFICATE_PIN_TOKEN_REMOVED);
+		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_TOKEN_REMOVED);
 		return;
 	}
 
-	pin_prompt_finish(prompt, CERTIFICATE_PIN_DEVICE_ERROR);
+	certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_DEVICE_ERROR);
 }
 
-static void run_login(PinPrompt* prompt, gboolean protected_path)
+static gboolean on_login_timeout(gpointer user_data)
+{
+	PinPrompt* prompt = user_data;
+
+	prompt->login_timeout_id = 0;
+
+	if (!prompt->login_in_flight)
+		return G_SOURCE_REMOVE;
+
+	certificate_log_grant(CERTIFICATE_REASON_PIN_TIMEOUT, NULL, "login-did-not-return");
+	certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_TIMED_OUT);
+	return G_SOURCE_REMOVE;
+}
+
+gboolean certificate_pin_prompt_hold(PinPrompt* prompt, const char* pin)
+{
+	if (prompt->finished || prompt->login_in_flight)
+		return FALSE;
+
+	if (!pin_buffer_set(prompt->buffer_opaque, pin))
+	{
+		prompt->impl->retry(prompt, "That is longer than any PIN this backend will send.");
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+void certificate_pin_prompt_submit(PinPrompt* prompt)
 {
 	g_autoptr(GTask) task = NULL;
-	LoginTask* data = g_new0(LoginTask, 1);
+	LoginTask* data = NULL;
 
+	if (prompt->busy || prompt->finished || prompt->login_in_flight)
+		return;
+
+	data = g_new0(LoginTask, 1);
 	data->prompt = pin_prompt_ref(prompt);
-	data->protected_path = protected_path;
+	data->protected_path = prompt->protected_path;
 
-	if (!protected_path)
+	if (!prompt->protected_path)
 	{
-		data->buffer = pin_buffer_dup(prompt->buffer);
+		data->buffer = pin_buffer_dup(prompt->buffer_opaque);
 
 		if (data->buffer == NULL)
 		{
 			login_task_free(data);
-			set_status(prompt, "The PIN could not be held in locked memory.", TRUE);
+			prompt->impl->retry(prompt, "The PIN could not be held in locked memory.");
 			return;
 		}
-
-		/* From here the PIN is in the task's own page and nowhere else this
-		 * module owns. GTK's GtkPasswordEntry keeps its own copy in the
-		 * secure-memory buffer it allocates; see the comment in on_unlock(). */
-		pin_buffer_wipe(prompt->buffer);
 	}
+
+	/* From here the PIN is in the task's own page and nowhere else this module
+	 * owns. */
+	pin_buffer_wipe(prompt->buffer_opaque);
 
 	prompt->attempts++;
 	prompt->login_in_flight = TRUE;
 	set_busy(prompt, TRUE);
 
+	if (pin_login_timeout_seconds > 0)
+		prompt->login_timeout_id =
+		    g_timeout_add_seconds(pin_login_timeout_seconds, on_login_timeout, prompt);
+
 	task = g_task_new(NULL, NULL, on_login_done, prompt);
 	g_task_set_task_data(task, data, login_task_free);
 	g_task_run_in_thread(task, login_thread);
-}
-
-static void on_unlock(GtkWidget* widget, gpointer user_data)
-{
-	PinPrompt* prompt = user_data;
-	const char* text = NULL;
-
-	if (prompt->busy || prompt->finished || prompt->login_in_flight)
-		return;
-
-	text = gtk_editable_get_text(GTK_EDITABLE(prompt->entry));
-	if (text == NULL || *text == '\0')
-	{
-		set_status(prompt, "Enter the PIN for this token.", FALSE);
-		return;
-	}
-
-	/* THE LAST ATTEMPT IS NOT SPENT ON A SINGLE CLICK. When the token says
-	 * CKF_USER_PIN_FINAL_TRY, the next refusal locks the card, so the window
-	 * says so and requires the user to ask a second time. */
-	if (prompt->token->pin_final_try && !prompt->final_try_confirmed)
-	{
-		prompt->final_try_confirmed = TRUE;
-		set_status(prompt,
-		           "This is the LAST attempt before the token locks. Press Unlock again to "
-		           "use it, or Cancel.",
-		           TRUE);
-		return;
-	}
-
-	if (!pin_buffer_set(prompt->buffer, text))
-	{
-		set_status(prompt, "That is longer than any PIN this backend will send.", TRUE);
-		return;
-	}
-
-	/* The entry is cleared the moment the value is in the locked buffer. GTK's
-	 * own storage is a GtkPasswordEntryBuffer, which GTK allocates from its
-	 * secure-memory pool and zeroes when it frees it -- but GTK guarantees
-	 * nothing about the intermediate copies a text widget, an input method or a
-	 * Pango layout may have made, so this backend does not claim the PIN
-	 * existed in exactly one place. It claims what is true: THIS module holds
-	 * it in one wiped, locked, non-dumpable page. */
-	gtk_editable_set_text(GTK_EDITABLE(prompt->entry), "");
-	set_status(prompt, NULL, FALSE);
-
-	run_login(prompt, FALSE);
-}
-
-static void on_cancel(GtkWidget* widget, gpointer user_data)
-{
-	PinPrompt* prompt = user_data;
-
-	pin_prompt_finish(prompt, CERTIFICATE_PIN_CANCELLED);
-}
-
-static gboolean on_close_request(GtkWindow* window, gpointer user_data)
-{
-	PinPrompt* prompt = user_data;
-
-	pin_prompt_finish(prompt, CERTIFICATE_PIN_CANCELLED);
-	return TRUE;
-}
-
-static gboolean on_key_pressed(GtkEventControllerKey* controller, guint keyval, guint keycode,
-                               GdkModifierType state, gpointer user_data)
-{
-	PinPrompt* prompt = user_data;
-
-	if (keyval == GDK_KEY_Escape)
-	{
-		pin_prompt_finish(prompt, CERTIFICATE_PIN_CANCELLED);
-		return GDK_EVENT_STOP;
-	}
-
-	return GDK_EVENT_PROPAGATE;
 }
 
 static gboolean on_cancelled_idle(gpointer user_data)
@@ -682,7 +702,7 @@ static gboolean on_cancelled_idle(gpointer user_data)
 	PinPrompt* prompt = user_data;
 
 	prompt->cancel_idle = 0;
-	pin_prompt_finish(prompt, CERTIFICATE_PIN_CANCELLED);
+	certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_CANCELLED);
 	return G_SOURCE_REMOVE;
 }
 
@@ -696,10 +716,10 @@ static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 	 * G_DBUS_INTERFACE_SKELETON_FLAGS_HANDLE_METHOD_INVOCATIONS_IN_THREAD, so
 	 * every Close() handler runs on the main context -- and this function is
 	 * written not to depend on that: it touches no widget and queues an idle.
-	 * g_cancellable_disconnect() in pin_prompt_finish() blocks until this
-	 * returns, so the prompt is alive here, and the idle takes its own
-	 * reference because the object may be finished and freed before the idle is
-	 * dispatched. */
+	 * g_cancellable_disconnect() in certificate_pin_prompt_answer() blocks
+	 * until this returns, so the prompt is alive here, and the idle takes its
+	 * own reference because the object may be finished and freed before the
+	 * idle is dispatched. */
 	if (prompt->cancel_idle != 0)
 		return;
 
@@ -707,173 +727,14 @@ static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 	                                      pin_prompt_ref(prompt), pin_prompt_unref);
 }
 
-static GtkWidget* label_row(const char* title, const char* value)
-{
-	GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-	GtkWidget* name = gtk_label_new(title);
-	GtkWidget* text = gtk_label_new(value);
-
-	gtk_widget_add_css_class(name, "dim-label");
-	gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
-	gtk_label_set_xalign(GTK_LABEL(text), 0.0f);
-	gtk_label_set_wrap(GTK_LABEL(text), TRUE);
-	gtk_label_set_selectable(GTK_LABEL(text), FALSE);
-	gtk_widget_set_hexpand(text, TRUE);
-	gtk_widget_set_size_request(name, 110, -1);
-
-	gtk_box_append(GTK_BOX(box), name);
-	gtk_box_append(GTK_BOX(box), text);
-
-	return box;
-}
-
 static void pin_prompt_start(PinPrompt* prompt)
 {
-	GtkWidget* window = NULL;
-	GtkWidget* toolbar = NULL;
-	GtkWidget* header = NULL;
-	GtkWidget* content = NULL;
-	GtkWidget* buttons = NULL;
-	GtkWidget* cancel = NULL;
-	GtkEventController* keys = NULL;
-	gboolean protected_path = prompt->token->protected_authentication_path;
-
 	pin_active = prompt;
 
-	window = adw_window_new();
-	prompt->window = GTK_WINDOW(window);
-	gtk_window_set_title(GTK_WINDOW(window), "Unlock Security Token");
-	gtk_window_set_modal(GTK_WINDOW(window), TRUE);
-	gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
-	gtk_window_set_default_size(GTK_WINDOW(window), 440, -1);
-
-	header = adw_header_bar_new();
-	adw_header_bar_set_show_end_title_buttons(ADW_HEADER_BAR(header), FALSE);
-
-	content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-	gtk_widget_set_margin_top(content, 18);
-	gtk_widget_set_margin_bottom(content, 18);
-	gtk_widget_set_margin_start(content, 18);
-	gtk_widget_set_margin_end(content, 18);
-
-	{
-		GtkWidget* heading = gtk_label_new(protected_path
-		                                       ? "Enter your PIN on the reader"
-		                                       : "Enter your PIN to unlock this token");
-
-		gtk_label_set_wrap(GTK_LABEL(heading), TRUE);
-		gtk_label_set_xalign(GTK_LABEL(heading), 0.0f);
-		gtk_widget_add_css_class(heading, "title-2");
-		gtk_box_append(GTK_BOX(content), heading);
-	}
-
-	/* The window restates the verified caller and the purpose from the chooser,
-	 * so that a PIN prompt arriving on its own is still attributable. EVERY
-	 * VALUE BELOW IS SANITISED AND CAPPED: the caller display comes from a
-	 * desktop file and the token label and reader name come off the card, and
-	 * none of the three may draw chrome of its own inside this window. */
-	{
-		g_autofree char* caller = certificate_display_text(prompt->caller_display,
-		                                                   CERTIFICATE_DISPLAY_MAX_APP_NAME, NULL);
-		g_autofree char* purpose = certificate_display_text(prompt->purpose_display,
-		                                                    CERTIFICATE_DISPLAY_MAX_PURPOSE, NULL);
-		g_autofree char* label = certificate_display_text(
-		    prompt->token->label, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "Unnamed token");
-		g_autofree char* reader = certificate_display_text(prompt->token->reader_name,
-		                                                   CERTIFICATE_DISPLAY_MAX_READER, NULL);
-
-		if (caller != NULL)
-			gtk_box_append(GTK_BOX(content), label_row("Application", caller));
-		if (purpose != NULL)
-			gtk_box_append(GTK_BOX(content), label_row("In order to", purpose));
-		gtk_box_append(GTK_BOX(content), label_row("Token", label));
-		if (reader != NULL)
-			gtk_box_append(GTK_BOX(content), label_row("Reader", reader));
-	}
-
-	if (!protected_path)
-	{
-		prompt->entry = gtk_password_entry_new();
-		gtk_password_entry_set_show_peek_icon(GTK_PASSWORD_ENTRY(prompt->entry), FALSE);
-		gtk_widget_set_hexpand(prompt->entry, TRUE);
-		gtk_accessible_update_property(GTK_ACCESSIBLE(prompt->entry),
-		                               GTK_ACCESSIBLE_PROPERTY_LABEL, "Token PIN", -1);
-		g_signal_connect(prompt->entry, "activate", G_CALLBACK(on_unlock), prompt);
-		gtk_box_append(GTK_BOX(content), prompt->entry);
-	}
-	else
-	{
-		GtkWidget* note = gtk_label_new(
-		    "This reader collects the PIN itself. Follow the instructions on the reader; "
-		    "nothing you type here is sent to the token.");
-
-		gtk_label_set_wrap(GTK_LABEL(note), TRUE);
-		gtk_label_set_xalign(GTK_LABEL(note), 0.0f);
-		gtk_widget_add_css_class(note, "dim-label");
-		gtk_box_append(GTK_BOX(content), note);
-	}
-
-	prompt->status = gtk_label_new(NULL);
-	gtk_label_set_wrap(GTK_LABEL(prompt->status), TRUE);
-	gtk_label_set_xalign(GTK_LABEL(prompt->status), 0.0f);
-	gtk_widget_set_visible(prompt->status, FALSE);
-	gtk_box_append(GTK_BOX(content), prompt->status);
-
-	/* Created whether or not there is a hint to show right now: the flags are
-	 * re-read after every refusal, and a warning that only exists if it was
-	 * needed at window-open time is a warning that arrives too late. */
-	prompt->hint = gtk_label_new(NULL);
-	gtk_label_set_wrap(GTK_LABEL(prompt->hint), TRUE);
-	gtk_label_set_xalign(GTK_LABEL(prompt->hint), 0.0f);
-	gtk_widget_add_css_class(prompt->hint, "warning");
-	gtk_box_append(GTK_BOX(content), prompt->hint);
-	update_retry_hint(prompt);
-
-	prompt->spinner = gtk_spinner_new();
-	gtk_spinner_set_spinning(GTK_SPINNER(prompt->spinner), TRUE);
-	gtk_widget_set_visible(prompt->spinner, FALSE);
-	gtk_widget_set_halign(prompt->spinner, GTK_ALIGN_CENTER);
-	gtk_box_append(GTK_BOX(content), prompt->spinner);
-
-	buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-	gtk_widget_set_halign(buttons, GTK_ALIGN_END);
-
-	cancel = gtk_button_new_with_mnemonic("_Cancel");
-	prompt->cancel_button = cancel;
-	g_signal_connect(cancel, "clicked", G_CALLBACK(on_cancel), prompt);
-	gtk_box_append(GTK_BOX(buttons), cancel);
-
-	if (!protected_path)
-	{
-		prompt->unlock_button = gtk_button_new_with_mnemonic("_Unlock");
-		gtk_widget_add_css_class(prompt->unlock_button, "suggested-action");
-		g_signal_connect(prompt->unlock_button, "clicked", G_CALLBACK(on_unlock), prompt);
-		gtk_box_append(GTK_BOX(buttons), prompt->unlock_button);
-	}
-
-	gtk_box_append(GTK_BOX(content), buttons);
-
-	toolbar = adw_toolbar_view_new();
-	adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar), header);
-	adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), content);
-	adw_window_set_content(ADW_WINDOW(window), toolbar);
-
-	keys = gtk_event_controller_key_new();
-	prompt->keys = keys;
-	g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key_pressed), prompt);
-	gtk_widget_add_controller(window, keys);
-
-	g_signal_connect(window, "close-request", G_CALLBACK(on_close_request), prompt);
-
 	certificate_log_grant(CERTIFICATE_REASON_PIN_PROMPTED, NULL,
-	                      protected_path ? "protected-path" : "on-screen");
+	                      prompt->protected_path ? "protected-path" : "on-screen");
 
-	certificate_external_window_present(GTK_WINDOW(window), prompt->parent_window, NULL);
-
-	if (prompt->entry != NULL)
-		gtk_widget_grab_focus(prompt->entry);
-	else
-		run_login(prompt, TRUE);
+	prompt->impl->start(prompt);
 }
 
 void certificate_pin_login(CertificateToken* token, const char* parent_window,
@@ -884,11 +745,16 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
                            gpointer user_data)
 {
 	PinPrompt* prompt = NULL;
+	const PinPromptImpl* impl = pin_impl();
 
-	if (!certificate_ui_has_display())
+	/* NEVER READ A PIN FROM STDIN. With no display there is no way for THIS
+	 * process to ask, and inventing one would be a trusted prompt nobody can
+	 * see. The system prompter is the exception that proves the rule: the
+	 * window is the shell's, so this process needs no display of its own -- and
+	 * the shell is still a graphical session, which is why the answer is
+	 * "no_display" rather than "headless works now". */
+	if (impl->needs_display && !certificate_ui_has_display())
 	{
-		/* NEVER READ A PIN FROM STDIN. With no display there is no way to ask,
-		 * and inventing one would be a trusted prompt nobody can see. */
 		done(CERTIFICATE_PIN_NO_DISPLAY, user_data);
 		return;
 	}
@@ -901,7 +767,9 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
 
 	prompt = g_new0(PinPrompt, 1);
 	prompt->refs = 1;
+	prompt->impl = impl;
 	prompt->token = certificate_token_ref(token);
+	prompt->protected_path = token->protected_authentication_path;
 	prompt->parent_window = g_strdup(parent_window);
 	prompt->caller_display = g_strdup(caller_display);
 	prompt->purpose_display = g_strdup(purpose_display);
@@ -912,9 +780,9 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
 	prompt->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
 	prompt->done = done;
 	prompt->user_data = user_data;
-	prompt->buffer = pin_buffer_new();
+	prompt->buffer_opaque = pin_buffer_new();
 
-	if (prompt->buffer == NULL)
+	if (prompt->buffer_opaque == NULL)
 	{
 		pin_prompt_unref(prompt);
 		done(CERTIFICATE_PIN_DEVICE_ERROR, user_data);

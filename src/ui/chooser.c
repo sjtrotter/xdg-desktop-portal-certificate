@@ -17,7 +17,11 @@
 
 typedef struct
 {
-	int refs;
+	/* ATOMIC. A cancellation handler runs on whatever thread called
+	 * g_cancellable_cancel(), and the idle it queues takes a reference of its
+	 * own; every one of those is the main thread today, and g_atomic_int_*
+	 * costs nothing measurable and removes the need to say so. */
+	gint refs;
 
 	GPtrArray* candidates;
 	CertificateChooserDone done;
@@ -46,7 +50,7 @@ static void chooser_free(Chooser* chooser)
 
 static Chooser* chooser_ref(Chooser* chooser)
 {
-	chooser->refs++;
+	g_atomic_int_inc(&chooser->refs);
 	return chooser;
 }
 
@@ -57,7 +61,7 @@ static void chooser_unref(gpointer data)
 	if (chooser == NULL)
 		return;
 
-	if (--chooser->refs > 0)
+	if (!g_atomic_int_dec_and_test(&chooser->refs))
 		return;
 
 	chooser_free(chooser);
