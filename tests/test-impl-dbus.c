@@ -434,6 +434,9 @@ static void test_options_are_validated(Fixture* fixture, gconstpointer user_data
 		{ "{'purpose': <'client_auth'>, 'lifetime': <'300'>}", "invalid_request" },
 		{ "{'purpose': <'client_auth'>, 'lifetime': <uint32 0>}", "invalid_request" },
 		{ "{'purpose': <'client_auth'>, 'reason': <42>}", "invalid_request" },
+		{ "{'purpose': <'client_auth'>, 'allow_selection_memory': <'yes'>}", "invalid_request" },
+		{ "{'purpose': <'client_auth'>, 'allow_selection_memory': <uint32 1>}",
+		  "invalid_request" },
 		{ "{'purpose': <'client_auth'>, 'operation_policy': <{'sign': <'yes'>}>}",
 		  "invalid_request" },
 		{ "{'purpose': <'client_auth'>, 'operation_policy': <{'delete': <true>}>}",
@@ -463,6 +466,41 @@ static void test_options_are_validated(Fixture* fixture, gconstpointer user_data
 		if (response != 2 || g_strcmp0(code, cases[i].code) != 0)
 			g_error("options %s answered %u/%s, expected 2/%s", cases[i].options, response,
 			        code != NULL ? code : "(none)", cases[i].code);
+	}
+}
+
+/* allow_selection_memory decides whether the chooser draws the "remember this"
+ * checkbox at all, so the two values that mean "do not offer it" -- absent and
+ * explicit false -- must both be accepted and must not be confused with a
+ * malformed request. The wrong-type cases are in test_options_are_validated;
+ * these are the ones that have to get PAST validation.
+ *
+ * What this cannot check from out here is the checkbox itself: with no token
+ * in the machine the request never reaches the chooser. The window is covered
+ * by tools/ui-smoke.sh. */
+static void test_selection_memory_is_accepted(Fixture* fixture, gconstpointer user_data)
+{
+	static const char* const cases[] = {
+		"{'purpose': <'client_auth'>}",
+		"{'purpose': <'client_auth'>, 'allow_selection_memory': <false>}",
+		"{'purpose': <'client_auth'>, 'allow_selection_memory': <true>}",
+	};
+
+	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
+
+	for (gsize i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		guint32 response = 0;
+		g_autofree char* code = NULL;
+		GVariant* options = g_variant_parse(G_VARIANT_TYPE_VARDICT, cases[i], NULL, NULL, NULL);
+
+		g_assert_nonnull(options);
+		acquire(fixture, SESSION_PATH, APP_A, options, &response, &code);
+
+		/* No card, so the answer is a refusal either way. It must not be the
+		 * one that means "this request was malformed". */
+		if (g_strcmp0(code, "invalid_request") == 0)
+			g_error("options %s were rejected as malformed", cases[i]);
 	}
 }
 
@@ -720,6 +758,7 @@ int main(int argc, char** argv)
 	ADD("/impl/identity-level-cannot-rise", test_identity_level_cannot_rise);
 	ADD("/impl/session-path-is-reusable", test_session_path_is_reusable);
 	ADD("/impl/options-are-validated", test_options_are_validated);
+	ADD("/impl/selection-memory-is-accepted", test_selection_memory_is_accepted);
 	ADD("/impl/results-types", test_results_types);
 	ADD("/impl/sign-without-grant", test_sign_without_grant);
 	ADD("/impl/decrypt-is-refused", test_decrypt_is_refused);

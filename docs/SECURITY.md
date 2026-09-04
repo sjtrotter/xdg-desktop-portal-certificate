@@ -194,7 +194,9 @@ Rules that follow:
   table for an unidentified app)*.
 - **Selection memory is unavailable to level 3** *(provided by xdg-desktop-portal)*, and the user's
   own "remember this" answer is required on top of the application's `allow_selection_memory` —
-  this backend reports what the user said as `remember_selection` and stores nothing itself.
+  this backend is told the effective value in the `AcquireCredential` options, offers the checkbox
+  only when it is true, reports what the user said as `remember_selection`, and stores nothing
+  itself.
 - **First use by an unidentified caller requires explicit confirmation**, and the dialog says the
   application could not be identified rather than inventing a name for it. *(Backend: this is the
   chooser, and it is this repository's obligation.)*
@@ -419,12 +421,12 @@ remember; and because it is in the real permission store it is listed and revoca
 desktop's own UI rather than in a private store nobody can see. There is no "remember PIN" and
 there never will be.
 
-**The impl interface cannot express `allow_selection_memory` yet**, so this backend cannot know
-whether the application asked. It used to offer the checkbox to every identified caller, which
-meant a user could tick "remember this certificate" and have nothing stored, silently. Until the
-frontend adds the key, the checkbox is offered **only when `preselect_certificate` was supplied** —
-under-approximating rather than lying. [IMPL-INTERFACE.md](IMPL-INTERFACE.md) records the interface
-change that fixes it.
+**The impl interface now carries `allow_selection_memory`**, the frontend's effective answer, and
+this backend offers the checkbox only when it is true. Absent is read as false and a non-boolean is
+a malformed request; the user's answer is clamped to the same condition on the way back, so
+`remember_selection` cannot be true for a grant that was never allowed to remember anything. The
+interim heuristic — offering the checkbox only when `preselect_certificate` was supplied — is gone.
+[IMPL-INTERFACE.md](IMPL-INTERFACE.md) has the detail.
 
 ## Logging
 

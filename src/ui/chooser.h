@@ -58,10 +58,15 @@ typedef struct
 	gboolean may_decrypt;
 	guint32 lifetime_seconds;
 	const char* reason;              /**< UNTRUSTED. Displayed labelled, subordinate. Never logged. */
-	gboolean offer_selection_memory; /**< the FRONTEND says whether the caller asked for it and
-	                                      whether the identity level permits it; the backend only
-	                                      offers it and reports the answer. THE FRONTEND, not this
-	                                      window, writes the permission store. */
+	gboolean offer_selection_memory; /**< whether to draw the "use this certificate next time"
+	                                      checkbox at all. It comes from the impl interface's
+	                                      allow_selection_memory option, which is the FRONTEND's
+	                                      effective answer: the application asked for it AND its
+	                                      identity level permits it. False means DO NOT OFFER --
+	                                      the frontend discards remember_selection in that case,
+	                                      so a checkbox drawn anyway is a promise nothing keeps.
+	                                      THE FRONTEND, not this window, writes the permission
+	                                      store. */
 	const char* preselect_certificate; /**< a stable certificate id the frontend read back from the
 	                                        permission store, or NULL. PRESELECTION ONLY: the window
 	                                        still opens and the user still confirms. */

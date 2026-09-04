@@ -285,6 +285,24 @@ static gboolean option_take_uint32(GVariant* options, const char* key, guint32* 
 	return TRUE;
 }
 
+static gboolean option_take_boolean(GVariant* options, const char* key, gboolean* out,
+                                    gboolean* bad)
+{
+	g_autoptr(GVariant) value = g_variant_lookup_value(options, key, NULL);
+
+	if (value == NULL)
+		return FALSE;
+
+	if (!g_variant_is_of_type(value, G_VARIANT_TYPE_BOOLEAN))
+	{
+		*bad = TRUE;
+		return FALSE;
+	}
+
+	*out = g_variant_get_boolean(value);
+	return TRUE;
+}
+
 static GVariant* option_take_vardict(GVariant* options, const char* key, gboolean* bad)
 {
 	g_autoptr(GVariant) value = g_variant_lookup_value(options, key, NULL);
@@ -346,6 +364,7 @@ typedef struct
 	gboolean may_sign;
 	gboolean may_decrypt;
 	gboolean interaction_forbidden;
+	gboolean allow_selection_memory;
 	gboolean offer_selection_memory;
 
 	/* Sign/Decrypt state */
@@ -767,7 +786,11 @@ static void on_chooser_done(const CertificateChooserResult* result, gpointer use
 		return;
 	}
 
-	finish_acquire(transaction, result->chosen, result->remember_selection);
+	/* Clamped rather than trusted: the window is this backend's own code, but
+	 * the answer it produces is reported to the frontend as the user's, and a
+	 * true here that the frontend would discard is worse than useless. */
+	finish_acquire(transaction, result->chosen,
+	               result->remember_selection && transaction->offer_selection_memory);
 }
 
 static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_data)
@@ -876,6 +899,17 @@ static gboolean parse_acquire_options(Transaction* transaction, GVariant* option
 	    bad)
 		return FALSE;
 	if (!option_take_string(options, "preselect_certificate", &transaction->preselect, &bad) &&
+	    bad)
+		return FALSE;
+
+	/* ABSENT MEANS NO. The key is the frontend's effective answer, so an older
+	 * frontend that does not send it is one whose permission store this
+	 * backend cannot reason about, and the safe reading of silence is that
+	 * nothing would be stored. Present and not a boolean is a malformed
+	 * request, not a default. */
+	transaction->allow_selection_memory = FALSE;
+	if (!option_take_boolean(options, "allow_selection_memory",
+	                         &transaction->allow_selection_memory, &bad) &&
 	    bad)
 		return FALSE;
 
@@ -1027,19 +1061,19 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object
 		return TRUE;
 	}
 
-	/* THE CHECKBOX IS ONLY OFFERED WHERE IT CANNOT LIE. The frontend stores a
-	 * remembered selection only when the application passed
-	 * allow_selection_memory, and the impl interface has no such key yet -- so
-	 * asking "remember this?" of every identified caller meant the user could
-	 * tick a box that did nothing, silently.
+	/* THE CHECKBOX IS ONLY OFFERED WHERE IT CANNOT LIE. allow_selection_memory
+	 * is the frontend's effective answer -- the application asked for it AND
+	 * the identity level permits it -- and the frontend discards
+	 * remember_selection when it is false, so an offer made anyway is a
+	 * promise to the user that nothing will keep.
 	 *
-	 * TODO: when the frontend branch adds allow_selection_memory (b) to the
-	 * impl AcquireCredential options, read it here and drop the preselect
-	 * proxy: a caller that asked for memory but has none yet is exactly the
-	 * case this under-approximates. */
+	 * The identity level is checked again here even though the frontend has
+	 * already folded it in. It costs nothing, and this backend does not draw a
+	 * "remember this for that application" checkbox on behalf of an
+	 * application it cannot name. */
 	transaction->offer_selection_memory =
-	    transaction->caller.level != CERTIFICATE_IDENTITY_UNKNOWN &&
-	    transaction->preselect != NULL;
+	    transaction->allow_selection_memory &&
+	    transaction->caller.level != CERTIFICATE_IDENTITY_UNKNOWN;
 
 	transaction->request = certificate_impl_request_new(
 	    g_dbus_method_invocation_get_sender(invocation), arg_app_id, arg_handle);

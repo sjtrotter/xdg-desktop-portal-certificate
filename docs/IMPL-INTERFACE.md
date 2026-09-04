@@ -91,6 +91,7 @@ cost:
 | `app_identity_level` | `verified_sandboxed` \| `derived_host` \| `unidentified`. **The backend must display this.** An application name shown without saying how it was established is a lie by omission. |
 | `lifetime` | Seconds the frontend has *decided* to allow, after applying its 3600 s ceiling — not the caller's `requested_lifetime`. |
 | `preselect_certificate` | A stable certificate id the frontend read from the permission store. Preselection only. |
+| `allow_selection_memory` | Whether the backend may offer to remember this selection. The **effective** value: the application asked for it *and* the identity level is not `unidentified`. |
 
 **And two fields that are gone.** `app_display_name` is not on the branch interface: the backend
 gets an app id and an identity level, and any human-readable name is its own to derive or to omit.
@@ -271,11 +272,28 @@ replaced; a **live** one is still refused.
 ### Selection memory is offered only where it cannot lie
 
 The frontend stores a remembered selection only when the application passed
-`allow_selection_memory`. The impl interface has no such key, so this backend cannot know, and
-offering the checkbox to every identified caller meant a user could tick it and have nothing
-stored. Until the frontend adds `allow_selection_memory` (`b`) to the impl `AcquireCredential`
-options — a one-key change, the same shape as `lifetime` and `app_identity_level` — the checkbox is
-shown **only when `preselect_certificate` was supplied**. That under-approximates and never lies.
+`allow_selection_memory` *and* the caller's identity level is not `unidentified`. It now forwards
+that decision as `allow_selection_memory` (`b`) in the impl `AcquireCredential` options, and the
+interface says a backend **must not** offer selection memory when it is false — the frontend
+discards `remember_selection` in that case, so a checkbox drawn anyway is a promise nothing keeps.
+
+This backend draws the "use this certificate next time" checkbox only when that key is true. Two
+notes on how it reads it:
+
+- **Absent means false.** The key is the frontend's effective answer; a frontend that does not send
+  it is one whose permission store this backend cannot reason about, and the safe reading of
+  silence is that nothing would be stored. Present but not a boolean is `invalid_request`, not a
+  default.
+- **The identity level is checked again**, even though the frontend has already folded it in. It
+  costs nothing, and this backend does not draw a "remember this for that application" checkbox on
+  behalf of an application it cannot name.
+
+The user's answer is clamped to the same condition on the way back out: `remember_selection` is
+false whenever the checkbox was not offered.
+
+The interim heuristic — offering the checkbox only when `preselect_certificate` was supplied — is
+gone. It under-approximated in exactly the case that mattered, a caller that asked for memory and
+did not have any yet.
 
 ### `token_display` does not carry the serial
 
