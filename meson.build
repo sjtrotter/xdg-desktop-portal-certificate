@@ -3,39 +3,40 @@
 # xdg-desktop-portal-certificate: an out-of-tree BACKEND for the experimental
 # org.freedesktop.impl.portal.experimental.Certificate portal interface.
 #
-# EXPERIMENTAL DESIGN SKETCH. Nothing is implemented. This build exists so that
-# the skeleton compiles, the dependency picture is visible, and the interface
-# XML, the .portal file and the D-Bus service file have install paths -- not
-# because there is anything to run.
-#
 # ONE BINARY, because there is one process:
 #
 #   xdg-desktop-portal-certificate   src/   the chooser, the PIN prompt, token
 #                                           discovery and the brokered
 #                                           operations
 #
-# There is no frontend here any more. The portal frontend -- app id derivation,
-# option validation, policy, the grant registry, the permission store, Request
-# and Session lifecycle, backend selection -- is a branch of xdg-desktop-portal
+# There is no frontend here. The portal frontend -- app id derivation, option
+# validation, policy, the grant registry, the permission store, Request and
+# Session lifecycle, backend selection -- is a branch of xdg-desktop-portal
 # itself: experimental/certificate-webauthentication, commits 3f46e3c..661e441.
 # See docs/decisions/0010-backend-only-frontend-lives-upstream.md and
 # docs/UPSTREAMING.md.
+#
+# LIBDEX IS DELIBERATELY NOT A DEPENDENCY. The frontend branch uses it for its
+# fibers; backends do not, and no released distribution ships it as a backend
+# dependency. Everything here is plain GLib/GIO async plus GTask worker threads
+# for the PKCS#11 calls, which is what xdg-desktop-portal-gtk does.
 
 project(
   'xdg-desktop-portal-certificate',
   'c',
-  version: '0.0.0',
+  version: '0.1.0',
   license: 'GPL-2.0-or-later',
   meson_version: '>= 0.60.0',
   default_options: [
     'c_std=c11',
-    'warning_level=3',
+    'warning_level=2',
     'werror=false',
     'b_ndebug=if-release',
   ],
 )
 
 cc = meson.get_compiler('c')
+gnome = import('gnome')
 
 add_project_arguments(
   cc.get_supported_arguments([
@@ -45,6 +46,8 @@ add_project_arguments(
     '-Wmissing-prototypes',
     '-Wwrite-strings',
     '-Wformat=2',
+    '-Wno-unused-parameter',
+    '-Wno-declaration-after-statement',
   ]),
   language: 'c',
 )
@@ -60,71 +63,60 @@ dbus_interfaces_dir = datadir / 'dbus-1' / 'interfaces'
 # THE REAL DIRECTORY. Out-of-tree backends install their .portal file into
 # ${datadir}/xdg-desktop-portal/portals -- that is where the frontend looks
 # (desktop-portal/xdp-portal-config.c:364) and there is nowhere else it would
-# find it. xdg-desktop-portal-termfilechooser and xdg-desktop-portal-gtk both do
-# exactly this.
+# find it.
 portal_dir = datadir / 'xdg-desktop-portal' / 'portals'
 
-# The stub needs only GLib. Everything else is declared so that the dependency
-# picture is visible in the summary, and is unused: none of the components those
-# libraries would serve exist yet.
 glib_dep = dependency('glib-2.0', version: '>= 2.66')
-gio_dep = dependency('gio-2.0', version: '>= 2.66', required: false)
+gobject_dep = dependency('gobject-2.0', version: '>= 2.66')
+gio_dep = dependency('gio-2.0', version: '>= 2.66')
+gio_unix_dep = dependency('gio-unix-2.0', version: '>= 2.66')
 
-# p11-kit is used for MANAGED MODULE loading and for the RPC transport under the
-# synthetic facade -- NOT for scoping. See
+# p11-kit is used for MANAGED MODULE loading -- NOT for scoping. See
 # docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md.
-p11kit_dep = dependency('p11-kit-1', required: false)
+p11kit_dep = dependency('p11-kit-1', version: '>= 0.23')
+# GnuTLS parses the DER the token hands back: subject, issuer, validity, key
+# usage, extended key usage, key type. Nothing is signed or verified with it.
+gnutls_dep = dependency('gnutls', version: '>= 3.6')
 # The chooser and the PIN prompt are this backend's own windows and are the
 # controls that carry the security decision; see docs/IMPL-INTERFACE.md.
-gtk_dep = dependency('gtk4', required: false)
+gtk_dep = dependency('gtk4', version: '>= 4.10')
+adw_dep = dependency('libadwaita-1', version: '>= 1.4')
 
-executable(
-  'xdg-desktop-portal-certificate',
-  sources: ['src/main.c'],
-  dependencies: [glib_dep],
-  install: true,
-  install_dir: libexecdir,
-)
+# Parenting a dialog to the requesting application's window. Both are optional:
+# a backend on a display server it was not built for simply draws an unparented
+# window, which the chooser is required to do anyway for an invalid handle.
+gtk_wayland_dep = dependency('gtk4-wayland', required: false)
+gtk_x11_dep = dependency('gtk4-x11', required: false)
+x11_dep = dependency('x11', required: false)
 
-# The impl interface description, installed where D-Bus interface XML lives so it
-# can be introspected and reviewed. It is a VERBATIM COPY of the xdg-desktop-portal
-# branch's file and must track it; the header in the file says so. Upstream keeps
-# these in xdg-desktop-portal and backends read them from its pkg-config
-# interfaces directory -- which is where this one comes from the day the branch
-# lands. See docs/IMPL-INTERFACE.md.
+config = configuration_data()
+config.set_quoted('PACKAGE_VERSION', meson.project_version())
+config.set('HAVE_GTK_WAYLAND', gtk_wayland_dep.found() ? 1 : 0)
+config.set('HAVE_GTK_X11', (gtk_x11_dep.found() and x11_dep.found()) ? 1 : 0)
+configure_file(output: 'config.h', configuration: config)
+
+config_inc = include_directories('.')
+
+subdir('data')
+subdir('src')
+subdir('tests')
+
 install_data(
-  'data/org.freedesktop.impl.portal.experimental.Certificate.xml',
-  install_dir: dbus_interfaces_dir,
-)
-
-# Backend discovery. Upstream's gtk.portal.in has @-substitutions because its
-# interface list is build-configurable; ours lists one interface unconditionally,
-# so this is a copy. The .in name is kept so the file gains substitutions the day
-# a second impl interface becomes optional.
-configure_file(
-  input: 'data/certificate.portal.in',
-  output: 'certificate.portal',
-  copy: true,
-  install: true,
-  install_dir: portal_dir,
-)
-
-# D-Bus activation. xdg-desktop-portal starts this name when a .portal file
-# selects this backend; applications have no reason to hold it.
-configure_file(
-  input: 'data/org.freedesktop.impl.portal.desktop.certificate.service.in',
-  output: 'org.freedesktop.impl.portal.desktop.certificate.service',
-  configuration: {'libexecdir': libexecdir},
-  install: true,
-  install_dir: dbus_service_dir,
+  'tools/certificate-e2e.py',
+  install_dir: get_option('datadir') / 'xdg-desktop-portal-certificate',
+  install_mode: 'rwxr-xr-x',
 )
 
 summary(
   {
-    'glib-2.0 (required)': glib_dep.version(),
-    'gio-2.0 (D-Bus)': gio_dep.found() ? gio_dep.version() : 'not found',
-    'p11-kit-1 (tokens, RPC transport)': p11kit_dep.found() ? p11kit_dep.version() : 'not found',
-    'gtk4 (chooser and PIN windows)': gtk_dep.found() ? gtk_dep.version() : 'not found',
+    'glib-2.0': glib_dep.version(),
+    'gio-2.0': gio_dep.version(),
+    'p11-kit-1': p11kit_dep.version(),
+    'gnutls': gnutls_dep.version(),
+    'gtk4': gtk_dep.version(),
+    'libadwaita-1': adw_dep.version(),
+    'gtk4-wayland (xdg_foreign parenting)': gtk_wayland_dep.found() ? gtk_wayland_dep.version() : 'not found',
+    'gtk4-x11 (XID parenting)': (gtk_x11_dep.found() and x11_dep.found()) ? gtk_x11_dep.version() : 'not found',
   },
   section: 'dependencies',
 )
@@ -146,8 +138,9 @@ summary(
 
 summary(
   {
-    'implemented': false,
-    'feasibility spike run': false,
+    'chooser and PIN prompt': true,
+    'brokered Sign / Decrypt': true,
+    'PKCS#11 compatibility facade': false,
     'frontend branch merged upstream': false,
     'safe to depend on': false,
   },

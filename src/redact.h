@@ -47,7 +47,9 @@
  *  the operation id are what join them -- which is one of the things this project is for
  *  -- without becoming a record of what they signed.
  *
- *  Sketch only; nothing here is implemented.
+ *  IMPLEMENTED. The negative test -- that a library error string carrying a
+ *  pkcs11: URI with a pin-value attribute is truncated before the URI -- lives
+ *  in tests/test-redact.c.
  */
 
 /** Stable reason codes. Machine-greppable, translation-independent, and safe to log. */
@@ -95,5 +97,17 @@ void certificate_log_counts(const char* reason_code, guint tokens, guint candida
  *  string safe to log. Every GError message from p11-kit, OpenSC or GnuTLS passes
  *  through this before it reaches a log or a D-Bus error_message. */
 char* certificate_redact_error_text(const char* text);
+
+/** A token serial reduced to its last four characters. Token PRESENCE may be
+ *  logged; token IDENTITY may not, and a card serial is an identity. */
+char* certificate_redact_serial(const char* serial);
+
+/** A debug breadcrumb, emitted only under --verbose. Two stable codes, no
+ *  free-form text, for the same reason the entry points above take no format
+ *  string. */
+void certificate_log_debug(const char* reason_code, const char* detail_code);
+
+void certificate_log_set_verbose(gboolean verbose);
+gboolean certificate_log_get_verbose(void);
 
 #endif /* CERTIFICATE_REDACT_H */
