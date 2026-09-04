@@ -643,10 +643,19 @@ static GVariant* token_display_for(const CertificateToken* token)
  * a strictly larger audience than a grant's token_display, which goes only to
  * the application that got the grant.
  *
- * The id is a salted hash with a salt this process generates at startup, so it
- * is stable enough to pair an added token with its removal and useless as a
- * cross-process or cross-session identifier. */
-static GVariant* token_presence_for(const CertificateToken* token)
+ * THE TWO KEYS ARE THE WHOLE SIGNAL. The impl interface names token_id (`s`)
+ * and protected_authentication_path (`b`) and says every other key is dropped,
+ * so nothing else is put here -- not even for a frontend that would discard it,
+ * because the next frontend might not.
+ *
+ * token_id IS NOT DERIVABLE FROM THE CARD, which the interface requires in as
+ * many words: a serial, or a hash of one another party can recompute, is a
+ * correlation handle across every application on the bus. It is a SHA-256 over
+ * a salt this process generates at startup and never publishes, so it is stable
+ * enough to pair an added token with its removal, stable for as long as the
+ * token is present, and useless to anyone trying to recognise the same card in
+ * another session or another process. */
+GVariant* certificate_impl_token_presence(const CertificateToken* token)
 {
 	static char* salt = NULL;
 	GVariantBuilder builder;
@@ -663,7 +672,7 @@ static GVariant* token_presence_for(const CertificateToken* token)
 	digest[32] = '\0';
 
 	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-	g_variant_builder_add(&builder, "{sv}", "id", g_variant_new_string(digest));
+	g_variant_builder_add(&builder, "{sv}", "token_id", g_variant_new_string(digest));
 	g_variant_builder_add(&builder, "{sv}", "protected_authentication_path",
 	                      g_variant_new_boolean(token->protected_authentication_path));
 
@@ -1352,7 +1361,7 @@ static gboolean handle_get_capabilities(XdpImplExperimentalCertificate* object,
 static void on_token_event(CertificateToken* token, gboolean added, gpointer user_data)
 {
 	CertificateImpl* impl = user_data;
-	GVariant* presence = token_presence_for(token);
+	GVariant* presence = certificate_impl_token_presence(token);
 
 	certificate_log_counts(added ? CERTIFICATE_REASON_DISCOVERY_RESULT
 	                             : CERTIFICATE_REASON_TOKEN_REMOVED,

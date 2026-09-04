@@ -24,6 +24,7 @@
 
 #include <gio/gio.h>
 #include <glib.h>
+#include <string.h>
 
 #include "certificate-impl.h"
 #include "fixture-util.h"
@@ -561,6 +562,43 @@ static void test_results_types(Fixture* fixture, gconstpointer user_data)
 	}
 }
 
+/* THE BROADCAST SIGNALS SAY A TOKEN IS THERE AND NOTHING ELSE. The frontend
+ * re-emits TokenAdded/TokenRemoved to every client on the session bus, before
+ * anyone has consented to anything, and a PIV card's label is routinely the
+ * cardholder's name. The interface names two keys; this asserts there are two
+ * keys, that the id is not the serial or the label or anything derived from
+ * them by a rule somebody else could apply, and that it is stable. */
+static void test_token_presence_carries_no_identity(Fixture* fixture, gconstpointer user_data)
+{
+	g_autoptr(CertificateCandidate) candidate =
+	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
+	g_autoptr(GVariant) presence = NULL;
+	g_autoptr(GVariant) again = NULL;
+	const char* token_id = NULL;
+	const char* second = NULL;
+	gboolean protected_path = TRUE;
+
+	presence = g_variant_ref_sink(certificate_impl_token_presence(candidate->token));
+
+	g_assert_cmpuint(g_variant_n_children(presence), ==, 2);
+	g_assert_true(g_variant_lookup(presence, "token_id", "&s", &token_id));
+	g_assert_true(g_variant_lookup(presence, "protected_authentication_path", "b",
+	                               &protected_path));
+	g_assert_false(protected_path);
+
+	/* Not the serial, not the label, and not a substring of either: the point
+	 * of the id is that a second party cannot recompute it. */
+	g_assert_cmpstr(token_id, !=, candidate->token->serial);
+	g_assert_cmpstr(token_id, !=, candidate->token->label);
+	g_assert_null(strstr(token_id, candidate->token->serial));
+
+	/* Stable for as long as the token is present, which is what pairs an
+	 * added token with its removal. */
+	again = g_variant_ref_sink(certificate_impl_token_presence(candidate->token));
+	g_assert_true(g_variant_lookup(again, "token_id", "&s", &second));
+	g_assert_cmpstr(token_id, ==, second);
+}
+
 /* Sign on a session that never acquired anything is refused, and a Close() in
  * flight is answered as a cancellation rather than a device failure. */
 static void test_sign_without_grant(Fixture* fixture, gconstpointer user_data)
@@ -760,6 +798,7 @@ int main(int argc, char** argv)
 	ADD("/impl/options-are-validated", test_options_are_validated);
 	ADD("/impl/selection-memory-is-accepted", test_selection_memory_is_accepted);
 	ADD("/impl/results-types", test_results_types);
+	ADD("/impl/token-presence-carries-no-identity", test_token_presence_carries_no_identity);
 	ADD("/impl/sign-without-grant", test_sign_without_grant);
 	ADD("/impl/decrypt-is-refused", test_decrypt_is_refused);
 	ADD("/impl/capabilities", test_capabilities);

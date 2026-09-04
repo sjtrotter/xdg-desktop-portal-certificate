@@ -217,13 +217,17 @@ document said all along.
 
 ### The token signals carry presence, not identity
 
-`TokenAdded` and `TokenRemoved` send an **opaque id** and `protected_authentication_path`, and
-nothing else. The id is a hash of the token's stable attributes salted with a value this process
-generates at startup: stable enough to pair an insertion with its removal, useless as a
-cross-process or cross-boot identifier.
+`TokenAdded` and `TokenRemoved` send `token_id` (`s`) and `protected_authentication_path` (`b`),
+and nothing else — the two keys the interface names, and no third key even for a frontend that
+would discard it, because the next frontend might not. `token_id` is a SHA-256 over the token's
+stable attributes salted with a value this process generates at startup and never publishes:
+stable for as long as the token is present, stable enough to pair an insertion with its removal,
+and **not derivable from the card**, which the interface requires in as many words. A serial, or a
+hash of one another party can recompute, would be a correlation handle across every application on
+the bus.
 
-The reason is the audience. The frontend re-emits these signals verbatim on its own public
-interface, to **every client on the bus**, before anybody has consented to anything. On PIV
+The reason is the audience. The frontend re-emits these signals on its own public interface, to
+**every client on the bus**, before anybody has consented to anything. On PIV
 deployments a token label is routinely the cardholder's name, an EDIPI or an issuing agency — which
 is exactly the correlation the serial is withheld to prevent, delivered to a strictly larger
 audience than `token_display`, which goes only to the application that obtained a grant. The full

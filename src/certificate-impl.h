@@ -87,6 +87,12 @@ gboolean certificate_impl_sender_is_frontend_default(const char* sender);
  *  afterwards is still answered. */
 void certificate_impl_session_forget(CertificateImplSession* session);
 
+/** Build the TokenAdded/TokenRemoved vardict for @token: the opaque token_id
+ *  and protected_authentication_path, and nothing else. Exposed so that a test
+ *  can assert exactly that -- the frontend re-emits these signals to every
+ *  client on the session bus, so a third key here is a broadcast leak. */
+GVariant* certificate_impl_token_presence(const CertificateToken* token);
+
 /** Build the AcquireCredential results vardict for @candidate. Exposed so that
  *  a test can assert the D-Bus type of every key: the frontend type-checks only
  *  `signature`/`plaintext` and passes the rest through, so a wrong type here
