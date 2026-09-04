@@ -39,6 +39,11 @@
  *  reason the split helps: a cancel arrives here having already been attributed
  *  to the caller that is allowed to send it.
  *
+ *  ONLY THE FRONTEND MAY CLOSE IT. The object path is guessable and the bus
+ *  name is reachable by anything running as the user, so Close() compares its
+ *  sender against the current owner of org.freedesktop.portal.Desktop exactly
+ *  as the Certificate methods do.
+ *
  *  EVERYTHING A TRANSACTION OWNS HANGS OFF THE CANCELLABLE, so that one
  *  cancellation closes all of it: the chooser window, the PIN window, the
  *  discovery worker and the in-flight PKCS#11 operation. Closed on exactly one
@@ -57,9 +62,13 @@ CertificateImplRequest* certificate_impl_request_new(const char* sender, const c
 
 /** Put it on the bus at its handle path. Takes a reference that
  *  certificate_impl_request_unexport() drops, exactly as upstream's does, so a
- *  racing Close() always finds a live object. */
-void certificate_impl_request_export(CertificateImplRequest* request,
-                                     GDBusConnection* connection);
+ *  racing Close() always finds a live object.
+ *
+ *  Returns FALSE and sets @error when the path cannot be exported. THE CALLER
+ *  MUST THEN ABORT THE CALL: an interaction with no Request on the bus is one
+ *  the frontend cannot cancel. */
+gboolean certificate_impl_request_export(CertificateImplRequest* request,
+                                         GDBusConnection* connection, GError** error);
 
 /** Take it off the bus. Idempotent. */
 void certificate_impl_request_unexport(CertificateImplRequest* request);

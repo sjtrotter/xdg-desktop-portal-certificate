@@ -280,9 +280,39 @@ gboolean certificate_filter_parse(GVariant* options, CertificatePurpose purpose,
 	if (options == NULL)
 		return TRUE;
 
-	filter = g_variant_lookup_value(options, "certificate_filter", G_VARIANT_TYPE_VARDICT);
+	filter = g_variant_lookup_value(options, "certificate_filter", NULL);
 	if (filter == NULL)
 		return TRUE;
+
+	/* PRESENT WITH THE WRONG TYPE IS NOT ABSENT. It used to be: a mistyped
+	 * certificate_filter was silently dropped, and the chooser then offered
+	 * certificates the caller had said it could not use. */
+	if (!g_variant_is_of_type(filter, G_VARIANT_TYPE_VARDICT))
+	{
+		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+		                    "certificate_filter must be a vardict");
+		return FALSE;
+	}
+
+	{
+		static const char* const known[] = { "issuers",        "key_usage", "eku",
+			                                 "key_algorithms", "token_label", "piv_slot",
+			                                 NULL };
+		GVariantIter iter;
+		const char* key = NULL;
+
+		/* A key nobody understood may have been the one that said "less". */
+		g_variant_iter_init(&iter, filter);
+		while (g_variant_iter_next(&iter, "{&sv}", &key, NULL))
+		{
+			if (g_strv_contains(known, key))
+				continue;
+
+			g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+			            "Unknown certificate_filter key '%s'", key);
+			return FALSE;
+		}
+	}
 
 	/* A filter is REJECTED rather than half-applied. Ignoring a key that was
 	 * not understood would offer credentials the caller said it could not use,
@@ -323,13 +353,20 @@ gboolean certificate_filter_parse(GVariant* options, CertificatePurpose purpose,
 		goto invalid;
 
 	if (g_variant_lookup(filter, "token_label", "&s", &text))
-		out->token_label = g_strdup(text);
-	else if (g_variant_lookup_value(filter, "token_label", NULL) != NULL)
 	{
-		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-		                    "certificate_filter.token_label must be a string");
-		certificate_filter_clear(out);
-		return FALSE;
+		out->token_label = g_strdup(text);
+	}
+	else
+	{
+		g_autoptr(GVariant) mistyped = g_variant_lookup_value(filter, "token_label", NULL);
+
+		if (mistyped != NULL)
+		{
+			g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+			                    "certificate_filter.token_label must be a string");
+			certificate_filter_clear(out);
+			return FALSE;
+		}
 	}
 
 	if (g_variant_lookup(filter, "piv_slot", "&s", &text))
@@ -347,12 +384,17 @@ gboolean certificate_filter_parse(GVariant* options, CertificatePurpose purpose,
 
 		out->piv_slot = g_strdup(text);
 	}
-	else if (g_variant_lookup_value(filter, "piv_slot", NULL) != NULL)
+	else
 	{
-		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-		                    "certificate_filter.piv_slot must be a string");
-		certificate_filter_clear(out);
-		return FALSE;
+		g_autoptr(GVariant) mistyped = g_variant_lookup_value(filter, "piv_slot", NULL);
+
+		if (mistyped != NULL)
+		{
+			g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+			                    "certificate_filter.piv_slot must be a string");
+			certificate_filter_clear(out);
+			return FALSE;
+		}
 	}
 
 	return TRUE;

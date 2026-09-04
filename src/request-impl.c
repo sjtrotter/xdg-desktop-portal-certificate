@@ -10,6 +10,9 @@
 
 #include "request-impl.h"
 
+#include "certificate-impl.h"
+#include "redact.h"
+
 struct _CertificateImplRequest
 {
 	XdpImplRequestSkeleton parent_instance;
@@ -38,6 +41,22 @@ static gboolean certificate_impl_request_handle_close(XdpImplRequest* object,
                                                       GDBusMethodInvocation* invocation)
 {
 	CertificateImplRequest* request = CERTIFICATE_IMPL_REQUEST(object);
+
+	/* CLOSE IS AUTHORISED LIKE EVERY OTHER METHOD. A request path is
+	 * /org/freedesktop/portal/desktop/request/<sender>/<handle_token> and the
+	 * token is very often a fixed string, so anything on the bus could have
+	 * cancelled consent dialogs and PIN prompts as they appeared. It is only a
+	 * denial of service, but it is one against smart-card sign-in. */
+	if (!certificate_impl_sender_is_frontend_default(
+	        g_dbus_method_invocation_get_sender(invocation)))
+	{
+		certificate_log_decision(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL, "request_close",
+		                         FALSE);
+		g_dbus_method_invocation_return_error_literal(
+		    invocation, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED,
+		    "Only xdg-desktop-portal may call this interface");
+		return TRUE;
+	}
 
 	/* Cancelling first: every window and every worker this transaction owns is
 	 * tied to this cancellable, so one call tears all of it down. */
@@ -92,22 +111,22 @@ CertificateImplRequest* certificate_impl_request_new(const char* sender, const c
 	return request;
 }
 
-void certificate_impl_request_export(CertificateImplRequest* request, GDBusConnection* connection)
+gboolean certificate_impl_request_export(CertificateImplRequest* request,
+                                         GDBusConnection* connection, GError** error)
 {
-	g_autoptr(GError) error = NULL;
-
 	if (request->exported)
-		return;
+		return TRUE;
 
+	/* A FAILURE HERE ABORTS THE CALL. It used to be a warning and the
+	 * transaction went on without a Request on the bus, which degraded
+	 * silently into a prompt the frontend could not cancel. */
 	if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(request), connection,
-	                                      request->id, &error))
-	{
-		g_warning("Could not export the request object: %s", error->message);
-		return;
-	}
+	                                      request->id, error))
+		return FALSE;
 
 	g_object_ref(request);
 	request->exported = TRUE;
+	return TRUE;
 }
 
 void certificate_impl_request_unexport(CertificateImplRequest* request)

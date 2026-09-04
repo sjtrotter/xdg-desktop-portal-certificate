@@ -25,6 +25,11 @@
 static void on_session_invalidated(CertificateImplSession* session, const char* reason,
                                    gpointer user_data);
 
+/* How long a GetNameOwner answer is reused. It is short enough that an accepted
+ * call is never more than this stale and long enough that a burst of calls
+ * inside one transaction is one round trip rather than five. */
+#define CERTIFICATE_OWNER_CACHE_US (100 * 1000)
+
 struct CertificateImpl
 {
 	GDBusConnection* connection;
@@ -35,19 +40,104 @@ struct CertificateImpl
 	 * when nothing does, in which case every method is refused: with no
 	 * frontend on the bus there is nobody who may legitimately call. */
 	char* frontend_owner;
+	gint64 owner_checked_at;
 	guint frontend_watch;
 
 	GHashTable* sessions; /* char *object_path -> CertificateImplSession* (owned) */
 };
 
+/* ONE BACKEND PER PROCESS. The Request and Session skeletons are exported by
+ * this object but are separate GObjects with their own default handlers, and
+ * those handlers have to be able to ask the same question every Certificate
+ * method asks: is this sender the frontend? Threading a CertificateImpl*
+ * through two generated interfaces buys nothing over saying out loud that there
+ * is exactly one of these. */
+static CertificateImpl* certificate_impl_singleton = NULL;
+
 /* ------------------------------------------------------------ peer identity */
+
+static void invalidate_foreign_sessions(CertificateImpl* impl, const char* owner);
+
+static void set_frontend_owner(CertificateImpl* impl, const char* owner)
+{
+	if (g_strcmp0(impl->frontend_owner, owner) == 0)
+		return;
+
+	/* THE OLD OWNER'S SESSIONS GO FIRST. A grant belongs to the frontend
+	 * connection that created it; a replacement portal is a different process
+	 * with different callers, and it must not inherit a logged-in card session
+	 * it never asked for. */
+	invalidate_foreign_sessions(impl, owner);
+
+	g_free(impl->frontend_owner);
+	impl->frontend_owner = g_strdup(owner);
+
+	certificate_log_debug(owner != NULL ? CERTIFICATE_REASON_IDENTITY_RESOLVED
+	                                    : CERTIFICATE_REASON_IDENTITY_UNVERIFIED,
+	                      owner != NULL ? "frontend-present" : "frontend-gone");
+}
+
+/* THE WATCHER IS FOR CLEANUP; THE BUS IS THE AUTHORITY. D-Bus does not order
+ * NameOwnerChanged against the messages of the process that lost the name, so a
+ * cached owner alone would accept calls from a former frontend that is still
+ * connected. Every authorisation therefore resolves the owner from the bus,
+ * with a short cache so that a burst of calls inside one transaction is not a
+ * round trip each.
+ *
+ * WHAT THIS STILL DOES NOT PROVIDE: the answer is a snapshot. A name can change
+ * hands between the check and the work the call authorises, exactly as it can
+ * for every other check-then-use on a bus. A deployment that wants more can
+ * deny this backend's name to everything but the portal's uid in D-Bus policy;
+ * see docs/IMPL-INTERFACE.md. */
+static const char* resolve_frontend_owner(CertificateImpl* impl, gboolean force)
+{
+	g_autoptr(GVariant) reply = NULL;
+	g_autoptr(GError) error = NULL;
+	const char* owner = NULL;
+	gint64 now = g_get_monotonic_time();
+
+	if (!force && impl->owner_checked_at != 0 &&
+	    now - impl->owner_checked_at < CERTIFICATE_OWNER_CACHE_US)
+		return impl->frontend_owner;
+
+	impl->owner_checked_at = now;
+
+	reply = g_dbus_connection_call_sync(
+	    impl->connection, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+	    "GetNameOwner", g_variant_new("(s)", CERTIFICATE_FRONTEND_BUS_NAME),
+	    G_VARIANT_TYPE("(s)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 1000, NULL, &error);
+
+	/* NameHasNoOwner, or a bus that did not answer: nobody may call. Failing
+	 * closed is the only safe direction here. */
+	if (reply != NULL)
+		g_variant_get(reply, "(&s)", &owner);
+
+	set_frontend_owner(impl, owner);
+
+	return impl->frontend_owner;
+}
 
 gboolean certificate_impl_sender_is_frontend(CertificateImpl* impl, const char* sender)
 {
-	if (sender == NULL || impl->frontend_owner == NULL)
+	const char* owner = NULL;
+
+	if (impl == NULL || sender == NULL)
 		return FALSE;
 
-	return g_strcmp0(sender, impl->frontend_owner) == 0;
+	owner = resolve_frontend_owner(impl, FALSE);
+	if (owner != NULL && g_strcmp0(sender, owner) == 0)
+		return TRUE;
+
+	/* A mismatch may be a stale cache rather than a stranger, so a REFUSAL is
+	 * always decided on a fresh answer. */
+	owner = resolve_frontend_owner(impl, TRUE);
+
+	return owner != NULL && g_strcmp0(sender, owner) == 0;
+}
+
+gboolean certificate_impl_sender_is_frontend_default(const char* sender)
+{
+	return certificate_impl_sender_is_frontend(certificate_impl_singleton, sender);
 }
 
 static gboolean reject_stranger(CertificateImpl* impl, GDBusMethodInvocation* invocation)
@@ -68,36 +158,168 @@ static gboolean reject_stranger(CertificateImpl* impl, GDBusMethodInvocation* in
 	return TRUE;
 }
 
+static void close_and_forget_all(CertificateImpl* impl)
+{
+	GHashTableIter iter;
+	gpointer value = NULL;
+
+	g_hash_table_iter_init(&iter, impl->sessions);
+	while (g_hash_table_iter_next(&iter, NULL, &value))
+	{
+		CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(value);
+
+		certificate_impl_session_close(session);
+		certificate_impl_session_unexport(session);
+	}
+
+	g_hash_table_remove_all(impl->sessions);
+}
+
+/* Every session that was created by somebody other than @owner. With one
+ * frontend on the bus that is "all of them" whenever the name changes hands,
+ * which is the point: a grant does not survive the process it was made for. */
+static void invalidate_foreign_sessions(CertificateImpl* impl, const char* owner)
+{
+	GHashTableIter iter;
+	gpointer value = NULL;
+	g_autoptr(GPtrArray) doomed = g_ptr_array_new_with_free_func(g_object_unref);
+
+	if (impl->sessions == NULL)
+		return;
+
+	g_hash_table_iter_init(&iter, impl->sessions);
+	while (g_hash_table_iter_next(&iter, NULL, &value))
+	{
+		CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(value);
+
+		if (owner != NULL && g_strcmp0(session->owner, owner) == 0)
+			continue;
+
+		g_ptr_array_add(doomed, g_object_ref(session));
+	}
+
+	for (guint i = 0; i < doomed->len; i++)
+	{
+		CertificateImplSession* session = g_ptr_array_index(doomed, i);
+
+		certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "frontend-gone");
+		certificate_impl_session_close(session);
+		certificate_impl_session_unexport(session);
+		g_hash_table_remove(impl->sessions, session->id);
+	}
+}
+
 static void on_frontend_appeared(GDBusConnection* connection, const char* name, const char* owner,
                                  gpointer user_data)
 {
 	CertificateImpl* impl = user_data;
 
-	g_free(impl->frontend_owner);
-	impl->frontend_owner = g_strdup(owner);
-	certificate_log_debug(CERTIFICATE_REASON_IDENTITY_RESOLVED, "frontend-present");
+	set_frontend_owner(impl, owner);
+	impl->owner_checked_at = g_get_monotonic_time();
 }
 
 static void on_frontend_vanished(GDBusConnection* connection, const char* name, gpointer user_data)
 {
 	CertificateImpl* impl = user_data;
 
-	g_clear_pointer(&impl->frontend_owner, g_free);
-	certificate_log_debug(CERTIFICATE_REASON_IDENTITY_UNVERIFIED, "frontend-gone");
-
 	/* The frontend going away takes every grant with it: nothing left on the
 	 * bus can legitimately ask for an operation on one, and a logged-in card
 	 * session held past that point is a capability nobody can account for. */
+	set_frontend_owner(impl, NULL);
+	impl->owner_checked_at = g_get_monotonic_time();
+	close_and_forget_all(impl);
+}
+
+void certificate_impl_session_forget(CertificateImplSession* session)
+{
+	CertificateImpl* impl = certificate_impl_singleton;
+
+	certificate_impl_session_unexport(session);
+
+	if (impl == NULL || impl->sessions == NULL || session->id == NULL)
+		return;
+
+	if (g_hash_table_lookup(impl->sessions, session->id) == session)
+		g_hash_table_remove(impl->sessions, session->id);
+}
+
+/* ------------------------------------------------------- option validation */
+
+/* PRESENT WITH THE WRONG TYPE IS AN ERROR, NEVER "ABSENT". Treating a
+ * mistyped option as missing is how a filter that should have narrowed the
+ * offered set silently stops narrowing it, and how an interaction_mode nobody
+ * recognised becomes "prompting is allowed". Defaults apply only to keys that
+ * are genuinely not there. */
+static gboolean option_take_string(GVariant* options, const char* key, char** out, gboolean* bad)
+{
+	g_autoptr(GVariant) value = g_variant_lookup_value(options, key, NULL);
+
+	if (value == NULL)
+		return FALSE;
+
+	if (!g_variant_is_of_type(value, G_VARIANT_TYPE_STRING))
 	{
-		GHashTableIter iter;
-		gpointer value = NULL;
-
-		g_hash_table_iter_init(&iter, impl->sessions);
-		while (g_hash_table_iter_next(&iter, NULL, &value))
-			certificate_impl_session_close(CERTIFICATE_IMPL_SESSION(value));
-
-		g_hash_table_remove_all(impl->sessions);
+		*bad = TRUE;
+		return FALSE;
 	}
+
+	*out = g_variant_dup_string(value, NULL);
+	return TRUE;
+}
+
+static gboolean option_take_uint32(GVariant* options, const char* key, guint32* out,
+                                   gboolean* bad)
+{
+	g_autoptr(GVariant) value = g_variant_lookup_value(options, key, NULL);
+
+	if (value == NULL)
+		return FALSE;
+
+	if (!g_variant_is_of_type(value, G_VARIANT_TYPE_UINT32))
+	{
+		*bad = TRUE;
+		return FALSE;
+	}
+
+	*out = g_variant_get_uint32(value);
+	return TRUE;
+}
+
+static GVariant* option_take_vardict(GVariant* options, const char* key, gboolean* bad)
+{
+	g_autoptr(GVariant) value = g_variant_lookup_value(options, key, NULL);
+
+	if (value == NULL)
+		return NULL;
+
+	if (!g_variant_is_of_type(value, G_VARIANT_TYPE_VARDICT))
+	{
+		*bad = TRUE;
+		return NULL;
+	}
+
+	return g_steal_pointer(&value);
+}
+
+/* An unknown key in a SECURITY-RELEVANT nested vardict is refused rather than
+ * ignored: operation_policy, certificate_filter and the mechanism parameters
+ * all say what a grant may do, and a key nobody understood may have been the
+ * one that said "less". Unknown keys at the TOP LEVEL are still ignored,
+ * because that is where the frontend adds fields and a backend that refused
+ * them could not be upgraded past. */
+static gboolean vardict_keys_known(GVariant* dict, const char* const* known)
+{
+	GVariantIter iter;
+	const char* key = NULL;
+
+	g_variant_iter_init(&iter, dict);
+	while (g_variant_iter_next(&iter, "{&sv}", &key, NULL))
+	{
+		if (!g_strv_contains(known, key))
+			return FALSE;
+	}
+
+	return TRUE;
 }
 
 /* ------------------------------------------------------------- per-request */
@@ -108,7 +330,7 @@ typedef struct
 	XdpImplExperimentalCertificate* object;
 	GDBusMethodInvocation* invocation; /* borrowed until completed */
 	CertificateImplRequest* request;
-	CertificateImplSession* session; /* borrowed */
+	CertificateImplSession* session; /* a reference of our own */
 	gulong close_id;
 	gboolean answered;
 
@@ -145,6 +367,7 @@ static void transaction_free(Transaction* transaction)
 	certificate_caller_identity_clear(&transaction->caller);
 	certificate_filter_clear(&transaction->filter);
 	g_clear_object(&transaction->request);
+	g_clear_object(&transaction->session);
 	g_free(transaction->parent_window);
 	g_free(transaction->activation_token);
 	g_free(transaction->reason);
@@ -211,6 +434,32 @@ static GVariant* error_results(const char* code)
 	return g_variant_builder_end(&builder);
 }
 
+/* Answer a method that has no transaction yet. */
+static void answer_early(XdpImplExperimentalCertificate* object,
+                         GDBusMethodInvocation* invocation, TransactionKind kind,
+                         gboolean decrypt, guint32 response, GVariant* results)
+{
+	switch (kind)
+	{
+		case TRANSACTION_CREATE_SESSION:
+			xdp_impl_experimental_certificate_complete_create_session(object, invocation,
+			                                                          response, results);
+			return;
+		case TRANSACTION_ACQUIRE:
+			xdp_impl_experimental_certificate_complete_acquire_credential(object, invocation,
+			                                                              response, results);
+			return;
+		default:
+			if (decrypt)
+				xdp_impl_experimental_certificate_complete_decrypt(object, invocation, response,
+				                                                   results);
+			else
+				xdp_impl_experimental_certificate_complete_sign(object, invocation, response,
+				                                               results);
+			return;
+	}
+}
+
 /* Connected to the Request's "handle-close" signal, and it deliberately does
  * almost nothing: it RETURNS FALSE so that emission continues into the Request
  * class closure, which is the only place that answers Close() itself, unexports
@@ -226,6 +475,32 @@ static gboolean on_request_close(XdpImplRequest* object, GDBusMethodInvocation* 
 	return FALSE;
 }
 
+/* The session a call names, with every check that is this backend's to make.
+ * Returns NULL and the error code to answer with. */
+static CertificateImplSession* lookup_session(CertificateImpl* impl, const char* session_handle,
+                                              const char* app_id, const char** code)
+{
+	CertificateImplSession* session = g_hash_table_lookup(impl->sessions, session_handle);
+
+	*code = "no_such_session";
+
+	if (session == NULL || session->closed)
+		return NULL;
+
+	/* THE SESSION IS BOUND TO ITS APP ID. The frontend enforces this too, and
+	 * that is the point: it is the check this backend can make for free, and a
+	 * frontend regression or a second frontend implementation would otherwise
+	 * turn a session handle into cross-application key use. */
+	if (g_strcmp0(session->app_id, app_id) != 0)
+	{
+		certificate_log_decision(CERTIFICATE_REASON_OPERATION_REFUSED, app_id, NULL,
+		                         "app-id-mismatch", FALSE);
+		return NULL;
+	}
+
+	return session;
+}
+
 /* ------------------------------------------------------------ CreateSession */
 
 static gboolean handle_create_session(XdpImplExperimentalCertificate* object,
@@ -235,6 +510,8 @@ static gboolean handle_create_session(XdpImplExperimentalCertificate* object,
 {
 	CertificateImpl* impl = user_data;
 	CertificateImplSession* session = NULL;
+	CertificateImplSession* existing = NULL;
+	g_autoptr(GError) error = NULL;
 
 	if (reject_stranger(impl, invocation))
 		return TRUE;
@@ -242,11 +519,27 @@ static gboolean handle_create_session(XdpImplExperimentalCertificate* object,
 	certificate_log_decision(CERTIFICATE_REASON_REQUEST_RECEIVED, arg_app_id, NULL,
 	                         "create_session", TRUE);
 
-	if (g_hash_table_contains(impl->sessions, arg_session_handle))
+	existing = g_hash_table_lookup(impl->sessions, arg_session_handle);
+	if (existing != NULL && !existing->closed)
 	{
+		/* A live session at this path already. Refusing is right; refusing a
+		 * CLOSED one was not -- see below. */
 		xdp_impl_experimental_certificate_complete_create_session(
-		    object, invocation, CERTIFICATE_RESPONSE_OTHER, empty_results());
+		    object, invocation, CERTIFICATE_RESPONSE_OTHER, error_results("invalid_request"));
 		return TRUE;
+	}
+
+	/* THE PATH IS REUSED, SO THE TABLE ENTRY MUST BE. The frontend builds a
+	 * session path out of the caller's unique name and its session_handle_token,
+	 * and applications pass a fixed token: the same application asking a second
+	 * time gets the identical path. A closed entry left in the table made every
+	 * later CreateSession from that application fail for the life of the
+	 * process. */
+	if (existing != NULL)
+	{
+		certificate_impl_session_close(existing);
+		certificate_impl_session_unexport(existing);
+		g_hash_table_remove(impl->sessions, arg_session_handle);
 	}
 
 	/* The Request is exported and immediately taken down again: CreateSession
@@ -257,12 +550,32 @@ static gboolean handle_create_session(XdpImplExperimentalCertificate* object,
 		g_autoptr(CertificateImplRequest) request = certificate_impl_request_new(
 		    g_dbus_method_invocation_get_sender(invocation), arg_app_id, arg_handle);
 
-		certificate_impl_request_export(request, impl->connection);
+		if (!certificate_impl_request_export(request, impl->connection, &error))
+		{
+			g_warning("Could not export the request object: %s", error->message);
+			xdp_impl_experimental_certificate_complete_create_session(
+			    object, invocation, CERTIFICATE_RESPONSE_OTHER, error_results("invalid_request"));
+			return TRUE;
+		}
+
 		certificate_impl_request_unexport(request);
 	}
 
 	session = certificate_impl_session_new(arg_session_handle, arg_app_id);
-	certificate_impl_session_export(session, impl->connection);
+	session->owner = g_strdup(g_dbus_method_invocation_get_sender(invocation));
+
+	if (!certificate_impl_session_export(session, impl->connection, &error))
+	{
+		/* NOT INSERTED. A session that is not on the bus is one the frontend
+		 * can never close, and one this backend would hold a card session for
+		 * with nobody able to end it. */
+		g_warning("Could not export the session object: %s", error->message);
+		g_object_unref(session);
+		xdp_impl_experimental_certificate_complete_create_session(
+		    object, invocation, CERTIFICATE_RESPONSE_OTHER, error_results("invalid_request"));
+		return TRUE;
+	}
+
 	g_hash_table_insert(impl->sessions, g_strdup(arg_session_handle), session);
 
 	/* The session's own signal, forwarded to the interface's. */
@@ -303,13 +616,48 @@ static GVariant* token_display_for(const CertificateToken* token)
 	return g_variant_builder_end(&builder);
 }
 
+/* WHAT GOES ON THE SIGNALS IS PRESENCE, NOT IDENTITY. TokenAdded and
+ * TokenRemoved are re-emitted by the frontend on its own public interface, to
+ * every client on the bus, before anybody has consented to anything. A PIV
+ * card's label is routinely the cardholder's name or an issuing agency, which
+ * is exactly the correlation the serial was withheld to prevent -- delivered to
+ * a strictly larger audience than a grant's token_display, which goes only to
+ * the application that got the grant.
+ *
+ * The id is a salted hash with a salt this process generates at startup, so it
+ * is stable enough to pair an added token with its removal and useless as a
+ * cross-process or cross-session identifier. */
+static GVariant* token_presence_for(const CertificateToken* token)
+{
+	static char* salt = NULL;
+	GVariantBuilder builder;
+	g_autofree char* identity = NULL;
+	g_autofree char* joined = NULL;
+	g_autofree char* digest = NULL;
+
+	if (salt == NULL)
+		salt = g_uuid_string_random();
+
+	identity = certificate_token_identity(token);
+	joined = g_strconcat(salt, "\x1f", identity, NULL);
+	digest = g_compute_checksum_for_string(G_CHECKSUM_SHA256, joined, -1);
+	digest[32] = '\0';
+
+	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+	g_variant_builder_add(&builder, "{sv}", "id", g_variant_new_string(digest));
+	g_variant_builder_add(&builder, "{sv}", "protected_authentication_path",
+	                      g_variant_new_boolean(token->protected_authentication_path));
+
+	return g_variant_builder_end(&builder);
+}
+
 static GVariant* bytes_to_variant(const GByteArray* bytes)
 {
 	return g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, bytes->data, bytes->len, 1);
 }
 
-static void finish_acquire(Transaction* transaction, CertificateCandidate* candidate,
-                           gboolean remember)
+GVariant* certificate_impl_acquire_results(CertificateCandidate* candidate, gboolean may_sign,
+                                           gboolean may_decrypt, gboolean remember)
 {
 	GVariantBuilder builder;
 	GVariantBuilder chain;
@@ -318,8 +666,7 @@ static void finish_acquire(Transaction* transaction, CertificateCandidate* candi
 
 	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
 
-	g_variant_builder_add(&builder, "{sv}", "certificate_der",
-	                      bytes_to_variant(candidate->der));
+	g_variant_builder_add(&builder, "{sv}", "certificate_der", bytes_to_variant(candidate->der));
 
 	/* CHAIN: leaf only. This backend reads the leaf certificate off the token
 	 * and does not go looking for intermediates, so it says so rather than
@@ -344,9 +691,9 @@ static void finish_acquire(Transaction* transaction, CertificateCandidate* candi
 	/* The operations the KEY permits, intersected with what the caller's
 	 * operation_policy asked for. The frontend intersects again with its own
 	 * list; a backend that returned more than it may does not get more. */
-	if (transaction->may_sign && candidate->can_sign)
+	if (may_sign && candidate->can_sign)
 		g_strv_builder_add(operations_builder, "sign");
-	if (transaction->may_decrypt && candidate->can_decrypt)
+	if (may_decrypt && candidate->can_decrypt)
 		g_strv_builder_add(operations_builder, "decrypt");
 	operations = g_strv_builder_end(operations_builder);
 
@@ -361,7 +708,40 @@ static void finish_acquire(Transaction* transaction, CertificateCandidate* candi
 	g_variant_builder_add(&builder, "{sv}", "remember_selection",
 	                      g_variant_new_boolean(remember));
 
-	certificate_impl_session_grant(transaction->session, candidate, transaction->purpose,
+	return g_variant_builder_end(&builder);
+}
+
+static void finish_acquire(Transaction* transaction, CertificateCandidate* candidate,
+                           gboolean remember)
+{
+	CertificateImplSession* session = transaction->session;
+
+	/* RE-CHECKED AFTER THE WINDOW. The user was looking at the chooser for as
+	 * long as they wanted to, and in that time the frontend could have
+	 * vanished, the session could have been closed, or the card could have been
+	 * pulled. */
+	if (session == NULL || session->closed)
+	{
+		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
+		                    error_results("no_such_session"));
+		return;
+	}
+
+	/* A TOKEN WITH NO SERIAL CANNOT BE RE-RESOLVED. Grants are re-bound to a
+	 * token by its stable attributes, and a serial-less observation is
+	 * deliberately never considered the same token twice -- so a grant on one
+	 * would fail at the first Sign, after the user had already consented and
+	 * typed a PIN. Say so now instead. */
+	if (candidate->token->serial == NULL || *candidate->token->serial == '\0')
+	{
+		certificate_log_grant(CERTIFICATE_REASON_OPERATION_REFUSED, session->id,
+		                      "token-without-serial");
+		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
+		                    error_results("device_error"));
+		return;
+	}
+
+	certificate_impl_session_grant(session, candidate, transaction->purpose,
 	                               transaction->may_sign && candidate->can_sign,
 	                               transaction->may_decrypt && candidate->can_decrypt,
 	                               transaction->lifetime);
@@ -371,7 +751,9 @@ static void finish_acquire(Transaction* transaction, CertificateCandidate* candi
 	                         certificate_purpose_to_string(transaction->purpose), TRUE);
 
 	transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_SUCCESS,
-	                    g_variant_builder_end(&builder));
+	                    certificate_impl_acquire_results(candidate,
+	                                                     transaction->may_sign,
+	                                                     transaction->may_decrypt, remember));
 }
 
 static void on_chooser_done(const CertificateChooserResult* result, gpointer user_data)
@@ -462,6 +844,106 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 	                         on_chooser_done, transaction);
 }
 
+static gboolean parse_acquire_options(Transaction* transaction, GVariant* options,
+                                      const char** code)
+{
+	static const char* const policy_keys[] = { "sign", "decrypt", NULL };
+	g_autofree char* level = NULL;
+	g_autofree char* interaction = NULL;
+	g_autoptr(GVariant) policy = NULL;
+	gboolean bad = FALSE;
+
+	*code = "invalid_request";
+
+	/* app_id and app_identity_level ARRIVED AS ARGUMENTS. Nothing here derives
+	 * either of them, and the display name comes from the desktop file the app
+	 * id names, never from anything the caller sent. */
+	if (option_take_string(options, "app_identity_level", &level, &bad))
+	{
+		if (g_strcmp0(level, CERTIFICATE_IDENTITY_LEVEL_VERIFIED) != 0 &&
+		    g_strcmp0(level, CERTIFICATE_IDENTITY_LEVEL_DERIVED) != 0 &&
+		    g_strcmp0(level, CERTIFICATE_IDENTITY_LEVEL_UNKNOWN) != 0)
+			return FALSE;
+	}
+	if (bad)
+		return FALSE;
+
+	transaction->caller.level = certificate_identity_level_parse(level);
+
+	if (!option_take_string(options, "reason", &transaction->reason, &bad) && bad)
+		return FALSE;
+	if (!option_take_string(options, "activation_token", &transaction->activation_token, &bad) &&
+	    bad)
+		return FALSE;
+	if (!option_take_string(options, "preselect_certificate", &transaction->preselect, &bad) &&
+	    bad)
+		return FALSE;
+
+	if (option_take_string(options, "interaction_mode", &interaction, &bad))
+	{
+		/* An unknown interaction_mode used to mean "interactive", which is the
+		 * permissive reading of a value nobody recognised. */
+		if (g_strcmp0(interaction, "forbidden") == 0)
+			transaction->interaction_forbidden = TRUE;
+		else if (g_strcmp0(interaction, "required") != 0 && g_strcmp0(interaction, "allowed") != 0)
+			return FALSE;
+	}
+	if (bad)
+		return FALSE;
+
+	/* `lifetime` is the frontend's DECISION, not the application's request. The
+	 * backend clamps it again anyway: it is the side holding the card. */
+	if (option_take_uint32(options, "lifetime", &transaction->lifetime, &bad))
+	{
+		if (transaction->lifetime == 0)
+			return FALSE;
+	}
+	else if (bad)
+	{
+		return FALSE;
+	}
+	else
+	{
+		transaction->lifetime = 300;
+	}
+
+	transaction->lifetime = MIN(transaction->lifetime, 3600u);
+
+	transaction->may_sign = TRUE;
+	transaction->may_decrypt = FALSE;
+	policy = option_take_vardict(options, "operation_policy", &bad);
+	if (bad)
+		return FALSE;
+
+	if (policy != NULL)
+	{
+		g_autoptr(GVariant) sign = NULL;
+		g_autoptr(GVariant) decrypt = NULL;
+
+		if (!vardict_keys_known(policy, policy_keys))
+			return FALSE;
+
+		sign = g_variant_lookup_value(policy, "sign", NULL);
+		decrypt = g_variant_lookup_value(policy, "decrypt", NULL);
+
+		if (sign != NULL)
+		{
+			if (!g_variant_is_of_type(sign, G_VARIANT_TYPE_BOOLEAN))
+				return FALSE;
+			transaction->may_sign = g_variant_get_boolean(sign);
+		}
+
+		if (decrypt != NULL)
+		{
+			if (!g_variant_is_of_type(decrypt, G_VARIANT_TYPE_BOOLEAN))
+				return FALSE;
+			transaction->may_decrypt = g_variant_get_boolean(decrypt);
+		}
+	}
+
+	return TRUE;
+}
+
 static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object,
                                           GDBusMethodInvocation* invocation,
                                           const char* arg_handle, const char* arg_session_handle,
@@ -472,18 +954,18 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object
 	Transaction* transaction = NULL;
 	CertificateImplSession* session = NULL;
 	const char* text = NULL;
-	g_autoptr(GVariant) policy = NULL;
+	const char* code = NULL;
 	g_autoptr(GError) error = NULL;
 	CertificatePurpose purpose = CERTIFICATE_PURPOSE_CLIENT_AUTH;
 
 	if (reject_stranger(impl, invocation))
 		return TRUE;
 
-	session = g_hash_table_lookup(impl->sessions, arg_session_handle);
-	if (session == NULL || session->closed)
+	session = lookup_session(impl, arg_session_handle, arg_app_id, &code);
+	if (session == NULL)
 	{
-		xdp_impl_experimental_certificate_complete_acquire_credential(
-		    object, invocation, CERTIFICATE_RESPONSE_OTHER, error_results("no_such_session"));
+		answer_early(object, invocation, TRANSACTION_ACQUIRE, FALSE, CERTIFICATE_RESPONSE_OTHER,
+		             error_results(code));
 		return TRUE;
 	}
 
@@ -494,8 +976,8 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object
 	if (!g_variant_lookup(arg_options, "purpose", "&s", &text) ||
 	    !certificate_purpose_parse(text, &purpose))
 	{
-		xdp_impl_experimental_certificate_complete_acquire_credential(
-		    object, invocation, CERTIFICATE_RESPONSE_OTHER, error_results("invalid_purpose"));
+		answer_early(object, invocation, TRANSACTION_ACQUIRE, FALSE, CERTIFICATE_RESPONSE_OTHER,
+		             error_results("invalid_purpose"));
 		return TRUE;
 	}
 
@@ -503,9 +985,39 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object
 	transaction->impl = impl;
 	transaction->object = object;
 	transaction->invocation = invocation;
-	transaction->session = session;
+	/* A REFERENCE, NOT A BORROWED POINTER. The chooser is on screen for as long
+	 * as the user takes, and the table that owns sessions can be emptied under
+	 * it by a frontend that went away. */
+	transaction->session = g_object_ref(session);
 	transaction->purpose = purpose;
 	transaction->parent_window = g_strdup(arg_parent_window);
+	transaction->caller.app_id = g_strdup(arg_app_id);
+
+	if (!parse_acquire_options(transaction, arg_options, &code))
+	{
+		certificate_log_debug(CERTIFICATE_REASON_OPERATION_REFUSED, "malformed-options");
+		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
+		                    error_results(code));
+		return TRUE;
+	}
+
+	/* THE IDENTITY LEVEL MAY FALL BUT NEVER RISE. A session created for a
+	 * caller the frontend could not identify does not become a session for a
+	 * verified one because a later call on the same handle said so. */
+	if (session->identity_seen && transaction->caller.level < session->identity_level)
+	{
+		certificate_log_decision(CERTIFICATE_REASON_OPERATION_REFUSED, arg_app_id,
+		                         certificate_identity_level_to_string(transaction->caller.level),
+		                         "identity-level-raised", FALSE);
+		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
+		                    error_results("no_such_session"));
+		return TRUE;
+	}
+
+	session->identity_level = transaction->caller.level;
+	session->identity_seen = TRUE;
+
+	transaction->caller.app_display_name = certificate_app_display_name(arg_app_id);
 
 	if (!certificate_filter_parse(arg_options, purpose, &transaction->filter, &error))
 	{
@@ -515,51 +1027,32 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object
 		return TRUE;
 	}
 
-	/* app_id and app_identity_level ARRIVED AS ARGUMENTS. Nothing here derives
-	 * either of them, and the display name comes from the desktop file the app
-	 * id names, never from anything the caller sent. */
-	transaction->caller.app_id = g_strdup(arg_app_id);
-	transaction->caller.level = certificate_identity_level_parse(
-	    g_variant_lookup(arg_options, "app_identity_level", "&s", &text) ? text : NULL);
-	transaction->caller.app_display_name = certificate_app_display_name(arg_app_id);
-
-	if (g_variant_lookup(arg_options, "reason", "&s", &text))
-		transaction->reason = g_strdup(text);
-	if (g_variant_lookup(arg_options, "activation_token", "&s", &text))
-		transaction->activation_token = g_strdup(text);
-	if (g_variant_lookup(arg_options, "preselect_certificate", "&s", &text))
-		transaction->preselect = g_strdup(text);
-	if (g_variant_lookup(arg_options, "interaction_mode", "&s", &text))
-		transaction->interaction_forbidden = g_strcmp0(text, "forbidden") == 0;
-
-	/* `lifetime` is the frontend's DECISION, not the application's request. The
-	 * backend clamps it again anyway: it is the side holding the card. */
-	if (!g_variant_lookup(arg_options, "lifetime", "u", &transaction->lifetime) ||
-	    transaction->lifetime == 0)
-		transaction->lifetime = 300;
-	transaction->lifetime = MIN(transaction->lifetime, 3600u);
-
-	transaction->may_sign = TRUE;
-	transaction->may_decrypt = FALSE;
-	policy = g_variant_lookup_value(arg_options, "operation_policy", G_VARIANT_TYPE_VARDICT);
-	if (policy != NULL)
-	{
-		gboolean value = FALSE;
-
-		if (g_variant_lookup(policy, "sign", "b", &value))
-			transaction->may_sign = value;
-		if (g_variant_lookup(policy, "decrypt", "b", &value))
-			transaction->may_decrypt = value;
-	}
-
+	/* THE CHECKBOX IS ONLY OFFERED WHERE IT CANNOT LIE. The frontend stores a
+	 * remembered selection only when the application passed
+	 * allow_selection_memory, and the impl interface has no such key yet -- so
+	 * asking "remember this?" of every identified caller meant the user could
+	 * tick a box that did nothing, silently.
+	 *
+	 * TODO: when the frontend branch adds allow_selection_memory (b) to the
+	 * impl AcquireCredential options, read it here and drop the preselect
+	 * proxy: a caller that asked for memory but has none yet is exactly the
+	 * case this under-approximates. */
 	transaction->offer_selection_memory =
-	    transaction->caller.level != CERTIFICATE_IDENTITY_UNKNOWN;
+	    transaction->caller.level != CERTIFICATE_IDENTITY_UNKNOWN &&
+	    transaction->preselect != NULL;
 
 	transaction->request = certificate_impl_request_new(
 	    g_dbus_method_invocation_get_sender(invocation), arg_app_id, arg_handle);
 	transaction->close_id = g_signal_connect(transaction->request, "handle-close",
 	                                         G_CALLBACK(on_request_close), transaction);
-	certificate_impl_request_export(transaction->request, impl->connection);
+
+	if (!certificate_impl_request_export(transaction->request, impl->connection, &error))
+	{
+		g_warning("Could not export the request object: %s", error->message);
+		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
+		                    error_results("invalid_request"));
+		return TRUE;
+	}
 
 	certificate_log_decision(CERTIFICATE_REASON_DISCOVERY_STARTED, arg_app_id,
 	                         certificate_identity_level_to_string(transaction->caller.level),
@@ -587,7 +1080,13 @@ static void on_operation_done(GBytes* result, const GError* error, gpointer user
 		guint32 response = CERTIFICATE_RESPONSE_OTHER;
 		const char* code = "device_error";
 
-		if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_CANCELLED))
+		/* A CANCEL IS A CANCEL, not a device failure. The GTask carries the
+		 * request's cancellable, so a Close() while the card is signing comes
+		 * back as G_IO_ERROR_CANCELLED even when the signature itself
+		 * succeeded -- and telling an application that cancelled its own
+		 * request that the device failed is a lie it may act on. */
+		if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_CANCELLED) ||
+		    g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
 		{
 			response = CERTIFICATE_RESPONSE_CANCELLED;
 			code = "cancelled";
@@ -627,26 +1126,25 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 {
 	Transaction* transaction = NULL;
 	CertificateImplSession* session = NULL;
-	const char* mechanism = NULL;
+	const char* code = NULL;
+	g_autofree char* mechanism = NULL;
 	g_autoptr(GVariant) parameters = NULL;
 	g_autoptr(GVariant) payload = NULL;
 	g_autoptr(GBytes) data = NULL;
+	g_autoptr(GError) error = NULL;
 	g_autofree char* caller_display = NULL;
+	gboolean bad = FALSE;
 	gsize size = 0;
 	gconstpointer bytes = NULL;
 
 	if (reject_stranger(impl, invocation))
 		return TRUE;
 
-	session = g_hash_table_lookup(impl->sessions, arg_session_handle);
-	if (session == NULL || session->closed)
+	session = lookup_session(impl, arg_session_handle, arg_app_id, &code);
+	if (session == NULL)
 	{
-		if (decrypt)
-			xdp_impl_experimental_certificate_complete_decrypt(
-			    object, invocation, CERTIFICATE_RESPONSE_OTHER, error_results("no_such_session"));
-		else
-			xdp_impl_experimental_certificate_complete_sign(
-			    object, invocation, CERTIFICATE_RESPONSE_OTHER, error_results("no_such_session"));
+		answer_early(object, invocation, TRANSACTION_OPERATION, decrypt,
+		             CERTIFICATE_RESPONSE_OTHER, error_results(code));
 		return TRUE;
 	}
 
@@ -654,12 +1152,25 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	transaction->impl = impl;
 	transaction->object = object;
 	transaction->invocation = invocation;
-	transaction->session = session;
+	transaction->session = g_object_ref(session);
 	transaction->decrypt = decrypt;
 	transaction->parent_window = g_strdup(arg_parent_window);
 
-	g_variant_lookup(arg_options, "mechanism", "&s", &mechanism);
-	parameters = g_variant_lookup_value(arg_options, "parameters", G_VARIANT_TYPE_VARDICT);
+	if (!option_take_string(arg_options, "mechanism", &mechanism, &bad) || bad)
+	{
+		transaction_respond(transaction, TRANSACTION_OPERATION, CERTIFICATE_RESPONSE_OTHER,
+		                    error_results("invalid_request"));
+		return TRUE;
+	}
+
+	parameters = option_take_vardict(arg_options, "parameters", &bad);
+	if (bad)
+	{
+		transaction_respond(transaction, TRANSACTION_OPERATION, CERTIFICATE_RESPONSE_OTHER,
+		                    error_results("invalid_request"));
+		return TRUE;
+	}
+
 	payload = g_variant_lookup_value(arg_options, decrypt ? "ciphertext" : "data",
 	                                 G_VARIANT_TYPE_BYTESTRING);
 
@@ -677,7 +1188,14 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	    g_dbus_method_invocation_get_sender(invocation), arg_app_id, arg_handle);
 	transaction->close_id = g_signal_connect(transaction->request, "handle-close",
 	                                         G_CALLBACK(on_request_close), transaction);
-	certificate_impl_request_export(transaction->request, impl->connection);
+
+	if (!certificate_impl_request_export(transaction->request, impl->connection, &error))
+	{
+		g_warning("Could not export the request object: %s", error->message);
+		transaction_respond(transaction, TRANSACTION_OPERATION, CERTIFICATE_RESPONSE_OTHER,
+		                    error_results("invalid_request"));
+		return TRUE;
+	}
 
 	caller_display = certificate_app_display_name(arg_app_id);
 
@@ -712,16 +1230,71 @@ static gboolean handle_decrypt(XdpImplExperimentalCertificate* object,
 
 /* ----------------------------------------------------------- GetCapabilities */
 
+typedef struct
+{
+	CertificateTokens* tokens;
+	GStrv mechanisms;
+	gboolean protected_path;
+} CapabilitiesQuery;
+
+static void capabilities_query_free(gpointer data)
+{
+	CapabilitiesQuery* query = data;
+
+	g_strfreev(query->mechanisms);
+	g_free(query);
+}
+
+/* OFF THE MAIN THREAD, like every other PKCS#11 call in this backend.
+ * C_GetSlotList, C_GetTokenInfo and C_GetMechanismList for every slot of every
+ * module, under the same lock a card enumeration holds for seconds, used to run
+ * straight from the method handler -- so a caller could freeze the chooser, the
+ * PIN window and the bus connection by asking what this backend can do in a
+ * loop. */
+static void capabilities_thread(GTask* task, gpointer source, gpointer task_data,
+                                GCancellable* cancellable)
+{
+	CapabilitiesQuery* query = task_data;
+
+	certificate_tokens_capabilities(query->tokens, &query->mechanisms, &query->protected_path);
+	g_task_return_boolean(task, TRUE);
+}
+
+static void on_capabilities(GObject* source, GAsyncResult* result, gpointer user_data)
+{
+	g_autoptr(GDBusMethodInvocation) invocation = user_data;
+	CapabilitiesQuery* query = g_task_get_task_data(G_TASK(result));
+	GVariantBuilder builder;
+	static const char* const purposes[] = { "client_auth", "signing", "email", "ssh", NULL };
+	/* DECRYPT IS NOT ADVERTISED. The interface's mechanism vocabulary has no
+	 * OAEP entry and this backend refuses RSA PKCS#1 v1.5 decryption, so there
+	 * is no decryption it can perform; saying otherwise would have applications
+	 * build a UI on a capability that answers invalid_request. See
+	 * docs/IMPL-INTERFACE.md. */
+	static const char* const operations[] = { "sign", NULL };
+
+	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+	g_variant_builder_add(&builder, "{sv}", "purposes", g_variant_new_strv(purposes, -1));
+	g_variant_builder_add(&builder, "{sv}", "operations", g_variant_new_strv(operations, -1));
+	g_variant_builder_add(&builder, "{sv}", "mechanisms",
+	                      g_variant_new_strv((const char* const*) query->mechanisms, -1));
+	g_variant_builder_add(&builder, "{sv}", "protected_authentication_path",
+	                      g_variant_new_boolean(query->protected_path));
+	g_variant_builder_add(&builder, "{sv}", "has_display",
+	                      g_variant_new_boolean(certificate_ui_has_display()));
+
+	g_dbus_method_invocation_return_value(invocation,
+	                                      g_variant_new("(@a{sv})",
+	                                                    g_variant_builder_end(&builder)));
+}
+
 static gboolean handle_get_capabilities(XdpImplExperimentalCertificate* object,
                                         GDBusMethodInvocation* invocation, const char* arg_app_id,
                                         GVariant* arg_options, gpointer user_data)
 {
 	CertificateImpl* impl = user_data;
-	GVariantBuilder builder;
-	g_auto(GStrv) mechanisms = NULL;
-	gboolean protected_path = FALSE;
-	static const char* const purposes[] = { "client_auth", "signing", "email", "ssh", NULL };
-	static const char* const operations[] = { "sign", "decrypt", NULL };
+	g_autoptr(GTask) task = NULL;
+	CapabilitiesQuery* query = NULL;
 
 	if (reject_stranger(impl, invocation))
 		return TRUE;
@@ -730,20 +1303,12 @@ static gboolean handle_get_capabilities(XdpImplExperimentalCertificate* object,
 	 * the backend, asked so that an application can adapt without provoking a
 	 * dialog, and the answer discloses nothing about which cards are present:
 	 * it is the mechanism vocabulary, not an inventory. */
-	certificate_tokens_capabilities(impl->tokens, &mechanisms, &protected_path);
+	query = g_new0(CapabilitiesQuery, 1);
+	query->tokens = impl->tokens;
 
-	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-	g_variant_builder_add(&builder, "{sv}", "purposes", g_variant_new_strv(purposes, -1));
-	g_variant_builder_add(&builder, "{sv}", "operations", g_variant_new_strv(operations, -1));
-	g_variant_builder_add(&builder, "{sv}", "mechanisms",
-	                      g_variant_new_strv((const char* const*) mechanisms, -1));
-	g_variant_builder_add(&builder, "{sv}", "protected_authentication_path",
-	                      g_variant_new_boolean(protected_path));
-	g_variant_builder_add(&builder, "{sv}", "has_display",
-	                      g_variant_new_boolean(certificate_ui_has_display()));
-
-	xdp_impl_experimental_certificate_complete_get_capabilities(object, invocation,
-	                                                            g_variant_builder_end(&builder));
+	task = g_task_new(NULL, NULL, on_capabilities, g_object_ref(invocation));
+	g_task_set_task_data(task, query, capabilities_query_free);
+	g_task_run_in_thread(task, capabilities_thread);
 
 	return TRUE;
 }
@@ -753,7 +1318,7 @@ static gboolean handle_get_capabilities(XdpImplExperimentalCertificate* object,
 static void on_token_event(CertificateToken* token, gboolean added, gpointer user_data)
 {
 	CertificateImpl* impl = user_data;
-	GVariant* display = token_display_for(token);
+	GVariant* presence = token_presence_for(token);
 
 	certificate_log_counts(added ? CERTIFICATE_REASON_DISCOVERY_RESULT
 	                             : CERTIFICATE_REASON_TOKEN_REMOVED,
@@ -761,11 +1326,11 @@ static void on_token_event(CertificateToken* token, gboolean added, gpointer use
 
 	if (added)
 	{
-		xdp_impl_experimental_certificate_emit_token_added(impl->skeleton, display);
+		xdp_impl_experimental_certificate_emit_token_added(impl->skeleton, presence);
 		return;
 	}
 
-	xdp_impl_experimental_certificate_emit_token_removed(impl->skeleton, display);
+	xdp_impl_experimental_certificate_emit_token_removed(impl->skeleton, presence);
 
 	/* A grant whose card has left the reader is over, and the frontend has to
 	 * be told rather than letting the application discover it at the next
@@ -785,13 +1350,11 @@ static void on_token_event(CertificateToken* token, gboolean added, gpointer use
 				g_ptr_array_add(doomed, session);
 		}
 
+		/* Invalidated but NOT removed from the table: the frontend answers
+		 * SessionInvalidated with Session.Close(), and a session that is gone
+		 * by then turns that answer into a D-Bus error. */
 		for (guint i = 0; i < doomed->len; i++)
-		{
-			CertificateImplSession* session = g_ptr_array_index(doomed, i);
-
-			certificate_impl_session_invalidate(session, "token_removed");
-			g_hash_table_remove(impl->sessions, session->id);
-		}
+			certificate_impl_session_invalidate(g_ptr_array_index(doomed, i), "token_removed");
 	}
 }
 
@@ -836,8 +1399,11 @@ CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTo
 		return NULL;
 	}
 
-	/* WHO MAY CALL. Watched rather than asked per call, so that the comparison
-	 * in every handler is a string compare and not a round trip. */
+	certificate_impl_singleton = impl;
+
+	/* WHO MAY CALL. The watcher is what closes grants when the frontend goes
+	 * away; the authorisation check itself asks the bus, because
+	 * NameOwnerChanged is not ordered against the former owner's messages. */
 	impl->frontend_watch = g_bus_watch_name_on_connection(
 	    connection, CERTIFICATE_FRONTEND_BUS_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
 	    on_frontend_appeared, on_frontend_vanished, impl, NULL);
@@ -863,7 +1429,7 @@ void certificate_impl_shutdown(CertificateImpl* impl)
 	while (g_hash_table_iter_next(&iter, NULL, &value))
 		certificate_impl_session_invalidate(CERTIFICATE_IMPL_SESSION(value), "backend_shutdown");
 
-	g_hash_table_remove_all(impl->sessions);
+	close_and_forget_all(impl);
 
 	certificate_tokens_stop_watch(impl->tokens);
 }
@@ -875,6 +1441,9 @@ void certificate_impl_free(CertificateImpl* impl)
 
 	if (impl->frontend_watch != 0)
 		g_bus_unwatch_name(impl->frontend_watch);
+
+	if (certificate_impl_singleton == impl)
+		certificate_impl_singleton = NULL;
 
 	g_clear_pointer(&impl->sessions, g_hash_table_unref);
 	g_clear_pointer(&impl->frontend_owner, g_free);

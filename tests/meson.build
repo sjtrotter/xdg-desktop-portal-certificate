@@ -58,6 +58,7 @@ endforeach
 # is the code the four tests above never touched: certificate-impl.c,
 # request-impl.c, session-impl.c, broker/operations.c and ui/pin.c.
 service_test_cases = {
+  'impl-dbus': 'test-impl-dbus.c',
   'cancellation': 'test-cancellation.c',
 }
 

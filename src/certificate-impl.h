@@ -10,6 +10,7 @@
 #include <glib.h>
 
 #include "certificate.h"
+#include "session-impl.h"
 #include "tokens/discovery.h"
 
 /** @file
@@ -51,13 +52,16 @@
  *
  *  REFUSING EVERYONE BUT THE PORTAL. Upstream relies on the impl bus names
  *  simply not being interesting to applications and not being proxied into
- *  sandboxes. This backend does that AND CHECKS: every method compares the
- *  sender against the unique name that currently owns
+ *  sandboxes. This backend does that AND CHECKS: EVERY method -- including
+ *  Request.Close() and Session.Close() on the objects this one exports --
+ *  compares the sender against the unique name that currently owns
  *  org.freedesktop.portal.Desktop, and refuses anything else with
- *  AccessDenied, logged by reason code. That check is cheap, and the failure it
- *  prevents -- an application handing itself an app id -- destroys the entire
- *  consent model. See docs/IMPL-INTERFACE.md, "Why an application cannot call
- *  this".
+ *  AccessDenied, logged by reason code. The owner is resolved from the bus
+ *  rather than taken from a watcher's cache, because NameOwnerChanged is not
+ *  ordered against the messages of the process that lost the name. That check
+ *  is cheap, and the failure it prevents -- an application handing itself an
+ *  app id -- destroys the entire consent model. See docs/IMPL-INTERFACE.md,
+ *  "Why an application cannot call this".
  */
 
 typedef struct CertificateImpl CertificateImpl;
@@ -71,6 +75,24 @@ CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTo
  *  calls this first. A refusal is logged as a reason code and never explains
  *  itself to the caller beyond AccessDenied. */
 gboolean certificate_impl_sender_is_frontend(CertificateImpl* impl, const char* sender);
+
+/** The same question, for the Request and Session skeletons this object
+ *  exports: they are separate GObjects with their own Close() handlers and
+ *  there is exactly one backend in a process. */
+gboolean certificate_impl_sender_is_frontend_default(const char* sender);
+
+/** Take @session out of the backend's table and off the bus. Called by
+ *  Session.Close(), which is the frontend saying it is finished with it; every
+ *  other end of a session leaves the object exported so that a Close() arriving
+ *  afterwards is still answered. */
+void certificate_impl_session_forget(CertificateImplSession* session);
+
+/** Build the AcquireCredential results vardict for @candidate. Exposed so that
+ *  a test can assert the D-Bus type of every key: the frontend type-checks only
+ *  `signature`/`plaintext` and passes the rest through, so a wrong type here
+ *  reaches applications. */
+GVariant* certificate_impl_acquire_results(CertificateCandidate* candidate, gboolean may_sign,
+                                           gboolean may_decrypt, gboolean remember);
 
 /** Shut down: close every token session, and emit SessionInvalidated with
  *  "backend_shutdown" for each one so the frontend can tell its callers the

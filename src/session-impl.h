@@ -92,8 +92,16 @@ struct _CertificateImplSession
 CertificateImplSession* certificate_impl_session_new(const char* session_handle,
                                                      const char* app_id);
 
-void certificate_impl_session_export(CertificateImplSession* session,
-                                     GDBusConnection* connection);
+/** Put the Session on the bus at the path the frontend chose. Returns FALSE and
+ *  sets @error when the path cannot be exported -- a collision, or a path this
+ *  connection may not own -- and the CALLER MUST THEN ABORT: a session that is
+ *  not on the bus is one the frontend can never close. */
+gboolean certificate_impl_session_export(CertificateImplSession* session,
+                                         GDBusConnection* connection, GError** error);
+
+/** Take it off the bus. Idempotent. NOT called by invalidation: the frontend
+ *  answers SessionInvalidated with Session.Close(), and a Session that has
+ *  already left the bus turns that into a D-Bus error the application sees. */
 void certificate_impl_session_unexport(CertificateImplSession* session);
 
 /** Record the grant this session now carries. Starts the lifetime timer. */

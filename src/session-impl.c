@@ -6,6 +6,7 @@
 
 #include "session-impl.h"
 
+#include "certificate-impl.h"
 #include "redact.h"
 
 enum
@@ -23,14 +24,40 @@ G_DEFINE_FINAL_TYPE_WITH_CODE(CertificateImplSession, certificate_impl_session,
                               G_IMPLEMENT_INTERFACE(XDP_IMPL_TYPE_SESSION,
                                                     certificate_impl_session_iface_init))
 
+/* CLOSE IS AUTHORISED LIKE EVERY OTHER METHOD. The Session skeleton is exported
+ * on the same bus name as the Certificate interface, at a path whose shape is
+ * guessable, and Close() on it logs the card out and destroys a grant. Object
+ * path secrecy is not an access control. */
 static gboolean handle_close(XdpImplSession* object, GDBusMethodInvocation* invocation)
 {
 	CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(object);
 
-	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "closed-by-portal");
-	certificate_impl_session_close(session);
+	if (!certificate_impl_sender_is_frontend_default(
+	        g_dbus_method_invocation_get_sender(invocation)))
+	{
+		certificate_log_decision(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL, "session_close",
+		                         FALSE);
+		g_dbus_method_invocation_return_error_literal(
+		    invocation, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED,
+		    "Only xdg-desktop-portal may call this interface");
+		return TRUE;
+	}
 
-	xdp_impl_session_complete_close(object, invocation);
+	/* IDEMPOTENT. The frontend answers SessionInvalidated with Close(), so the
+	 * second close of a session this backend already tore down is the normal
+	 * case and must succeed rather than telling the application the device
+	 * failed. */
+	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "closed-by-portal");
+
+	{
+		/* forget() drops the table's reference, which is the only one, so the
+		 * invocation is completed while a reference of our own is still held. */
+		g_autoptr(CertificateImplSession) held = g_object_ref(session);
+
+		certificate_impl_session_close(session);
+		certificate_impl_session_forget(session);
+		xdp_impl_session_complete_close(object, invocation);
+	}
 
 	return TRUE;
 }
@@ -49,9 +76,13 @@ static void certificate_impl_session_finalize(GObject* object)
 	if (session->expiry_source != 0)
 		g_source_remove(session->expiry_source);
 
+	certificate_impl_session_unexport(session);
+
+	g_clear_pointer(&session->login_waiters, g_ptr_array_unref);
 	g_clear_pointer(&session->candidate, certificate_candidate_unref);
 	g_clear_pointer(&session->id, g_free);
 	g_clear_pointer(&session->app_id, g_free);
+	g_clear_pointer(&session->owner, g_free);
 	g_mutex_clear(&session->device_lock);
 
 	G_OBJECT_CLASS(certificate_impl_session_parent_class)->finalize(object);
@@ -87,25 +118,27 @@ CertificateImplSession* certificate_impl_session_new(const char* session_handle,
 
 	session->id = g_strdup(session_handle);
 	session->app_id = g_strdup(app_id);
+	session->identity_level = CERTIFICATE_IDENTITY_UNKNOWN;
 
 	return session;
 }
 
-void certificate_impl_session_export(CertificateImplSession* session, GDBusConnection* connection)
+gboolean certificate_impl_session_export(CertificateImplSession* session,
+                                         GDBusConnection* connection, GError** error)
 {
-	g_autoptr(GError) error = NULL;
-
 	if (session->exported)
-		return;
+		return TRUE;
 
+	/* A FAILURE HERE ABORTS THE CALL. It used to be a warning, and the session
+	 * was inserted anyway: the frontend then held a session handle for an
+	 * object that was not on the bus, and could neither close it nor learn
+	 * that it could not. */
 	if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(session), connection,
-	                                      session->id, &error))
-	{
-		g_warning("Could not export the session object: %s", error->message);
-		return;
-	}
+	                                      session->id, error))
+		return FALSE;
 
 	session->exported = TRUE;
+	return TRUE;
 }
 
 void certificate_impl_session_unexport(CertificateImplSession* session)
@@ -181,7 +214,11 @@ void certificate_impl_session_close(CertificateImplSession* session)
 	}
 
 	certificate_impl_session_release_device(session);
-	certificate_impl_session_unexport(session);
+
+	/* THE SKELETON STAYS ON THE BUS. Unexporting here is what made the
+	 * frontend's own Close() -- which it sends in answer to
+	 * SessionInvalidated -- come back as UnknownObject to the application. It
+	 * comes off the bus in handle_close() and at finalize, and nowhere else. */
 }
 
 void certificate_impl_session_invalidate(CertificateImplSession* session, const char* reason)
