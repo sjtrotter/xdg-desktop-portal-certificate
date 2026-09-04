@@ -61,8 +61,11 @@ such throughout the rest of this document.
 | The bus name is only offered for replacement under `--allow-replacement`, which the installed `.service` file does not pass | `src/main.c`, `data/org.freedesktop.impl.portal.desktop.certificate.service.in` | otherwise any process running as the user could take the name and draw the PIN window. `--replace` (ask to replace) and `--allow-replacement` (permit being replaced) are separate flags because D-Bus lets the current owner authenticate neither: an upgrade is a restart, not a `--replace`. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) and [TESTING.md](TESTING.md) §3.5 |
 | Nothing persists a PIN | — | there is no option, no keyring call and no configuration key |
 | Protected authentication path draws **no PIN field** and logs in with a NULL PIN | `src/ui/pin-gtk.c`, `src/ui/pin-system.c` | in the shell's prompter that is a message and a Cancel and no password round at all. `tests/test-pin-system.c` asserts zero password rounds and a NULL PIN |
+| An **empty PIN is never submitted** by either implementation: the prompt is asked again with a warning and no attempt is spent | `src/ui/pin.c`, `certificate_pin_prompt_hold()` | a stray Return in the shell's field used to reach `C_Login`, and a token that counts a zero-length PIN as a failure would have spent a try on it. `tests/test-pin-system.c` `/pin-system/empty-answer-never-reaches-the-card` asserts one login for two rounds |
 | Retry state is shown only from `CKF_USER_PIN_COUNT_LOW` / `FINAL_TRY` / `LOCKED`, never as an invented number, and is **re-read after every refusal** | `src/ui/pin.c`, `certificate_pin_prompt_retry_hint()`; `src/tokens/discovery.c`, `certificate_tokens_refresh_flags()` | `FINAL_TRY` is normally set by the attempt that just failed. `tests/test-pin-system.c` asserts the wording reaches the prompter and carries no number |
-| Once `FINAL_TRY` is set the prompt requires a second, explicit confirmation before the attempt is spent | `src/ui/pin.c`, `certificate_pin_prompt_needs_final_confirm()` | a second Unlock in the window; a confirmation round on the same open system prompt. `tests/test-pin-system.c` asserts that refusing it leaves the card **unasked** |
+| Once `FINAL_TRY` is set the prompt requires a second, explicit confirmation before the attempt is spent — **including on a protected authentication path**, where the reader collects the digits but the try that locks the card is spent all the same | `src/ui/pin.c`, `certificate_pin_prompt_needs_final_confirm()`; `src/ui/pin-gtk.c`, the "Use the last attempt" button; `src/ui/pin-system.c`, `handle_prompt_opened()` | a second Unlock in the window; a confirmation round on the same open system prompt. The protected path used to submit the NULL-PIN login the moment the notice appeared, which made this row untrue for exactly the tokens whose counter cannot be seen. `tests/test-pin-system.c` asserts that refusing it leaves the card **unasked**, on both paths |
+| A prompt the **desktop shell takes away** ends the interaction, even with no round outstanding — a Cancel pressed after the PIN went to the card answers `cancelled`, and the login that succeeds anyway is abandoned | `src/ui/pin-system.c`, `on_gcr_prompt_close()` | after submission there is no gcr round left to answer, so the shell's Cancel was invisible here and the grant would sign for a request the user had just refused. `tests/test-pin-system.c` `/pin-system/shell-cancel-after-the-pin-was-submitted` |
+| A **prompter that disappears** settles the interaction rather than leaving it open, at every stage | `src/ui/pin-system.c`, the error branches of the open, password and confirm callbacks | gcr raises `G_IO_ERROR_CANCELLED` from inside itself when the prompter's bus name vanishes. Swallowing it left the caller unanswered and the process's single prompt slot occupied for good. Three tests in `tests/test-pin-system.c`: vanish during open, during password, during confirm |
 | One prompt offers at most three attempts | `src/ui/pin.c`, `PIN_MAX_ATTEMPTS` | it is not a rate limit (see below); it is a bound on one prompt. `tests/test-pin-system.c` `/pin-system/attempt-cap` |
 | Retries are user-initiated; nothing retries on its own | `src/ui/pin.c` | `tests/test-broker-device.c` checks the wrong PIN is reported as `PIN_INCORRECT` and not collapsed |
 | PIN prompts are serialised process-wide, and two operations on one session share **one** prompt | `src/ui/pin.c`, the prompt queue; `src/broker/operations.c`, the waiter list | two concurrent `Sign` calls on a logged-out grant produce one window, not two |
@@ -298,9 +301,13 @@ client. This project no longer has to reason about GTK's secure-memory pool at a
 **What does not move**: *we still hold a copy.* `C_Login` takes a PIN, so the PIN has to arrive
 here. It lands in gcr's secure memory, is copied into the same page-aligned, `mlock()`ed,
 `MADV_DONTDUMP`ed, `explicit_bzero()`ed buffer the GTK path uses, and the login worker still gets a
-private copy of its own. gcr's copy belongs to the prompt and is released when the prompt is closed,
-which is why closing it is part of the PIN's exit path in `src/ui/pin-system.c` rather than
-bookkeeping. **`system` is not "the PIN never enters this process"; it is "the PIN is not typed into
+private copy of its own. gcr's copy belongs to the `GcrPrompt` and goes when that object is closed
+and released, which is why letting go of it is part of the PIN's exit path in
+`src/ui/pin-system.c` rather than bookkeeping — and why the object is released when the prompt is
+merely *hidden* too, which is what a cancel or a login timeout arriving while `C_Login` is in
+flight does. The worker has had its own private page since submission and needs nothing from this
+file, so gcr's copy has no reason to outlive the dialog, and "until the module returns" can mean
+for ever. **`system` is not "the PIN never enters this process"; it is "the PIN is not typed into
 this process".**
 
 Everything else is identical, because everything else is in `src/ui/pin.c` and neither
@@ -314,11 +321,23 @@ fallback to the in-process window, because which process asked for the PIN is a 
 interaction and must not depend on timing.
 
 **One gcr defect is worked around here and is worth knowing about.** gcr 4.4 completes a prompt
-round *twice* when the round is cancelled and the prompter answers it — once from the cancellation
-and once from the reply. The second completion ran on a prompt whose last reference the first had
-dropped. Nothing in `src/ui/pin-system.c` passes a `GCancellable` to gcr for that reason; the
-interaction is ended by closing the prompt, which comes back exactly once. It was found by
-`tests/test-pin-system.c` crashing, which is the argument for the test existing.
+round *twice*, and closing the prompt is not enough to avoid it. `perform_close()` — which
+`gcr_prompt_close()`, a `PromptDone` from the prompter, and the prompter's bus name vanishing all
+reach — takes the round's pending result and completes it from an idle; if the `PerformPrompt`
+method call is still on the wire and then comes back an error,
+`on_perform_prompt_complete()` completes *the same result again*. `on_call_timeout()` on the open
+path does both, in that order, by construction. The first completion drops the reference the round
+held, which can be the last one, so the second ran on freed memory.
+
+Two things answer it. Nothing in `src/ui/pin-system.c` passes a `GCancellable` to gcr, which
+removes one trigger. And every gcr callback in that file **claims its result before it touches
+anything else**: a flag set on the `GAsyncResult` object, which gcr keeps a reference to across
+both completions and which is therefore the one thing certainly alive in the second — a flag in
+this backend's own state would be the use-after-free it is meant to prevent. The ignored second
+completion logs `pin-prompt-round-completed-twice`. Both halves were found by
+`tests/test-pin-system.c` crashing, which is the argument for the test existing;
+`/pin-system/close-racing-a-transport-error` drives a prompter that leaves `PerformPrompt`
+unanswered and then fails it, and asserts the log line.
 - **No `pin-value` and no `pin-source` in any PKCS#11 URI this service emits**, ever. Any URI
   arriving from elsewhere carrying one is truncated before it can be logged.
 - **The buffer is wiped on every exit path** — success, failure, cancel, timeout, window destroyed
@@ -349,7 +368,8 @@ interaction is ended by closing the prompt, which comes back exactly once. It wa
     followed for changes (`src/main.c`, `follow_colour_scheme()`). Where the schema is absent —
     this is not a GNOME-only backend — libadwaita's own answer stands. `ADW_DEBUG_COLOR_SCHEME`
     still wins, so that `tools/ui-smoke.sh` can check a dark scheme actually reaches the windows.
-    `--verbose` logs the outcome as `colour-scheme-dark` / `colour-scheme-light`.
+    `--verbose` logs the outcome as `colour-scheme detail=dark` / `colour-scheme detail=light`
+    (its own event name; it used to be filed under `request-received`, where nobody could find it).
   - **What GTK's copy is** (the `gtk` prompt only; with `system` the entry is the shell's). The PIN is typed into a `GtkPasswordEntry`, which GTK backs with a
     `GtkPasswordEntryBuffer` allocated from its secure-memory pool and zeroed when freed, and which
     GTK places in non-pageable memory "if the underlying platform allows it". GTK promises nothing
@@ -373,12 +393,18 @@ interaction is ended by closing the prompt, which comes back exactly once. It wa
 - **Protected authentication path**: when the token sets `CKF_PROTECTED_AUTHENTICATION_PATH`, the
   login is made with a null PIN and the token or reader collects the secret. The service shows an
   instructional dialog **with no editable PIN field** and never receives the PIN. Emulating a PIN
-  field for such a token would be a lie about where the secret goes.
+  field for such a token would be a lie about where the secret goes. **The `FINAL_TRY`
+  confirmation is not waived here**: the digits are typed on a pin pad, but the attempt that locks
+  the card is spent by this process either way, so the null-PIN login waits for an explicit "Use
+  the last attempt" — a button in the window, a confirmation round on the shell's prompt.
 - **Retry handling.** Remaining attempts are displayed only when the token reports them reliably and
   are **never invented**; the user is warned before the final known attempt, and the flags are
   **re-read from the token after every refusal**, because `CKF_USER_PIN_FINAL_TRY` is normally set
-  by the attempt that just failed. Once it is set, the window requires a second, explicit Unlock
-  before spending the attempt, and one window offers at most three attempts in total. Incorrect PIN, blocked
+  by the attempt that just failed. Once it is set, the prompt requires a second, explicit
+  confirmation before spending the attempt — unconditionally, protected authentication paths
+  included — and one prompt offers at most three attempts in total. An **empty** answer is not an
+  attempt at all: it is refused before any submission, in `src/ui/pin.c` so that both
+  implementations obey the same rule, and the prompt is asked again. Incorrect PIN, blocked
   PIN, cancelled prompt, device error and removal are always distinguished. Retries are
   user-initiated only; the service never retries automatically, and never after an ambiguous
   transport failure. Prompts for the same token are serialised so two grants cannot race two windows

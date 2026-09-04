@@ -27,7 +27,8 @@ Ten suites:
 | `broker-device` | a SoftHSM fixture, and `openssl(1)` for the OAEP half | `C_Login`, `C_Sign`, signature verification, an **RSA-OAEP round trip** against a ciphertext `openssl pkeyutl` produced, and that opening the device for a **different** candidate throws away the previous grant's login and key handle. **Skips itself** without one; see tier 2 |
 | `broker-decrypt` | a SoftHSM fixture | the two properties that make `Decrypt` safe to offer: **one indistinguishable error** for every failure, and the **per-grant budget**. **Skips itself** without one |
 | `broker-regrant` | a SoftHSM fixture with both an RSA and an EC key | a second `AcquireCredential` on a live session, end to end: the signature after the re-grant **verifies against the new certificate**, and the operation in between is refused rather than signed with the old grant's key. **Skips itself** without one |
-| `pin-system` | nothing (it stands up its own `GTestDBus` and gcr's own system prompter on it) | the OTHER PIN prompt, end to end and with nobody typing: that `--pin-prompt=auto` picks the system prompter when the name is on the bus, that the application, purpose, token and reader reach the prompt, that no "remember" choice is ever offered, that a wrong PIN comes back as a **warning on the prompt that is already up** rather than a second prompt, the three-attempt cap, cancel from the prompter, `Request.Close()` closing it, the `FINAL_TRY` second confirmation **and that refusing it leaves the card unasked**, the token flags reaching the warning without a number, the login timeout, and a protected-authentication-path token asking for nothing. Built only when the build found gcr-4 |
+| `tools-lib` | nothing | the two helpers in `tools/lib.sh` that decide something dangerous: that the generated `portals.conf` is the **effective** per-interface resolution of the machine's whole configuration chain rather than a copy of the first file (a user `Screenshot=none` survives an `/etc` file that names a backend for it), that our `Certificate` line replaces any existing one, that a private run switches the `Secret` backend off and a `--live` one does not, and that the fixture checks refuse a forged marker, a symlinked path, an ancestor that is not ours, a mode that is not 0700, and a directory this project did not make |
+| `pin-system` | nothing (it stands up its own `GTestDBus`, and gcr's own system prompter or a hand-written hostile one on it) | the OTHER PIN prompt, end to end and with nobody typing: that `--pin-prompt=auto` picks the system prompter when the name is on the bus, that the application, purpose, token and reader reach the prompt, that no "remember" choice is ever offered, that a wrong PIN comes back as a **warning on the prompt that is already up** rather than a second prompt, that an **empty answer never reaches `C_Login`**, the three-attempt cap, cancel from the prompter, `Request.Close()` closing it, a **Cancel in the shell after the PIN was submitted** answering `cancelled` and abandoning the login that succeeds anyway, the prompter **vanishing** during the open, during a password round and during a confirmation round, a **close racing a transport error** (gcr completing one round twice), the `FINAL_TRY` second confirmation **and that refusing it leaves the card unasked — on a protected authentication path too**, the token flags reaching the warning without a number, the login timeout, and a protected-authentication-path token asking for nothing. Built only when the build found gcr-4 |
 | `impl-dbus` | nothing (it stands up its own `GTestDBus`) | the D-Bus boundary: a stranger calling every method including both `Close()`s, cross-`app_id` session use, session-path reuse, strict option validation, the results vardict's types, a frontend **replaced while its call is already in the backend's queue**, and the frontend vanishing while a call is in flight |
 | `cancellation` | a display for four of six, a SoftHSM fixture for two | cancelling while `C_Login` is in flight, cancelling before the window is up, cancelling **while the device call is in progress**, a cancelled login that succeeded anyway being logged out again (and a normal one not being), and one of two callers sharing a PIN window cancelling **on its own** |
 
@@ -82,7 +83,7 @@ halves are checked by configuring without it:
 ```console
 $ meson setup build-nogcr -Dgcr=disabled && ninja -C build-nogcr
 $ ./build-nogcr/src/xdg-desktop-portal-certificate --help | grep pin-prompt   # nothing
-$ meson test -C build-nogcr                                                   # nine suites
+$ meson test -C build-nogcr                                                   # ten suites
 ```
 
 An option that names a prompt the binary cannot draw would be an option that fails at the worst
@@ -158,9 +159,11 @@ GetCapabilities:
   purposes                         ['client_auth', 'signing', 'email', 'ssh']
   selection_memory                 True
 
-AcquireCredential answered 2 with no grant, as expected.
-PASS (plumbing: the frontend reached the backend and the backend refused cleanly)
+PASS no-certificate: AcquireCredential answered 2, no grant
 ```
+
+That is the plumbing check: the frontend routed to this backend, the backend answered, and the
+answer was a clean refusal rather than a hang or a crash.
 
 `app_id=(none)` and `identity=unidentified` are correct here: the client is a bare python script
 on a private bus, so the frontend has nothing to identify it by, and the backend says so rather
@@ -193,14 +196,28 @@ that **every** spelling of a decryption request is refused. It checks that a wro
 `PIN_INCORRECT` and not as a generic failure, and that discovery sees both certificates without
 logging in.
 
-`tools/softhsm-fixture.sh` refuses to write into — or delete — any directory that is not owned by
-you, is reached through a symlink, is outside `$TMPDIR`, or does not carry this project's marker
-file (`.xdg-desktop-portal-certificate-fixture`). It tightens the mode to 700 if it has to. What
-lives in that directory includes the module path the backend `dlopen()`s, and the script `rm -rf`s
-it; an ownership check alone is one a mistyped `SOFTHSM_DIR` pointing at `$HOME` passes. **A
-directory that already exists without the marker is refused rather than emptied** — remove it by
-hand if it really is disposable. The same rule covers `tools/ui-smoke.sh`'s `$LOGDIR` and
-`tools/dev-stack.sh`'s `$DEVDIR`; it is all in `tools/lib.sh`.
+`tools/softhsm-fixture.sh` refuses to write into — or delete — any directory unless all five of
+these hold: no component of the path is a symlink (the path is compared with its own resolved real
+path), it is under `$TMPDIR` by real path, every ancestor from `$TMPDIR` down is owned by you or by
+root and is not writable by others unless it is sticky, it carries this project's marker
+(`.xdg-desktop-portal-certificate-fixture`) as a **regular file you own at mode 0600** whose
+contents name the fixture, and the directory itself is mode 0700. What lives in that directory
+includes the module path the backend `dlopen()`s, and the script deletes it recursively; an
+ownership check alone is one a mistyped `SOFTHSM_DIR` pointing at `$HOME` passes.
+
+A directory that already exists without a valid marker is **refused rather than emptied**, and the
+message names the manual way out. Modes are no longer repaired: fixtures are created exclusively
+(`mktemp -d`, or a plain `mkdir` under `umask 077` for the one whose name has to be predictable) so
+they are 0700 from their first instant, and one that is not was open at some point. The delete runs
+on the resolved path with `--one-file-system`.
+
+`$TMPDIR` itself is the operator's choice and is not otherwise validated: containment under it
+guards against a typo, not against the person running the script. The same rules cover
+`tools/ui-smoke.sh`'s `$LOGDIR` and `tools/dev-stack.sh`'s `$DEVDIR`; it is all in `tools/lib.sh`,
+and the `tools-lib` suite in tier 1 asserts each refusal.
+
+**A fixture made before these checks existed has a 0644 marker and will be refused.** Either
+`chmod 600` the marker or re-create the fixture with the script that owns it.
 
 Then the whole thing including the windows, in a headless X server:
 
@@ -220,16 +237,37 @@ typed, `xdotool` is not used for the PIN at all, and a signature coming back is 
 refuses to run if anything already owns that name on the bus it was pointed at, because a test
 fixture must never stand between a user and a password request. It needs a build with gcr-4.
 
-`tools/dev-stack.sh` deliberately **refuses** `--pin-prompt=system` outside `--live`: a private bus
-has no shell to own the name. On the real session bus, `auto` picks the system prompter by itself.
+`tools/dev-stack.sh` **refuses** `--pin-prompt=system` outside `--live`, and **defaults a private
+run to `gtk`** rather than leaving it at the backend's `auto`. Both are the same fact: `auto` asks
+the bus whether `org.gnome.keyring.SystemPrompter` has an owner *or is activatable*, and
+`dbus-run-session` reads the same service directories the session bus does — so on any machine with
+gnome-keyring installed, `org.gnome.keyring.SystemPrompter.service` activates
+`/usr/libexec/gcr-prompter` on the private bus too. **"No shell" is not "no prompter"**, and a
+private run left at `auto` was not testing the window it looked like it was testing. `--pin-prompt`
+is forwarded through both of the script's re-executions, so `--live --pin-prompt=gtk` really is
+`gtk`. On the real session bus with no `--pin-prompt`, `auto` picks the shell's prompter.
 
-The portal directory these scripts build is a **copy of the machine's**: a symlink to every
-`.portal` file installed here, plus this repository's, plus the machine's effective `portals.conf`
-with one line added for this backend. `XDG_DESKTOP_PORTAL_DIR` makes the frontend ignore every other
-portal directory *and* every other `portals.conf`, so a directory holding only `certificate.portal`
-used to leave the stack with no settings portal — which is why the windows came up light on a dark
-desktop — and used to take every other portal on the session down for the duration of a `--live`
-run. To check the settings portal is really there:
+The portal directory these scripts build is a **reconstruction of the machine's**: a symlink to
+every `.portal` file installed here, plus this repository's, plus the machine's configuration
+chain **flattened into one `portals.conf`**, with the `Certificate` line replaced by ours.
+`XDG_DESKTOP_PORTAL_DIR` makes the frontend ignore every other portal directory *and* every other
+`portals.conf`, so a directory holding only `certificate.portal` used to leave the stack with no
+settings portal — which is why the windows came up light on a dark desktop — and used to take every
+other portal on the session down for the duration of a `--live` run.
+
+**Flattened, not copied.** The frontend does not stop at the first configuration file it finds: it
+loads one per directory in the chain and then resolves *each interface* against the whole list, so
+copying the first file loses whatever a later one said — a partial `~/.config` file hiding
+`/etc`'s `Screenshot=none`, for instance, and handing the development stack a backend the session
+had switched off. `tools/lib.sh` replays that resolution per interface, `none` included, and the
+`tools-lib` suite asserts it.
+
+**On a private bus the `Secret` backend is switched off**, because nothing there owns
+`org.freedesktop.secrets` and the frontend's start-up otherwise waits out the full D-Bus activation
+timeout — about 25 seconds of "Failed to create secret proxy: … Timeout was reached" before
+`Desktop acquired`. A `--live` run keeps the machine's own value.
+
+To check the settings portal is really there:
 
 ```console
 $ tools/dev-stack.sh --keep --no-e2e
@@ -254,7 +292,7 @@ process, so the backend reads `org.gnome.desktop.interface color-scheme` from GS
 ```console
 $ ADW_DEBUG_COLOR_SCHEME=prefer-dark tools/ui-smoke.sh
 $ grep colour-scheme /tmp/xdp-certificate-ui-smoke.*/backend.log
-... DEBUG: request-received detail=colour-scheme-dark
+... DEBUG: colour-scheme detail=dark
 ```
 
 With `ADW_DEBUG_COLOR_SCHEME` unset the same line reports what the session is actually set to, which
@@ -396,13 +434,13 @@ the one to look at first, because it is the one this repository draws.
    must never appear above, in the name position. Then the certificates, each with subject, issuer,
    validity, key type, token label and reader. Then what the grant allows and for how long. Then
    Cancel and Use Certificate. **It should be the same colour as the rest of your desktop**; if it is
-   not, `--verbose` prints `colour-scheme-dark` or `colour-scheme-light` and §2 says what that means.
+   not, `--verbose` prints `colour-scheme detail=dark` or `detail=light` and §2 says what that means.
 2. Pick a certificate, press Use Certificate.
 3. **The PIN prompt**, titled *Unlock Security Token*, naming the application, the purpose, the token
    and the reader. It appears **at Sign time, not at grant time** — that is the lazy login, and it is
    why `may_prompt_later` was `true` in the output above it.
 4. Type the PIN. The client prints the signature length, then
-   `verified  the signature checks out against the certificate the portal returned`, then `PASS`.
+   `verified  signature checks against the returned certificate`, then `PASS`.
 
 `FAIL: the signature did not verify` is the interesting failure and worth keeping the logs for: the
 wrong key signed, or the digest was wrapped wrongly.
@@ -416,8 +454,10 @@ $ tools/dev-stack.sh -- --purpose client_auth --cancel-after 5000 --expect-cance
 The chooser goes up and the client closes the request five seconds later. The window must vanish at
 that moment, the backend log must show `chooser-cancelled`, no grant may be issued, and **no
 `Response` follows the `Close()`**. Pressing Escape or the close button by hand must do the same
-thing from the other direction: the client prints `AcquireCredential was cancelled by the user` and
-exits 2.
+thing from the other direction: the client prints `cancelled by the user` and exits 2. When the
+client asked, it prints `PASS cancel: Close() delivered, no Response` — upstream's `Request`
+unexports the frontend object before forwarding `Close()` to the backend, so there is no second
+answer for the application that asked.
 
 ### 3.4 On the real session bus, with the shell's PIN prompt
 
@@ -432,13 +472,26 @@ On a GNOME session `--pin-prompt` defaults to `auto` and `org.gnome.keyring.Syst
 by gnome-shell, so **the PIN request is drawn by the shell**, not by this backend: a shell-styled
 dialog rather than a window of ours, and it will **not** be parented to the requesting application.
 Both of those are expected and [SECURITY.md](SECURITY.md#where-the-field-is-drawn-and-what-that-moves)
-says what that moves and what it does not. The backend log says which prompt was used:
+says what that moves and what it does not.
+
+**Three things to try in the shell's dialog, because they are what the headless suite now covers
+and the card is the only place they can be seen for real.** Press Return on an empty field: the
+prompt must come back with "Enter the PIN for this token." and the attempt counter must not move
+(`--verbose` shows no `pin-incorrect`, and 3.1 will still say the counter is healthy). Press Cancel
+*after* the PIN has gone in, while the card is thinking: the answer must be `cancelled`, and if the
+login succeeded anyway the log must show `login-ok detail=cancelled-after-login` followed by
+`login-ok detail=abandoning-cancelled-login`. And `pkill -f gcr-prompter` while the prompt is up:
+the interaction must fail with a reason rather than hang, and the *next* request must still be able
+to put a prompt up.
+
+The backend log says which prompt was used:
 
 ```
 ** Message: pin-prompt-selected detail=system
 ```
 
-To compare the two by eye, run it again with the other one:
+To compare the two by eye, run it again with the other one. `--pin-prompt` is forwarded through
+the script's `--live` re-execution, so this really is the in-process window and not `auto` again:
 
 ```console
 $ tools/dev-stack.sh --live --pin-prompt=gtk -- --purpose client_auth
@@ -569,9 +622,13 @@ chooser-cancelled     the user did not
 grant-created
 pin-prompt-selected   detail=gtk | system -- which process drew the PIN field
 pin-prompted          detail=on-screen | protected-path
+pin-prompt-failed     detail=system-prompter[-unreachable] -- the shell's prompt did not answer
+pin-prompt-dismissed  detail=system-prompter -- the shell took the prompt away
+pin-prompt-round-completed-twice  gcr completed one round twice; the second was ignored
 pin-incorrect         an attempt was spent
 pin-locked            terminal
 pin-timeout           a submitted C_Login did not return; the prompt came down
+colour-scheme         detail=dark | light | forced | no-schema (--verbose only)
 login-ok
 operation-refused     a check said no; the mechanism name says which
 operation-completed
@@ -595,11 +652,12 @@ backend's. That is a consequence of the split, and the session handle is what jo
 | the frontend logs nothing about `certificate` | no `.portal` file matched: check `XDG_DESKTOP_PORTAL_DIR` and `portals.conf` |
 | `Backend call failed: ... disconnected from message bus without replying` | **this backend crashed** — and there will be no core dump, because `main()` sets `PR_SET_DUMPABLE(0)` and `RLIMIT_CORE 0` so that a crash between typing a PIN and wiping it cannot write one to disk. Re-run it with `--debug-allow-core` to get a dump and to be able to attach `gdb`; never put that flag in an installed service file |
 | `Gdk-WARNING: Failed to read portal settings ... Unable to open /proc/<pid>/root` | expected, and the same hardening: a non-dumpable process's `/proc` entries are root-owned, so the settings portal cannot identify this one. It is the mechanism that blocks a same-uid `ptrace` attach. The colour scheme is **not** lost with it: `src/main.c` reads `org.gnome.desktop.interface color-scheme` from GSettings and feeds libadwaita directly, because measuring showed the fallbacks did not recover it |
-| the chooser or the PIN window is the wrong colour | `--verbose` prints `colour-scheme-dark` / `colour-scheme-light`. If it disagrees with `gsettings get org.gnome.desktop.interface color-scheme`, the GSettings path in `follow_colour_scheme()` is what to look at; if it agrees, the theme is right and something else is wrong |
+| the chooser or the PIN window is the wrong colour | `--verbose` prints `colour-scheme detail=dark` / `detail=light`. If it disagrees with `gsettings get org.gnome.desktop.interface color-scheme`, the GSettings path in `follow_colour_scheme()` is what to look at; if it agrees, the theme is right and something else is wrong |
 | `--pin-prompt` is not in `--help` | this build has no gcr-4. `meson configure build \| grep gcr`; the option does not exist rather than failing later |
 | `--pin-prompt=system` and nothing appears | `org.gnome.keyring.SystemPrompter` is not on the bus the backend is using. On a private bus there is no shell; the backend answers `no_display` and says `pin-prompt-failed detail=system-prompter-unreachable` rather than silently drawing its own window |
 | `--list-tokens` says `SKIPPED  not a hardware token` | the token's slot does not set `CKF_HW_SLOT`. That is the default policy, not a failure: pass `--allow-software-tokens`, or name the module with `--module` |
-| a tools script says a directory `has no .xdg-desktop-portal-certificate-fixture` | it was not created by this project, and the scripts `rm -rf` these directories. Remove it by hand if it really is disposable |
+| a tools script says a directory `has no .xdg-desktop-portal-certificate-fixture` | it was not created by this project, and the scripts delete these directories recursively. Remove it by hand if it really is disposable |
+| a tools script says a marker `is mode 644, not 600` | the fixture predates the tightened checks. `chmod 600` the marker, or re-create the fixture with the script that owns it |
 | a `Sign` fails with "The token did not answer the login in time" | `--login-timeout` (60 s) ran out. The attempt is still spent — PKCS#11 cannot withdraw a `C_Login` — and a login that lands afterwards is logged out again. Raise it, or pass `--login-timeout 0`, if the middleware is legitimately that slow |
 | every method returns `AccessDenied` | the sender does not own `org.freedesktop.portal.Desktop`. That is the peer check, and it is working |
 | `AcquireCredential` answers 2 with `no_token` | no token is present |
