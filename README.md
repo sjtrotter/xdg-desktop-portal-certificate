@@ -11,9 +11,11 @@ the frontend branch it has completed `CreateSession` → `AcquireCredential` →
 end, with the signature verified against the certificate it returned, for RSA PKCS#1 v1.5,
 RSA-PSS and ECDSA.
 
-**No real smart card has ever been read by this code.** Everything above happened against a
-SoftHSM fixture token. [docs/TESTING.md](docs/TESTING.md) tier 3 is the run that would
-change that, and it is the author's to make. The PKCS#11 compatibility facade is still not
+**Real hardware has now been read by this code, once.** Everything in the paragraph above
+happened against a SoftHSM fixture token; [docs/TESTING.md](docs/TESTING.md) tier 3 is the run
+against a real card, and tiers 3.1–3.4 have passed once, on 2026-09-04, against one PIV card in
+one reader — one card, one reader, not yet a claim about PIV hardware in general, and the rest of
+tier 3 is still the author's to make. The PKCS#11 compatibility facade is still not
 reachable — `OpenPkcs11Endpoint` is on neither interface — and the two spikes that decide
 whether it can exist at all are still unrun ([docs/SPIKES.md](docs/SPIKES.md)).
 

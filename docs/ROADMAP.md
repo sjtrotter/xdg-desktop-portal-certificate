@@ -234,3 +234,11 @@ was understood.
 | **Windows-style minidriver semantics** | Certificate propagation into a system store, a device-level PIN cache, a CSP/KSP layer every application uses implicitly. It is the right long-term shape and it presumes an OS-wide credential API that Linux does not have. Building one on top of a D-Bus service nobody has adopted is a way to have neither. |
 | **Non-PIV card stacks** | Each is separate testing on hardware the author does not have. |
 | **Raw PC/SC forwarding** | That is `--socket=pcsc` with extra steps, and it is what this exists to replace. |
+
+---
+
+## Open questions
+
+| | |
+|---|---|
+| **A decryption-only certificate matches no purpose** | `certificate_purpose_matches()` requires a key that will sign, for every purpose including `email`. A PIV "key management" certificate — `keyEncipherment`, no `digitalSignature` — matches none of them, so an email client can never be offered it for decrypting mail even though brokered `Decrypt` exists. The fix is either a new `decrypt`/`email_decrypt` purpose, or letting `email` match `keyEncipherment` certificates when the caller's `operation_policy` is decrypt-only; either changes what a purpose can mean and has to be settled on the frontend branch's public XML, not here. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md#open-question-a-decryption-only-certificate-matches-no-purpose). |

@@ -3,8 +3,9 @@
 Three tiers, in the order they become possible, and only the third needs a card. What each tier
 can and cannot tell you is [tests/README.md](../tests/README.md); this file is the **commands**.
 
-Everything here has been run on Fedora 44 except tier 3, which is the author's and has never been
-run by anyone. **No real smart card has ever been read by this code.**
+Everything here has been run on Fedora 44. Tier 3 is the author's; tiers 3.1 through 3.4 have now
+been run once, against one real PIV card and one reader (see the note under §3.4), but the rest of
+tier 3 and every other card and reader combination remain unrun.
 
 ---
 
@@ -474,15 +475,25 @@ dialog rather than a window of ours, and it will **not** be parented to the requ
 Both of those are expected and [SECURITY.md](SECURITY.md#where-the-field-is-drawn-and-what-that-moves)
 says what that moves and what it does not.
 
-**Three things to try in the shell's dialog, because they are what the headless suite now covers
-and the card is the only place they can be seen for real.** Press Return on an empty field: the
-prompt must come back with "Enter the PIN for this token." and the attempt counter must not move
+**Two things to try in the shell's dialog by hand.** Press Return on an empty field: the prompt
+must come back with "Enter the PIN for this token." and the attempt counter must not move
 (`--verbose` shows no `pin-incorrect`, and 3.1 will still say the counter is healthy). Press Cancel
 *after* the PIN has gone in, while the card is thinking: the answer must be `cancelled`, and if the
 login succeeded anyway the log must show `login-ok detail=cancelled-after-login` followed by
-`login-ok detail=abandoning-cancelled-login`. And `pkill -f gcr-prompter` while the prompt is up:
-the interaction must fail with a reason rather than hang, and the *next* request must still be able
-to put a prompt up.
+`login-ok detail=abandoning-cancelled-login`. **That second one is not reliably testable by hand**:
+a PIV card typically verifies a submitted PIN in tens of milliseconds, well inside human reaction
+time, so there is usually no window to land the Cancel after submission and before the answer comes
+back — it is only observable by hand against a slow reader or card. Otherwise it is covered by the
+headless `/pin-system/shell-cancel-after-the-pin-was-submitted` case in `tests/test-pin-system.c`,
+which drives the same path with a scripted prompter instead.
+
+On GNOME, `org.gnome.keyring.SystemPrompter` **is gnome-shell itself**, not a separate
+`gcr-prompter` process — killing it would end the session the prompt is running in, not exercise a
+crash path. The prompter vanishing mid-interaction is therefore **not testable by hand on GNOME**;
+it is covered instead by the vanish cases in `tests/test-pin-system.c`
+(`prompter-vanishes-during-open`, `prompter-vanishes-during-password`,
+`prompter-vanishes-during-confirm`), which run against a hand-written hostile prompter that can
+drop off the bus on command.
 
 The backend log says which prompt was used:
 
@@ -498,6 +509,17 @@ $ tools/dev-stack.sh --live --pin-prompt=gtk -- --purpose client_auth
 ```
 
 The chooser is this backend's window in both cases. Only the PIN request moves.
+
+### Observed on real hardware (2026-09-04)
+
+Tiers 3.1 through 3.4 have passed, once, against one PIV card in one reader (OpenSC, an SCR 331
+class reader, GNOME 50 under Wayland): `--list-tokens` parsed every certificate on the card (3.1),
+the private-bus happy path and cancel both went as described (3.2, 3.3), and the live run with the
+shell's own prompter passed including the empty-Return re-prompt and a chooser cancel (3.4).
+Timings, from the backend's own log: the card verifies a submitted PIN in about 40 ms, a signature
+comes back in about 0.26 s, and moving the `Secret` backend off (§2) took private-bus startup from
+roughly 25 s to about 2 s. **One card, one reader** — this is not yet a claim about PIV hardware in
+general.
 
 ### 3.5 One PIN per grant
 
