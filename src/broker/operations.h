@@ -1,0 +1,103 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#ifndef SMARTCARD_BROKER_OPERATIONS_H
+#define SMARTCARD_BROKER_OPERATIONS_H
+
+#include <glib.h>
+
+#include "../dbus/service.h"
+
+/** @file
+ *  The broker. THE CORE CONTRACT: this service holds the key and performs the operation.
+ *
+ *  An application never receives key material, never receives the PIN, and never holds a
+ *  PKCS#11 handle unless it explicitly asks for the experimental compatibility endpoint
+ *  (src/export/facade.h). It asks for a signature and gets a signature.
+ *
+ *  WHY THIS AND NOT A FORWARDED MODULE. A sign-capable PKCS#11 session IS a signing
+ *  capability, and one with almost no accounting: it cannot be counted, expired per
+ *  operation, consented to per operation, or revoked cleanly mid-handshake. A brokered
+ *  call can be all of those. See docs/decisions/0007-brokered-operations-are-the-core.md.
+ *
+ *  WHAT THIS DOES NOT DO: attest purpose. A Sign call cannot be shown to have come from a
+ *  TLS handshake rather than from a PDF, a challenge string, or nothing. purpose
+ *  constrains certificate SELECTION and the words in the consent dialog. Anyone reading
+ *  it as a guarantee about later use has misread it, and every document in this
+ *  repository says so.
+ *
+ *  Sketch only; nothing here is implemented.
+ */
+
+/** Consent policy, per purpose. Applied per operation, not once at grant time.
+ *
+ *   CLIENT_AUTH  one consent per short-lived grant, bound to one verified application,
+ *                one certificate and preferably one destination context; expires after
+ *                the authentication attempt or a few minutes.
+ *   SIGNING      PER-OPERATION CONSENT BY DEFAULT, showing the application context and a
+ *                digest or fingerprint of what is being signed when the content cannot
+ *                safely be rendered. High-volume or unattended signing needs separately
+ *                configured policy, never a checkbox.
+ *   EMAIL        a session grant is defensible for sending or reading mail; bulk
+ *                behaviour must be explicit.
+ *   SSH          its own purpose and its own policy. Not "signing with extra steps".
+ *
+ *  Decryption, whatever the purpose, is per-operation or tightly bounded: it exposes
+ *  confidential data rather than producing an authentication artefact.
+ *
+ *  A CACHED TOKEN LOGIN MUST NEVER SILENTLY AUTHORISE A DIFFERENT APPLICATION OR A
+ *  DIFFERENT PURPOSE. Login is a hardware state; consent is a decision. */
+typedef enum
+{
+	SMARTCARD_CONSENT_PER_GRANT,
+	SMARTCARD_CONSENT_PER_OPERATION
+} SmartcardConsentPolicy;
+
+SmartcardConsentPolicy smartcard_consent_policy_for(SmartcardPurpose purpose, gboolean decrypt);
+
+/** A mechanism the allow-list permits, with its parameters ALREADY VALIDATED against the
+ *  mechanism and the key -- not forwarded. RSA-PSS hash, MGF and salt length are the
+ *  case that matters: a caller that can choose them freely can choose badly. */
+typedef struct
+{
+	char* mechanism;   /**< from the grant's supported_mechanisms */
+	GVariant* params;  /**< validated, not trusted */
+} SmartcardMechanism;
+
+typedef struct SmartcardBroker SmartcardBroker;
+
+typedef void (*SmartcardSignDone)(GByteArray* signature, const GError* error, gpointer user_data);
+
+/** Sign @data with the grant's key.
+ *
+ *  MAY PROMPT. The first private-key use triggers this service's own lazy login
+ *  (src/ui/pin.h), and some purposes require per-operation consent, so this is
+ *  asynchronous and callers were told may_prompt_later at grant time.
+ *
+ *  Order of checks, all of which must pass: grant is live and owned by this caller;
+ *  operation is in permitted_operations; mechanism is in the allow-list; parameters
+ *  validate against mechanism and key; rate limit not exceeded; consent policy satisfied
+ *  (which may show a window); token still present; login performed on THIS SERVICE'S
+ *  session.
+ *
+ *  @operation_id is caller-chosen and lets a cancellation, a result and a log line be
+ *  correlated without correlating them by content. */
+void smartcard_broker_sign(SmartcardBroker* broker, const char* grant_id,
+                           const char* operation_id, const SmartcardMechanism* mechanism,
+                           GBytes* data, GCancellable* cancellable, SmartcardSignDone done,
+                           gpointer user_data);
+
+/** Decrypt. Refused unless the grant's permitted_operations includes decrypt. Not in v1;
+ *  see docs/ROADMAP.md. */
+void smartcard_broker_decrypt(SmartcardBroker* broker, const char* grant_id,
+                              const char* operation_id, const SmartcardMechanism* mechanism,
+                              GBytes* ciphertext, GCancellable* cancellable,
+                              SmartcardSignDone done, gpointer user_data);
+
+/** Ensure this service is logged in on its OWN session for @grant_id, prompting if
+ *  necessary. Called at first private-key use, from both the brokered path and the
+ *  facade's lazy-login path -- so that both share one login model and one serialised
+ *  prompt per token. */
+void smartcard_broker_ensure_login(SmartcardBroker* broker, const char* grant_id,
+                                   GCancellable* cancellable, SmartcardSignDone done,
+                                   gpointer user_data);
+
+#endif /* SMARTCARD_BROKER_OPERATIONS_H */
