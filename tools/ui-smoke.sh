@@ -34,6 +34,12 @@
 # --no-drive leaves the windows alone, so that the client can cancel instead:
 #
 #     tools/ui-smoke.sh --no-drive -- --cancel-after 3000 --expect-cancelled
+#
+# A second AcquireCredential on the same session -- two choosers and, because
+# the grant changed, TWO PIN prompts. It fails if the second signature does not
+# verify against the second certificate:
+#
+#     tools/ui-smoke.sh -- --key-algorithm RSA --regrant EC
 
 set -u
 
@@ -194,6 +200,18 @@ inner() {
 	if [ "$DRIVE_WINDOWS" = 1 ]; then
 		drive "Use a Certificate" Down Return
 		drive "Unlock Security Token" "type:" Return
+
+		# --regrant asks for a SECOND credential on the same session, so there
+		# is a second chooser and -- this is the point -- a SECOND PIN prompt.
+		# A backend that reused the first grant's token session would show no
+		# second prompt at all, and this would time out looking for it.
+		for arg in "$@"; do
+			if [ "$arg" = --regrant ]; then
+				drive "Use a Certificate" Down Return
+				drive "Unlock Security Token" "type:" Return
+				break
+			fi
+		done
 	else
 		echo "ui-smoke: --no-drive: the windows are up and nothing will touch them"
 	fi

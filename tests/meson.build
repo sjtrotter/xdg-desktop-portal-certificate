@@ -63,6 +63,9 @@ service_test_cases = {
   # The two properties that make Decrypt safe to offer: one error for every
   # failure, and a per-grant budget. Skips itself without a SoftHSM fixture.
   'broker-decrypt': 'test-broker-decrypt.c',
+  # A second AcquireCredential on a live session: the signature has to verify
+  # against the certificate that was handed back. Skips without SoftHSM.
+  'broker-regrant': 'test-broker-regrant.c',
 }
 
 foreach name, source : service_test_cases

@@ -296,7 +296,7 @@ def build_filter(args):
     return filter_options
 
 
-def acquire(portal, session, args):
+def acquire(portal, session, args, key_algorithm=None):
     def options(handle):
         values = {
             "handle_token": GLib.Variant("s", handle),
@@ -315,6 +315,8 @@ def acquire(portal, session, args):
                 {"sign": GLib.Variant("b", True), "decrypt": GLib.Variant("b", True)},
             )
         filter_options = build_filter(args)
+        if key_algorithm:
+            filter_options["key_algorithms"] = GLib.Variant("as", [key_algorithm])
         if filter_options:
             values["certificate_filter"] = GLib.Variant("a{sv}", filter_options)
         return GLib.Variant("(osa{sv})", (session, args.parent_window, values))
@@ -614,6 +616,14 @@ def parse_args(argv):
     parser.add_argument("--expect-cancelled", action="store_true",
                         help="PASS when AcquireCredential comes back cancelled rather than with "
                         "a grant; use it with --cancel-after")
+    parser.add_argument("--regrant", metavar="KEY_ALGORITHM",
+                        help="after the first signature, call AcquireCredential AGAIN on the "
+                             "same session -- filtered to this key algorithm, so a DIFFERENT "
+                             "certificate is offered -- and check that the next Sign asks for "
+                             "the PIN again and produces a signature that verifies against the "
+                             "NEW certificate. A second AcquireCredential on a live session "
+                             "used to be answered with the new certificate and then signed with "
+                             "the old one's key, silently")
     parser.add_argument("--expect-no-certificate", action="store_true",
                         help="PASS when AcquireCredential fails cleanly with no token or no "
                         "matching certificate; this is the no-card plumbing check")
@@ -749,9 +759,69 @@ def main(argv):
             release(portal, session)
             return status
 
+    if args.regrant:
+        status = run_regrant(portal, session, args, cert_der)
+        if status != EXIT_PASS:
+            release(portal, session)
+            return status
+
     release(portal, session)
 
     print("\nPASS")
+    return EXIT_PASS
+
+
+def run_regrant(portal, session, args, first_cert_der):
+    """A SECOND AcquireCredential ON THE SAME SESSION, and then a signature.
+
+    The failure this exists to catch is silent: the portal answers with
+    certificate B, and the backend -- which had already opened a token session
+    and logged in for certificate A -- signs with A's key and never asks for a
+    PIN. What comes back does not verify against what the caller was handed.
+    """
+    print(f"\nre-grant  AcquireCredential again on {session}, filtered to {args.regrant}")
+
+    response, results = acquire(portal, session, args, key_algorithm=args.regrant)
+
+    if response != 0:
+        die(EXIT_FAIL, f"the second AcquireCredential answered {response}")
+
+    cert_der = bytes(results["certificate_der"])
+    key_type = results.get("key_type", "unknown")
+    mechanisms = list(results.get("supported_mechanisms", []))
+
+    print(f"re-grant  key {key_type}, {len(cert_der)} certificate bytes")
+
+    # THE CERTIFICATE ITSELF, not certificate_id: that key is the impl
+    # interface's and the frontend does not forward it to applications.
+    if cert_der == first_cert_der:
+        die(EXIT_FAIL,
+            "the second grant is the same certificate as the first, so this run proves "
+            "nothing; pick a --regrant key algorithm the first grant did not use")
+
+    mechanism = "ECDSA" if key_type == "EC" else "RSA_PKCS1_V1_5"
+    if mechanism not in mechanisms:
+        die(EXIT_FAIL, f"the re-grant does not offer {mechanism}; it offers {mechanisms}")
+
+    message = f"xdg-desktop-portal-certificate e2e re-grant {time.time()}".encode()
+    digest = hashlib.new(args.hash_name.lower(), message).digest()
+
+    print(f"re-grant  signing with {mechanism}")
+    response, results = sign(portal, session, args, mechanism, digest, args.hash_name)
+
+    if response != 0:
+        die(EXIT_FAIL, f"Sign after the re-grant answered {response}")
+
+    signature = bytes(results["signature"])
+
+    try:
+        verify(cert_der, signature, message, mechanism, args.hash_name, args.der)
+    except Exception as error:
+        die(EXIT_FAIL,
+            "the signature after the re-grant did not verify against the certificate the "
+            f"portal returned -- which is the whole point of this check: {error}")
+
+    print("re-grant  verified against the NEW certificate")
     return EXIT_PASS
 
 

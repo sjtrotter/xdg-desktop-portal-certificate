@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "broker/device.h"
+#include "fixture-util.h"
 #include "tokens/filter.h"
 
 #define FIXTURE_PIN "123456"
@@ -112,53 +113,6 @@ static CertificateCandidate* candidate_of_type(Fixture* fixture, const char* key
 	return NULL;
 }
 
-/* Verify with GnuTLS, from the certificate the token handed back -- not from
- * the key the fixture script generated. If those two ever disagree, the wrong
- * key signed. */
-static void verify_signature(CertificateCandidate* candidate, gnutls_sign_algorithm_t algorithm,
-                             const guint8* digest, gsize digest_length, GBytes* signature,
-                             gboolean ecdsa)
-{
-	gnutls_x509_crt_t crt = NULL;
-	gnutls_pubkey_t pubkey = NULL;
-	gnutls_datum_t der = { candidate->der->data, candidate->der->len };
-	gnutls_datum_t hash = { (unsigned char*) digest, (unsigned int) digest_length };
-	gnutls_datum_t sig;
-	g_autoptr(GBytes) encoded = NULL;
-	g_autoptr(GError) error = NULL;
-	int rc;
-
-	if (ecdsa)
-	{
-		gsize raw_length = 0;
-		const guint8* raw = g_bytes_get_data(signature, &raw_length);
-
-		/* PKCS#11 produces r||s; X.509 wants an ECDSA-Sig-Value. */
-		encoded = certificate_ecdsa_raw_to_der(raw, raw_length, &error);
-		g_assert_no_error(error);
-		sig.data = (unsigned char*) g_bytes_get_data(encoded, NULL);
-		sig.size = (unsigned int) g_bytes_get_size(encoded);
-	}
-	else
-	{
-		sig.data = (unsigned char*) g_bytes_get_data(signature, NULL);
-		sig.size = (unsigned int) g_bytes_get_size(signature);
-	}
-
-	g_assert_cmpint(gnutls_x509_crt_init(&crt), ==, 0);
-	g_assert_cmpint(gnutls_x509_crt_import(crt, &der, GNUTLS_X509_FMT_DER), ==, 0);
-	g_assert_cmpint(gnutls_pubkey_init(&pubkey), ==, 0);
-	g_assert_cmpint(gnutls_pubkey_import_x509(pubkey, crt, 0), ==, 0);
-
-	rc = gnutls_pubkey_verify_hash2(pubkey, algorithm, 0, &hash, &sig);
-
-	gnutls_pubkey_deinit(pubkey);
-	gnutls_x509_crt_deinit(crt);
-
-	if (rc < 0)
-		g_error("the signature did not verify: %s", gnutls_strerror(rc));
-}
-
 static void sign_and_verify(Fixture* fixture, const char* key_type, const char* mechanism_name,
                             const char* hash_name, gnutls_sign_algorithm_t algorithm)
 {
@@ -218,11 +172,74 @@ static void sign_and_verify(Fixture* fixture, const char* key_type, const char* 
 	g_assert_nonnull(signature);
 	g_assert_cmpuint(g_bytes_get_size(signature), >, 0);
 
-	verify_signature(candidate, algorithm, digest, digest_length, signature,
-	                 g_strcmp0(mechanism_name, "ECDSA") == 0);
+	certificate_test_verify_signature(candidate, algorithm, digest, digest_length, signature,
+	                                  g_strcmp0(mechanism_name, "ECDSA") == 0);
 
 	certificate_device_close(&device);
 	certificate_mechanism_clear(&mechanism);
+}
+
+/* A SECOND AcquireCredential ON A LIVE SESSION IS A NEW CREDENTIAL, and the
+ * open device has to notice. It used to return early on "a module is loaded",
+ * so the next Sign went to the PREVIOUS grant's private key handle -- with the
+ * login state of the previous grant, so no PIN window either. The application
+ * had been handed certificate B and got a signature only certificate A's key
+ * could have made.
+ *
+ * This is the device half: rebinding closes the old session, forgets the key
+ * handle and forgets the login. The end-to-end half -- that the signature then
+ * verifies against certificate B -- is tests/test-broker-regrant.c. */
+static void test_regrant_rebinds_the_device(Fixture* fixture, gconstpointer user_data)
+{
+	CertificateCandidate* first = candidate_of_type(fixture, "RSA");
+	CertificateCandidate* second = candidate_of_type(fixture, "EC");
+	CertificateDevice device = { 0 };
+	g_autoptr(GError) error = NULL;
+	CK_SESSION_HANDLE first_session;
+	CK_OBJECT_HANDLE first_key;
+
+	if (fixture->tokens == NULL)
+		return;
+
+	if (first == NULL || second == NULL)
+	{
+		g_test_skip("the fixture needs both an RSA and an EC key");
+		return;
+	}
+
+	g_assert_true(certificate_device_open(&device, fixture->tokens, first, &error));
+	g_assert_no_error(error);
+	g_assert_true(certificate_device_login(&device, first, FIXTURE_PIN, &error));
+	g_assert_no_error(error);
+	g_assert_true(device.logged_in);
+	g_assert_cmpuint(device.private_key, !=, (guint) CK_INVALID_HANDLE);
+
+	first_session = device.session;
+	first_key = device.private_key;
+
+	/* Opening for the SAME candidate is still a no-op: the login is not thrown
+	 * away by every operation, which is the whole point of "one PIN per
+	 * grant". */
+	g_assert_true(certificate_device_open(&device, fixture->tokens, first, &error));
+	g_assert_no_error(error);
+	g_assert_true(device.logged_in);
+	g_assert_cmpuint(device.session, ==, first_session);
+	g_assert_cmpuint(device.private_key, ==, first_key);
+
+	/* Opening for a DIFFERENT one is a rebind. */
+	g_assert_true(certificate_device_open(&device, fixture->tokens, second, &error));
+	g_assert_no_error(error);
+	g_assert_false(device.logged_in);
+	g_assert_cmpuint(device.session, !=, first_session);
+	g_assert_cmpuint(device.private_key, !=, first_key);
+
+	/* And the new grant's own login finds the new grant's key. */
+	g_assert_true(certificate_device_login(&device, second, FIXTURE_PIN, &error));
+	g_assert_no_error(error);
+	g_assert_cmpuint(device.private_key, !=, (guint) CK_INVALID_HANDLE);
+	g_assert_cmpuint(device.private_key, !=, first_key);
+
+	certificate_device_close(&device);
 }
 
 static void test_rsa_pkcs1(Fixture* fixture, gconstpointer user_data)
@@ -273,11 +290,19 @@ static GBytes* oaep_encrypt(CertificateCandidate* candidate, const char* hash_na
 	GBytes* out = NULL;
 	int status = 0;
 
-	if (g_find_program_in_path("openssl") == NULL)
+	{
+		g_autofree char* openssl = g_find_program_in_path("openssl");
+
+		if (openssl != NULL)
+			goto have_openssl;
+	}
+
 	{
 		g_test_skip("openssl(1) is not installed; it is what produces the OAEP ciphertext");
 		return NULL;
 	}
+
+have_openssl:
 
 	directory = g_dir_make_tmp("xdp-certificate-oaep-XXXXXX", &error);
 	g_assert_no_error(error);
@@ -627,6 +652,7 @@ int main(int argc, char** argv)
 	ADD("/device/oaep-round-trip", test_oaep_round_trip);
 	ADD("/device/oaep-bad-input-is-refused", test_oaep_bad_input_is_refused);
 	ADD("/device/wrong-pin", test_wrong_pin);
+	ADD("/device/regrant-rebinds", test_regrant_rebinds_the_device);
 
 #undef ADD
 

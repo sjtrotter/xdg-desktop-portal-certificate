@@ -6,8 +6,11 @@
 
 #include "fixture-util.h"
 
+#include <gnutls/abstract.h>
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
+
+#include "broker/mechanism.h"
 
 static GByteArray* load_der(const char* name)
 {
@@ -91,4 +94,48 @@ void certificate_test_attach_token(CertificateCandidate* candidate, const char* 
 
 	if (piv_slot != NULL)
 		candidate->piv_slot = g_strdup(piv_slot);
+}
+
+void certificate_test_verify_signature(CertificateCandidate* candidate,
+                                       gnutls_sign_algorithm_t algorithm, const guint8* digest,
+                                       gsize digest_length, GBytes* signature, gboolean ecdsa)
+{
+	gnutls_x509_crt_t crt = NULL;
+	gnutls_pubkey_t pubkey = NULL;
+	gnutls_datum_t der = { candidate->der->data, candidate->der->len };
+	gnutls_datum_t hash = { (unsigned char*) digest, (unsigned int) digest_length };
+	gnutls_datum_t sig;
+	g_autoptr(GBytes) encoded = NULL;
+	g_autoptr(GError) error = NULL;
+	int rc;
+
+	if (ecdsa)
+	{
+		gsize raw_length = 0;
+		const guint8* raw = g_bytes_get_data(signature, &raw_length);
+
+		/* PKCS#11 produces r||s; X.509 wants an ECDSA-Sig-Value. */
+		encoded = certificate_ecdsa_raw_to_der(raw, raw_length, &error);
+		g_assert_no_error(error);
+		sig.data = (unsigned char*) g_bytes_get_data(encoded, NULL);
+		sig.size = (unsigned int) g_bytes_get_size(encoded);
+	}
+	else
+	{
+		sig.data = (unsigned char*) g_bytes_get_data(signature, NULL);
+		sig.size = (unsigned int) g_bytes_get_size(signature);
+	}
+
+	g_assert_cmpint(gnutls_x509_crt_init(&crt), ==, 0);
+	g_assert_cmpint(gnutls_x509_crt_import(crt, &der, GNUTLS_X509_FMT_DER), ==, 0);
+	g_assert_cmpint(gnutls_pubkey_init(&pubkey), ==, 0);
+	g_assert_cmpint(gnutls_pubkey_import_x509(pubkey, crt, 0), ==, 0);
+
+	rc = gnutls_pubkey_verify_hash2(pubkey, algorithm, 0, &hash, &sig);
+
+	gnutls_pubkey_deinit(pubkey);
+	gnutls_x509_crt_deinit(crt);
+
+	if (rc < 0)
+		g_error("the signature did not verify: %s", gnutls_strerror(rc));
 }

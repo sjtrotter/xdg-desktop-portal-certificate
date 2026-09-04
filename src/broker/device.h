@@ -32,6 +32,15 @@ typedef struct
 	CK_SESSION_HANDLE session;
 	CK_OBJECT_HANDLE private_key;
 	gboolean logged_in;
+
+	/* THE CREDENTIAL THIS OPEN SESSION IS BOUND TO, and the whole of the answer
+	 * to "which key is device.private_key". A grant can change under a live
+	 * session -- the frontend does not refuse a second AcquireCredential on one
+	 * -- and an open device that did not remember what it was opened for would
+	 * go on signing with the previous grant's key while the application had been
+	 * handed the new grant's certificate. A reference, because the session's
+	 * candidate pointer is replaced at the moment of the re-grant. */
+	CertificateCandidate* candidate;
 } CertificateDevice;
 
 /** Open a read-only session on the token behind @candidate.
@@ -42,7 +51,15 @@ typedef struct
  *
  *  The private key is looked for immediately, and may not be found: on tokens
  *  where CKA_PRIVATE hides it, it only becomes visible after the login. That is
- *  not an error here. */
+ *  not an error here.
+ *
+ *  AN OPEN DEVICE IS REUSED ONLY FOR THE CANDIDATE IT WAS OPENED FOR. A second
+ *  AcquireCredential on a live session replaces the grant, and this is where
+ *  that is noticed: a candidate that is not the bound one closes the PKCS#11
+ *  session (C_Logout first, where the token permits) and opens a new one, so
+ *  the next operation uses the new certificate's key and asks for the PIN
+ *  again. Returning early on "a module is loaded" was how the backend came to
+ *  sign with the previous grant's key, silently, with no prompt. */
 gboolean certificate_device_open(CertificateDevice* device, CertificateTokens* tokens,
                                  const CertificateCandidate* candidate, GError** error);
 

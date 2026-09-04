@@ -26,11 +26,38 @@ static void find_private_key(CertificateDevice* device, const CertificateCandida
 		device->private_key = g_array_index(keys, CK_OBJECT_HANDLE, 0);
 }
 
+/* Whether an already open device is the one this candidate needs. The
+ * certificate id is the SHA-256 of the DER, so two candidates compare equal
+ * only when they are the same certificate, and the token comparison catches the
+ * same certificate present on two cards. */
+static gboolean device_is_bound_to(const CertificateDevice* device,
+                                   const CertificateCandidate* candidate)
+{
+	if (device->candidate == NULL || candidate == NULL)
+		return FALSE;
+
+	return g_strcmp0(device->candidate->certificate_id, candidate->certificate_id) == 0 &&
+	       certificate_token_same(device->candidate->token, candidate->token);
+}
+
 gboolean certificate_device_open(CertificateDevice* device, CertificateTokens* tokens,
                                  const CertificateCandidate* candidate, GError** error)
 {
 	if (device->module != NULL)
-		return TRUE;
+	{
+		if (device_is_bound_to(device, candidate))
+			return TRUE;
+
+		/* A DIFFERENT CREDENTIAL, SO A DIFFERENT SESSION. The grant this device
+		 * was opened for has been replaced -- a second AcquireCredential on a
+		 * live session, which the interface permits -- and everything the old
+		 * one left behind is wrong for the new one: the private key handle
+		 * belongs to the previous certificate, the login state was spent on it,
+		 * and the token may not even be the same card. Logging out and closing
+		 * here is what makes the next operation prompt for the PIN and sign
+		 * with the key the application was told about. */
+		certificate_device_close(device);
+	}
 
 	device->private_key = CK_INVALID_HANDLE;
 	device->session = CK_INVALID_HANDLE;
@@ -43,6 +70,7 @@ gboolean certificate_device_open(CertificateDevice* device, CertificateTokens* t
 	}
 
 	device->logged_in = FALSE;
+	device->candidate = certificate_candidate_ref((CertificateCandidate*) candidate);
 	find_private_key(device, candidate);
 
 	return TRUE;
@@ -167,6 +195,11 @@ GBytes* certificate_device_perform(CertificateDevice* device, gboolean decrypt,
 
 void certificate_device_close(CertificateDevice* device)
 {
+	/* Cleared whether or not a module was ever loaded, so that a device that
+	 * failed to open cannot be mistaken for one bound to the candidate it
+	 * failed on. */
+	g_clear_pointer(&device->candidate, certificate_candidate_unref);
+
 	if (device->module == NULL)
 		return;
 
