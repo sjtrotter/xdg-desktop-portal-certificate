@@ -63,4 +63,17 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
                                 const char* caller_display, GCancellable* cancellable,
                                 CertificateBrokerDone done, gpointer user_data);
 
+/** A SEAM FOR ONE TEST, and nothing in the shipped path uses it.
+ *
+ *  "Cancel while the card is signing" cannot be produced by timing: SoftHSM
+ *  answers in microseconds, so a cancel issued after the call returns is a
+ *  cancel before the operation started, which is a different test that already
+ *  exists. The gate is called ON THE WORKER THREAD with the device lock held,
+ *  at exactly the point a real card spends its hundreds of milliseconds, so
+ *  tests/test-cancellation.c can hold the worker there, cancel, and let it go.
+ *
+ *  NULL by default and never set by src/main.c. */
+typedef void (*CertificateBrokerGate)(gpointer user_data);
+void certificate_broker_set_gate(CertificateBrokerGate gate, gpointer user_data);
+
 #endif /* CERTIFICATE_BROKER_OPERATIONS_H */

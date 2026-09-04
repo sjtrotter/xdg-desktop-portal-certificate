@@ -89,9 +89,18 @@ struct _CertificateImplSession
 	/* ONE PIN PROMPT PER SESSION AT A TIME, under device_lock. Two Sign calls
 	 * on a logged-out grant used to produce two windows for the same token;
 	 * the second and later ones now wait here for the first one's answer.
-	 * broker/operations.c owns the contents. */
+	 * broker/operations.c owns the contents.
+	 *
+	 * THE PROMPT BELONGS TO THE SESSION, NOT TO THE OPERATION THAT OPENED IT.
+	 * login_cancellable is the window's, and it is cancelled only when the last
+	 * live waiter has gone: an operation that is closed while it waits takes
+	 * itself out of the list and is answered on its own, and the window stays up
+	 * for the ones that are still asking. Cancelling the FIRST caller used to
+	 * close the shared window and report "the user cancelled" to every other
+	 * caller behind it. */
 	gboolean login_in_progress;
 	GPtrArray* login_waiters;
+	GCancellable* login_cancellable;
 };
 
 CertificateImplSession* certificate_impl_session_new(const char* session_handle,

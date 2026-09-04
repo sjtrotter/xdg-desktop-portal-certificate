@@ -173,6 +173,7 @@ typedef struct
 
 	CertificatePinLoginFunc login;
 	CertificatePinRefreshFunc refresh;
+	CertificatePinAbandonFunc abandon;
 	gpointer login_data;
 	GCancellable* cancellable;
 	gulong cancel_id;
@@ -182,6 +183,8 @@ typedef struct
 	GtkWindow* window;
 	GtkWidget* entry;
 	GtkWidget* unlock_button;
+	GtkWidget* cancel_button;
+	GtkEventController* keys;
 	GtkWidget* status;
 	GtkWidget* hint;
 	GtkWidget* spinner;
@@ -198,6 +201,11 @@ typedef struct
 	gboolean login_in_flight;
 	gboolean cancel_deferred;
 	CertificatePinOutcome deferred_outcome;
+
+	/* A login that went through. It matters after the fact only when the answer
+	 * given is NOT "unlocked": that is a login the caller never asked for and
+	 * has to be able to undo. */
+	gboolean login_succeeded;
 
 	guint cancel_idle;
 	guint attempts;
@@ -248,6 +256,8 @@ static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
 {
 	CertificatePinDone done = NULL;
 	gpointer user_data = NULL;
+	CertificatePinAbandonFunc abandon = NULL;
+	gpointer login_data = NULL;
 
 	if (prompt->finished)
 		return;
@@ -280,6 +290,8 @@ static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
 	prompt->finished = TRUE;
 	done = prompt->done;
 	user_data = prompt->user_data;
+	abandon = prompt->login_succeeded && outcome != CERTIFICATE_PIN_OK ? prompt->abandon : NULL;
+	login_data = prompt->login_data;
 
 	/* THE ORDER MATTERS: disconnect first, so that no new idle can be queued
 	 * behind the removal below. g_cancellable_disconnect() blocks until a
@@ -308,6 +320,15 @@ static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
 		g_signal_handlers_disconnect_by_data(prompt->entry, prompt);
 	if (prompt->window != NULL)
 		g_signal_handlers_disconnect_by_data(prompt->window, prompt);
+	/* EVERY handler, not only the two that used to be listed. The `finished`
+	 * guard makes a late callback harmless, but "harmless because the first
+	 * line returns" is a weaker property than "cannot be called". */
+	if (prompt->unlock_button != NULL)
+		g_signal_handlers_disconnect_by_data(prompt->unlock_button, prompt);
+	if (prompt->cancel_button != NULL)
+		g_signal_handlers_disconnect_by_data(prompt->cancel_button, prompt);
+	if (prompt->keys != NULL)
+		g_signal_handlers_disconnect_by_data(prompt->keys, prompt);
 
 	if (prompt->window != NULL)
 	{
@@ -328,6 +349,19 @@ static void pin_prompt_finish(PinPrompt* prompt, CertificatePinOutcome outcome)
 	}
 
 	done(outcome, user_data);
+
+	/* A LOGIN NOBODY IS GOING TO USE IS A LOGIN THAT HAS TO BE UNDONE. The card
+	 * is slower than the Escape key: an attempt submitted before the cancel can
+	 * succeed after it, and PKCS#11 has no way to withdraw one. The window said
+	 * the request was cancelled, so the token must not be left authenticated
+	 * for the rest of the grant -- the next Sign would otherwise go through
+	 * with no prompt and no consent. Called AFTER done(), so that the caller
+	 * has already answered its waiters and this sees the settled state. */
+	if (abandon != NULL)
+	{
+		certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, NULL, "abandoning-cancelled-login");
+		abandon(login_data);
+	}
 
 	/* The creation reference. Any worker or queued idle still holding one keeps
 	 * the object alive until it drops it. */
@@ -444,6 +478,9 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 	gboolean ok = g_task_propagate_boolean(G_TASK(result), &error);
 
 	prompt->login_in_flight = FALSE;
+
+	if (ok)
+		prompt->login_succeeded = TRUE;
 
 	/* The window was closed, Escape was pressed, or Close() arrived while the
 	 * card was busy. The answer the user asked for is given now that nothing is
@@ -653,11 +690,16 @@ static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 {
 	PinPrompt* prompt = user_data;
 
-	/* Close() can arrive on any thread GDBus feels like; the window is only
-	 * ever touched from the main context. g_cancellable_disconnect() in
-	 * pin_prompt_finish() blocks until this returns, so the prompt is alive
-	 * here -- and the idle takes its own reference, because the object may be
-	 * finished and freed before the idle is dispatched. */
+	/* A cancellation is delivered on whatever thread called
+	 * g_cancellable_cancel(). Today that is always the main thread -- no
+	 * skeleton in this backend sets
+	 * G_DBUS_INTERFACE_SKELETON_FLAGS_HANDLE_METHOD_INVOCATIONS_IN_THREAD, so
+	 * every Close() handler runs on the main context -- and this function is
+	 * written not to depend on that: it touches no widget and queues an idle.
+	 * g_cancellable_disconnect() in pin_prompt_finish() blocks until this
+	 * returns, so the prompt is alive here, and the idle takes its own
+	 * reference because the object may be finished and freed before the idle is
+	 * dispatched. */
 	if (prompt->cancel_idle != 0)
 		return;
 
@@ -797,6 +839,7 @@ static void pin_prompt_start(PinPrompt* prompt)
 	gtk_widget_set_halign(buttons, GTK_ALIGN_END);
 
 	cancel = gtk_button_new_with_mnemonic("_Cancel");
+	prompt->cancel_button = cancel;
 	g_signal_connect(cancel, "clicked", G_CALLBACK(on_cancel), prompt);
 	gtk_box_append(GTK_BOX(buttons), cancel);
 
@@ -816,6 +859,7 @@ static void pin_prompt_start(PinPrompt* prompt)
 	adw_window_set_content(ADW_WINDOW(window), toolbar);
 
 	keys = gtk_event_controller_key_new();
+	prompt->keys = keys;
 	g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key_pressed), prompt);
 	gtk_widget_add_controller(window, keys);
 
@@ -835,7 +879,8 @@ static void pin_prompt_start(PinPrompt* prompt)
 void certificate_pin_login(CertificateToken* token, const char* parent_window,
                            const char* caller_display, const char* purpose_display,
                            CertificatePinLoginFunc login, CertificatePinRefreshFunc refresh,
-                           gpointer login_data, GCancellable* cancellable, CertificatePinDone done,
+                           CertificatePinAbandonFunc abandon, gpointer login_data,
+                           GCancellable* cancellable, CertificatePinDone done,
                            gpointer user_data)
 {
 	PinPrompt* prompt = NULL;
@@ -862,6 +907,7 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
 	prompt->purpose_display = g_strdup(purpose_display);
 	prompt->login = login;
 	prompt->refresh = refresh;
+	prompt->abandon = abandon;
 	prompt->login_data = login_data;
 	prompt->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
 	prompt->done = done;

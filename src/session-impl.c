@@ -86,6 +86,7 @@ static void certificate_impl_session_finalize(GObject* object)
 	certificate_impl_session_unexport(session);
 
 	g_clear_pointer(&session->login_waiters, g_ptr_array_unref);
+	g_clear_object(&session->login_cancellable);
 	g_clear_pointer(&session->candidate, certificate_candidate_unref);
 	g_clear_pointer(&session->id, g_free);
 	g_clear_pointer(&session->app_id, g_free);

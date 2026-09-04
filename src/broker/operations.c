@@ -32,6 +32,12 @@ typedef struct
 	GCancellable* cancellable;
 	CertificateBrokerDone done;
 	gpointer user_data;
+
+	/* Set while this operation is one of the session's login waiters. Its own
+	 * cancellation has to answer IT and nothing else, so it gets its own
+	 * handler for as long as it is waiting. */
+	gulong login_cancel_id;
+	guint login_cancel_idle;
 } Operation;
 
 static void operation_free(Operation* operation)
@@ -92,6 +98,21 @@ static void operation_succeed(Operation* operation, GBytes* result)
 	operation->done(owned, NULL, operation->user_data);
 }
 
+/* The fast refusal on the main thread, before a mechanism is parsed or an
+ * Operation exists. It is a HINT: the check that decides is the one under the
+ * device lock in certificate_broker_perform(), which charges in the same
+ * critical section it reads in. */
+static gboolean certificate_broker_decrypts_spent(CertificateImplSession* session)
+{
+	gboolean spent;
+
+	g_mutex_lock(&session->device_lock);
+	spent = session->decrypt_count >= CERTIFICATE_MAX_DECRYPTS_PER_GRANT;
+	g_mutex_unlock(&session->device_lock);
+
+	return spent;
+}
+
 /* Closed, expired, cancelled: checked before the device lock is taken and
  * again with it held, immediately before the operation is submitted. Expiry
  * cannot revoke a call the card has already accepted -- PKCS#11 has no way to
@@ -139,12 +160,34 @@ static gboolean ensure_session_locked(Operation* operation, GError** error)
 
 /* ------------------------------------------------------------------- login */
 
+/* ONE LOGIN INTERACTION PER SESSION, OWNED BY THE SESSION. It outlives the
+ * operation that opened the window -- that one can be cancelled while others go
+ * on waiting -- so it holds what the login needs and nothing that belongs to
+ * any single caller. */
+typedef struct
+{
+	CertificateTokens* tokens;
+	CertificateImplSession* session; /* a reference */
+
+	/* Whether THIS interaction is the one that authenticated the token. It is
+	 * false when the login function found the session already logged in, and
+	 * abandoning a login this interaction did not perform would log out a
+	 * session somebody else is using. */
+	gboolean performed_login;
+} LoginInteraction;
+
+static void login_interaction_free(LoginInteraction* interaction)
+{
+	g_clear_object(&interaction->session);
+	g_free(interaction);
+}
+
 /* Runs on the PIN module's worker thread, with the PIN in locked memory that
  * this function does not own, does not copy, and does not log. */
 static gboolean do_login(const char* pin, gpointer user_data, GError** error)
 {
-	Operation* operation = user_data;
-	CertificateImplSession* session = operation->session;
+	LoginInteraction* interaction = user_data;
+	CertificateImplSession* session = interaction->session;
 	gboolean ok;
 
 	g_mutex_lock(&session->device_lock);
@@ -159,6 +202,7 @@ static gboolean do_login(const char* pin, gpointer user_data, GError** error)
 	}
 
 	ok = certificate_device_login(&session->device, session->candidate, pin, error);
+	interaction->performed_login = ok;
 	g_mutex_unlock(&session->device_lock);
 
 	return ok;
@@ -167,12 +211,60 @@ static gboolean do_login(const char* pin, gpointer user_data, GError** error)
 /* Runs on the same worker thread, right after a refused PIN. */
 static void do_refresh_flags(CertificateToken* token, gpointer user_data)
 {
-	Operation* operation = user_data;
+	LoginInteraction* interaction = user_data;
 
-	certificate_tokens_refresh_flags(operation->tokens, token);
+	certificate_tokens_refresh_flags(interaction->tokens, token);
+}
+
+/* THE CARD IS LOGGED IN AND NOBODY ASKED FOR IT. Called on the main thread
+ * after the outcome has been delivered, in the one case where a C_Login
+ * succeeded and the answer given was not "unlocked": the user cancelled while
+ * the card was still thinking, and PKCS#11 cannot withdraw the attempt.
+ *
+ * THE POLICY, stated because it is one: the login is undone. The design is
+ * "one PIN per grant, then sign freely", so leaving it would turn a cancelled
+ * request into an unprompted signing capability for the rest of the grant --
+ * the next Sign would go through with no window at all. Undoing it costs the
+ * user one more PIN entry if they ask again, which is the answer their cancel
+ * asked for. The token session is closed rather than only C_Logout-ed, because
+ * a logged-out session is a handle with nothing behind it and reopening is what
+ * the next operation does anyway.
+ *
+ * The device is closed ON A WORKER: this is the main thread. */
+static void do_abandon(gpointer user_data)
+{
+	LoginInteraction* interaction = user_data;
+	CertificateImplSession* session = interaction->session;
+	gboolean still_wanted = FALSE;
+
+	if (!interaction->performed_login)
+		return;
+
+	/* Belt to the braces: by the time this runs the waiter list has been
+	 * emptied and answered, so there is nobody left who wanted the login. If
+	 * that ever stops being true, the ones still waiting keep it. */
+	g_mutex_lock(&session->device_lock);
+	still_wanted = session->login_waiters != NULL && session->login_waiters->len > 0;
+	g_mutex_unlock(&session->device_lock);
+
+	if (still_wanted)
+		return;
+
+	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id,
+	                      "logged-out-after-cancelled-login");
+	certificate_impl_session_release_device_async(session);
 }
 
 /* ------------------------------------------------------- the operation itself */
+
+static CertificateBrokerGate certificate_broker_gate = NULL;
+static gpointer certificate_broker_gate_data = NULL;
+
+void certificate_broker_set_gate(CertificateBrokerGate gate, gpointer user_data)
+{
+	certificate_broker_gate = gate;
+	certificate_broker_gate_data = user_data;
+}
 
 static void sign_thread(GTask* task, gpointer source, gpointer task_data,
                         GCancellable* cancellable)
@@ -198,6 +290,10 @@ static void sign_thread(GTask* task, gpointer source, gpointer task_data,
 		g_task_return_error(task, g_steal_pointer(&error));
 		return;
 	}
+
+	/* Where a card would be busy. See certificate_broker_set_gate(). */
+	if (certificate_broker_gate != NULL)
+		certificate_broker_gate(certificate_broker_gate_data);
 
 	result = certificate_device_perform(&session->device, operation->decrypt,
 	                                    &operation->mechanism, operation->payload, &error);
@@ -287,6 +383,19 @@ static void run_operation(Operation* operation)
  * put the window up and for every operation that arrived while it was up. */
 static void apply_login_outcome(Operation* operation, CertificatePinOutcome outcome)
 {
+	/* CHECKED FIRST, WHATEVER THE OUTCOME WAS. A waiter whose own Close()
+	 * arrived while the shared prompt was still on screen is answered
+	 * "cancelled" -- not handed a signature it no longer wants, and not shown a
+	 * second window either. The login itself stands: it was asked for by
+	 * somebody, and the ones who still want it get it. */
+	if (operation->cancellable != NULL && g_cancellable_is_cancelled(operation->cancellable))
+	{
+		operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
+		                                   CERTIFICATE_PKCS11_ERROR_CANCELLED,
+		                                   "The request was cancelled"));
+		return;
+	}
+
 	switch (outcome)
 	{
 		case CERTIFICATE_PIN_OK:
@@ -326,18 +435,37 @@ static void apply_login_outcome(Operation* operation, CertificatePinOutcome outc
 	}
 }
 
+/* Stop watching this operation's own cancellable on behalf of the login. Only
+ * ever called from the main thread and never from inside the handler itself,
+ * which is what makes g_cancellable_disconnect() safe here: it blocks until a
+ * handler already running has returned, and deadlocks if called from one. */
+static void detach_waiter_cancel(Operation* operation)
+{
+	if (operation->login_cancel_id != 0)
+	{
+		g_cancellable_disconnect(operation->cancellable, operation->login_cancel_id);
+		operation->login_cancel_id = 0;
+	}
+
+	if (operation->login_cancel_idle != 0)
+	{
+		g_source_remove(operation->login_cancel_idle);
+		operation->login_cancel_idle = 0;
+	}
+}
+
 static void on_pin_done(CertificatePinOutcome outcome, gpointer user_data)
 {
-	Operation* operation = user_data;
-	CertificateImplSession* session = operation->session;
-	GPtrArray* waiters = NULL;
+	LoginInteraction* interaction = user_data;
+	CertificateImplSession* session = interaction->session;
+	g_autoptr(GPtrArray) waiters = NULL;
+	g_autoptr(GCancellable) cancellable = NULL;
 
 	g_mutex_lock(&session->device_lock);
 	session->login_in_progress = FALSE;
 	waiters = g_steal_pointer(&session->login_waiters);
+	cancellable = g_steal_pointer(&session->login_cancellable);
 	g_mutex_unlock(&session->device_lock);
-
-	apply_login_outcome(operation, outcome);
 
 	/* ONE PROMPT, ONE ANSWER, EVERY WAITER. Two Sign calls on a logged-out
 	 * grant used to produce two windows for the same token, which is exactly
@@ -345,13 +473,74 @@ static void on_pin_done(CertificatePinOutcome outcome, gpointer user_data)
 	if (waiters != NULL)
 	{
 		for (guint i = 0; i < waiters->len; i++)
-			apply_login_outcome(g_ptr_array_index(waiters, i), outcome);
+		{
+			Operation* waiter = g_ptr_array_index(waiters, i);
 
-		g_ptr_array_unref(waiters);
+			detach_waiter_cancel(waiter);
+			apply_login_outcome(waiter, outcome);
+		}
 	}
 
-	/* The reference taken for the PIN interaction. */
-	operation_unref(operation);
+	/* The array's free function drops the reference each waiter was added with;
+	 * an operation whose task chain is still running keeps its own. */
+	login_interaction_free(interaction);
+}
+
+/* One waiter, cancelled on its own. It leaves the queue and is answered here
+ * and now; the window stays up for whoever is left, and comes down only when
+ * nobody is. */
+static gboolean waiter_cancelled_idle(gpointer user_data)
+{
+	Operation* operation = user_data;
+	CertificateImplSession* session = operation->session;
+	g_autoptr(GCancellable) close_the_window = NULL;
+	gboolean was_waiting = FALSE;
+
+	operation->login_cancel_idle = 0;
+
+	g_mutex_lock(&session->device_lock);
+	if (session->login_waiters != NULL)
+	{
+		/* g_ptr_array_remove() runs the free function, so the reference the
+		 * list held goes here; the idle's own reference keeps this alive. */
+		was_waiting = g_ptr_array_remove(session->login_waiters, operation);
+
+		if (was_waiting && session->login_waiters->len == 0 &&
+		    session->login_cancellable != NULL)
+			close_the_window = g_object_ref(session->login_cancellable);
+	}
+	g_mutex_unlock(&session->device_lock);
+
+	if (was_waiting)
+	{
+		detach_waiter_cancel(operation);
+		operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
+		                                   CERTIFICATE_PKCS11_ERROR_CANCELLED,
+		                                   "The request was cancelled"));
+	}
+
+	/* THE LAST ONE OUT TURNS THE WINDOW OFF. Cancelling the prompt while
+	 * somebody is still waiting for it would answer them for a request they did
+	 * not cancel, which is the defect this whole arrangement replaces. */
+	if (close_the_window != NULL)
+		g_cancellable_cancel(close_the_window);
+
+	return G_SOURCE_REMOVE;
+}
+
+static void on_waiter_cancelled(GCancellable* cancellable, gpointer user_data)
+{
+	Operation* operation = user_data;
+
+	/* Queued rather than done here: a cancel can be delivered from a thread
+	 * that must not touch the waiter list or a window, and the operation may be
+	 * answered and freed before the idle is dispatched, so the idle holds a
+	 * reference of its own. */
+	if (operation->login_cancel_idle != 0)
+		return;
+
+	operation->login_cancel_idle = g_idle_add_full(G_PRIORITY_DEFAULT, waiter_cancelled_idle,
+	                                               operation_ref(operation), operation_unref);
 }
 
 static void open_thread(GTask* task, gpointer source, gpointer task_data,
@@ -385,6 +574,8 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 	g_autoptr(GError) error = NULL;
 	gboolean needs_login;
 	gboolean wait_for_login = FALSE;
+	LoginInteraction* interaction = NULL;
+	g_autoptr(GCancellable) prompt_cancellable = NULL;
 
 	if (!g_task_propagate_boolean(G_TASK(result), &error))
 	{
@@ -405,22 +596,37 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 	              (session->candidate->token->login_required ||
 	               session->device.private_key == CK_INVALID_HANDLE);
 
-	if (needs_login && session->login_in_progress)
+	if (needs_login)
 	{
 		if (session->login_waiters == NULL)
 			session->login_waiters = g_ptr_array_new_with_free_func(operation_unref);
 
+		/* EVERY PARTICIPANT IS A WAITER, including the one that is about to
+		 * open the window. The list is what "who still wants this login" means,
+		 * and the operation that started it is not privileged: it can be
+		 * cancelled on its own like any other, and the window stays up for the
+		 * rest. */
 		g_ptr_array_add(session->login_waiters, operation_ref(operation));
-		wait_for_login = TRUE;
-	}
-	else if (needs_login)
-	{
-		session->login_in_progress = TRUE;
+
+		if (session->login_in_progress)
+		{
+			wait_for_login = TRUE;
+		}
+		else
+		{
+			session->login_in_progress = TRUE;
+			/* THE WINDOW'S CANCELLABLE IS THE SESSION'S, not this request's.
+			 * Handing the prompt the first caller's cancellable meant that
+			 * closing the first request closed the window every later one was
+			 * waiting behind. */
+			session->login_cancellable = g_cancellable_new();
+			interaction = g_new0(LoginInteraction, 1);
+			interaction->tokens = operation->tokens;
+			interaction->session = g_object_ref(session);
+			prompt_cancellable = g_object_ref(session->login_cancellable);
+		}
 	}
 	g_mutex_unlock(&session->device_lock);
-
-	if (wait_for_login)
-		return;
 
 	if (!needs_login)
 	{
@@ -428,12 +634,19 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 		return;
 	}
 
-	/* The prompt outlives this callback and the worker outlives the prompt, so
-	 * the operation is handed a reference of its own. */
+	/* Watched for as long as it is in the queue: this operation's own Close()
+	 * answers this operation and takes it out, and nothing else. */
+	if (operation->cancellable != NULL)
+		operation->login_cancel_id = g_cancellable_connect(
+		    operation->cancellable, G_CALLBACK(on_waiter_cancelled), operation, NULL);
+
+	if (wait_for_login)
+		return;
+
 	certificate_pin_login(session->candidate->token, operation->parent_window,
 	                      operation->caller_display, operation->purpose_display, do_login,
-	                      do_refresh_flags, operation_ref(operation), operation->cancellable,
-	                      on_pin_done, operation);
+	                      do_refresh_flags, do_abandon, interaction, prompt_cancellable,
+	                      on_pin_done, interaction);
 }
 
 void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSession* session,
@@ -491,7 +704,7 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 	 * needs, so the honest client never sees it and the hostile one runs out.
 	 * It is per grant rather than per unit time on purpose: re-consenting is
 	 * what buys more, and a user who is asked again is a user who finds out. */
-	if (decrypt && session->decrypt_count >= CERTIFICATE_MAX_DECRYPTS_PER_GRANT)
+	if (decrypt && certificate_broker_decrypts_spent(session))
 	{
 		certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL,
 		                          mechanism_name);
@@ -547,9 +760,38 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 
 	/* COUNTED WHEN IT IS ACCEPTED, not when it succeeds. A failed decryption is
 	 * exactly the query an attacker wants; charging only for the successful
-	 * ones would leave the budget unspent by the traffic it exists to bound. */
+	 * ones would leave the budget unspent by the traffic it exists to bound.
+	 *
+	 * CHARGED UNDER THE DEVICE LOCK, which is the same lock the workers read
+	 * and write every other piece of this session's device state under. The
+	 * check above is a fast refusal on the main thread and cannot be relied on
+	 * alone: read-then-increment without the lock is a budget that two callers
+	 * can both spend the last unit of. The refusal is repeated here because
+	 * this is the check that actually holds. */
 	if (decrypt)
-		session->decrypt_count++;
+	{
+		gboolean spent = FALSE;
+
+		g_mutex_lock(&session->device_lock);
+		spent = session->decrypt_count >= CERTIFICATE_MAX_DECRYPTS_PER_GRANT;
+		if (!spent)
+			session->decrypt_count++;
+		g_mutex_unlock(&session->device_lock);
+
+		if (spent)
+		{
+			certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL,
+			                          mechanism.name);
+			operation_fail(operation,
+			               g_error_new(CERTIFICATE_PKCS11_ERROR,
+			                           CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED,
+			                           "This grant has spent its %d decryptions; a further one "
+			                           "needs a new grant",
+			                           CERTIFICATE_MAX_DECRYPTS_PER_GRANT));
+			operation_unref(operation);
+			return;
+		}
+	}
 
 	certificate_log_operation(CERTIFICATE_REASON_REQUEST_RECEIVED, NULL, NULL, mechanism.name);
 

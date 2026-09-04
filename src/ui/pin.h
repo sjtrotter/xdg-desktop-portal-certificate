@@ -69,7 +69,10 @@
  *
  *  CANCELLING WHILE THE CARD IS BUSY hides the window at once and answers the
  *  caller when the worker returns: nothing the login is reading is freed while
- *  it is reading it, and the caller is answered exactly once.
+ *  it is reading it, and the caller is answered exactly once. If the login the
+ *  user cancelled SUCCEEDED anyway -- the card was simply slower than the
+ *  Escape key -- the abandon callback is invoked afterwards so that the token
+ *  is not left authenticated for an operation nobody consented to.
  *
  *  HEADLESS: NEVER READ A PIN FROM STDIN. With no display the caller gets
  *  CERTIFICATE_PIN_NO_DISPLAY.
@@ -109,6 +112,16 @@ typedef gboolean (*CertificatePinLoginFunc)(const char* pin, gpointer user_data,
  *  last attempt. Optional; NULL means the flags are never refreshed. */
 typedef void (*CertificatePinRefreshFunc)(CertificateToken* token, gpointer user_data);
 
+/** Called ON THE MAIN THREAD when a login SUCCEEDED but its outcome is being
+ *  thrown away -- the one case being a cancel that arrived while C_Login was in
+ *  flight and lost the race. PKCS#11 cannot withdraw a login, so the token is
+ *  authenticated and nobody asked for it to be: the implementation is expected
+ *  to log the session out again, and this is the only place that knows the
+ *  difference. Called after the outcome has been delivered, so the caller's
+ *  own bookkeeping has already run. Optional; NULL means a discarded login is
+ *  left in place. */
+typedef void (*CertificatePinAbandonFunc)(gpointer user_data);
+
 typedef void (*CertificatePinDone)(CertificatePinOutcome outcome, gpointer user_data);
 
 /** Prompt and log in. The window restates the verified caller and the purpose
@@ -119,7 +132,8 @@ typedef void (*CertificatePinDone)(CertificatePinOutcome outcome, gpointer user_
 void certificate_pin_login(CertificateToken* token, const char* parent_window,
                            const char* caller_display, const char* purpose_display,
                            CertificatePinLoginFunc login, CertificatePinRefreshFunc refresh,
-                           gpointer login_data, GCancellable* cancellable, CertificatePinDone done,
+                           CertificatePinAbandonFunc abandon, gpointer login_data,
+                           GCancellable* cancellable, CertificatePinDone done,
                            gpointer user_data);
 
 /** Whether a display was available when the process started. With none, every
