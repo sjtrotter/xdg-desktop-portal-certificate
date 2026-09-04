@@ -152,6 +152,79 @@ The three "open items" the previous version of this document listed have all mov
    one run the python-dbusmock templates are the only implementations that have ever answered
    these interfaces.
 
+## Prior art and related discussion
+
+None of this was cited anywhere in this repository until now, which was the wrong order: the
+argument below is with a five-year-old thread, and posting into it without having recorded that it
+was read would be rude as well as unconvincing. Read in full on 2026-09-04.
+
+**[xdg-desktop-portal#662, "PKCS#11 portal"](https://github.com/flatpak/xdg-desktop-portal/issues/662).**
+Opened by `yoe`, who works on the Belgian eID software (`Fedict/eid-mw`), on 2021-11-17; 21 comments; last activity
+2023-07-11; dormant, unassigned, and it produced no interface. The positions worth knowing, because
+each is an objection this design has to survive:
+
+| Who | When | Position |
+|---|---|---|
+| **yoe** | 2021-11-17 | The portal should use p11-kit on the unconfined side and **export every module p11-kit knows**. Named consumers: browsers, Thunderbird/Evolution, LibreOffice. Motivation: European ID cards ship a PKCS#11 module as their main deliverable |
+| **frankmorgner** (OpenSC, vsmartcard) | 2022-02-28 | Points at `valentindavid/pkcs11-demo` as a working demonstration |
+| **3v1n0** | 2023-03-22 | The opposite: do **not** expose modules to confined apps; expose a generic smart card, perhaps via vsmartcard's `vpcd` |
+| **frankmorgner** | 2023-03-22 | The layering comment. `vpcd`/`vicc` expose the **token** over PC/SC; `pkcs11-proxy` exposes the **middleware** over PKCS#11. Reproduced in [ARCHITECTURE.md](ARCHITECTURE.md#two-layers-and-the-one-this-adds) |
+| **jmaris** | 2023-04-04 | eIDAS is being extended to digital identity documents; this will matter to EU users |
+| **ueno** (p11-kit, GnuTLS) | 2023-06-23 | Attaches a design (below). The threat model in one sentence: "a malicious application could brick smartcards by calling destructive functions like `C_InitToken` or by repeatedly providing incorrect PIN" |
+| **frankmorgner** | 2023-06-23 | Agrees consent is needed; worries about permission fatigue, citing the Apple and Windows Vista backlashes. Floats **whitelisting signed "friendly" applications** |
+| **mcatanzaro** (WebKitGTK) | 2023-06-23 | The framing the maintainers accept: "The security model is to protect against **compromised** applications" |
+| **Erick555** | 2023-06-26 | Every Flathub app is signed; signed is not benign; an app can turn malicious a minute after being blessed |
+| **jadahl** (maintainer) | 2023-06-27 | **The ruling.** "Listing 'blessed' applications is not how portals are designed… it also side steps one of the most important aspects of sandboxing — compromised apps, trusted or not" |
+| **Mikenux** | 2023-06-28 | Review at scale is impossible; the only legitimate escape from prompting is the *user* choosing to always grant, with re-evaluation on app update |
+| **jmpolom** | 2023-07-11 | The last word, and the strongest dissent. Notarization is user-hostile and must be ruled out; yoe's original proposal is still the most reasonable; granular prompts will produce MFA-style fatigue; the brick argument is not watertight because a host app can do the same; **rate limits belong lower in the stack**, "not in this portal though, that is for certain"; wants one coarse per-app "allow PKCS#11" |
+
+Two camps, then: *coarse forwarding* (yoe, jmpolom, frankmorgner's UX wing) and *mediated access
+with consent* (ueno, 3v1n0, Erick555, Mikenux, and — on the security model — jadahl and
+mcatanzaro). **Nobody argued for brokered operations, and nobody argued against them: the option
+was never raised.** Where this project agrees with the thread it should say so plainly — the
+consent model here is Mikenux's answer and jadahl's ruling, and there is no blessed-app list
+anywhere in it.
+
+**Ueno's "Flatpak portal design for smartcard access" (2023), attached to that issue.** D-Bus to
+*gain* access so permissions land in the normal permission UI, p11-kit RPC for the calls
+themselves. Three states — no access, enumerating, accessing — and two methods,
+`StartForwarding(fd) → handle` and `AccessToken(token_uri, {writable, destructive}) → handle`,
+where `AccessToken` may be called again to escalate. The sentence this design differs from is
+explicit: "The minimal unit of access control is PKCS#11 **token**, not object nor certain
+operation." Destructive functions are gated behind a flag rather than removed, PIN entry stays with
+the application ("it would be desirable to not interfere with the existing application level
+pop-up, such as the password prompt implemented by Firefox"), and PIN-retry exhaustion is named as
+motivation but not solved by the mechanism. Decision [0006](decisions/0006-failure-modes-of-naive-p11kit-forwarding.md)
+failure mode 9 is the disagreement: a PIV card holds four keys, so a token-scoped grant makes a
+certificate-scoped consent sentence untrue.
+
+**[p11-kit#294](https://github.com/p11-glue/p11-kit/issues/294)** (open since 2020-05-01). Morgner
+asks for PKCS#11 modules to be sandboxed; Ueno answers that it is partly possible already with the
+`remote:` configuration option plus bubblewrap (comment `622359664`), and that doing it
+transparently might want a new `sandbox-profile:` option (comment `968077421`). **That option does
+not exist**; it is a plan, and Ueno says in #662 that it is out of scope for the portal proposal.
+
+**[valentindavid/pkcs11-demo](https://github.com/valentindavid/pkcs11-demo).** Two snaps joined by
+snapd's content interface: an `opensc` snap running a confined `pcscd` plus
+`p11-kit server -f --name … pkcs11:` — the bare URI, i.e. **every module, unfiltered** — and a
+strictly-confined consumer shipping only `p11-kit-client.so`. It is yoe's and jmpolom's proposal,
+already built, and it has **no consent model at all**: authorization is a one-time admin
+`snap connect`, after which the app holds the whole token set for good. It is the thing decision
+[0006](decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) rejects, and it works, and it is
+worth being fair about why someone would want it.
+
+**pkcs11-proxy and vsmartcard.** vsmartcard's `vpcd`/`vicc` virtualize at the **PC/SC** layer —
+APDUs over a socket — and its README makes no comparison to pkcs11-proxy; the layering distinction
+is Morgner's own. pkcs11-proxy's original README says "the connection is not encrypted and can
+easily be sniffed", which, since it tunnels `C_Login`, means PINs in the clear by default; the
+SUNET fork adds TLS-PSK and seccomp but still no per-client authorization or call filtering.
+Neither is OpenSC-maintained.
+
+**[xdg-desktop-portal PR #1889](https://github.com/flatpak/xdg-desktop-portal/pull/1889)**,
+"Introduce Credentials portal (experimental)". Already load-bearing here for the naming and gating
+convention (above), and relevant a second time: certificate-backed signing may belong there as a
+credential **type** rather than beside it as a rival portal. That is the maintainers' call.
+
 ## What does not change, and must not
 
 - The application talks to xdg-desktop-portal and only to xdg-desktop-portal.

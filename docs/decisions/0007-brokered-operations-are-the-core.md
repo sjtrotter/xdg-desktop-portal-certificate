@@ -41,7 +41,15 @@ capability rather than a sequence of events.
 Brokered operations can enforce what a session cannot:
 
 - **per-operation consent**, where the purpose demands it — `signing` shows what is being signed;
-- **precise accounting**: an operation counter, a single-use option, rate limits;
+- **precise accounting**: an operation counter, a single-use option, rate limits — of which only
+  the per-grant decryption budget exists in code today; **rate limiting is designed and not
+  implemented**, on either side (`docs/SECURITY.md`, "Not implemented"). It is listed here as a
+  property the shape *permits* and a forwarded session does not, which is a different claim from
+  having it, and the difference matters: jmpolom's objection in
+  [xdg-desktop-portal#662](https://github.com/flatpak/xdg-desktop-portal/issues/662) (2023-07-11)
+  is that rate limiting belongs lower in the stack, near the hardware. He is right that a portal
+  cannot rate-limit the host; what a portal can bound is the use of a grant it issued itself, and
+  that is the only version of this claim worth making;
 - **revocation that takes effect immediately**, including mid-handshake;
 - **mechanism allow-listing with parameter validation** — RSA-PSS hash, MGF and salt length checked
   against the mechanism and the key rather than forwarded;
