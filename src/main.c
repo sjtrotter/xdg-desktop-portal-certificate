@@ -28,8 +28,10 @@
  * The main() shape -- gtk_init plus a plain GMainLoop rather than GtkApplication,
  * g_bus_own_name with REPLACE under --replace, and quitting on name-lost -- is
  * xdg-desktop-portal-gtk's, LGPL-2.1-or-later, Copyright (C) 2016 Red Hat, Inc.
- * ALLOW_REPLACEMENT is where this backend deliberately differs from it; see
- * harden() and claim_name() below.
+ * ALLOW_REPLACEMENT is where this backend deliberately differs from it: it is a
+ * separate --allow-replacement flag that nothing installed passes, so an
+ * upgrade is a restart rather than a --replace. See harden() and the comment
+ * over g_bus_own_name_on_connection() below.
  */
 
 #include <locale.h>
@@ -56,6 +58,7 @@ static CertificateImpl* impl = NULL;
 static CertificateTokens* tokens = NULL;
 
 static gboolean opt_replace = FALSE;
+static gboolean opt_allow_replacement = FALSE;
 static gboolean opt_verbose = FALSE;
 static gboolean opt_version = FALSE;
 static gboolean opt_list_tokens = FALSE;
@@ -65,7 +68,9 @@ static char** opt_modules = NULL;
 
 static const GOptionEntry entries[] = {
 	{ "replace", 'r', 0, G_OPTION_ARG_NONE, &opt_replace,
-	  "Replace a running instance, and allow being replaced in turn", NULL },
+	  "Take the bus name from a running instance that permitted it", NULL },
+	{ "allow-replacement", 0, 0, G_OPTION_ARG_NONE, &opt_allow_replacement,
+	  "Let a later instance take the bus name from this one", NULL },
 	{ "verbose", 'v', 0, G_OPTION_ARG_NONE, &opt_verbose, "Log decisions and breadcrumbs on stderr",
 	  NULL },
 	{ "module", 'm', 0, G_OPTION_ARG_FILENAME_ARRAY, &opt_modules,
@@ -409,24 +414,41 @@ int main(int argc, char** argv)
 	g_unix_signal_add(SIGINT, on_signal, NULL);
 	g_unix_signal_add(SIGTERM, on_signal, NULL);
 
-	/* REPLACEMENT IS NOT OFFERED TO EVERYONE. xdg-desktop-portal-gtk sets
-	 * ALLOW_REPLACEMENT unconditionally, and for a file chooser that is
-	 * reasonable. Here it means any process running as the user can take
-	 * org.freedesktop.impl.portal.desktop.certificate at will and become the
-	 * thing the portal calls -- receiving AcquireCredential and Sign with a
-	 * real app id and identity level, and drawing the window that asks for the
-	 * PIN. The trusted dialog is the one thing docs/SECURITY.md says this
-	 * repository owns outright, so the name is only offered up when an operator
-	 * says so: --replace both allows a replacement and asks to be one, so an
-	 * in-place upgrade still works (start the new instance with --replace) and
-	 * an arbitrary peer cannot simply ask for the name.
+	/* REPLACEMENT IS NOT OFFERED TO ANYONE UNLESS IT IS ASKED FOR, AND THE TWO
+	 * HALVES ARE SEPARATE FLAGS.
 	 *
-	 * It is not a boundary against a determined local process -- nothing here
-	 * is -- but it removes the one-call version. */
+	 * xdg-desktop-portal-gtk sets ALLOW_REPLACEMENT unconditionally, and for a
+	 * file chooser that is reasonable. Here it means any process running as the
+	 * user can take org.freedesktop.impl.portal.desktop.certificate at will and
+	 * become the thing the portal calls -- receiving AcquireCredential and Sign
+	 * with a real app id and identity level, and drawing the window that asks
+	 * for the PIN. The trusted dialog is the one thing docs/SECURITY.md says
+	 * this repository owns outright.
+	 *
+	 * D-BUS CANNOT AUTHENTICATE A REPLACEMENT. ALLOW_REPLACEMENT is not "let
+	 * the package manager replace me"; it is "let whoever asks next replace
+	 * me", and the bus offers nothing finer -- no uid check, no peer identity,
+	 * nothing the current owner can inspect before yielding. So the choice is
+	 * between a name anybody can take and a name nobody can take, and this
+	 * backend takes the second:
+	 *
+	 *   --allow-replacement   this instance may be replaced. NOT the default,
+	 *                         and NOT in the installed .service file.
+	 *   --replace             this instance asks to replace the current owner,
+	 *                         which works only if that owner allowed it.
+	 *
+	 * WHICH MEANS AN UPGRADE IS A RESTART, not a --replace: the D-Bus activated
+	 * instance permits no replacement, so a new binary takes over by stopping
+	 * the old one (the service manager, or a SIGTERM) and letting activation
+	 * start the new one on the next call. --replace exists for a development
+	 * loop where the running instance was deliberately started with
+	 * --allow-replacement; tools/dev-stack.sh --live does exactly that.
+	 * docs/TESTING.md 3.5 has the recipe. */
 	owner_id = g_bus_own_name_on_connection(
 	    connection, CERTIFICATE_IMPL_BUS_NAME,
-	    opt_replace ? (G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT | G_BUS_NAME_OWNER_FLAGS_REPLACE)
-	                : G_BUS_NAME_OWNER_FLAGS_NONE,
+	    (opt_allow_replacement ? G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT
+	                           : G_BUS_NAME_OWNER_FLAGS_NONE) |
+	        (opt_replace ? G_BUS_NAME_OWNER_FLAGS_REPLACE : G_BUS_NAME_OWNER_FLAGS_NONE),
 	    on_name_acquired, on_name_lost, NULL, NULL);
 
 	on_bus_acquired(connection, CERTIFICATE_IMPL_BUS_NAME, NULL);

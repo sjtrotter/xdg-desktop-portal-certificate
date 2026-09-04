@@ -12,7 +12,9 @@
 #   nothing touches the user's real session bus. This is the mode to use for
 #   everything except a run that has to show windows on the real desktop.
 #
-#   --live. Uses the real session bus and starts the frontend with --replace,
+#   --live. Uses the real session bus, starts the frontend with --replace and
+#     the backend with --replace --allow-replacement (a development loop only;
+#     see the comment on BACKEND_ARGS and src/main.c),
 #   taking org.freedesktop.portal.Desktop away from the system one for the
 #   duration. THE SYSTEM PORTAL COMES BACK BY D-BUS ACTIVATION as soon as this
 #   script's frontend exits and something asks for the name again; see
@@ -203,6 +205,26 @@ softhsm_env() {
 	echo "${0##*/}: using the SoftHSM fixture in $SOFTHSM_DIR"
 }
 
+# Poll the bus for @1 until it has an owner, for at most 30 seconds, giving up
+# early if the process that is meant to own it (@2) has exited.
+wait_for_name() {
+	local name="$1" pid="$2" owned=""
+
+	for _ in $(seq 1 120); do
+		owned="$(gdbus call --session --dest org.freedesktop.DBus \
+			--object-path /org/freedesktop/DBus \
+			--method org.freedesktop.DBus.NameHasOwner "$name" 2>/dev/null)"
+		case "$owned" in
+		*true*) return 0 ;;
+		esac
+
+		kill -0 "$pid" 2>/dev/null || return 1
+		sleep 0.25
+	done
+
+	return 1
+}
+
 start_stack() {
 	export XDG_DESKTOP_PORTAL_DIR="$DEVDIR"
 	export XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate
@@ -216,9 +238,13 @@ start_stack() {
 		PERM_PID=""
 	fi
 
-	"$BACKEND" "${BACKEND_ARGS[@]}" &
-	BACKEND_PID=$!
-
+	# THE FRONTEND GOES UP FIRST, and this is not a preference. GTK asks the
+	# settings portal for a theme as soon as the backend initialises it, which
+	# on a private bus ACTIVATES org.freedesktop.portal.Desktop -- and D-Bus
+	# activation finds the system portal at /usr/libexec, which then owns the
+	# name this script's frontend was about to take. The development frontend
+	# quits with "Terminated because dbus name was lost", and the run fails in a
+	# way that reads like a portal configuration problem and is not one.
 	if [ "$MODE" = live ]; then
 		"$FRONTEND_BIN" -r -v &
 	else
@@ -226,7 +252,19 @@ start_stack() {
 	fi
 	FRONTEND_PID=$!
 
-	sleep 2
+	# WAIT FOR THE NAME, DO NOT SLEEP AND HOPE. Loading the PKCS#11 modules
+	# takes a couple of seconds on a machine with several configured, and the
+	# backend requests its name only after that -- so a fixed sleep raced it and
+	# the frontend's first call came back "was not provided by any .service
+	# files", there being no activation file on a private bus.
+	wait_for_name org.freedesktop.portal.Desktop "$FRONTEND_PID" ||
+		die "the frontend never took org.freedesktop.portal.Desktop"
+
+	"$BACKEND" "${BACKEND_ARGS[@]}" &
+	BACKEND_PID=$!
+
+	wait_for_name org.freedesktop.impl.portal.desktop.certificate "$BACKEND_PID" ||
+		die "the backend never took org.freedesktop.impl.portal.desktop.certificate"
 }
 
 stop_stack() {
@@ -236,6 +274,19 @@ stop_stack() {
 
 inner() {
 	BACKEND_ARGS=(--verbose)
+
+	# A DEVELOPMENT LOOP, AND ONLY A DEVELOPMENT LOOP. The backend refuses to be
+	# replaced unless it was started with --allow-replacement, because D-Bus
+	# cannot tell "the package manager" from "any process running as this user"
+	# and the thing that would be taken over is the window that asks for a PIN.
+	# On the real bus that means re-running this script would otherwise fail to
+	# get the name off the instance the last run left behind, so --live opts in
+	# to both halves: take the name, and be takeable in turn. The installed
+	# .service file passes neither, and docs/SECURITY.md says why.
+	if [ "$MODE" = live ]; then
+		BACKEND_ARGS+=(--replace --allow-replacement)
+	fi
+
 	softhsm_env
 	start_stack
 
