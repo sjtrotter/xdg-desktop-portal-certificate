@@ -238,10 +238,10 @@ static void harden(void)
  * Where it is absent, libadwaita's own answer stands. */
 static void on_dark_changed(GObject* manager, GParamSpec* spec, gpointer user_data)
 {
-	certificate_log_debug(CERTIFICATE_REASON_REQUEST_RECEIVED,
+	certificate_log_debug(CERTIFICATE_REASON_COLOUR_SCHEME,
 	                      adw_style_manager_get_dark(ADW_STYLE_MANAGER(manager))
-	                          ? "colour-scheme-dark"
-	                          : "colour-scheme-light");
+	                          ? "dark"
+	                          : "light");
 }
 
 static void apply_colour_scheme(GSettings* settings, const char* key, gpointer user_data)
@@ -274,7 +274,7 @@ static void follow_colour_scheme(void)
 
 		if (forced != NULL && *forced != '\0')
 		{
-			certificate_log_debug(CERTIFICATE_REASON_REQUEST_RECEIVED, "colour-scheme-forced");
+			certificate_log_debug(CERTIFICATE_REASON_COLOUR_SCHEME, "forced");
 			on_dark_changed(G_OBJECT(manager), NULL, NULL);
 			return;
 		}
@@ -295,7 +295,7 @@ static void follow_colour_scheme(void)
 	}
 	else
 	{
-		certificate_log_debug(CERTIFICATE_REASON_REQUEST_RECEIVED, "colour-scheme-no-schema");
+		certificate_log_debug(CERTIFICATE_REASON_COLOUR_SCHEME, "no-schema");
 	}
 
 	on_dark_changed(G_OBJECT(manager), NULL, NULL);
@@ -576,8 +576,8 @@ int main(int argc, char** argv)
 	}
 	else
 	{
-		g_message("no display: this backend will answer GetCapabilities and refuse "
-		          "anything that needs a window");
+		/* GetCapabilities still answers; anything needing a window is refused. */
+		g_message("no-display detail=window-requests-refused");
 		certificate_ui_set_has_display(FALSE);
 	}
 

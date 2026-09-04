@@ -160,16 +160,26 @@ class Portal:
                     None,
                 )
 
+            # A SOURCE IS REMOVED ONCE, BY WHOEVER STILL HAS IT. A GLib
+            # timeout that has already fired and returned SOURCE_REMOVE is
+            # gone, and asking GLib to remove it again is the warning
+            # "Source ID N was not found when attempting to remove it" --
+            # which is noise in a log that is meant to be read. Each
+            # callback therefore forgets its own id before it does anything
+            # else, and the cleanup below removes only what is still live.
+            live = {"timeout": 0, "cancel": 0, "give_up": 0}
+
             def on_timeout():
+                live["timeout"] = 0
                 answer["timeout"] = True
                 loop.quit()
                 return GLib.SOURCE_REMOVE
 
-            source = GLib.timeout_add(self.timeout, on_timeout)
+            live["timeout"] = GLib.timeout_add(self.timeout, on_timeout)
 
-            cancel_source = None
             if cancel_after > 0:
                 def do_close():
+                    live["cancel"] = 0
                     print(f"closing {returned} after {cancel_after} ms")
                     self.close_request(returned)
 
@@ -180,21 +190,22 @@ class Portal:
                     # answers anyway with a grant, which would mean the window
                     # was never torn down.
                     def give_up():
+                        live["give_up"] = 0
                         answer["closed"] = True
                         loop.quit()
                         return GLib.SOURCE_REMOVE
 
-                    GLib.timeout_add(2000, give_up)
+                    live["give_up"] = GLib.timeout_add(2000, give_up)
                     return GLib.SOURCE_REMOVE
 
-                cancel_source = GLib.timeout_add(cancel_after, do_close)
+                live["cancel"] = GLib.timeout_add(cancel_after, do_close)
 
             loop.run()
 
-            if cancel_source is not None:
-                GLib.source_remove(cancel_source)
-            if not answer.get("timeout"):
-                GLib.source_remove(source)
+            for name in ("timeout", "cancel", "give_up"):
+                if live[name] != 0:
+                    GLib.source_remove(live[name])
+                    live[name] = 0
         finally:
             self.bus.signal_unsubscribe(subscription)
 
@@ -448,7 +459,7 @@ def run_decrypt(portal, session, args, cert_der, operations):
     response, results = decrypt(portal, session, args, ciphertext)
 
     if response == 1:
-        print("Decrypt was cancelled by the user.")
+        print("cancelled by the user")
         return EXIT_CANCELLED
     if response != 0:
         die(EXIT_FAIL,
@@ -461,7 +472,7 @@ def run_decrypt(portal, session, args, cert_der, operations):
             f"the plaintext did not survive the round trip: {recovered!r} != {plaintext!r}")
 
     print(f"decrypted {len(recovered)} bytes, operation_id={results.get('operation_id')}")
-    print("verified  the plaintext came back byte for byte")
+    print("verified  plaintext identical")
     return EXIT_PASS
 
 
@@ -651,15 +662,16 @@ def main(argv):
     response, results = acquire(portal, session, args)
 
     if args.expect_cancelled:
+        # No Response after a Close() is correct: upstream's Request unexports
+        # the frontend object before forwarding Close() to the backend, so the
+        # application that asked is not told again. docs/TESTING.md 3.3 says
+        # which backend log line to look for.
         if response == 0:
             die(EXIT_FAIL, "expected a cancellation, but a grant was issued")
         if response is None:
-            print("\nClose() returned and no Response followed it, which is what upstream's "
-                  "Request does: it unexports before forwarding the Close.")
+            print("PASS cancel: Close() delivered, no Response")
         else:
-            print(f"\nAcquireCredential answered {response} after Close().")
-        print("PASS (the frontend's Close() reached the backend; check the backend log for "
-              "chooser-cancelled)")
+            print(f"PASS cancel: Close() delivered, Response {response}")
         return EXIT_PASS
 
     if args.expect_no_certificate:
@@ -668,15 +680,13 @@ def main(argv):
         # rather than a hang or a crash.
         if response == 0:
             die(EXIT_FAIL, "expected no certificate, but a grant was issued")
-        print(f"\nAcquireCredential answered {response} with no grant, as expected.")
-        print("PASS (plumbing: the frontend reached the backend and the backend refused "
-              "cleanly)")
+        print(f"PASS no-certificate: AcquireCredential answered {response}, no grant")
         return EXIT_PASS
 
     if response is None:
         die(EXIT_FAIL, "the request was closed and produced no grant")
     if response == 1:
-        print("\nAcquireCredential was cancelled by the user.")
+        print("cancelled by the user")
         return EXIT_CANCELLED
     if response != 0:
         die(
@@ -711,7 +721,7 @@ def main(argv):
 
     if args.close:
         release(portal, session)
-        print("\nPASS (grant acquired and released; no signature was requested)")
+        print("PASS grant: acquired and released, no signature requested")
         return EXIT_PASS
 
     if args.decrypt and args.decrypt_only:
@@ -719,7 +729,7 @@ def main(argv):
         release(portal, session)
         if status != EXIT_PASS:
             return status
-        print("\nPASS")
+        print("PASS")
         return EXIT_PASS
 
     mechanism = args.mechanism
@@ -735,7 +745,7 @@ def main(argv):
     response, results = sign(portal, session, args, mechanism, digest, args.hash_name)
 
     if response == 1:
-        print("Sign was cancelled by the user.")
+        print("cancelled by the user")
         release(portal, session)
         return EXIT_CANCELLED
     if response != 0:
@@ -751,7 +761,7 @@ def main(argv):
         release(portal, session)
         die(EXIT_FAIL, f"the signature did not verify against the certificate: {error}")
 
-    print("verified  the signature checks out against the certificate the portal returned")
+    print("verified  signature checks against the returned certificate")
 
     if args.decrypt:
         status = run_decrypt(portal, session, args, cert_der, operations)
@@ -767,7 +777,7 @@ def main(argv):
 
     release(portal, session)
 
-    print("\nPASS")
+    print("PASS")
     return EXIT_PASS
 
 
@@ -821,7 +831,7 @@ def run_regrant(portal, session, args, first_cert_der):
             "the signature after the re-grant did not verify against the certificate the "
             f"portal returned -- which is the whole point of this check: {error}")
 
-    print("re-grant  verified against the NEW certificate")
+    print("re-grant  verified against the new certificate")
     return EXIT_PASS
 
 

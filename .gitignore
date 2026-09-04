@@ -23,3 +23,6 @@ compile_commands.json
 
 # The local scratch-prefix environment tools/dev-stack.sh sources; see docs/TESTING.md.
 .xdp-env
+
+# Python bytecode from tools/
+__pycache__/

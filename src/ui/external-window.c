@@ -47,7 +47,7 @@ static void set_x11_parent(GdkSurface* surface, const char* handle)
 	xid = strtoul(handle, &end, 16);
 	if (errno != 0 || end == handle || *end != '\0' || xid == 0)
 	{
-		g_warning("Ignoring an invalid X11 parent window handle");
+		g_warning("parent-window-ignored detail=invalid-x11-handle");
 		return;
 	}
 

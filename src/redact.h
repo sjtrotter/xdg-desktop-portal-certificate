@@ -78,6 +78,9 @@
 #define CERTIFICATE_REASON_ENDPOINT_OPENED "endpoint-opened"
 #define CERTIFICATE_REASON_ENDPOINT_POISONED "endpoint-poisoned"
 #define CERTIFICATE_REASON_FACADE_CALL_REFUSED "facade-call-refused"
+/* Not a request: which colour scheme the windows follow, and where it came
+ * from. It was logged as "request-received" and was unreadable there. */
+#define CERTIFICATE_REASON_COLOUR_SCHEME "colour-scheme"
 
 /** A decision about a request. @app_id and @level come from identity resolution and are
  *  the only caller-derived strings that may be logged; the caller's own reason and

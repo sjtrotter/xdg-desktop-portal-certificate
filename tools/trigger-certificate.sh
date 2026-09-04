@@ -166,7 +166,7 @@ main() {
 		trap 'kill "$MONITOR_PID" 2>/dev/null' EXIT
 		echo "== version"; cmd_version
 		echo "== capabilities"; cmd_capabilities
-		echo "== CreateSession (watch the monitor for the Response carrying session_handle)"
+		echo "== CreateSession"
 		cmd_session
 		# The Response is asynchronous; give it a moment to land in the monitor.
 		sleep 2

@@ -274,9 +274,8 @@ void certificate_impl_session_drain_releases(guint timeout_ms)
 	{
 		if (g_get_monotonic_time() >= deadline)
 		{
-			g_message("device-close-unfinished detail=shutdown-timeout: a token session "
-			          "could not be closed within %u ms, so C_Logout is left to the "
-			          "module's own teardown",
+			/* C_Logout is left to the module's own teardown. */
+			g_message("device-close-unfinished detail=shutdown-timeout timeout_ms=%u",
 			          timeout_ms);
 			return;
 		}
