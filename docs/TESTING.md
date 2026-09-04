@@ -38,12 +38,19 @@ clean refusal rather than a hang.
 The frontend is a **local branch of xdg-desktop-portal**,
 `experimental/certificate-webauthentication`, and it has a hard dependency on libdex which Fedora
 does not install by default. If it was built against a scratch prefix, put the environment for it
-in `.xdp-env` in this repository — the file is gitignored, and `tools/dev-stack.sh` sources it:
+in `.xdp-env` in this repository — the file is gitignored, and both `tools/dev-stack.sh` and
+`tools/ui-smoke.sh` source it:
 
 ```sh
 # .xdp-env
 export LD_LIBRARY_PATH=/path/to/scratch/prefix/lib64
 ```
+
+The frontend binary's `RUNPATH` already names the prefix it was built in, so it may work with no
+`.xdp-env` at all — until that prefix is deleted. If the prefix was under `/tmp`, copy the one
+library that is not packaged (`libdex-1.so.1`) somewhere that survives a reboot and point
+`LD_LIBRARY_PATH` at it: `LD_LIBRARY_PATH` wins over `RUNPATH`. Rebuilding libdex from scratch is
+`FreeRDP-plan/XDP-BRANCH.md` section 4.
 
 `tools/dev-stack.sh` checks with `ldd` and says so if the frontend cannot resolve its libraries.
 
