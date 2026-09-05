@@ -35,31 +35,29 @@ Interface `org.freedesktop.portal.experimental.Certificate`, on bus name
 `version` property `1`.
 
 **It is not exported unless xdg-desktop-portal was started with
-`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` containing `certificate`** (or `all`). With the
-gate off it is absent from introspection and `Properties.Get` fails. It is experimental and
-can change or be removed without a version bump.
+`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` containing `certificate`.** With the gate off it
+is absent from introspection and `Properties.Get` fails. It is experimental and can change
+or be removed without a version bump.
 
 ```
 CreateSession      (a{sv} options)                            → o handle          [Request]
 AcquireCredential  (o session, s parent_window, a{sv} options) → o handle          [Request]
 Sign               (o session, s parent_window, a{sv} options) → o handle          [Request]
-Decrypt            (o session, s parent_window, a{sv} options) → o handle          [Request]
-RenewGrant         (o session, a{sv} options)                  → t expires_at
-ReleaseGrant       (o session)
 GetCapabilities    (a{sv} options)                             → a{sv} capabilities
-signals: TokenAdded(a{sv}), TokenRemoved(a{sv}), GrantInvalidated(o, s)
+signals: GrantInvalidated(o, s), to the session's owner only
 ```
 
 **A grant is a `Session`.** `CreateSession` makes an empty one, `AcquireCredential` fills
-it in with a certificate the user chose, and `Session.Close()` — or `ReleaseGrant`, its
-alias — ends it. A grant is bound to the D-Bus connection that created it, to the token
-that backs it, and to the operations and mechanisms the frontend allowed; a grant always
-has an expiry.
+it in with a certificate the user chose, and `Session.Close()` ends it. A grant is bound to
+the D-Bus connection that created it, to the token that backs it, and to the operations and
+mechanisms the frontend allowed; a grant always has an expiry. **A session acquires once**:
+a second `AcquireCredential` on it answers `2` with `reason` `grant_already_held`, and a
+second credential means a second session and a second consent.
 
-`Sign` and `Decrypt` are `Request`-shaped because they may prompt — a lazy login, or
-per-operation consent — and upstream's convention is that anything which can show a window
-returns a `Request` the caller can `Close()`. The acquire response carries
-`may_prompt_later` so a caller can never claim it was promised silence.
+`Sign` is `Request`-shaped because it may prompt — a lazy login, or per-operation consent —
+and upstream's convention is that anything which can show a window returns a `Request` the
+caller can `Close()`. The acquire response carries `may_prompt_later` so a caller can never
+claim it was promised silence.
 
 ### Options that matter
 
@@ -68,10 +66,7 @@ returns a `Request` the caller can `Close()`. The acquire response carries
 - `interaction_mode` is `required`, `allowed` (default) or `forbidden`.
 - `requested_lifetime` is a ceiling *request*: the frontend clamps it to 3600 s (default
   300) and hands the backend its own decision.
-- `mechanism` must be one the grant reported, and the allow list is now **per operation**:
-  `Sign` takes `RSA_PKCS1_V1_5`, `RSA_PSS` or `ECDSA`; `Decrypt` takes `RSA_OAEP` and
-  nothing else. A v1.5 decryption whose outcome the caller can observe is a padding
-  oracle over the card's key, so it is a signing mechanism here and not a decryption one.
+- `mechanism` must be one the grant reported: `RSA_PKCS1_V1_5`, `RSA_PSS` or `ECDSA`.
 - `data` on `Sign` is **always a digest** of the `hash` named in `parameters`, and its
   length must be exactly that digest's length. What that buys is narrow and worth stating
   exactly: a caller cannot get a signature over bytes it did not hash itself, and cannot
@@ -80,57 +75,39 @@ returns a `Request` the caller can `Close()`. The acquire response carries
   the grant's purpose, expiry and `permitted_operations` are what bound it.
 - `reason` (≤ 256 chars) is application-supplied text, shown as such and never in the
   trusted identity position.
-- `allow_selection_memory` permits *preselection only*, is ignored for applications whose
-  identity could not be verified, and never skips consent or a PIN.
 - `certificate_filter` narrows what is offered (`issuers`, `key_usage`, `eku`,
   `key_algorithms`, `token_label`, `piv_slot`). A filter never widens, and is not a
-  security boundary.
-- `delegate_to_children` (default false) lets the grant this call produces answer a later
-  `AcquireCredential` from a **descendant of the calling process**, with no second window.
-  The frontend takes it only when the purpose matches, the caller's filter is absent or
-  identical, the holder's process is alive, the grant is live, and the caller did not ask
-  for `interaction_mode: required`; it then calls this backend with `preselect_certificate`
-  and `delegated: true`, which is the one case where a backend answers without a window.
-  What the caller gets is a *derived* grant, described below. It exists because one
-  WebKitGTK handshake loads the module in two processes and used to ask the user twice; see
-  [ADR 0011](decisions/0011-client-side-pkcs11-module.md).
+  security boundary. It and `operation_policy` are **closed vocabularies**: a key the
+  frontend does not know is an error, because a filter that is silently ignored offers the
+  user more than the application asked for.
 
 ### Results that matter
 
-`grant_id` (a diagnostic identifier, not a capability — the session handle is the
-capability), `certificate_der`, `chain_der`, `chain_status` (`complete` / `partial` /
-`leaf_only`, which describes completeness and not trust), `token_display`, `key_type`,
-`key_size`, `key_curve`, `supported_mechanisms`, `permitted_operations`, `expires_at`,
-`may_prompt_later`, and — on a derived grant only — `delegated_from`, the session handle of
-the grant it came from.
+`certificate_der` (required), `supported_mechanisms` and `permitted_operations` (required
+and non-empty), `chain_der`, `chain_status` (`complete` / `partial` / `leaf_only`, which
+describes completeness and not trust), `token_display`, `key_type`, `key_size`,
+`key_curve`, `expires_at` and `may_prompt_later`. Every one of them is type-checked against
+the type the interface declares, and an acquisition whose results do not satisfy that
+answers `2` with `reason` `backend_protocol_error`.
 
-`GetCapabilities` answers `purposes`, `operations`, `mechanisms`, `selection_memory`,
-`protected_authentication_path`, `max_grant_lifetime`, `max_grant_total_lifetime`.
+`GetCapabilities` answers `purposes`, `operations`, `mechanisms`,
+`protected_authentication_path` and `max_grant_lifetime`.
 
 ## Lifetime
 
-A grant always expires. `expires_at` is frontend-generated and can be sooner than
-`requested_lifetime` asked for. `RenewGrant` is decided **entirely** in the frontend — the
-backend is never asked and no window appears — and never expands the permitted operations
-or mechanisms.
+A grant always expires, and **there is no renewal**: the lifetime is fixed at acquisition,
+clamped to 3600 s, and the only way on is a fresh session and a fresh consent. `expires_at`
+is frontend-generated, can be sooner than `requested_lifetime` asked for, and is a wall-clock
+value for display — the frontend enforces the lifetime on the monotonic clock, so moving the
+system clock moves the number and not the grant.
 
-**Renewal is bounded in total, not only per renewal.** Each consent carries an absolute
-deadline, `max_grant_total_lifetime` seconds (8 h) after `AcquireCredential` succeeded, which
-renewal never moves: a renewal before it is clamped to it, and one after it fails with
-`org.freedesktop.portal.Error.NotAllowed`. The only way on is a fresh `AcquireCredential`,
-which asks the user again. Nothing in this backend implements or can extend that; it is
-recorded here because a backend must not assume a grant it was told about lives as long as
-its own `Sign` calls keep arriving. `GrantInvalidated(o session_handle, s reason)` says why a grant stopped
-being usable before it was released; `reason` is one of `released`, `expired`,
-`token_removed`, `owner_gone`, `parent_released`, `policy`, `service_shutdown`,
-`backend_gone`, `error`, and consumers must tolerate values they do not know.
-
-**A derived grant is a subset of the one it came from and dies with it.** Same certificate,
-`permitted_operations` and `supported_mechanisms` intersected with the parent's, the
-parent's consent deadline, an expiry never later than the parent's at acquisition or at any
-renewal, and `parent_released` when the parent ends for any reason. It is never itself
-delegable: a descendant of its holder is a descendant of the original holder too, and
-matches the original grant directly.
+Nothing in this backend can extend a grant; it is recorded here because a backend must not
+assume a grant it was told about lives as long as its own `Sign` calls keep arriving.
+`GrantInvalidated(o session_handle, s reason)` says why a grant stopped being usable before
+it was released, and is emitted **to the session's owner alone**: a session object path
+carries the owner's unique bus name, so a broadcast would tell every application on the bus
+which peers hold certificate grants. `reason` is one of `token_removed`, `policy`,
+`backend_gone` or `error`, and consumers must tolerate values they do not know.
 
 ## Accessibility as acceptance criteria
 

@@ -13,7 +13,6 @@
 typedef struct
 {
 	char* session_handle;         /**< the Session object path; the grant handle */
-	char* grant_id;               /**< a log identifier, never passed back */
 	GBytes* certificate_der;      /**< the chosen leaf */
 	char* key_type;               /**< "RSA" or "EC" */
 	guint key_size;               /**< modulus bits, or curve size */

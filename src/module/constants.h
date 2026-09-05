@@ -53,17 +53,10 @@
 
 #define PKCS11_PORTAL_ENV_PURPOSE "PKCS11_PORTAL_CERTIFICATE_PURPOSE"
 #define PKCS11_PORTAL_ENV_REASON "PKCS11_PORTAL_CERTIFICATE_REASON"
-#define PKCS11_PORTAL_ENV_OPERATIONS "PKCS11_PORTAL_CERTIFICATE_OPERATIONS"
 /* The one certificate_filter field the module offers. A PKCS#11 consumer has no
  * way to say "I can only use an RSA key", and the environment is the only
  * channel a module loaded by p11-kit has. */
 #define PKCS11_PORTAL_ENV_KEY_ALGORITHMS "PKCS11_PORTAL_CERTIFICATE_KEY_ALGORITHMS"
-/* Ask the frontend to let this process's DESCENDANTS reuse the grant this
- * module acquires, instead of putting a second chooser in front of the user.
- * For a consumer that does one job across more than one process -- a browser
- * engine building the certificate in the UI process and using the key in the
- * network process -- and for nothing else. See ADR 0011. */
-#define PKCS11_PORTAL_ENV_DELEGATE "PKCS11_PORTAL_CERTIFICATE_DELEGATE_TO_CHILDREN"
 #define PKCS11_PORTAL_ENV_TIMEOUT "PKCS11_PORTAL_CERTIFICATE_TIMEOUT_MS"
 #define PKCS11_PORTAL_ENV_DISABLE "PKCS11_PORTAL_CERTIFICATE_DISABLE"
 

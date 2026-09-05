@@ -35,16 +35,16 @@ upstream: the left-hand column now describes code that exists, in
 
 | Concern | Frontend — `xdg-desktop-portal` (branch) | Backend — `xdg-desktop-portal-certificate` (here) |
 |---|---|---|
-| **Caller identity** | `xdp_invocation_get_app_info()`; derives `app_identity_level` (`verified_sandboxed` / `derived_host` / `unidentified`) once and forwards it | Never derives anything. Receives `app_id` and `app_identity_level` as **arguments** |
+| **Caller identity** | `xdp_invocation_get_app_info()`; derives `app_identity_level` (`sandboxed` / `host` / `unidentified`) once and forwards it | Never derives anything. Receives `app_id` and `app_identity_level` as **arguments** |
 | **Bus name applications use** | `org.freedesktop.portal.Desktop` — the only one | `org.freedesktop.impl.portal.desktop.certificate` — not for applications |
 | **Object path** | `/org/freedesktop/portal/desktop` | the same path, on its own bus name |
 | **Policy** | `xdp_filter_options()` with per-key validators: `purpose` ∈ `client_auth\|signing\|email\|ssh` (required), `interaction_mode` ∈ `required\|allowed\|forbidden`, `mechanism` ∈ `RSA_PKCS1_V1_5\|RSA_PSS\|ECDSA`, `reason` ≤ 256 chars, `data`/`ciphertext` ≤ 1 MiB. Unknown keys dropped, not forwarded | Enforces what it is told, plus its own hard limits. Never widens |
 | **Grant lifetime** | `requested_lifetime` clamped to 3600 s, default 300, forwarded as `lifetime` — a decision, not a request | Obeys it. Cannot expire or renew a grant |
 | **Results clamping** | Intersects the backend's `supported_mechanisms` and `permitted_operations` with its own lists, in its own order, before the app sees them *and* before recording them on the grant | Reports what it can do; over-claiming gets clamped, not believed |
-| **Permissions** | Permission store table `certificate`, id = app id, value = the backend's `certificate_id`; written only when the app passed `allow_selection_memory` **and** the user asked to remember, never for an unidentified app; read back as `preselect_certificate` | Never touches it. Told what to preselect; reports `certificate_id` and `remember_selection` |
-| **Delegation** | Decides it entirely: `delegate_to_children` marks a grant delegable, and a later request from a **descendant** of the holder's process — same purpose, same filter, holder alive, grant live — is answered from it as a derived grant, with `delegated: true` and the certificate to bind sent to the backend | Binds what it is told, with **no window**, and refuses if that certificate is not among the matching ones. Knows nothing about processes |
+| **Permissions** | None: there is no selection memory on the interface | Never touches the permission store |
+| **Delegation** | None: one grant, one D-Bus peer. The process-tree delegation that was on the branch is archived downstream, on `experimental/certificate-webauthentication+delegation` | Knows nothing about processes |
 | **Request lifecycle** | `xdp_request_dex_*`; one terminal `Response`; cancellation | Exports an impl `Request` at the path the frontend chose; `Close()` only |
-| **Session lifecycle** | `xdp_session_dex_*` plus its own grant table; `RenewGrant` decided **entirely** here — the backend is never asked and no window appears | The token session behind it: PKCS#11 session, login state, handles |
+| **Session lifecycle** | `xdp_session_dex_*` plus its own grant table; a session acquires once, and there is no renewal | The token session behind it: PKCS#11 session, login state, handles |
 | **Backend selection** | `.portal` files and `portals.conf` (`xdp-portal-config.c`) | Declares itself in `data/certificate.portal` |
 | **UI** | Draws nothing | Chooser and PIN prompt, in its own words, with accessibility as acceptance criteria |
 | **Device access** | Loads no PKCS#11 module, never talks to p11-kit, never sees a card serial | Token discovery, certificate reading, `C_Login`, `C_Sign`, card-removal watching |
@@ -79,7 +79,7 @@ in the branch*, which is a better place to argue about it from.
                                                                 │
                                      ◄─────────────────────── (response, results)
                                 grant table   ← identity, expiry, ownership, clamping
-  ◄─── Response(0, { grant_id, certificate_der, chain_der, chain_status,
+  ◄─── Response(0, { certificate_der, chain_der, chain_status,
                      token_display, key_type, supported_mechanisms,
                      permitted_operations, expires_at, may_prompt_later })
 
@@ -298,11 +298,8 @@ selectable** — an expired certificate is a diagnosis the user needs, and hidin
 is empty" bug reports. **Filtering never narrows the set to one and auto-confirms**: a single
 candidate still gets a chooser, because the chooser is where consent happens.
 
-The single exception is `delegated: true`, which the frontend sends only when the consent for this
-certificate, this purpose and this process tree already exists — the caller's process descends from
-the holder of a grant whose holder asked for its descendants to be covered. Then the named
-certificate is bound with no window, and a request whose named certificate is not among the
-matching ones is refused rather than turned into a chooser. See
+There is no exception. Nothing on the interface tells this backend to bind a certificate without
+asking; the `delegated` key that used to is archived downstream. See
 [SECURITY.md](SECURITY.md#grant-lifetime-and-delegation) and
 [IMPL-INTERFACE.md](IMPL-INTERFACE.md).
 
@@ -316,9 +313,9 @@ cannot be talked into naming the wrong application by the application:
 
 1. **the application id the frontend established**, and a human-readable name this backend
    derives from it if it can — there is no `app_display_name` on the wire;
-2. **how well that identity is known** — `app_identity_level` is `verified_sandboxed`,
-   `derived_host` or `unidentified` — with an explicit warning for the second and the
-   strongest warning the design has for the third;
+2. **how well that identity is known** — `app_identity_level` is `sandboxed`, `host` or
+   `unidentified` — with an explicit warning for the second and the strongest warning the
+   design has for the third;
 3. **the purpose, in the service's own words** — "sign in to a website", "sign a document" — never
    the caller's;
 4. **the operation class** being granted: authenticate, sign, or decrypt;
@@ -496,12 +493,11 @@ programming error and is sent as `error`.
 `SessionInvalidated`. Reinsertion requires explicit reselection even when the label and slot number
 are identical, because they prove nothing.
 
-**Selection memory** (`allow_selection_memory`) remembers **which certificate** the user picked, for
-the same verified application. It is preselection, not authorisation: it never skips the trusted
-consent step, never skips a PIN prompt, and is unavailable to callers whose identity could not be
-verified. The frontend stores it, keyed on the app id, as this backend's `certificate_id`; this
-backend never writes it and only receives it back as `preselect_certificate`. There is no "remember
-PIN", and there is no remembered authorisation to use the key.
+**Selection memory is not on the interface.** Nothing remembers which certificate the user picked,
+so the chooser is the whole of the choice every time. If it returns it belongs in the frontend's
+permission store and it is preselection, not authorisation: it must never skip the trusted consent
+step or a PIN prompt. There is no "remember PIN", and there is no remembered authorisation to use
+the key.
 
 ### Logging — [`../src/redact.h`](../src/redact.h)
 

@@ -55,9 +55,7 @@ Commands:
                  Response signal on the returned handle, not as a return value.
   acquire PATH   AcquireCredential(o session, s parent_window, a{sv}) -> o handle
   sign PATH      Sign(o session, s parent_window, a{sv}) -> o handle
-  renew PATH     RenewGrant(o session, a{sv}) -> t expires_at   (frontend only,
-                 no backend call, no window)
-  release PATH   ReleaseGrant(o session)
+  release PATH   Session.Close(); a grant ends with its session
   monitor        watch Request/Session/Certificate signals and exit on Ctrl-C
   all            monitor in the background, then version + capabilities + session
 
@@ -110,8 +108,7 @@ cmd_acquire() {
 'purpose': <'client_auth'>, \
 'reason': <'Connect to the corporate VPN'>, \
 'requested_lifetime': <uint32 600>, \
-'interaction_mode': <'allowed'>, \
-'allow_selection_memory': <true>}"
+'interaction_mode': <'allowed'>}"
 }
 
 cmd_sign() {
@@ -128,14 +125,9 @@ cmd_sign() {
 'parameters': <{'hash': <'SHA256'>}>}"
 }
 
-cmd_renew() {
-	gdbus call "$BUS" --dest "$DEST" --object-path "$PATH_" \
-		--method "$IFACE".RenewGrant "$1" "{'requested_lifetime': <uint32 900>}"
-}
-
 cmd_release() {
-	gdbus call "$BUS" --dest "$DEST" --object-path "$PATH_" \
-		--method "$IFACE".ReleaseGrant "$1"
+	gdbus call "$BUS" --dest "$DEST" --object-path "$1" \
+		--method org.freedesktop.portal.Session.Close
 }
 
 main() {
@@ -152,10 +144,6 @@ main() {
 	sign)
 		[ $# -ge 2 ] || { echo "sign needs a session object path" >&2; exit 64; }
 		cmd_sign "$2"
-		;;
-	renew)
-		[ $# -ge 2 ] || { echo "renew needs a session object path" >&2; exit 64; }
-		cmd_renew "$2"
 		;;
 	release)
 		[ $# -ge 2 ] || { echo "release needs a session object path" >&2; exit 64; }

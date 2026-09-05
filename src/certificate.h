@@ -38,8 +38,8 @@
 
 /** How well the frontend knows the caller, as it arrives on the wire. The
  *  backend does not compute this and cannot improve it; it DISPLAYS it. */
-#define CERTIFICATE_IDENTITY_LEVEL_VERIFIED "verified_sandboxed"
-#define CERTIFICATE_IDENTITY_LEVEL_DERIVED "derived_host"
+#define CERTIFICATE_IDENTITY_LEVEL_VERIFIED "sandboxed"
+#define CERTIFICATE_IDENTITY_LEVEL_DERIVED "host"
 #define CERTIFICATE_IDENTITY_LEVEL_UNKNOWN "unidentified"
 
 /** The four purposes, parsed from the string the frontend sent. The frontend

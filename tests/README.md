@@ -58,10 +58,9 @@ argument lives in it.
   caller can subscribe before calling; `handle_token` and `session_handle_token` handling; exactly
   one terminal `Response` per request; `Close()` producing no later success; unknown options
   rejected rather than ignored.
-- **The frontend against a fake backend.** *Upstream's, and largely written* — see above. What it
-  does not yet cover, and the branch says so: `TokenAdded`/`TokenRemoved`/`GrantInvalidated`
-  forwarding, the `SessionInvalidated` → `GrantInvalidated` conversion, and selection memory being
-  read back on a second `AcquireCredential`.
+- **The frontend against a fake backend.** *Upstream's, and largely written* — see above. It now
+  covers the `SessionInvalidated` → `GrantInvalidated` conversion, including that the signal
+  reaches the session's owner and a second connection watching the same signal does not.
 - **This backend against a fake frontend.** *Still not written as a suite*, and it is now the most
   valuable missing piece: that a sender which does not own `org.freedesktop.portal.Desktop` is
   refused; that the `app_id` and `app_identity_level` the backend was given are the ones it
@@ -122,7 +121,7 @@ publication gates in [../docs/ROADMAP.md](../docs/ROADMAP.md) and the spikes in
 - card removal during signing, between `C_SignInit` and `C_Sign`, and during the PIN prompt;
 - reinsertion of the same card, and of a different card with the same label in the same slot;
 - two readers, two cards, two concurrent grants;
-- caller disconnect mid-handshake with a delegated subprocess still connected.
+- caller disconnect mid-handshake with an operation in flight.
 
 Tier 1's fake backend and fake frontend are the two most valuable pieces of test infrastructure in
 the project. The fake backend exists, upstream, in `tests/templates/certificate.py`; the fake

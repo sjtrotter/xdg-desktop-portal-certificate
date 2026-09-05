@@ -36,9 +36,10 @@
 #
 #     tools/ui-smoke.sh --no-drive -- --cancel-after 3000 --expect-cancelled
 #
-# A second AcquireCredential on the same session -- two choosers and, because
-# the grant changed, TWO PIN prompts. It fails if the second signature does not
-# verify against the second certificate:
+# A SECOND CREDENTIAL, which means a second session: a session acquires once, so
+# a second grant is a second consent -- two choosers and, because the grant
+# changed, TWO PIN prompts. It fails if the second signature does not verify
+# against the second certificate:
 #
 #     tools/ui-smoke.sh -- --key-algorithm RSA --regrant EC
 #
@@ -254,7 +255,7 @@ inner() {
 		# anything typing into anything.
 		[ "$PIN_PROMPT" = gtk ] && drive "Unlock Security Token" "type:" Return
 
-		# --regrant asks for a SECOND credential on the same session, so there
+		# --regrant asks for a SECOND credential, on a second session, so there
 		# is a second chooser and -- this is the point -- a SECOND PIN prompt.
 		# A backend that reused the first grant's token session would show no
 		# second prompt at all, and this would time out looking for it.

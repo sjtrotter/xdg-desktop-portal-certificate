@@ -61,10 +61,17 @@ Every one of these is xdg-desktop-portal's, and none of them is an improvement o
 | `CreateSession(o handle, o session_handle, s app_id, a{sv} options) → (u, a{sv})` | non-interactive | Creates the backend-side state for a grant. `options` is unused and `results` is empty. Fails early when there is no p11-kit, no reader, no display. |
 | `AcquireCredential(o handle, o session_handle, s app_id, s parent_window, a{sv} options) → (u, a{sv})` | **interactive** | Discovery, filtering, and **the chooser**. |
 | `Sign(o handle, o session_handle, s app_id, s parent_window, a{sv} options) → (u, a{sv})` | **interactive** | The signature, and the PIN prompt if this is the first private-key use. |
-| `Decrypt(...)` | **interactive** | As `Sign`, with `ciphertext` in place of `data` and `plaintext` in place of `signature`. `RSA_OAEP` only — see "Decrypt is RSA_OAEP, and nothing else" below. |
 | `GetCapabilities(s app_id, a{sv} options) → a{sv}` | non-interactive | What this backend can do on this hardware. **Note the `app_id`** — see below. |
-| `TokenAdded(a{sv})`, `TokenRemoved(a{sv})` | signals | To the frontend, which re-emits them to every client. **Presence only**: see "The token signals carry presence, not identity". |
-| `SessionInvalidated(o session_handle, s reason)` | signal | A grant can no longer be honoured. `reason` is one of the interface's eight and nothing else: see "`SessionInvalidated` speaks the public vocabulary". The frontend turns it into `GrantInvalidated` and closes the Session. |
+| `SessionInvalidated(o session_handle, s reason)` | signal | A grant can no longer be honoured. `reason` is one of the interface's four and nothing else: see "`SessionInvalidated` speaks the public vocabulary". The frontend turns it into `GrantInvalidated`, emitted to the session's owner alone, and closes the Session. |
+
+**There is no `Decrypt`, no `RenewGrant`, no `ReleaseGrant` and there are no token
+signals.** They were on the branch and came out of it: the first proposal is
+`CreateSession`, `AcquireCredential`, `Sign`, `GetCapabilities`, `Session.Close`
+and `GrantInvalidated`, and this backend implements exactly that. The broker
+still knows how to decrypt (`src/broker/mechanism.c`, `tests/test-broker-decrypt.c`)
+and the mechanism layer still knows `RSA_OAEP`, because the operation is right
+and only the method is missing; nothing exports it, and `GetCapabilities` does
+not advertise `decrypt`.
 
 **`GetCapabilities` carries `app_id`, and that is a change** from what this repository used to
 document. The old sketch had `GetCapabilities(a{sv}) → a{sv}` on both interfaces. The branch made
@@ -88,11 +95,8 @@ cost:
 | Key | Why |
 |---|---|
 | `app_id` | Established by the frontend from `xdp_invocation_get_app_info()`. Empty string when unidentified. |
-| `app_identity_level` | `verified_sandboxed` \| `derived_host` \| `unidentified`. **The backend must display this.** An application name shown without saying how it was established is a lie by omission. |
+| `app_identity_level` | `sandboxed` \| `host` \| `unidentified`. **The backend must display this.** An application name shown without saying how it was established is a lie by omission. |
 | `lifetime` | Seconds the frontend has *decided* to allow, after applying its 3600 s ceiling — not the caller's `requested_lifetime`. |
-| `preselect_certificate` | A stable certificate id the frontend read from the permission store, or — with `delegated` — the certificate the backend must bind. Preselection only without it. |
-| `delegated` | **The one key that tells a backend not to show a window.** The frontend has established that the consent for this certificate, this purpose and this process tree already exists. Never sent without `preselect_certificate`. See below. |
-| `allow_selection_memory` | Whether the backend may offer to remember this selection. The **effective** value: the application asked for it *and* the identity level is not `unidentified`. |
 
 **And two fields that are gone.** `app_display_name` is not on the branch interface: the backend
 gets an app id and an identity level, and any human-readable name is its own to derive or to omit.
@@ -101,12 +105,14 @@ that reaches a backend is `reason`.
 
 ### What the backend returns that the frontend does not simply pass on
 
-`certificate_id` (the key a permission-store entry would use) and `remember_selection` (what the
-user said). The frontend decides whether to store anything, in its `certificate` permission table
-keyed on the app id, because the app id is the frontend's. A backend never writes the permission
-store.
+Nothing is stored anywhere: there is no selection memory on the interface, so
+there is no `certificate_id` and no `remember_selection`, and this backend never
+touches the permission store.
 
-The frontend also **intersects** everything else: `supported_mechanisms` against its allow list
+The frontend **requires** `certificate_der`, `supported_mechanisms` and
+`permitted_operations`, type-checks every optional key against the type the
+public interface declares, and fails the acquisition over any of it. It also
+**intersects**: `supported_mechanisms` against its allow list
 (`RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA`), `permitted_operations` against what the purpose permits,
 and `expires_at` is not the backend's to send at all — it is frontend-generated. A backend that
 returns more than it was allowed to does not get more; it gets clamped, and the branch has a test
@@ -188,56 +194,29 @@ itself.
 ### `interaction_mode` never skips the chooser
 
 The XML says `required` means always prompt, `allowed` means prompt if needed, and `forbidden`
-means never prompt and fail instead. It does not say whether a single matching certificate, or a
-`preselect_certificate` that matches one, may skip the consent window.
+means never prompt and fail instead. It does not say whether a single matching certificate may skip
+the consent window.
 
 **It may not.** For `required` and `allowed` the chooser always opens, even with exactly one
-candidate and a remembered selection. The chooser is where the application's identity, its identity
-*level*, and the purpose are shown; skipping it because there was only one certificate turns a
-consent dialog into a PIN dialog, which is the failure mode this project exists to end.
-`preselect_certificate` preselects the row and nothing more.
+candidate. The chooser is where the application's identity, its identity *level*, and the purpose
+are shown; skipping it because there was only one certificate turns a consent dialog into a PIN
+dialog, which is the failure mode this project exists to end. Nothing on the interface skips it:
+there is no delegation and no remembered selection to skip it with.
 
 For `forbidden` there is no path to a grant at all, and `AcquireCredential` answers 2. That is the
 XML's own reading: consent here *is* a prompt.
 
-### `delegated` is the one exception, and it is the frontend's to assert
-
-`delegated: true` tells the backend to bind the certificate named by `preselect_certificate` and
-answer **with no window at all**. It is not a shortcut the backend may take on its own evidence,
-and there is nothing in this process that could establish it: it is the frontend saying that the
-user already consented to this certificate, for this purpose, with this filter, in a process this
-caller's process descends from, and that the holder of that consent asked for its descendants to be
-covered (`delegate_to_children` on the public interface).
-
-What this backend does with it, in `on_enumerated()`:
-
-- refuses the request outright if `delegated` arrives without `preselect_certificate` —
-  "do not ask the user" with no certificate to bind would mean "choose one for them";
-- enumerates and filters exactly as it would otherwise, so a delegated request cannot reach a
-  certificate the filter excludes;
-- binds the candidate whose `certificate_id` matches, and **refuses with
-  `no_matching_certificate`** if there is none. It does not fall through to the chooser: that would
-  put a window in front of a user who was told this question was already answered, with nothing on
-  screen to explain why;
-- logs `grant-delegated` instead of `grant-created`, so counting `grant-created` counts the windows
-  a user actually answered.
-
-The PIN is untouched. A delegated grant logs in at its first `Sign` like any other, which is why
-one WebKitGTK handshake now shows one chooser and one PIN prompt rather than two and one.
-
 ### `SessionInvalidated` speaks the public vocabulary
 
 The impl XML used to list three reasons — `token_removed`, `device_error`, `backend_shutdown` —
-where the public `GrantInvalidated` lists eight. The frontend does not translate: it forwards the
-backend's string through unchanged, so the smaller list was a trap in both directions. `expired`,
-the ordinary case, was not in it; `backend_shutdown` was in it and is not a value any application
-has ever been told about. The impl XML now carries the public list verbatim:
+where the public `GrantInvalidated` had a different set. The frontend does not translate: it
+forwards the backend's string through unchanged, so a divergent list is a trap in both directions.
+The impl XML now carries the public list verbatim:
 
-> `released`, `expired`, `token_removed`, `owner_gone`, `parent_released`, `policy`,
-> `service_shutdown`, `backend_gone`, `error`
+> `token_removed`, `policy`, `backend_gone`, `error`
 
-`parent_released` is in the list so that the two lists stay identical; only the frontend emits it,
-for a grant it derived from another one when that one ended.
+A backend that goes off the bus needs no signal for it: the frontend invalidates every grant it was
+holding when the backend's name loses its owner.
 
 **A value outside it is a `g_critical()` and goes on the bus as `error`.** The list is in
 `src/session-impl.c`, checked in `certificate_impl_session_invalidate()`, because a typo in a
@@ -261,63 +240,14 @@ mid-operation fails that operation and keeps the grant, because the card may sti
 is still closed and the card session released, but nothing is emitted: there is no longer anybody
 subscribed to hear it.
 
-### `Decrypt` is `RSA_OAEP`, and nothing else
+### The broker can decrypt; the interface cannot ask it to
 
-`Decrypt` was refused outright until the frontend branch grew a decryption mechanism. It now has
-one, and only one, and this backend implements exactly that.
-
-**Why v1.5 is not on the list.** `C_Decrypt` under `CKM_RSA_PKCS` answers "padding valid, here is
-the plaintext" or "that failed" — two outcomes that are distinguishable on the wire. Against a key
-the user consented to once, repeated, that is Bleichenbacher's attack: it recovers plaintext and
-can forge a signature with the same key, for as long as the grant lasts, with no further consent
-and no rate limit on either side of the boundary. `Sign` is deliberately constrained to a digest of
-a named length so that raw v1.5 padding of caller-chosen bytes is out of reach; letting `Decrypt`
-hand over the equivalent capability through a different door would make that constraint
-decorative. The impl XML says a
-backend **must not implement v1.5 decryption behind some other mechanism name either**, and the one
-branch in `src/broker/mechanism.c` that decrypts accepts one name.
-
-**The parameters**, validated here against the key rather than forwarded, because `pParameter` goes
-straight into the module:
-
-| Key | |
-|---|---|
-| `hash` (`s`) | Required. `SHA1`, `SHA224`, `SHA256`, `SHA384` or `SHA512`; the `SHA-256` spelling too. Becomes `CK_RSA_PKCS_OAEP_PARAMS.hashAlg`. |
-| `mgf1_hash` (`s`) | Optional, and must name the same hash. PKCS#1 allows them to differ; this interface does not. `mgf` is `CKG_MGF1_<hash>`. |
-| `label` (`ay`) | Optional, at most 256 bytes — the frontend's cap, applied again here so a request it accepted is not refused for a reason it could have applied itself. `source` is `CKZ_DATA_SPECIFIED` with the label, or with nothing, which is the empty label OAEP defaults to. |
-
-**The ciphertext must be exactly one modulus long.** It is the only length an RSA ciphertext can
-have, and the frontend cannot check it, because it does not know the modulus size. This is the same
-class of check as the PSS salt.
-
-**Every other failure is one error.** The module distinguishes a malformed encoding from wrong
-parameters from a device fault; the caller is told "the decryption failed", in the same words, every
-time, and the real reason goes to the journal. OAEP is not a padding oracle the way v1.5 is, but
-that is a property of OAEP rather than of this code, and it survives only as long as nobody rebuilds
-the distinction by hand. This equalises the *answer*, not the time it took to produce it — nothing
-here can equalise a card's timing.
-
-**A grant buys 32 decryptions.** Every practical attack on RSA decryption — padding oracles, fault
-injection, timing — needs thousands to millions of queries against one key, and nothing on either
-side of the portal boundary counts them. Real use of a card decryption key is unwrapping: one
-`C_Decrypt`, occasionally a handful when a client retries or a message has several recipients.
-Thirty-two is far above that and four orders of magnitude below what an attack needs. It is charged
-per *attempt*, not per success — a failed decryption is exactly the query an attacker wants — and it
-is per grant rather than per unit time on purpose: re-consenting is what buys more, and a user who
-is asked again is a user who finds out. The number is
-`CERTIFICATE_MAX_DECRYPTS_PER_GRANT` in `src/session-impl.h`.
-
-**`GetCapabilities` now reports `decrypt`** alongside `sign`. Whether a *particular* card can do it
-is a separate question, answered by `mechanisms` — `RSA_OAEP` appears there only where a token
-really has `CKM_RSA_PKCS_OAEP` — and, per grant, by `permitted_operations`, which is the key's
-`CKA_DECRYPT` intersected with the caller's `operation_policy`.
-
-**What is not covered by an automated test.** SoftHSM 2.x implements OAEP with SHA-1 and no label
-and refuses everything else at `C_DecryptInit`, so the round-trip test in
-`tests/test-broker-device.c` runs SHA-1 without a label; the SHA-256 mapping and the label are
-asserted against `CK_RSA_PKCS_OAEP_PARAMS` in `tests/test-mechanism.c` instead, and the labelled
-half of the round trip skips itself with a message. A real card is
-[TESTING.md](TESTING.md) tier 3.
+`src/broker/mechanism.c` implements `RSA_OAEP` decryption, refuses PKCS#1 v1.5 for it, and budgets
+a grant's decryptions; `tests/test-broker-decrypt.c` covers it. None of that is reachable, because
+the interface has no `Decrypt` method and `GetCapabilities` does not advertise `decrypt`. It is
+kept rather than deleted because the reasoning is the part that is expensive: a v1.5 decryption
+whose outcome the caller can observe is a Bleichenbacher oracle over the token's key, and that
+conclusion should be in the tree when the method comes back.
 
 ### `email` is the one purpose that does not end in a signature
 
@@ -327,8 +257,8 @@ true for `client_auth`, `signing` and `ssh`, and false for a certificate whose o
 unwrapping mail: a PIV "key management" certificate, `keyEncipherment` with no `digitalSignature`,
 backed by a private key that will decrypt and never sign. Such a certificate matched **no purpose
 at all**, so an email client asking for `email` in order to decrypt an incoming message could
-never be offered it — even though brokered `Decrypt` (`RSA_OAEP`, above) is exactly the operation
-it would need. Belgian and Estonian eID cards are laid out the same way as PIV here.
+never be offered it — even though decryption is exactly the operation it would need. Belgian and
+Estonian eID cards are laid out the same way as PIV here.
 
 **The rule now**, settled on the frontend branch's public XML first
 (`7635aa8 certificate: Let email cover a decryption-only certificate`) and implemented here:
@@ -337,10 +267,11 @@ it would need. Belgian and Estonian eID cards are laid out the same way as PIV h
   carries no extended key usage extension at all — **and** its key usage permits either
   `digitalSignature` or `keyEncipherment`;
 - which of the two it matched decides which operations it can serve: signing, decryption, or both;
-- it is offered only if one of those operations is one the request's `operation_policy` permits,
-  so a decrypt-only certificate reaches an application that asked to decrypt and nobody else;
-- and because such a certificate's key will not sign, the grant's `permitted_operations` holds
-  `decrypt` alone.
+- it is offered only if one of those operations is one the request's `operation_policy` permits.
+
+**With no `Decrypt` on the interface this is currently theory**, and it is written down because the
+matching rule is in the tree and behaves this way: `operation_policy` names only `sign` today, so a
+decrypt-only certificate matches `email` and is then offered to nobody.
 
 `client_auth`, `signing` and `ssh` are unchanged and still require a key that will sign.
 
@@ -353,29 +284,9 @@ than a yes/no, which is what lets `--list-tokens` print `email (decrypt only)`. 
 now restricts what the *card* claims: a token that sets `CKA_SIGN` on every key it holds cannot
 turn a key-management certificate into a signing credential.
 
-### The token signals carry presence, not identity
-
-`TokenAdded` and `TokenRemoved` send `token_id` (`s`) and `protected_authentication_path` (`b`),
-and nothing else — the two keys the interface names, and no third key even for a frontend that
-would discard it, because the next frontend might not. `token_id` is a SHA-256 over the token's
-stable attributes salted with a value this process generates at startup and never publishes:
-stable for as long as the token is present, stable enough to pair an insertion with its removal,
-and **not derivable from the card**, which the interface requires in as many words. A serial, or a
-hash of one another party can recompute, would be a correlation handle across every application on
-the bus.
-
-The reason is the audience. The frontend re-emits these signals on its own public interface, to
-**every client on the bus**, before anybody has consented to anything. On PIV
-deployments a token label is routinely the cardholder's name, an EDIPI or an issuing agency — which
-is exactly the correlation the serial is withheld to prevent, delivered to a strictly larger
-audience than `token_display`, which goes only to the application that obtained a grant. The full
-`token_display` still goes there, in the `AcquireCredential` results.
-
-Gating or filtering the public signal is the frontend's half of this; it is on that branch's list.
-
 ### A session is bound to its app id, and its identity level may not rise
 
-`AcquireCredential`, `Sign` and `Decrypt` all compare `app_id` against the one the session was
+`AcquireCredential` and `Sign` both compare `app_id` against the one the session was
 created with and answer `2` / `no_such_session` when they differ. The frontend enforces session
 ownership too, and that is the point: it is the check this backend can make for free, and a
 frontend regression or a second frontend implementation would otherwise turn a session handle into
@@ -413,9 +324,10 @@ replaced; a **live** one is still refused.
 
 ### A second `AcquireCredential` on a live session rebinds the device
 
-The interface does not forbid it and the frontend does not refuse it: an application may ask again
-on a session handle it already holds, and the user may choose a different certificate. The backend
-therefore has to treat the grant, not the session, as what the open token session belongs to.
+**The frontend now refuses one**: a session acquires once, and a second credential means a second
+session. The backend does not rely on that. It is one process on the other side of a bus from a
+frontend it does not control, so it treats the grant, not the session, as what the open token
+session belongs to.
 
 It does: the open `CertificateDevice` remembers the candidate it was opened for, and the next
 operation that finds a different one **logs out, closes the PKCS#11 session and opens a new one** —
@@ -426,35 +338,10 @@ A's key, with no prompt: a signature that does not verify against the certificat
 returned, produced silently. If the new grant is on a *different token*, the operation would have
 been submitted to the first token's session entirely.
 
-`remember_selection` and the decryption budget are reset by the re-grant, and the lifetime timer
-restarts. `tools/certificate-e2e.py --regrant <key algorithm>` drives the whole thing and checks
-the second signature against the second certificate; `tools/ui-smoke.sh` runs it with the windows.
-
-### Selection memory is offered only where it cannot lie
-
-The frontend stores a remembered selection only when the application passed
-`allow_selection_memory` *and* the caller's identity level is not `unidentified`. It now forwards
-that decision as `allow_selection_memory` (`b`) in the impl `AcquireCredential` options, and the
-interface says a backend **must not** offer selection memory when it is false — the frontend
-discards `remember_selection` in that case, so a checkbox drawn anyway is a promise nothing keeps.
-
-This backend draws the "use this certificate next time" checkbox only when that key is true. Two
-notes on how it reads it:
-
-- **Absent means false.** The key is the frontend's effective answer; a frontend that does not send
-  it is one whose permission store this backend cannot reason about, and the safe reading of
-  silence is that nothing would be stored. Present but not a boolean is `invalid_request`, not a
-  default.
-- **The identity level is checked again**, even though the frontend has already folded it in. It
-  costs nothing, and this backend does not draw a "remember this for that application" checkbox on
-  behalf of an application it cannot name.
-
-The user's answer is clamped to the same condition on the way back out: `remember_selection` is
-false whenever the checkbox was not offered.
-
-The interim heuristic — offering the checkbox only when `preselect_certificate` was supplied — is
-gone. It under-approximated in exactly the case that mattered, a caller that asked for memory and
-did not have any yet.
+The decryption budget is reset by the re-grant, and the lifetime timer restarts.
+`tools/certificate-e2e.py --regrant <key algorithm>` drives the frontend's version of this — a
+second session, a second consent — and checks the second signature against the second certificate;
+`tools/ui-smoke.sh` runs it with the windows.
 
 ### `token_display` does not carry the serial
 

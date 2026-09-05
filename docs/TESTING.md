@@ -26,8 +26,8 @@ Twelve suites:
 | `redact` | nothing | the redactor, the display-text sanitiser, that a newline in an app id cannot forge a journal line |
 | `chooser` | nothing | the consent window's display helpers: that a desktop file's `Name=` or a card's token label cannot add a line, an ANSI escape or a direction override to the window, that both are capped, and that "expired" is a **word** |
 | `broker-device` | a SoftHSM fixture, and `openssl(1)` for the OAEP half | `C_Login`, `C_Sign`, signature verification, an **RSA-OAEP round trip** against a ciphertext `openssl pkeyutl` produced, and that opening the device for a **different** candidate throws away the previous grant's login and key handle. **Skips itself** without one; see tier 2 |
-| `broker-decrypt` | a SoftHSM fixture | the two properties that make `Decrypt` safe to offer: **one indistinguishable error** for every failure, and the **per-grant budget**. **Skips itself** without one |
-| `broker-regrant` | a SoftHSM fixture with both an RSA and an EC key | a second `AcquireCredential` on a live session, end to end: the signature after the re-grant **verifies against the new certificate**, and the operation in between is refused rather than signed with the old grant's key. **Skips itself** without one |
+| `broker-decrypt` | a SoftHSM fixture | the two properties that would make decryption safe to offer: **one indistinguishable error** for every failure, and the **per-grant budget**. Nothing on the interface can ask for it today. **Skips itself** without a fixture |
+| `broker-regrant` | a SoftHSM fixture with both an RSA and an EC key | a second `AcquireCredential` on a live impl session, end to end: the signature after the re-grant **verifies against the new certificate**, and the operation in between is refused rather than signed with the old grant's key. The frontend refuses a second acquisition on one session, so this is the backend not relying on it. **Skips itself** without a fixture |
 | `filter` (second half) | nothing | also: that the backend **refuses to load the portal's own client-side module**, by p11-kit name and by an explicit `--module` path. Loading it would make the backend enumerate a token whose enumeration calls the backend |
 | `tools-lib` | nothing | the two helpers in `tools/lib.sh` that decide something dangerous: that the generated `portals.conf` is the **effective** per-interface resolution of the machine's whole configuration chain rather than a copy of the first file (a user `Screenshot=none` survives an `/etc` file that names a backend for it), that our `Certificate` line replaces any existing one, that a private run switches the `Secret` backend off and a `--live` one does not, and that the fixture checks refuse a forged marker, a symlinked path, an ancestor that is not ours, a mode that is not 0700, and a directory this project did not make |
 | `pin-system` | nothing (it stands up its own `GTestDBus`, and gcr's own system prompter or a hand-written hostile one on it) | the OTHER PIN prompt, end to end and with nobody typing: that `--pin-prompt=auto` picks the system prompter when the name is on the bus, that the application, purpose, token and reader reach the prompt, that no "remember" choice is ever offered, that a wrong PIN comes back as a **warning on the prompt that is already up** rather than a second prompt, that an **empty answer never reaches `C_Login`**, the three-attempt cap, cancel from the prompter, `Request.Close()` closing it, a **Cancel in the shell after the PIN was submitted** answering `cancelled` and abandoning the login that succeeds anyway, the prompter **vanishing** during the open, during a password round and during a confirmation round, a **close racing a transport error** (gcr completing one round twice), the `FINAL_TRY` second confirmation **and that refusing it leaves the card unasked — on a protected authentication path too**, the token flags reaching the warning without a number, the login timeout, and a protected-authentication-path token asking for nothing. Built only when the build found gcr-4 |
@@ -150,17 +150,16 @@ then, from the backend:
 ** Message: no-matching-certificate tokens=0 candidates=0
 ```
 
-and from the client (`operations` is `['sign', 'decrypt']`; `RSA_OAEP` is the only mechanism
-`Decrypt` will take, and [IMPL-INTERFACE.md](IMPL-INTERFACE.md) says why):
+and from the client (`operations` is `['sign']`: the interface has no `Decrypt`, and
+[IMPL-INTERFACE.md](IMPL-INTERFACE.md) says what became of it):
 
 ```
 GetCapabilities:
   max_grant_lifetime               3600
-  mechanisms                       ['RSA_PKCS1_V1_5', 'RSA_PSS', 'RSA_OAEP', 'ECDSA']
-  operations                       ['sign', 'decrypt']
+  mechanisms                       ['RSA_PKCS1_V1_5', 'RSA_PSS', 'ECDSA']
+  operations                       ['sign']
   protected_authentication_path    False
   purposes                         ['client_auth', 'signing', 'email', 'ssh']
-  selection_memory                 True
 
 PASS no-certificate: AcquireCredential answered 2, no grant
 ```
@@ -228,8 +227,7 @@ Then the whole thing including the windows, in a headless X server:
 $ tools/ui-smoke.sh                                        # RSA
 $ tools/ui-smoke.sh --key-algorithm EC                     # ECDSA, raw r||s
 $ tools/ui-smoke.sh --key-algorithm EC --der               # ECDSA, DER
-$ tools/ui-smoke.sh -- --decrypt --oaep-hash SHA1          # and the OAEP round trip
-$ tools/ui-smoke.sh -- --key-algorithm RSA --regrant EC    # two grants, two prompts
+$ tools/ui-smoke.sh -- --key-algorithm RSA --regrant EC    # two sessions, two prompts
 $ tools/ui-smoke.sh --pin-prompt=system                    # the shell's prompt instead
 ```
 
@@ -300,13 +298,6 @@ $ grep colour-scheme /tmp/xdp-certificate-ui-smoke.*/backend.log
 
 With `ADW_DEBUG_COLOR_SCHEME` unset the same line reports what the session is actually set to, which
 is the thing that used to be wrong.
-
-`--decrypt` asks for a grant that may decrypt, encrypts a short plaintext to the public key in the
-certificate the portal returned — with python `cryptography`, or `openssl pkeyutl` if that is not
-installed, because the ciphertext has to come from something that is not this backend — and checks
-that `Decrypt` gives the plaintext back byte for byte. `--oaep-hash SHA1` is there because
-**SoftHSM 2.x implements OAEP with SHA-1 and no label and refuses everything else** at
-`C_DecryptInit`; against a card, drop it and use `--oaep-label` too.
 
 It needs `Xvfb` and `xdotool`. Neither has to be installed system wide:
 
@@ -451,8 +442,8 @@ $ ninja -C build && tools/softhsm-fixture.sh
 $ cd ../xdg-desktop-portal-webauth && tools/portal-stack.sh
 ```
 
-Re-run on 2026-09-05 after delegation landed, it passes, and each hop is a log line from the
-process that made it:
+Re-run on 2026-09-05 after delegation came out of the proposal, it passes, and each hop is a log
+line from the process that made it:
 
 ```
   ok    3 p11-kit loaded the module here   xdg-desktop-portal-webauth:378854): pkcs11-portal-certificate-DEBUG
@@ -460,15 +451,12 @@ process that made it:
   ok    3 the module ran in the network process (process:378930): ... grant acquired
   ok    4 the frontend identified the caller chooser-shown app_id=(none) identity=unidentified
   ok    5 the backend created a grant      grant-created
-  ok    5 the network process reused the grant grant-delegated
-  ok    5 the module was told so           grant acquired: RSA 2048 bits, sign=1 decrypt=0, delegated_from=parent
   ok    6 the PIN was accepted             login-ok
   ok    6 the signature was produced       operation-completed
   ok    7 the server saw the card's CN     client-cn=Portal Test User
 
 module instances: 2
-choosers granted: 1
-grants delegated: 1
+choosers granted: 2
 PIN prompts:      1
 signatures:       1
 ```
@@ -479,24 +467,20 @@ Three things that run established, and none of them was predictable from the cod
   `CKM_SHA256_RSA_PKCS_PSS`, the module's PSS parameter mapping, the portal's `Sign` with `mgf` and
   `salt_length`, and this backend's own PSS assembly. The `pkcs11-tool` phase of
   `module-smoke.sh` exercises v1.5 and would not have caught a PSS mistake.
-- **ONE HANDSHAKE, TWO GRANTS, ONE CHOOSER.** The consumer resolves the URI twice, in two
+- **ONE HANDSHAKE, TWO GRANTS, TWO CHOOSERS.** The consumer resolves the URI twice, in two
   processes: once in the application's own process to build a `GTlsCertificate`, and again in
   WebKit's network process, which owns the handshake. Each is a separate p11-kit module instance
-  with a grant of its own. That used to be two choosers about three seconds apart asking the same
-  question — the module's most visible UX defect, and not fixable in the module, because a grant
+  with a grant of its own, so the user answers the same question twice, about three seconds apart.
+  It is the module's most visible UX defect and it is not fixable in the module, because a grant
   belongs to the D-Bus peer that acquired it and that is the point of the design.
 
-  It was fixed in the *interface* instead. The backend sets
-  `PKCS11_PORTAL_CERTIFICATE_DELEGATE_TO_CHILDREN=1` in its own `main()`, so the module asks for
-  `delegate_to_children`; the network process is a **child** of that process, so the frontend
-  answers its `AcquireCredential` from the grant the parent already holds and calls this backend
-  with `delegated: true` and the certificate to bind. Two module instances, two grants, one
-  chooser, one PIN — counted at the bottom of every `portal-stack.sh` run, and the hop
-  `grant-delegated` is what says which grant was which. **A second chooser is a regression.** See
-  [ADR 0011](decisions/0011-client-side-pkcs11-module.md) and
-  [SECURITY.md](SECURITY.md#grant-lifetime-and-delegation) for what the delegation trusts.
+  Process-tree delegation did fix it and came out of the proposal: it cannot fire at all for a
+  Flatpak caller, and ancestry alone crosses application boundaries. It is archived on
+  `experimental/certificate-webauthentication+delegation`. **The count to watch is two, and a
+  third is a regression.** See [ADR 0011](decisions/0011-client-side-pkcs11-module.md) for the
+  candidate that would replace it.
 
-  One, and no longer three. The live Entra run on 2026-09-05 saw a *third* chooser, two seconds
+  Two, and no longer three. The live Entra run on 2026-09-05 saw a *third* chooser, two seconds
   after the sign-in window opened and before any client-certificate challenge, from GnuTLS
   verifying the identity provider's own certificate chain through this module. Phase 0 of
   `module-smoke.sh` is the check that it stays gone.
@@ -536,8 +520,7 @@ Not yet done, and it is the next thing worth doing, because NSS is the other hal
 What to write down: whether NSS calls `C_Login` and what it does with `CKR_OK`, whether it respects
 `CKF_PROTECTED_AUTHENTICATION_PATH` and so asks for no PIN of its own, whether it re-enumerates
 often enough to provoke a second chooser, and whether it copes with a token whose object set
-changes when the grant expires. The same run, with Thunderbird and an S/MIME message, exercises
-`C_Decrypt`.
+changes when the grant expires.
 
 ---
 ## 3. A real PIV card. Tiers 3.1–3.4 have been run, once.
@@ -757,7 +740,7 @@ None of these is on the critical path, and each is a separate run.
 
 # OAEP with a hash other than SHA-1, and with a label: SoftHSM 2.x refuses both
 # at C_DecryptInit, so neither path has ever run against a module
-$ tools/dev-stack.sh --live -- --purpose client_auth --decrypt --oaep-label test
+$ tools/dev-stack.sh --live -- --purpose client_auth
 ```
 
 Three things changed in the November 2026 fix pass that this section depends on:
@@ -770,7 +753,7 @@ Three things changed in the November 2026 fix pass that this section depends on:
   interaction after 60 seconds and abandons the login if it lands afterwards.
 - **The PIN flags are re-read after every refusal**, so `CKF_USER_PIN_FINAL_TRY` appearing mid-run
   is shown.
-- **`Decrypt` takes `RSA_OAEP` and nothing else.** PKCS#1 v1.5 decryption is refused by name, so
+- **Decryption, if it returns, takes `RSA_OAEP` and nothing else.** PKCS#1 v1.5 decryption is refused by name, so
   there is no path that could expose the key to a padding oracle.
 
 ### 3.8 Putting the session back
@@ -829,8 +812,6 @@ chooser-shown         the consent window went up
 consent-granted       the user picked one
 chooser-cancelled     the user did not
 grant-created         a grant a user answered a window for
-grant-delegated       a grant made with NO window, because the frontend said the consent for
-                      this certificate, purpose and process tree already existed
 pin-prompt-selected   detail=gtk | system -- which process drew the PIN field
 pin-prompted          detail=on-screen | protected-path
 pin-prompt-failed     detail=system-prompter[-unreachable] -- the shell's prompt did not answer
@@ -874,8 +855,5 @@ backend's. That is a consequence of the split, and the session handle is what jo
 | `AcquireCredential` answers 2 with `no_token` | no token is present |
 | `AcquireCredential` answers 2 with `no_matching_certificate` | a token is present but nothing on it fits the purpose and filter. `--list-tokens` says which purposes each certificate fits |
 | `Sign` answers 2 with `invalid_request` | the mechanism, the `hash` parameter or the digest length did not validate. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) |
-| `Decrypt` answers 2 with `invalid_request` | the mechanism was not `RSA_OAEP`, or its `hash`/`mgf1_hash`/`label` did not validate, or the ciphertext was not exactly one modulus long. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) |
-| `Decrypt` answers 2 and says only "the decryption failed" | by design: every failure of a well-formed request is reported in the same words so that it cannot be used as an oracle. The reason is in the backend's journal |
-| `Decrypt` answers 2 and mentions a new grant | the grant has spent its 32 decryptions. Acquire again |
 | `AcquireCredential` answers 2 with `no_such_session` and the session obviously exists | the call named a different `app_id` than `CreateSession` did, or a higher `app_identity_level` than the session has already been used at |
 | a second `CreateSession` on the same path answers 2 | there is a live session there. Close it first; a **closed** one is replaced |

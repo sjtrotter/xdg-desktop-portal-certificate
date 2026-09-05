@@ -152,11 +152,8 @@ key's type and mechanisms, the permitted operations, and an expiry. The applicat
 frontend to **`Sign`**; the frontend checks the grant and forwards; this backend prompts for the PIN in its own window, logs into its own PKCS#11 session,
 performs the operation and returns the result.
 The PIN never crosses D-Bus, the private key never leaves the card, and the application never holds
-a PKCS#11 handle. `Decrypt` works the same way and takes **`RSA_OAEP` and nothing else**: PKCS#1
-v1.5 decryption is refused by name, because answering "padding valid" or "padding invalid" for a
-card key over D-Bus is an oracle against that key [[S49](docs/SOURCES.md)]. Every OAEP failure
-comes back in the same words [[S50](docs/SOURCES.md)], and one grant buys 32 decryptions.
-[docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) has the detail.
+a PKCS#11 handle. `Sign` is the whole of it: the interface has no `Decrypt`, and this backend does
+not advertise one. [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) has the detail.
 
 ## Current capabilities
 
@@ -168,13 +165,13 @@ defers to it; where one of them disagrees, this is right and it is a bug. Last c
 | Token discovery, X.509 parsing, purpose rules, `certificate_filter` | **Implemented** | unit-tested against fixture certificates; `--list-tokens` prints what it found |
 | The chooser and the PIN prompt | **Implemented** | GTK window or the desktop shell's prompter (`--pin-prompt`), protected authentication path, retry, final-try confirmation, login timeout |
 | Brokered `Sign` — `RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA`, lazy login | **Implemented** | verified against SoftHSM and, once, against a PIV card |
-| Brokered `Decrypt` — `RSA_OAEP` and nothing else | **Implemented** | one indistinguishable error per failure, 32 attempts per grant |
+| Brokered decryption — `RSA_OAEP` and nothing else | **Not on the interface** | the broker implements it, with one indistinguishable error per failure and 32 attempts per grant, and nothing can ask for it: the first proposal has no `Decrypt` method and `GetCapabilities` does not advertise `decrypt` |
 | Token insertion and removal watching, `SessionInvalidated` | **Implemented** | polled and debounced. Never exercised with a card physically leaving a reader |
 | The client-side PKCS#11 module | **Implemented** | one token, one credential per process. `tools/module-smoke.sh` drives `p11tool`, `pkcs11-tool --sign` and a real mutual-TLS handshake through it |
 | The private-bus stack, the headless UI runs, the joint run with the web-auth portal | **Implemented** | `tools/dev-stack.sh`, `tools/ui-smoke.sh`, and the sibling repository's `tools/portal-stack.sh` |
 | Hardware | **Partial** | **one PIV card, one reader, one middleware, once** — [TESTING.md](docs/TESTING.md) tiers 3.1–3.4, 2026-09-04. The rest of tier 3 is unrun: one PIN per grant, wrong PIN and `FINAL_TRY`, removal during an operation, a PIN-pad reader, a second card |
 | Consumers of the module | **Partial** | GnuTLS through p11-kit, and WebKitGTK's network process, both proven headless. **NSS is untested** (Firefox, Thunderbird, LibreOffice) and so is the OpenSSL 3 provider |
-| One grant across an application's processes | **Implemented** | a grant belongs to the D-Bus peer that acquired it, and a holder may mark it delegable to its own **descendants**: one WebKitGTK handshake still loads the module in two processes but raises **one chooser**. Opt-in per consumer, checked per request. [0011](docs/decisions/0011-client-side-pkcs11-module.md) |
+| One grant across an application's processes | **Not implemented** | a grant belongs to the D-Bus peer that acquired it, so one WebKitGTK handshake loads the module in two processes and raises **two choosers**. The process-tree delegation that fixed it came out of the proposal and is archived on `experimental/certificate-webauthentication+delegation`. [0011](docs/decisions/0011-client-side-pkcs11-module.md) |
 | Chain building | **Partial** | `chain_status` is always `leaf_only`, and says so |
 | Flatpak | **Partial** | the portal bus name is already allowed, which is the transport half. Installing the module inside a runtime, its ABI and a browser's inner sandbox are **not** proven |
 | Two concurrent grants in one process | **Not implemented** | [0006](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) failure mode 8, deferred because no consumer has asked |
@@ -202,14 +199,15 @@ org.freedesktop.portal.experimental.Certificate      [EXPERIMENTAL, gated]
                  purpose: client_auth | signing | email | ssh   (required, no "any")
                  certificate_filter { issuers, key_usage, eku, token_label,
                                       piv_slot, key_algorithms }
-                 operation_policy { sign, decrypt }
+                 operation_policy { sign }
                  requested_lifetime (clamped to 3600), interaction_mode,
-                 allow_selection_memory, delegate_to_children, reason (untrusted)
-  Sign / Decrypt     (o session, s parent_window, a{sv}) → o handle      [Request]
-  RenewGrant         (o session, a{sv})                  → t expires_at
-  ReleaseGrant       (o session)
+                 reason (untrusted)
+  Sign               (o session, s parent_window, a{sv}) → o handle      [Request]
   GetCapabilities    (a{sv})                             → a{sv}
-  signals: TokenAdded, TokenRemoved, GrantInvalidated
+  signals: GrantInvalidated (to the session's owner only)
+
+  A grant ends with org.freedesktop.portal.Session.Close(). A session acquires
+  once: a second credential is a second session and a second consent.
 ```
 
 **Private**, frontend-to-backend, on `org.freedesktop.impl.portal.desktop.certificate` at the
@@ -224,10 +222,10 @@ org.freedesktop.impl.portal.experimental.Certificate
   CreateSession     (o handle, o session_handle, s app_id, a{sv}) → (u, a{sv})
   AcquireCredential (o handle, o session_handle, s app_id, s parent_window,
                      a{sv} options) → (u response, a{sv} results)
-  Sign / Decrypt    (o handle, o session_handle, s app_id, s parent_window,
+  Sign              (o handle, o session_handle, s app_id, s parent_window,
                      a{sv} options) → (u response, a{sv} results)
   GetCapabilities   (s app_id, a{sv} options) → a{sv}
-  signals: TokenAdded, TokenRemoved, SessionInvalidated
+  signals: SessionInvalidated
 ```
 
 Every impl call carries `app_id` — including `GetCapabilities`, which is one of the things
@@ -317,11 +315,7 @@ Three things worth knowing before enabling it:
 
 Environment, for a consumer that knows more than PKCS#11 lets it say:
 `PKCS11_PORTAL_CERTIFICATE_PURPOSE` (`client_auth` by default),
-`PKCS11_PORTAL_CERTIFICATE_REASON`, `PKCS11_PORTAL_CERTIFICATE_OPERATIONS` (`sign`, `decrypt`),
-`PKCS11_PORTAL_CERTIFICATE_KEY_ALGORITHMS`,
-`PKCS11_PORTAL_CERTIFICATE_DELEGATE_TO_CHILDREN=1` (let this process's **descendants** reuse the
-grant it acquires instead of raising a second chooser — for a consumer whose one job spans a
-process tree, and for nothing else),
+`PKCS11_PORTAL_CERTIFICATE_REASON`, `PKCS11_PORTAL_CERTIFICATE_KEY_ALGORITHMS`,
 `PKCS11_PORTAL_CERTIFICATE_DISABLE=1`, and
 `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` to let a class-only enumeration acquire a credential (for
 NSS experiments; documented as an experiment in
@@ -335,14 +329,13 @@ WebKitGTK sign-in completes with the private key on the token
 ([docs/TESTING.md](docs/TESTING.md) §2.55).
 
 **One handshake resolves the URI in two processes** — the application's own process builds the
-`GTlsCertificate`, WebKit's network process uses the key — and for a long time that drew **two
-choosers** three seconds apart. It was not fixable inside the module, because a grant belongs to
-the D-Bus peer that acquired it; it was fixed in the interface. A holder that passes
-`delegate_to_children` has later requests **from descendants of its process** answered from its own
-grant, and this backend binds the same certificate with no window when the frontend says
-`delegated: true`. Two module instances, two grants, one chooser, one PIN. **The module is not a
-trust boundary; the portal is.** [0011](docs/decisions/0011-client-side-pkcs11-module.md) says what
-that means, what it trusts and what it does not solve.
+`GTlsCertificate`, WebKit's network process uses the key — and that draws **two choosers** three
+seconds apart. It is not fixable inside the module, because a grant belongs to the D-Bus peer that
+acquired it. The process-tree delegation that did fix it is out of the proposal — it cannot work
+for a Flatpak caller, whose app-info pidfd is the sandbox instance's rather than the calling
+process's, and ancestry alone crosses app boundaries — and is archived on
+`experimental/certificate-webauthentication+delegation`. **The module is not a trust boundary; the
+portal is.** [0011](docs/decisions/0011-client-side-pkcs11-module.md) says what the candidates are.
 
 ## Building, and running it
 

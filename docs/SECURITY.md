@@ -37,7 +37,7 @@ such throughout the rest of this document.
 |---|---|---|
 | Only the owner of `org.freedesktop.portal.Desktop` may call any method — **including `Request.Close()` and `Session.Close()`** | `src/certificate-impl.c`, `reject_stranger()`; `src/request-impl.c`; `src/session-impl.c` | `tests/test-impl-dbus.c`: a third connection calls every method, and both `Close()`s, and is refused |
 | A sender is **never accepted** from a remembered answer: every accept decision asks the bus who owns `org.freedesktop.portal.Desktop` now. A *refusal* is decided from the cached owner, with no bus call at all | `src/certificate-impl.c`, `certificate_impl_sender_is_frontend()` | `NameOwnerChanged` is not ordered against the former owner's messages, so a cached "yes" admits a replaced frontend that is still connected. The asymmetry is deliberate in both directions: anything on the bus can send this backend a message, and a `GetNameOwner` round trip per stranger's message would be a main-thread stall an open PIN window feels. A stranger's unique name can never equal the cached owner's, so a stranger never reaches the bus call. The cost is one refused call at the moment a replacement portal takes the name over before this process has seen it. `tests/test-impl-dbus.c` reproduces the race rather than hoping for it |
-| A session is bound to the `app_id` it was created for, and its identity level may fall but never rise | `src/certificate-impl.c`, `lookup_session()` | `tests/test-impl-dbus.c`: app B cannot use app A's session; `unidentified` cannot become `verified_sandboxed` |
+| A session is bound to the `app_id` it was created for, and its identity level may fall but never rise | `src/certificate-impl.c`, `lookup_session()` | `tests/test-impl-dbus.c`: app B cannot use app A's session; `unidentified` cannot become `sandboxed` |
 | A closed session leaves the table and its path can be used again | `src/certificate-impl.c`, `handle_create_session()` | `tests/test-impl-dbus.c`: create, close, create again |
 | The Session skeleton stays on the bus after invalidation, so the frontend's answering `Close()` is answered | `src/session-impl.c` | `Close()` is idempotent; the frontend sends one in reply to every `SessionInvalidated` |
 | Options are validated strictly: a present field of the wrong type, an unknown enum value or an unknown key in a security-relevant nested vardict is refused, and defaults apply only to absent fields. **Including the mechanism parameters** — `signature_encoding`, `mgf` and `mgf1_hash` used to be silently discarded when they were present with the wrong type | `src/certificate-impl.c`, `parse_acquire_options()`; `src/tokens/filter.c`; `src/broker/mechanism.c`, `lookup_string()` | `tests/test-impl-dbus.c` drives sixteen malformed option sets; `tests/test-mechanism.c` covers the parameters, per operation, including the `MGF1-<hash>` vocabulary the interface names and which nothing tested before |
@@ -87,7 +87,6 @@ such throughout the rest of this document.
 | Shutdown emits `SessionInvalidated(service_shutdown)` and flushes before exit, and the name changing hands emits `owner_gone` for the previous owner's grants | `src/main.c`, `src/certificate-impl.c` | `tests/test-impl-dbus.c` asserts the shutdown reason; the reason is checked against the interface's eight in `src/session-impl.c` and anything else is a `g_critical()` sent as `error` |
 | Logging is structural: no format-string entry point, no PIN, no subject, no URI, no signature — and every external field is escaped and capped | `src/redact.h`, `src/redact.c` | `tests/test-redact.c` asserts `pin-value` never survives and that a newline in an app id cannot forge a journal line |
 | Card serials are truncated in logs and **absent from `token_display`** | `src/redact.c`, `src/certificate-impl.c` | — |
-| `TokenAdded`/`TokenRemoved` carry **presence only** — `token_id`, a per-process salted hash the card cannot be recognised from, and `protected_authentication_path`, and no third key | `src/certificate-impl.c`, `certificate_impl_token_presence()` | `tests/test-impl-dbus.c` asserts exactly two keys and that the id is neither the serial nor derived from it by a rule a second party could apply; the frontend re-emits these to every client on the bus, and a PIV label is routinely the cardholder's name |
 | Every PKCS#11 call runs off the main thread, `GetCapabilities` and the closing `C_Logout`/`C_CloseSession` included — **with one deliberate exception, at shutdown** | `src/broker/`, `src/tokens/discovery.c`, `src/certificate-impl.c`, `src/session-impl.c` | `GetCapabilities` used to enumerate every slot from the method handler, and `Close()`, expiry, token removal and frontend loss used to close the card from the main thread — under a lock a worker holds for the whole of a `C_Login`, so the PIN window stopped redrawing while it happened. Both now run on workers (`certificate_impl_session_release_device_async()`). The exception is `certificate_impl_shutdown()`, which waits **up to two seconds** for those workers so that `C_Logout` is issued before the process exits; when the wait runs out it says so in the journal and exits anyway. Session finalize also closes synchronously, and cannot race a worker: the asynchronous close holds a reference for its whole life, so by then there is nothing left to close |
 | Every request is tied to one `GCancellable` that `Close()` cancels, and a cancelled operation answers 1 rather than 2 | `src/request-impl.c`, `src/certificate-impl.c` | `tests/test-cancellation.c` |
 | Discovery does not log in | `src/tokens/discovery.c` | `tests/test-broker-device.c` |
@@ -197,12 +196,13 @@ itself [[S40](SOURCES.md)].
 The frontend resolves identity into three honesty levels, forwards which one it got as
 `app_identity_level`, and **this backend displays it**:
 
-1. **Verified sandboxed** — Flatpak or Snap identity obtained through the containment framework's
+1. **`sandboxed`** — Flatpak or Snap identity obtained through the containment framework's
    mediation. Treated as authenticated metadata. Displayed as the application, with its sandbox
    status.
-2. **Derived host label** — a cgroup-derived desktop identity. A useful label, **not** a security
-   principal. Displayed as the application, with an explicit warning that it is unverified.
-3. **Unidentified** — nothing trustworthy. Displayed as "an unidentified application", with the
+2. **`host`** — a cgroup-derived desktop identity for a host process. A useful label, **not** a
+   security principal. Displayed as the application, with an explicit warning that it is
+   unverified.
+3. **`unidentified`** — nothing trustworthy. Displayed as "an unidentified application", with the
    strongest warning the design has.
 
 Rules that follow:
@@ -221,7 +221,7 @@ Rules that follow:
   that persists *(provided by xdg-desktop-portal: it refuses to write the `certificate` permission
   table for an unidentified app)*.
 - **Selection memory is unavailable to level 3** *(provided by xdg-desktop-portal)*, and the user's
-  own "remember this" answer is required on top of the application's `allow_selection_memory` —
+  own "remember this" answer would be required on top of the application asking for it —
   this backend is told the effective value in the `AcquireCredential` options, offers the checkbox
   only when it is true, reports what the user said as `remember_selection`, and stores nothing
   itself.
@@ -653,46 +653,34 @@ model, serial, label — never by slot number alone.
 *(Frontend concern — provided by xdg-desktop-portal, recorded here because the delegation shape is
 what a facade follow-up would have to satisfy.)*
 
-### What is implemented: delegation down the process tree
+A grant's lifetime is fixed at acquisition and there is no renewal: the frontend clamps it to
+3600 s and enforces it on the monotonic clock, so a clock change cannot prolong one.
 
-`AcquireCredential` takes `delegate_to_children` (`b`, default false). A grant whose holder passed
-it answers a later `AcquireCredential` **from a descendant of the holder's process** without asking
-the user again, as a derived grant bounded by its parent in every dimension. This backend's part of
-it is `delegated: true` alongside `preselect_certificate`: bind that certificate, show no window,
-log `grant-delegated`, and refuse with `no_matching_certificate` rather than fall through to a
-chooser if the named certificate is not among the matching ones. It is the only relaxation of "a
-grant needs a window" anywhere in this interface.
+### What was implemented and then removed: delegation down the process tree
 
-**The argument for it.** A parent process on the same UID can already read and write its children's
-memory — `ptrace`, `/proc/<pid>/mem`, the file descriptors it hands them. A descendant that gets a
-derived grant therefore obtains nothing its holder could not have obtained itself and forwarded, so
-the second consent dialog was buying the user nothing while training them to click through consent
-dialogs. What it cost was real: one WebKitGTK handshake raised two choosers three seconds apart
-asking the identical question, because the certificate is built in the application's process and
-the key is used in WebKit's network process.
+`AcquireCredential` grew a `delegate_to_children` (`b`) option, and a grant whose holder passed it
+answered a later `AcquireCredential` **from a descendant of the holder's process** without asking
+the user again. This backend's part was `delegated: true` alongside `preselect_certificate`: bind
+that certificate and show no window. It was the only relaxation of "a grant needs a window"
+anywhere in this interface, and it is gone from the proposal. Two reasons, either of which is
+enough:
 
-**The limits, all of which are the reason it is opt-in.**
+- **it could never fire for a Flatpak caller.** `XdpAppInfo`'s pidfd for a Flatpak app is the
+  *bwrap instance's* and is identical for every process in that instance, so two peers inside one
+  sandbox are never in a descendant relationship. The branch's tests passed only because the
+  synthetic Flatpak app-info used by tests had been changed to carry the caller's own pidfd.
+- **ancestry alone crosses application boundaries.** A host process holding a delegable grant that
+  runs `flatpak run com.other.App` produces a descendant, and that unrelated application would have
+  received a derived credential with no prompt.
 
-- **It is not a boundary against the holder.** A process that launches code it does not trust as a
-  child — a sandbox launcher, a plugin host, a terminal emulator — must not pass
-  `delegate_to_children`; if it does, that child gets the card. The module asks for it only when
-  `PKCS11_PORTAL_CERTIFICATE_DELEGATE_TO_CHILDREN=1` is set, because the consumer knows what it
-  starts and the module does not.
-- **It is checked at request time, never remembered.** Purpose, filter, expiry, the holder's
-  liveness and the ancestry are all re-established for each request, and none of them is cached.
-- **Ancestry is pids, and pids are not identities.** Both ends of the walk are pinned by a pidfd —
-  the caller's, from the frontend's app info, and a duplicate the grant keeps of the holder's — so
-  neither of those two pid numbers can have been recycled while the check runs. The hops in between
-  are not pinned: an intermediate process that exits mid-walk either makes its `/proc` entry
-  unreadable, which refuses, or leaves a pid the kernel could have handed to something else before
-  the walk reaches it. That needs a pid wraparound inside a few microseconds, and the walk is
-  bounded at 64 hops. It is written down in the public XML rather than hidden.
-- **A derived grant is not a second consent.** It cannot outlive its parent, cannot gain an
-  operation or a mechanism the parent lacks, is not written to selection memory, and is not itself
-  delegable. When the parent ends, for any reason, it is invalidated with `parent_released`.
-- **The certificate is checked on the way back.** If a backend answers a delegated request with a
-  certificate other than the one it was told to bind, the frontend discards the answer. Consent
-  cannot be moved to a credential nobody chose.
+The pidfd argument for the walk was also wrong: a pidfd holds the `struct pid`, not the numeric
+pid's reservation, so "neither end can have been recycled" did not follow.
+
+It is archived on the frontend's `experimental/certificate-webauthentication+delegation` branch.
+The cost is the two choosers one WebKitGTK handshake raises, three seconds apart, asking the
+identical question. The replacement worth designing is a grant that belongs to the **app-info
+identity** rather than to the D-Bus peer: inside a Flatpak every process shares that identity, so
+the helper process would get the grant with no new mechanism and no process-tree walk at all.
 
 ### What a facade would still force
 
@@ -709,7 +697,7 @@ model:
 - the grant dies when the owner releases it, **or** when all permitted holders have gone;
 - a **short orphan grace period** covers acquisition-to-connection, after which an unclaimed grant is
   destroyed;
-- `expires_at` always applies, and `RenewGrant` never expands what a grant permits.
+- `expires_at` always applies, and nothing extends a grant: a longer one is a fresh consent.
 
 The fd-lifetime rules the
 [USB portal documents](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Usb.html)
@@ -721,25 +709,18 @@ portal revokes them — are the precedent and are deliberately mirrored.
 
 Three things must never be conflated:
 
-1. **remember which certificate was selected** — the only one this design offers;
+1. **remember which certificate was selected** — deferred;
 2. **token login caching** — hardware and driver behaviour this service does not control and must not
    present as a feature;
 3. **remembered authorisation to use the key** — deliberately absent.
 
-Selection memory is keyed by the frontend on the verified app id, in a permission-store table
-called `certificate`, with this backend's `certificate_id` as the value. It **preselects** and
-never skips the trusted consent step or a PIN prompt; it is unavailable to unverified callers; it
-is written only when the application passed `allow_selection_memory` *and* the user asked to
-remember; and because it is in the real permission store it is listed and revocable in the
-desktop's own UI rather than in a private store nobody can see. There is no "remember PIN" and
-there never will be.
-
-**The impl interface now carries `allow_selection_memory`**, the frontend's effective answer, and
-this backend offers the checkbox only when it is true. Absent is read as false and a non-boolean is
-a malformed request; the user's answer is clamped to the same condition on the way back, so
-`remember_selection` cannot be true for a grant that was never allowed to remember anything. The
-interim heuristic — offering the checkbox only when `preselect_certificate` was supplied — is gone.
-[IMPL-INTERFACE.md](IMPL-INTERFACE.md) has the detail.
+**There is no selection memory on the interface.** The frontend's first proposal has no
+permission-store row, no `allow_selection_memory` option and no `remember_selection` result, so
+this backend has no checkbox to draw and never touches the permission store. When it comes back it
+belongs in the frontend's permission store, keyed on something narrower than the app id alone —
+the earlier shape remembered one certificate per application across every purpose and filter —
+and it must still **preselect** and never skip the trusted consent step or a PIN. There is no
+"remember PIN" and there never will be.
 
 ## Logging
 

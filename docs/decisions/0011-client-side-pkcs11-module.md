@@ -146,38 +146,40 @@ application because it is the one that called.
   Sharing a grant between two processes means deciding what "the same application" is, which is an
   interface question and not a module one.
 
-  **What was built, in the interface: delegation down the process tree.** The frontend's
-  `AcquireCredential` takes `delegate_to_children` (`b`). A grant whose holder passed it answers a
-  later `AcquireCredential` from a **descendant of the holder's process** — same purpose, same
-  certificate filter or none, holder still alive, grant still live, and not for a caller that asked
-  for `interaction_mode: required` — as a *derived* grant: the same certificate, operations and
-  mechanisms a subset of the parent's, an expiry no later than the parent's, `delegated_from` in
-  its results, invalidated with `parent_released` when the parent ends, and never delegable
-  further. The backend is still called, with `preselect_certificate` naming the certificate and
-  `delegated: true`, which is the one key in the impl interface that tells a backend to bind and
-  show no window. The module asks for it only when
-  `PKCS11_PORTAL_CERTIFICATE_DELEGATE_TO_CHILDREN=1` is set, because it is the consumer, not the
-  module, that knows whether the processes it starts are its own work. `xdg-desktop-portal-webauth`
-  sets it in `main()`, before p11-kit can load and before the network process is forked.
+  **What was built, and then removed from the proposal: delegation down the process tree.** The
+  frontend's `AcquireCredential` grew a `delegate_to_children` (`b`) option; a grant whose holder
+  passed it answered a later `AcquireCredential` from a **descendant of the holder's process** as a
+  derived grant, and the backend was told `delegated: true` with the certificate to bind and no
+  window to show. It worked, and two independent reviews of the branch agreed it should not be
+  proposed:
 
-  The trust argument is that a parent process on the same UID can already read and write its
-  children's memory, so a descendant that gets a derived grant obtains nothing its holder could not
-  have obtained itself and forwarded — and the holder has to opt in. It is not a boundary against
-  the holder: a process that launches code it does not trust as a child must not ask for it. The
-  ancestry walk pins both ends with a pidfd, so neither pid can have been recycled, and refuses at
-  the first `/proc` hop it cannot read; the hops in between are the residual race, and it is
-  written down in the interface XML rather than hidden.
+  - **it cannot work for a Flatpak caller at all.** `XdpAppInfo`'s pidfd for a Flatpak app is the
+    *bwrap instance's*, identical for every process in the instance, so two peers inside one
+    sandbox are never in a descendant relationship and the check never fires. The branch's tests
+    passed only because the synthetic Flatpak app-info used by tests had been changed to store the
+    caller's own pidfd — a fixture altered to make a feature look tested.
+  - **ancestry alone crosses application boundaries.** A host process holding a delegable grant
+    that runs `flatpak run com.other.App` produces a descendant, so an unrelated application would
+    receive a derived credential with no prompt.
+  - the pidfd argument for the walk was wrong as well: a pidfd holds the `struct pid`, not the
+    numeric pid's reservation.
+
+  It is archived on `experimental/certificate-webauthentication+delegation` and is not part of the
+  first proposal. The user-visible consequence is **two choosers** for one WebKitGTK handshake. The
+  candidate that would replace it, and which upstream would recognise, is a grant that belongs to
+  the *app-info identity* rather than to the D-Bus peer: inside a Flatpak every process shares that
+  identity, so the helper process would get the grant with no new mechanism at all. Host processes
+  have no instance identity, so that fixes the sandboxed case and not the host one.
 
   **The other candidate, not taken: a WebKit API that accepts a PKCS#11 URI**, so the application
   process would never import the certificate and only the network process would ever load the
   module — one instance, one grant, no delegation needed. It is the better shape and it is not
   available: `webkit_credential_new_for_certificate()` takes a `GTlsCertificate`, there is no
   `_for_certificate_uri()` [[S24](../SOURCES.md)], and adding one is a WebKitGTK release cycle
-  away from anything this project can test. It would also fix only WebKit; delegation is in the
-  portal interface, so it
-  answers the same question for any consumer whose work spans a process tree. If such an API
-  appears, this backend should use it and stop setting the environment variable: one process that
-  needs the card is better than two that agree about it.
+  away from anything this project can test. It would fix only WebKit, where a per-app-instance
+  grant would answer the same question for any consumer whose work spans a process tree. If such an
+  API appears, this backend should use it: one process that needs the card is better than two that
+  agree about it.
 
 ### Consequences for the login model
 

@@ -33,15 +33,12 @@
  *   - DERIVE THE CALLER'S IDENTITY. app_id is an argument. There is no code
  *     here that asks the bus who is calling, reads /proc, or consults Flatpak
  *     metadata, because the answer would describe xdg-desktop-portal.
- *   - DECIDE POLICY. Whether a purpose may ask for decrypt, how long a grant
- *     lives, whether a caller has made too many requests: all frontend. The
+ *   - DECIDE POLICY. What a purpose covers, how long a grant lives, whether a
+ *     caller has made too many requests: all frontend. The
  *     `lifetime` option arrives as the number of seconds the frontend has
  *     DECIDED to allow, after applying its 3600 s ceiling. The backend enforces
  *     what it is told plus its own hard limits, and never widens.
- *   - TOUCH THE PERMISSION STORE. Selection memory is keyed by app id, and the
- *     app id is the frontend's. This backend reports `certificate_id` and
- *     `remember_selection` and receives `preselect_certificate`.
- *   - TRUST THE CALLER DIRECTLY. The only legitimate caller is
+ * *   - TRUST THE CALLER DIRECTLY. The only legitimate caller is
  *     xdg-desktop-portal.
  *
  *  WHAT IT MUST ALWAYS DO: display what it was told about the caller INCLUDING
@@ -96,18 +93,11 @@ gboolean certificate_impl_sender_is_frontend_default(const char* sender);
  *  afterwards is still answered. */
 void certificate_impl_session_forget(CertificateImplSession* session);
 
-/** Build the TokenAdded/TokenRemoved vardict for @token: the opaque token_id
- *  and protected_authentication_path, and nothing else. Exposed so that a test
- *  can assert exactly that -- the frontend re-emits these signals to every
- *  client on the session bus, so a third key here is a broadcast leak. */
-GVariant* certificate_impl_token_presence(const CertificateToken* token);
-
 /** Build the AcquireCredential results vardict for @candidate. Exposed so that
- *  a test can assert the D-Bus type of every key: the frontend type-checks only
- *  `signature`/`plaintext` and passes the rest through, so a wrong type here
- *  reaches applications. */
-GVariant* certificate_impl_acquire_results(CertificateCandidate* candidate, gboolean may_sign,
-                                           gboolean may_decrypt, gboolean remember);
+ *  a test can assert the D-Bus type of every key: the frontend requires and
+ *  type-checks a few of them and refuses the acquisition over the rest, so a
+ *  wrong type here costs the user a consent they already gave. */
+GVariant* certificate_impl_acquire_results(CertificateCandidate* candidate, gboolean may_sign);
 
 /** Shut down: close every token session, and emit SessionInvalidated with
  *  "service_shutdown" for each one so the frontend can tell its callers the

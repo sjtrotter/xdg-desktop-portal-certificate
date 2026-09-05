@@ -16,12 +16,6 @@
 #     CreateSession -> AcquireCredential -> Sign -> verify the signature with
 #     the certificate that came back
 #
-# and, with --decrypt, the other direction: encrypt to the public key in the
-# certificate the portal returned, with RSA-OAEP, and check that Decrypt gives
-# the plaintext back. RSA_OAEP is the only mechanism Decrypt takes; PKCS#1 v1.5
-# decryption is refused on both sides of the boundary because its outcome is an
-# oracle over the card's key.
-#
 # The interface only exists if the running xdg-desktop-portal was started with
 #     XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate
 # (or "all"). With the gate off, this says so and exits 40 rather than dumping a
@@ -327,16 +321,7 @@ def acquire(portal, session, args, key_algorithm=None):
             "reason": GLib.Variant("s", args.reason),
             "requested_lifetime": GLib.Variant("u", args.lifetime),
             "interaction_mode": GLib.Variant("s", args.interaction_mode),
-            "allow_selection_memory": GLib.Variant("b", args.remember),
         }
-        if args.decrypt:
-            # The default is {'sign': true}, so a grant that may decrypt has to
-            # be asked for. The backend intersects this with the key's own
-            # CKA_DECRYPT, and the frontend intersects the answer again.
-            values["operation_policy"] = GLib.Variant(
-                "a{sv}",
-                {"sign": GLib.Variant("b", True), "decrypt": GLib.Variant("b", True)},
-            )
         filter_options = build_filter(args)
         if key_algorithm:
             filter_options["key_algorithms"] = GLib.Variant("as", [key_algorithm])
@@ -365,134 +350,16 @@ def sign(portal, session, args, mechanism, digest, hash_name):
     return portal.request("Sign", options, "c")
 
 
-def decrypt(portal, session, args, ciphertext):
-    def options(handle):
-        parameters = {"hash": GLib.Variant("s", args.oaep_hash)}
-        if args.oaep_label:
-            parameters["label"] = GLib.Variant("ay", args.oaep_label.encode())
-
-        values = {
-            "handle_token": GLib.Variant("s", handle),
-            "mechanism": GLib.Variant("s", "RSA_OAEP"),
-            "operation_id": GLib.Variant("s", "e2e-decrypt-1"),
-            "parameters": GLib.Variant("a{sv}", parameters),
-            "ciphertext": GLib.Variant("ay", ciphertext),
-        }
-        return GLib.Variant("(osa{sv})", (session, args.parent_window, values))
-
-    return portal.request("Decrypt", options, "c")
-
-
-def oaep_encrypt_with_cryptography(cert_der, plaintext, hash_name, label):
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import padding
-
-    algorithm = getattr(hashes, hash_name.replace("-", ""))()
-    public_key = x509.load_der_x509_certificate(cert_der).public_key()
-
-    return public_key.encrypt(
-        plaintext,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=algorithm),
-            algorithm=algorithm,
-            label=label,
-        ),
-    )
-
-
-def oaep_encrypt_with_openssl(cert_der, plaintext, hash_name, label):
-    with tempfile.TemporaryDirectory() as directory:
-        cert_path = os.path.join(directory, "certificate.der")
-        pubkey_path = os.path.join(directory, "public.pem")
-        plain_path = os.path.join(directory, "plaintext.bin")
-        cipher_path = os.path.join(directory, "ciphertext.bin")
-
-        with open(cert_path, "wb") as handle:
-            handle.write(cert_der)
-        with open(plain_path, "wb") as handle:
-            handle.write(plaintext)
-
-        subprocess.run(
-            ["openssl", "x509", "-inform", "DER", "-in", cert_path,
-             "-pubkey", "-noout", "-out", pubkey_path],
-            check=True, capture_output=True,
-        )
-
-        digest = hash_name.replace("-", "").lower()
-        command = [
-            "openssl", "pkeyutl", "-encrypt", "-pubin", "-inkey", pubkey_path,
-            "-pkeyopt", "rsa_padding_mode:oaep",
-            "-pkeyopt", f"rsa_oaep_md:{digest}",
-            "-pkeyopt", f"rsa_mgf1_md:{digest}",
-        ]
-        if label:
-            command += ["-pkeyopt", "rsa_oaep_label:" + label.hex()]
-        command += ["-in", plain_path, "-out", cipher_path]
-
-        subprocess.run(command, check=True, capture_output=True)
-
-        with open(cipher_path, "rb") as handle:
-            return handle.read()
-
-
-def oaep_encrypt(cert_der, plaintext, hash_name, label):
-    """Encrypt with something that is not this backend.
-
-    If the two ever disagree about how OAEP is spelled, the round trip has to
-    fail rather than agree with itself, so the ciphertext comes from python
-    cryptography or, failing that, from openssl(1).
-    """
-    try:
-        return oaep_encrypt_with_cryptography(cert_der, plaintext, hash_name, label)
-    except ImportError:
-        return oaep_encrypt_with_openssl(cert_der, plaintext, hash_name, label)
-
-
-def run_decrypt(portal, session, args, cert_der, operations):
-    if "decrypt" not in operations:
-        die(EXIT_FAIL,
-            f"the grant does not permit decryption; it permits {operations}. The key's "
-            "CKA_DECRYPT, or the certificate's key usage, may not allow it")
-
-    plaintext = f"e2e session key {time.time()}".encode()
-    label = args.oaep_label.encode() if args.oaep_label else None
-
-    try:
-        ciphertext = oaep_encrypt(cert_der, plaintext, args.oaep_hash, label)
-    except Exception as error:
-        die(EXIT_UNAVAILABLE, f"could not encrypt with RSA-OAEP: {error}")
-
-    print(f"\nencrypted {len(plaintext)} bytes to the certificate's key, "
-          f"RSA-OAEP/{args.oaep_hash}"
-          + (f", label {args.oaep_label!r}" if args.oaep_label else "")
-          + f" -> {len(ciphertext)} bytes")
-
-    response, results = decrypt(portal, session, args, ciphertext)
-
-    if response == 1:
-        print("cancelled by the user")
-        return EXIT_CANCELLED
-    if response != 0:
-        die(EXIT_FAIL,
-            f"Decrypt answered {response}: {dict(results)}. A token that only implements "
-            "OAEP with SHA-1 -- SoftHSM 2.x does -- needs --oaep-hash SHA1 and no label")
-
-    recovered = bytes(results["plaintext"])
-    if recovered != plaintext:
-        die(EXIT_FAIL,
-            f"the plaintext did not survive the round trip: {recovered!r} != {plaintext!r}")
-
-    print(f"decrypted {len(recovered)} bytes, operation_id={results.get('operation_id')}")
-    print("verified  plaintext identical")
-    return EXIT_PASS
-
-
 def release(portal, session):
+    # Session.Close(), which is the whole of releasing a grant: the interface
+    # has no method of its own for it.
     try:
-        portal.call("ReleaseGrant", GLib.Variant("(o)", (session,)), None)
+        portal.bus.call_sync(
+            BUS_NAME, session, "org.freedesktop.portal.Session", "Close",
+            None, None, Gio.DBusCallFlags.NONE, portal.timeout, None,
+        )
     except GLib.Error as error:
-        print(f"note: ReleaseGrant said {error.message}", file=sys.stderr)
+        print(f"note: Session.Close said {error.message}", file=sys.stderr)
 
 
 # ----------------------------------------------------------------- verifying
@@ -614,18 +481,6 @@ def parse_args(argv):
     parser.add_argument("--mechanism", help="override the mechanism chosen from the key type")
     parser.add_argument("--der", action="store_true",
                         help="ask for a DER ECDSA-Sig-Value instead of raw r||s")
-    parser.add_argument("--remember", action="store_true",
-                        help="pass allow_selection_memory and tick the box if offered")
-    parser.add_argument("--decrypt", action="store_true",
-                        help="ask for a grant that may decrypt, then encrypt to the "
-                        "certificate's key with RSA-OAEP and check that Decrypt gives the "
-                        "plaintext back")
-    parser.add_argument("--decrypt-only", action="store_true",
-                        help="with --decrypt, skip the Sign half")
-    parser.add_argument("--oaep-hash", default="SHA256",
-                        choices=["SHA1", "SHA256", "SHA384", "SHA512"],
-                        help="OAEP hash and MGF1 hash. SoftHSM 2.x implements SHA1 only")
-    parser.add_argument("--oaep-label", help="OAEP label, as text. SoftHSM 2.x refuses any")
     parser.add_argument("--timeout", type=int, default=180000,
                         help="milliseconds to wait for each Response (default 180000)")
     parser.add_argument("--capabilities", action="store_true",
@@ -721,8 +576,7 @@ def main(argv):
     except Exception:
         pass
 
-    print(f"\ngrant     {results.get('grant_id')}")
-    print(f"subject   {subject}")
+    print(f"\nsubject   {subject}")
     print(f"key       {key_type} {results.get('key_size')} {results.get('key_curve', '')}".rstrip())
     print(f"chain     {results.get('chain_status')}")
     print(f"token     {dict(results.get('token_display', {}))}")
@@ -734,14 +588,6 @@ def main(argv):
     if args.close:
         release(portal, session)
         print("PASS grant: acquired and released, no signature requested")
-        return EXIT_PASS
-
-    if args.decrypt and args.decrypt_only:
-        status = run_decrypt(portal, session, args, cert_der, operations)
-        release(portal, session)
-        if status != EXIT_PASS:
-            return status
-        print("PASS")
         return EXIT_PASS
 
     mechanism = args.mechanism
@@ -775,14 +621,8 @@ def main(argv):
 
     print("verified  signature checks against the returned certificate")
 
-    if args.decrypt:
-        status = run_decrypt(portal, session, args, cert_der, operations)
-        if status != EXIT_PASS:
-            release(portal, session)
-            return status
-
     if args.regrant:
-        status = run_regrant(portal, session, args, cert_der)
+        status = run_regrant(portal, args, cert_der)
         if status != EXIT_PASS:
             release(portal, session)
             return status
@@ -793,15 +633,18 @@ def main(argv):
     return EXIT_PASS
 
 
-def run_regrant(portal, session, args, first_cert_der):
-    """A SECOND AcquireCredential ON THE SAME SESSION, and then a signature.
+def run_regrant(portal, args, first_cert_der):
+    """A SECOND GRANT, on a SECOND SESSION, and then a signature.
 
-    The failure this exists to catch is silent: the portal answers with
-    certificate B, and the backend -- which had already opened a token session
-    and logged in for certificate A -- signs with A's key and never asks for a
-    PIN. What comes back does not verify against what the caller was handed.
+    A session acquires once, so a second credential is a second session and a
+    second consent. The failure this exists to catch is silent: the portal
+    answers with certificate B, and the backend -- which had already opened a
+    token session and logged in for certificate A -- signs with A's key and
+    never asks for a PIN. What comes back does not verify against what the
+    caller was handed.
     """
-    print(f"\nre-grant  AcquireCredential again on {session}, filtered to {args.regrant}")
+    session = create_session(portal)
+    print(f"\nre-grant  a second session {session}, filtered to {args.regrant}")
 
     response, results = acquire(portal, session, args, key_algorithm=args.regrant)
 
@@ -844,6 +687,7 @@ def run_regrant(portal, session, args, first_cert_der):
             f"portal returned -- which is the whole point of this check: {error}")
 
     print("re-grant  verified against the new certificate")
+    release(portal, session)
     return EXIT_PASS
 
 

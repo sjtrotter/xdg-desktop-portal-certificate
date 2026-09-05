@@ -29,7 +29,8 @@
  *  produce from the app id (a desktop file lookup) or to omit. There is also no
  *  `context` option -- the earlier sketch's "requested destination host" hint
  *  does not exist on the wire, and the only caller-supplied text that does is
- *  `reason`.
+ *  `reason`. Nor is there a remembered selection: the interface has no
+ *  selection memory, so this window is the whole of the choice every time.
  *
  *  Not the PIN prompt. The PIN proves the user was present and knew the PIN; it
  *  does not tell them which application asked, for what, or how long the answer
@@ -57,25 +58,12 @@ typedef struct
 	gboolean may_sign;
 	gboolean may_decrypt;
 	guint32 lifetime_seconds;
-	const char* reason;              /**< UNTRUSTED. Displayed labelled, subordinate. Never logged. */
-	gboolean offer_selection_memory; /**< whether to draw the "use this certificate next time"
-	                                      checkbox at all. It comes from the impl interface's
-	                                      allow_selection_memory option, which is the FRONTEND's
-	                                      effective answer: the application asked for it AND its
-	                                      identity level permits it. False means DO NOT OFFER --
-	                                      the frontend discards remember_selection in that case,
-	                                      so a checkbox drawn anyway is a promise nothing keeps.
-	                                      THE FRONTEND, not this window, writes the permission
-	                                      store. */
-	const char* preselect_certificate; /**< a stable certificate id the frontend read back from the
-	                                        permission store, or NULL. PRESELECTION ONLY: the window
-	                                        still opens and the user still confirms. */
+	const char* reason; /**< UNTRUSTED. Displayed labelled, subordinate. Never logged. */
 } CertificateChooserRequest;
 
 typedef struct
 {
 	CertificateCandidate* chosen; /**< NULL if the user cancelled */
-	gboolean remember_selection;
 } CertificateChooserResult;
 
 typedef void (*CertificateChooserDone)(const CertificateChooserResult* result, gpointer user_data);

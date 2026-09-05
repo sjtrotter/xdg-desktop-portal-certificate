@@ -219,7 +219,7 @@ static GVariant* empty_options(void)
 static GVariant* acquire_options(const char* extra)
 {
 	g_autofree char* text =
-	    g_strdup_printf("{'purpose': <'client_auth'>, 'app_identity_level': <'derived_host'>%s%s}",
+	    g_strdup_printf("{'purpose': <'client_auth'>, 'app_identity_level': <'host'>%s%s}",
 	                    extra != NULL ? ", " : "", extra != NULL ? extra : "");
 	/* A FULL reference, which is what g_variant_parse() returns. Callers own
 	 * it; acquire() consumes it, and anything passing it to g_variant_new()
@@ -275,7 +275,7 @@ static void acquire(Fixture* fixture, const char* session_path, const char* app_
  * makes that sentence checkable. */
 static void test_stranger_is_refused(Fixture* fixture, gconstpointer user_data)
 {
-	static const char* const interactive[] = { "AcquireCredential", "Sign", "Decrypt", NULL };
+	static const char* const interactive[] = { "AcquireCredential", "Sign", NULL };
 
 	{
 		g_autoptr(GError) error = NULL;
@@ -404,7 +404,7 @@ static void test_identity_level_cannot_rise(Fixture* fixture, gconstpointer user
 	{
 		g_autoptr(GVariant) options = g_variant_parse(
 		    G_VARIANT_TYPE_VARDICT,
-		    "{'purpose': <'client_auth'>, 'app_identity_level': <'verified_sandboxed'>}", NULL,
+		    "{'purpose': <'client_auth'>, 'app_identity_level': <'sandboxed'>}", NULL,
 		    NULL, NULL);
 
 		acquire(fixture, SESSION_PATH, APP_A, g_steal_pointer(&options), &response, &code);
@@ -450,13 +450,8 @@ static void test_options_are_validated(Fixture* fixture, gconstpointer user_data
 		{ "{'purpose': <'client_auth'>, 'lifetime': <'300'>}", "invalid_request" },
 		{ "{'purpose': <'client_auth'>, 'lifetime': <uint32 0>}", "invalid_request" },
 		{ "{'purpose': <'client_auth'>, 'reason': <42>}", "invalid_request" },
-		{ "{'purpose': <'client_auth'>, 'allow_selection_memory': <'yes'>}", "invalid_request" },
-		{ "{'purpose': <'client_auth'>, 'allow_selection_memory': <uint32 1>}",
+		{ "{'purpose': <'client_auth'>, 'operation_policy': <{'decrypt': <true>}>}",
 		  "invalid_request" },
-		{ "{'purpose': <'client_auth'>, 'delegated': <'yes'>}", "invalid_request" },
-		/* "do not ask the user" with no certificate to bind would be
-		 * "choose one for them", which this backend does not do. */
-		{ "{'purpose': <'client_auth'>, 'delegated': <true>}", "invalid_request" },
 		{ "{'purpose': <'client_auth'>, 'operation_policy': <{'sign': <'yes'>}>}",
 		  "invalid_request" },
 		{ "{'purpose': <'client_auth'>, 'operation_policy': <{'delete': <true>}>}",
@@ -489,65 +484,10 @@ static void test_options_are_validated(Fixture* fixture, gconstpointer user_data
 	}
 }
 
-/* allow_selection_memory decides whether the chooser draws the "remember this"
- * checkbox at all, so the two values that mean "do not offer it" -- absent and
- * explicit false -- must both be accepted and must not be confused with a
- * malformed request. The wrong-type cases are in test_options_are_validated;
- * these are the ones that have to get PAST validation.
- *
- * What this cannot check from out here is the checkbox itself: with no token
- * in the machine the request never reaches the chooser. The window is covered
- * by tools/ui-smoke.sh. */
-static void test_selection_memory_is_accepted(Fixture* fixture, gconstpointer user_data)
-{
-	static const char* const cases[] = {
-		"{'purpose': <'client_auth'>}",
-		"{'purpose': <'client_auth'>, 'allow_selection_memory': <false>}",
-		"{'purpose': <'client_auth'>, 'allow_selection_memory': <true>}",
-	};
-
-	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
-
-	for (gsize i = 0; i < G_N_ELEMENTS(cases); i++)
-	{
-		guint32 response = 0;
-		g_autofree char* code = NULL;
-		GVariant* options = g_variant_parse(G_VARIANT_TYPE_VARDICT, cases[i], NULL, NULL, NULL);
-
-		g_assert_nonnull(options);
-		acquire(fixture, SESSION_PATH, APP_A, options, &response, &code);
-
-		/* No card, so the answer is a refusal either way. It must not be the
-		 * one that means "this request was malformed". */
-		if (g_strcmp0(code, "invalid_request") == 0)
-			g_error("options %s were rejected as malformed", cases[i]);
-	}
-}
-
-/* 'delegated' with a certificate to bind is a well formed request: the answer
- * here is a refusal either way, because there is no card in this test, but it
- * must not be the one that means "this request was malformed" -- and it must
- * not be the one that means "the chooser was cancelled" either, because no
- * chooser may go up for a delegated request. */
-static void test_delegation_is_accepted(Fixture* fixture, gconstpointer user_data)
-{
-	guint32 response = 0;
-	g_autofree char* code = NULL;
-	GVariant* options =
-	    acquire_options("'delegated': <true>, 'preselect_certificate': <'cert-1'>");
-
-	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
-
-	acquire(fixture, SESSION_PATH, APP_A, options, &response, &code);
-
-	g_assert_cmpuint(response, ==, 2);
-	g_assert_cmpstr(code, !=, "invalid_request");
-}
-
-/* THE FRONTEND TYPE-CHECKS ONE KEY. `signature` and `plaintext` are the only
- * results it looks at; everything else is passed through with type == NULL, so
- * a wrong type here reaches applications and a missing key turns into a grant
- * that can never sign. */
+/* THE FRONTEND REQUIRES AND TYPE-CHECKS THESE. certificate_der,
+ * supported_mechanisms and permitted_operations are required, the optional keys
+ * are refused when they carry the wrong type, and the acquisition fails over
+ * any of it -- which costs the user a consent they have already given. */
 static void test_results_types(Fixture* fixture, gconstpointer user_data)
 {
 	g_autoptr(CertificateCandidate) candidate =
@@ -559,15 +499,14 @@ static void test_results_types(Fixture* fixture, gconstpointer user_data)
 		const char* type;
 		gboolean required;
 	} expected[] = {
-		{ "certificate_der", "ay", TRUE },       { "chain_der", "aay", TRUE },
-		{ "chain_status", "s", TRUE },           { "token_display", "a{sv}", TRUE },
-		{ "key_type", "s", TRUE },               { "key_size", "u", TRUE },
-		{ "key_curve", "s", FALSE },             { "supported_mechanisms", "as", TRUE },
-		{ "permitted_operations", "as", TRUE },  { "may_prompt_later", "b", TRUE },
-		{ "certificate_id", "s", TRUE },         { "remember_selection", "b", TRUE },
+		{ "certificate_der", "ay", TRUE },      { "chain_der", "aay", TRUE },
+		{ "chain_status", "s", TRUE },          { "token_display", "a{sv}", TRUE },
+		{ "key_type", "s", TRUE },              { "key_size", "u", TRUE },
+		{ "key_curve", "s", FALSE },            { "supported_mechanisms", "as", TRUE },
+		{ "permitted_operations", "as", TRUE }, { "may_prompt_later", "b", TRUE },
 	};
 
-	results = g_variant_ref_sink(certificate_impl_acquire_results(candidate, TRUE, TRUE, TRUE));
+	results = g_variant_ref_sink(certificate_impl_acquire_results(candidate, TRUE));
 
 	for (gsize i = 0; i < G_N_ELEMENTS(expected); i++)
 	{
@@ -599,43 +538,6 @@ static void test_results_types(Fixture* fixture, gconstpointer user_data)
 
 		g_assert_null(serial);
 	}
-}
-
-/* THE BROADCAST SIGNALS SAY A TOKEN IS THERE AND NOTHING ELSE. The frontend
- * re-emits TokenAdded/TokenRemoved to every client on the session bus, before
- * anyone has consented to anything, and a PIV card's label is routinely the
- * cardholder's name. The interface names two keys; this asserts there are two
- * keys, that the id is not the serial or the label or anything derived from
- * them by a rule somebody else could apply, and that it is stable. */
-static void test_token_presence_carries_no_identity(Fixture* fixture, gconstpointer user_data)
-{
-	g_autoptr(CertificateCandidate) candidate =
-	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
-	g_autoptr(GVariant) presence = NULL;
-	g_autoptr(GVariant) again = NULL;
-	const char* token_id = NULL;
-	const char* second = NULL;
-	gboolean protected_path = TRUE;
-
-	presence = g_variant_ref_sink(certificate_impl_token_presence(candidate->token));
-
-	g_assert_cmpuint(g_variant_n_children(presence), ==, 2);
-	g_assert_true(g_variant_lookup(presence, "token_id", "&s", &token_id));
-	g_assert_true(g_variant_lookup(presence, "protected_authentication_path", "b",
-	                               &protected_path));
-	g_assert_false(protected_path);
-
-	/* Not the serial, not the label, and not a substring of either: the point
-	 * of the id is that a second party cannot recompute it. */
-	g_assert_cmpstr(token_id, !=, candidate->token->serial);
-	g_assert_cmpstr(token_id, !=, candidate->token->label);
-	g_assert_null(strstr(token_id, candidate->token->serial));
-
-	/* Stable for as long as the token is present, which is what pairs an
-	 * added token with its removal. */
-	again = g_variant_ref_sink(certificate_impl_token_presence(candidate->token));
-	g_assert_true(g_variant_lookup(again, "token_id", "&s", &second));
-	g_assert_cmpstr(token_id, ==, second);
 }
 
 typedef struct
@@ -714,63 +616,12 @@ static void test_sign_without_grant(Fixture* fixture, gconstpointer user_data)
 	g_assert_cmpuint(response, ==, 2);
 }
 
-/* v1.5 IS REFUSED BEFORE THE CARD IS TOUCHED, and so is every other signing
- * mechanism, and so is a malformed OAEP request. RSA_OAEP is the only thing
- * Decrypt will look at, and a well-formed OAEP request on a session with no
- * grant is refused for that reason instead -- which is the point: the two are
- * different refusals, and neither reaches the token. */
-static void test_decrypt_takes_oaep_only(Fixture* fixture, gconstpointer user_data)
-{
-	static const char* const refused[] = {
-		"{'mechanism': <'RSA_PKCS1_V1_5'>, 'parameters': <{'hash': <'SHA256'>}>, "
-		"'ciphertext': <b'0123456789abcdef'>}",
-		"{'mechanism': <'RSA_PSS'>, 'parameters': <{'hash': <'SHA256'>}>, "
-		"'ciphertext': <b'0123456789abcdef'>}",
-		"{'mechanism': <'ECDSA'>, 'parameters': <{'hash': <'SHA256'>}>, "
-		"'ciphertext': <b'0123456789abcdef'>}",
-		/* OAEP with parameters this backend refuses to forward. */
-		"{'mechanism': <'RSA_OAEP'>, 'ciphertext': <b'0123456789abcdef'>}",
-		"{'mechanism': <'RSA_OAEP'>, 'parameters': <{'hash': <'SHA3-256'>}>, "
-		"'ciphertext': <b'0123456789abcdef'>}",
-		"{'mechanism': <'RSA_OAEP'>, 'parameters': <{'hash': <'SHA256'>, "
-		"'mgf1_hash': <'SHA1'>}>, 'ciphertext': <b'0123456789abcdef'>}",
-		/* A well-formed OAEP request. Refused too, because this session holds
-		 * no grant -- but by the grant check, not the mechanism one. */
-		"{'mechanism': <'RSA_OAEP'>, 'parameters': <{'hash': <'SHA256'>}>, "
-		"'ciphertext': <b'0123456789abcdef'>}",
-		NULL,
-	};
-
-	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
-
-	for (gsize i = 0; refused[i] != NULL; i++)
-	{
-		g_autoptr(GError) error = NULL;
-		g_autoptr(GVariant) reply = NULL;
-		g_autoptr(GVariant) results = NULL;
-		g_autoptr(GVariant) options =
-		    g_variant_parse(G_VARIANT_TYPE_VARDICT, refused[i], NULL, NULL, NULL);
-		guint32 response = 0;
-
-		g_assert_nonnull(options);
-
-		reply = impl_call(fixture->frontend, "Decrypt",
-		                  g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "",
-		                                options),
-		                  &error);
-		g_assert_no_error(error);
-		g_variant_get(reply, "(u@a{sv})", &response, &results);
-
-		if (response != 2)
-			g_error("Decrypt options %s answered %u, expected 2", refused[i], response);
-	}
-}
-
 /* GetCapabilities advertises what this backend implements, and it must answer
  * while the main loop is free -- it runs the PKCS#11 calls on a worker, and
- * this test is what proves it still answers at all. Decrypt is now among them,
- * with RSA_OAEP in `mechanisms` as the only thing it will decrypt with; the
- * pairing is what an application reads to decide whether to ask. */
+ * this test is what proves it still answers at all. `sign` is the whole of it:
+ * the interface has no Decrypt method, so a backend advertising `decrypt`
+ * would have applications build a UI on a capability nothing can be asked
+ * for. */
 static void test_capabilities(Fixture* fixture, gconstpointer user_data)
 {
 	g_autoptr(GError) error = NULL;
@@ -785,14 +636,7 @@ static void test_capabilities(Fixture* fixture, gconstpointer user_data)
 
 	g_assert_true(g_variant_lookup(capabilities, "operations", "^as", &operations));
 	g_assert_true(g_strv_contains((const char* const*) operations, "sign"));
-	g_assert_true(g_strv_contains((const char* const*) operations, "decrypt"));
-
-	{
-		g_auto(GStrv) mechanisms = NULL;
-
-		g_assert_true(g_variant_lookup(capabilities, "mechanisms", "^as", &mechanisms));
-		g_assert_true(g_strv_contains((const char* const*) mechanisms, "RSA_OAEP"));
-	}
+	g_assert_false(g_strv_contains((const char* const*) operations, "decrypt"));
 }
 
 /* A round trip that does not involve the backend, made SYNCHRONOUSLY on
@@ -1033,12 +877,8 @@ int main(int argc, char** argv)
 	ADD("/impl/identity-level-cannot-rise", test_identity_level_cannot_rise);
 	ADD("/impl/session-path-is-reusable", test_session_path_is_reusable);
 	ADD("/impl/options-are-validated", test_options_are_validated);
-	ADD("/impl/selection-memory-is-accepted", test_selection_memory_is_accepted);
-	ADD("/impl/delegation-is-accepted", test_delegation_is_accepted);
 	ADD("/impl/results-types", test_results_types);
-	ADD("/impl/token-presence-carries-no-identity", test_token_presence_carries_no_identity);
 	ADD("/impl/sign-without-grant", test_sign_without_grant);
-	ADD("/impl/decrypt-takes-oaep-only", test_decrypt_takes_oaep_only);
 	ADD("/impl/capabilities", test_capabilities);
 	ADD("/impl/replaced-frontend-is-refused", test_replaced_frontend_is_refused);
 	ADD("/impl/close-mid-flight", test_close_mid_flight);

@@ -100,7 +100,7 @@ dependency, until all of the following exist.**
    key-management entry point refused, including through the PKCS#11 v3 interface tables. (Blocked
    on there *being* a facade: `OpenPkcs11Endpoint` is on neither interface, having been deferred as
    a follow-up in the frontend branch.)
-8. **Caller disconnect and subprocess delegation** tests.
+8. **Caller disconnect** tests.
 9. **Fuzzing** of the facade's RPC surface and **mechanism-parameter validation** tests, RSA-PSS
    included.
 10. **The frontend/backend boundary** ([SPIKES.md](SPIKES.md) S5). Three of its four questions are

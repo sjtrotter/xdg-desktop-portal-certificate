@@ -15,26 +15,43 @@ table attached. The frontend **is** in xdg-desktop-portal now, on a branch, in t
 ```
 repository   a local checkout of xdg-desktop-portal
 remote       upstream → https://github.com/flatpak/xdg-desktop-portal.git
+             origin   → https://github.com/sjtrotter/xdg-desktop-portal.git
 branch       experimental/certificate-webauthentication
-base         upstream/main = c95490a  settings: include xdp-dex.h for the
-                                      dex_scheduler_spawnv fallback
-commits      661e441  doc: List the experimental portals in the interface reference
-             3a32e9b  web-authentication: Add an experimental WebAuthentication portal
-             703fb22  certificate: Add an experimental Certificate portal      ← this one
-             aa1d697  session-dex: Add xdp_session_dex_close()
-             3f46e3c  xdp: Add a gate for experimental portals
+base         upstream/main = 86bd3e2  po: Update Russian translation
+commits      02b679a  xdp: Add a gate for experimental portals            ┐ series 1
+             e587d47  session-dex: Add xdp_session_dex_close()            ┘
+             214af63  web-authentication: Add an experimental
+                      WebAuthentication portal                           ┐
+             d74fab2  doc: List the experimental portals in the           │ series 2
+                      interface reference                                 │
+             8efe3ef  tests: Add WebAuthentication portal tests           ┘
+             0e5c595  request-dex: Let a portal see that a request was    ┐
+                      closed                                              │ series 3
+             1dec352  certificate: Add an experimental Certificate portal │ ← this one
+             42664d2  tests: Add Certificate portal tests                 ┘
 ```
 
-`703fb22` is the commit this repository tracks. `3f46e3c` is the
-`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` gate; `aa1d697` adds an
-`xdp_session_dex_close()` that upstream was missing and that a session-shaped portal
-cannot do without. `3a32e9b` is the sibling project's portal, on the same branch for the
-reason [0005](decisions/0005-first-consumer-is-the-web-auth-service.md) records: with both
-in one frontend process the delegation gap closes in-process.
+**Three series, proposed in that order**, because they are three separate questions: a
+gate for experimental portals at all, then the smaller interface, then the one this
+repository implements. The gate is 40 lines and needs the maintainers' answer
+independently of whether they like either interface.
 
-Test results, from the branch write-up: `meson test` green on the whole suite,
-`tests/test_certificate.py` 40 passed, `tests/test_webauthentication.py` 38 passed,
-`gitlint --commits upstream/main..HEAD` passes, `black --check` passes.
+`1dec352` is the commit this repository tracks. `e587d47` adds an `xdp_session_dex_close()`
+that upstream was missing and that a session-shaped portal cannot do without; `0e5c595`
+adds the accessor that lets a portal decline to commit state for a request the application
+has closed.
+
+**What came out of the branch before it was shown to anyone**, after two independent
+reviews: process-tree delegation and every change under `shared/` it needed, `Decrypt`,
+`RenewGrant`, `ReleaseGrant`, `TokenAdded`/`TokenRemoved`, selection memory and `grant_id`.
+The delegation commits are archived on
+`experimental/certificate-webauthentication+delegation`, at the old tip `209f9ff`. This
+backend follows the interface, not the archive.
+
+Test results: `meson test --suite integration --suite unit` green except the pre-existing
+`usb` failure (`umockdev-run` is not installed here), `tests/test_certificate.py` 84
+passed, `tests/test_webauthentication.py` 54 passed, `gitlint --commits
+upstream/main..HEAD` passes, `black --check` passes.
 
 ## Why `experimental` is not a claim of acceptance
 
@@ -99,22 +116,22 @@ is only worth anything with its exceptions attached — and these are the except
 | `OpenPkcs11Endpoint(...) → h fd, s, s, u` on both interfaces | **not implemented, on either** | An fd-returning method needs its own review, and a python-dbusmock backend cannot hand back a usable fd, so a v0 with it would have had no test. A follow-up, with the facade rules from [SECURITY.md](SECURITY.md) |
 | a `context` option carrying the requested destination host | **no such option** | The only caller-supplied text on the interface is `reason` |
 | an `app_display_name` impl option | **no such option** | The backend gets `app_id` and `app_identity_level`; a human-readable name is its own to derive |
-| the permission-store table name and resource-id format were "ours, and the kind of thing maintainers have opinions about" | table `certificate`, id = app id, value = the backend's `certificate_id` | Settled, in code, in the frontend |
+| the permission-store table name and resource-id format were "ours, and the kind of thing maintainers have opinions about" | **no permission store at all**: selection memory is not in the first proposal | The shape the branch had — one certificate per app id, across every purpose and filter — is not the shape it should return in |
 | grant lifetime ceiling unspecified | 3600 s ceiling, 300 s default, forwarded to the backend as `lifetime` | Settled |
 | mechanisms described prose-wise as "RSA PKCS#1 v1.5, RSA-PSS and ECDSA" | the exact allow-list strings `RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA`, intersected in the frontend's own order | Settled |
-| `GrantInvalidated` reasons partly open | fixed: `released`, `expired`, `token_removed`, `owner_gone`, `policy`, `service_shutdown`, `backend_gone`, `error` | Settled |
+| `GrantInvalidated` reasons partly open | fixed: `token_removed`, `policy`, `backend_gone`, `error`, and the signal goes to the session's owner alone rather than to the bus | Settled |
 
 The three "open items" the previous version of this document listed have all moved:
 
 - **Who opens the device** is decided in the branch's favour of ScreenCast/RemoteDesktop —
   the backend owns the device — and is now a thing to argue about with a patch in hand
   rather than a thing to raise.
-- **`Sign` and `Decrypt` returning a `Request`** is what the branch does. Nobody has
-  measured the round-trip cost, and the answer if it is too slow is still probably a
-  non-interactive fast path.
-- **`ReleaseGrant` duplicating `Session.Close()`** and **`GrantInvalidated` duplicating
-  `Session.Closed`** are both still in the interface, and a reviewer may still ask for one
-  of each to go. The answer should still be yes.
+- **`Sign` returning a `Request`** is what the branch does. Nobody has measured the
+  round-trip cost, and the answer if it is too slow is still probably a non-interactive
+  fast path.
+- **`ReleaseGrant` duplicating `Session.Close()`** is settled: `ReleaseGrant` is gone and
+  a grant ends with `Session.Close()`. `GrantInvalidated` stays, because
+  `Session.Closed` cannot say *why*.
 
 ## What remains before this could be a pull request
 
@@ -144,10 +161,10 @@ The three "open items" the previous version of this document listed have all mov
 4. **`OpenPkcs11Endpoint` as a follow-up**, with the facade rules from
    [SECURITY.md](SECURITY.md), a review of the fd hand-off, and something better than
    python-dbusmock to test it against.
-5. **The branch's own open items**, none of which are this repository's:
-   `TokenAdded`/`TokenRemoved`/`GrantInvalidated` are forwarded but untested; the
-   `SessionInvalidated` → `GrantInvalidated` conversion is untested; selection memory is
-   written but never read back in a test; rate limiting is not implemented at all.
+5. **The branch's own open items**, none of which are this repository's: rate limiting is
+   not implemented at all, and the pieces that came out of the first proposal — decryption,
+   renewal, selection memory, and any sharing of one grant across an application's
+   processes — each need a consumer and a design before they return.
 6. **Everything in [ROADMAP.md](ROADMAP.md) phase 0 and 1**, which is about hardware and has
    barely moved. The branch has now driven one PIV card in one reader, on 2026-09-04, through
    this repository's backend ([TESTING.md](TESTING.md) tiers 3.2–3.4; 3.1 needs no

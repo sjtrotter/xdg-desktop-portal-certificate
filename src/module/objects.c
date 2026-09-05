@@ -30,7 +30,6 @@ void portal_grant_free(PortalGrant* grant)
 		return;
 
 	g_free(grant->session_handle);
-	g_free(grant->grant_id);
 	g_clear_pointer(&grant->certificate_der, g_bytes_unref);
 	g_free(grant->key_type);
 	g_free(grant->key_curve);

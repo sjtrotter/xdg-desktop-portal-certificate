@@ -35,7 +35,6 @@ typedef struct
 	GtkWidget* list;
 	GtkWidget* use_button;
 	GtkWidget* cancel_button;
-	GtkWidget* remember;
 	GtkEventController* keys;
 
 	gboolean finished;
@@ -67,9 +66,9 @@ static void chooser_unref(gpointer data)
 	chooser_free(chooser);
 }
 
-static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen, gboolean remember)
+static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen)
 {
-	CertificateChooserResult result = { chosen, remember };
+	CertificateChooserResult result = { chosen };
 	CertificateChooserDone done = chooser->done;
 	gpointer user_data = chooser->user_data;
 
@@ -148,25 +147,21 @@ static void on_use(GtkWidget* widget, gpointer user_data)
 {
 	Chooser* chooser = user_data;
 	CertificateCandidate* candidate = selected_candidate(chooser);
-	gboolean remember = FALSE;
 
 	if (candidate == NULL)
 		return;
 
-	if (chooser->remember != NULL)
-		remember = gtk_check_button_get_active(GTK_CHECK_BUTTON(chooser->remember));
-
-	chooser_finish(chooser, candidate, remember);
+	chooser_finish(chooser, candidate);
 }
 
 static void on_cancel(GtkWidget* widget, gpointer user_data)
 {
-	chooser_finish(user_data, NULL, FALSE);
+	chooser_finish(user_data, NULL);
 }
 
 static gboolean on_close_request(GtkWindow* window, gpointer user_data)
 {
-	chooser_finish(user_data, NULL, FALSE);
+	chooser_finish(user_data, NULL);
 	return TRUE;
 }
 
@@ -175,7 +170,7 @@ static gboolean on_key_pressed(GtkEventControllerKey* controller, guint keyval, 
 {
 	if (keyval == GDK_KEY_Escape)
 	{
-		chooser_finish(user_data, NULL, FALSE);
+		chooser_finish(user_data, NULL);
 		return GDK_EVENT_STOP;
 	}
 
@@ -187,7 +182,7 @@ static gboolean on_cancelled_idle(gpointer user_data)
 	Chooser* chooser = user_data;
 
 	chooser->cancel_idle = 0;
-	chooser_finish(chooser, NULL, FALSE);
+	chooser_finish(chooser, NULL);
 	return G_SOURCE_REMOVE;
 }
 
@@ -452,11 +447,10 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	g_autofree char* reason = NULL;
 	g_autofree char* lifetime = NULL;
 	gint64 now = g_get_real_time() / G_USEC_PER_SEC;
-	GtkListBoxRow* preselected = NULL;
 
 	if (!certificate_ui_has_display())
 	{
-		CertificateChooserResult result = { NULL, FALSE };
+		CertificateChooserResult result = { NULL };
 
 		done(&result, user_data);
 		return;
@@ -541,12 +535,6 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 		GtkWidget* row = build_row(candidate, now);
 
 		gtk_list_box_append(GTK_LIST_BOX(chooser->list), row);
-
-		/* PRESELECTION ONLY. The window still opens and the user still
-		 * confirms; a remembered choice is a shortcut, never a bypass. */
-		if (request->preselect_certificate != NULL &&
-		    g_strcmp0(request->preselect_certificate, candidate->certificate_id) == 0)
-			preselected = GTK_LIST_BOX_ROW(row);
 	}
 
 	scroller = gtk_scrolled_window_new();
@@ -574,14 +562,6 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 		gtk_label_set_wrap(GTK_LABEL(label), TRUE);
 		gtk_widget_add_css_class(label, "caption");
 		gtk_box_append(GTK_BOX(content), label);
-	}
-
-	if (request->offer_selection_memory)
-	{
-		chooser->remember =
-		    gtk_check_button_new_with_mnemonic("_Use this certificate for this application next "
-		                                       "time without asking which one");
-		gtk_box_append(GTK_BOX(content), chooser->remember);
 	}
 
 	buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -618,9 +598,6 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	if (chooser->cancellable != NULL)
 		chooser->cancel_id =
 		    g_cancellable_connect(chooser->cancellable, G_CALLBACK(on_cancelled), chooser, NULL);
-
-	if (preselected != NULL)
-		gtk_list_box_select_row(GTK_LIST_BOX(chooser->list), preselected);
 
 	certificate_log_decision(CERTIFICATE_REASON_CHOOSER_SHOWN, request->caller->app_id,
 	                         certificate_identity_level_to_string(request->caller->level),

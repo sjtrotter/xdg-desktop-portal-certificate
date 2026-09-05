@@ -411,32 +411,15 @@ static void add_certificate_filter(GVariantBuilder* options)
 	                      g_variant_builder_end(&filter));
 }
 
-static void add_operation_policy(GVariantBuilder* options, const char* purpose)
+/* SIGNING, WHICH IS THE WHOLE OF THE INTERFACE. The public interface has one
+ * operation and one method to reach it with; a policy naming anything else is
+ * refused by the frontend, so there is nothing here to select between. */
+static void add_operation_policy(GVariantBuilder* options)
 {
-	const char* value = g_getenv(PKCS11_PORTAL_ENV_OPERATIONS);
-	gboolean sign;
-	gboolean decrypt;
 	GVariantBuilder policy;
 
-	if (value != NULL)
-	{
-		sign = strstr(value, "sign") != NULL;
-		decrypt = strstr(value, "decrypt") != NULL;
-	}
-	else
-	{
-		/* S/MIME splits mail between a signing certificate and a decryption
-		 * one, so `email` is the purpose that has to ask for both. */
-		sign = TRUE;
-		decrypt = strcmp(purpose, "email") == 0;
-	}
-
-	if (!sign && !decrypt)
-		sign = TRUE;
-
 	g_variant_builder_init(&policy, G_VARIANT_TYPE_VARDICT);
-	g_variant_builder_add(&policy, "{sv}", "sign", g_variant_new_boolean(sign));
-	g_variant_builder_add(&policy, "{sv}", "decrypt", g_variant_new_boolean(decrypt));
+	g_variant_builder_add(&policy, "{sv}", "sign", g_variant_new_boolean(TRUE));
 	g_variant_builder_add(options, "{sv}", "operation_policy", g_variant_builder_end(&policy));
 }
 
@@ -613,6 +596,19 @@ const char* const* portal_client_mechanisms(PortalClient* client)
 
 /* ------------------------------------------------------------------ acquire */
 
+/* Session.Close() on the session object, which is how a grant is released:
+ * the interface has no method of its own for it. Releasing a grant that is
+ * already gone is not an error worth reporting. */
+static void close_session(PortalClient* client, const char* session)
+{
+	if (session == NULL)
+		return;
+
+	g_dbus_connection_call(client->connection, PKCS11_PORTAL_BUS_NAME, session,
+	                       "org.freedesktop.portal.Session", "Close", NULL, NULL,
+	                       G_DBUS_CALL_FLAGS_NONE, METHOD_TIMEOUT_MS, NULL, NULL, NULL);
+}
+
 static char* create_session(PortalClient* client, GError** error)
 {
 	g_autofree char* handle_token = request_token(client, "pkcs11c");
@@ -683,28 +679,16 @@ PortalGrant* portal_client_acquire(PortalClient* client, GError** error)
 	g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
 	g_variant_builder_add(&options, "{sv}", "handle_token", g_variant_new_string(handle_token));
 	g_variant_builder_add(&options, "{sv}", "purpose", g_variant_new_string(purpose));
-	g_variant_builder_add(&options, "{sv}", "allow_selection_memory",
-	                      g_variant_new_boolean(TRUE));
-	/* OFF UNLESS THE CONSUMER SAYS OTHERWISE. It is the consumer, not this
-	 * module, that knows whether the processes it starts are its own work or
-	 * somebody else's code; a module that asked for delegation everywhere
-	 * would be handing a card to whatever a process happens to launch. */
-	if (g_strcmp0(g_getenv(PKCS11_PORTAL_ENV_DELEGATE), "1") == 0)
-		g_variant_builder_add(&options, "{sv}", "delegate_to_children",
-		                      g_variant_new_boolean(TRUE));
 	if (reason != NULL)
 		g_variant_builder_add(&options, "{sv}", "reason", g_variant_new_string(reason));
-	add_operation_policy(&options, purpose);
+	add_operation_policy(&options);
 	add_certificate_filter(&options);
 
 	results = portal_request(client, "AcquireCredential",
 	                         g_variant_new("(osa{sv})", session, "", &options), path, error);
 	if (results == NULL)
 	{
-		g_dbus_connection_call(client->connection, PKCS11_PORTAL_BUS_NAME,
-		                       PKCS11_PORTAL_OBJECT_PATH, PKCS11_PORTAL_INTERFACE,
-		                       "ReleaseGrant", g_variant_new("(o)", session), NULL,
-		                       G_DBUS_CALL_FLAGS_NONE, METHOD_TIMEOUT_MS, NULL, NULL, NULL);
+		close_session(client, session);
 		return NULL;
 	}
 
@@ -721,7 +705,6 @@ PortalGrant* portal_client_acquire(PortalClient* client, GError** error)
 	}
 	grant->certificate_der = g_variant_get_data_as_bytes(certificate);
 
-	g_variant_lookup(results, "grant_id", "s", &grant->grant_id);
 	g_variant_lookup(results, "key_type", "s", &grant->key_type);
 	g_variant_lookup(results, "key_curve", "s", &grant->key_curve);
 	g_variant_lookup(results, "key_size", "u", &grant->key_size);
@@ -739,43 +722,21 @@ PortalGrant* portal_client_acquire(PortalClient* client, GError** error)
 	if (grant->supported_mechanisms == NULL)
 		grant->supported_mechanisms = g_new0(char*, 1);
 
-	{
-		const char* delegated_from = NULL;
-
-		/* WHICH GRANT THIS IS, in the one line that says a grant exists. A
-		 * derived grant means no window went up here, because an ancestor of
-		 * this process already asked the user.
-		 *
-		 * THE HANDLE ITSELF IS NOT LOGGED. A session handle is the capability
-		 * that holds the grant, and this one belongs to another process. */
-		g_variant_lookup(results, "delegated_from", "&o", &delegated_from);
-
-		g_debug("grant acquired: %s %u bits, sign=%d decrypt=%d%s", grant->key_type,
-		        grant->key_size, grant->may_sign, grant->may_decrypt,
-		        delegated_from != NULL ? ", delegated_from=parent" : "");
-	}
+	/* THE HANDLE ITSELF IS NOT LOGGED. A session handle is the capability that
+	 * holds the grant. */
+	g_debug("grant acquired: %s %u bits, sign=%d", grant->key_type, grant->key_size,
+	        grant->may_sign);
 
 	return g_steal_pointer(&grant);
 }
 
 void portal_client_release(PortalClient* client, const PortalGrant* grant)
 {
-	g_autoptr(GVariant) reply = NULL;
-	g_autoptr(GError) error = NULL;
-
 	if (client == NULL || client->connection == NULL || grant == NULL ||
 	    grant->session_handle == NULL)
 		return;
 
-	reply = g_dbus_connection_call_sync(client->connection, PKCS11_PORTAL_BUS_NAME,
-	                                    PKCS11_PORTAL_OBJECT_PATH, PKCS11_PORTAL_INTERFACE,
-	                                    "ReleaseGrant",
-	                                    g_variant_new("(o)", grant->session_handle), NULL,
-	                                    G_DBUS_CALL_FLAGS_NONE, METHOD_TIMEOUT_MS, NULL,
-	                                    &error);
-
-	if (reply == NULL)
-		g_debug("ReleaseGrant did not answer");
+	close_session(client, grant->session_handle);
 }
 
 /* --------------------------------------------------------- sign and decrypt */

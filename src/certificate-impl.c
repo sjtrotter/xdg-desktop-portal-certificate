@@ -342,24 +342,6 @@ static gboolean option_take_uint32(GVariant* options, const char* key, guint32* 
 	return TRUE;
 }
 
-static gboolean option_take_boolean(GVariant* options, const char* key, gboolean* out,
-                                    gboolean* bad)
-{
-	g_autoptr(GVariant) value = g_variant_lookup_value(options, key, NULL);
-
-	if (value == NULL)
-		return FALSE;
-
-	if (!g_variant_is_of_type(value, G_VARIANT_TYPE_BOOLEAN))
-	{
-		*bad = TRUE;
-		return FALSE;
-	}
-
-	*out = g_variant_get_boolean(value);
-	return TRUE;
-}
-
 static GVariant* option_take_vardict(GVariant* options, const char* key, gboolean* bad)
 {
 	g_autoptr(GVariant) value = g_variant_lookup_value(options, key, NULL);
@@ -424,20 +406,9 @@ typedef struct
 	char* parent_window;
 	char* activation_token;
 	char* reason;
-	char* preselect;
 	guint32 lifetime;
 	gboolean may_sign;
-	gboolean may_decrypt;
 	gboolean interaction_forbidden;
-	gboolean allow_selection_memory;
-	gboolean offer_selection_memory;
-	/* The frontend says this exact consent already exists, for a process this
-	 * caller's process descends from. The one request this backend answers
-	 * without a window. */
-	gboolean delegated;
-
-	/* Sign/Decrypt state */
-	gboolean decrypt;
 } Transaction;
 
 typedef enum
@@ -463,7 +434,6 @@ static void transaction_free(Transaction* transaction)
 	g_free(transaction->parent_window);
 	g_free(transaction->activation_token);
 	g_free(transaction->reason);
-	g_free(transaction->preselect);
 	g_free(transaction);
 }
 
@@ -540,12 +510,8 @@ static void transaction_respond(Transaction* transaction, TransactionKind kind, 
 			    transaction->object, transaction->invocation, response, owned);
 			break;
 		default:
-			if (transaction->decrypt)
-				xdp_impl_experimental_certificate_complete_decrypt(
-				    transaction->object, transaction->invocation, response, owned);
-			else
-				xdp_impl_experimental_certificate_complete_sign(
-				    transaction->object, transaction->invocation, response, owned);
+			xdp_impl_experimental_certificate_complete_sign(
+			    transaction->object, transaction->invocation, response, owned);
 			break;
 	}
 
@@ -575,7 +541,7 @@ static GVariant* error_results(const char* code)
 /* Answer a method that has no transaction yet. */
 static void answer_early(XdpImplExperimentalCertificate* object,
                          GDBusMethodInvocation* invocation, TransactionKind kind,
-                         gboolean decrypt, guint32 response, GVariant* results)
+                         guint32 response, GVariant* results)
 {
 	switch (kind)
 	{
@@ -588,12 +554,8 @@ static void answer_early(XdpImplExperimentalCertificate* object,
 			                                                              response, results);
 			return;
 		default:
-			if (decrypt)
-				xdp_impl_experimental_certificate_complete_decrypt(object, invocation, response,
-				                                                   results);
-			else
-				xdp_impl_experimental_certificate_complete_sign(object, invocation, response,
-				                                               results);
+			xdp_impl_experimental_certificate_complete_sign(object, invocation, response,
+			                                               results);
 			return;
 	}
 }
@@ -764,57 +726,12 @@ static GVariant* token_display_for(const CertificateToken* token)
 	return g_variant_builder_end(&builder);
 }
 
-/* WHAT GOES ON THE SIGNALS IS PRESENCE, NOT IDENTITY. TokenAdded and
- * TokenRemoved are re-emitted by the frontend on its own public interface, to
- * every client on the bus, before anybody has consented to anything. A PIV
- * card's label is routinely the cardholder's name or an issuing agency, which
- * is exactly the correlation the serial was withheld to prevent -- delivered to
- * a strictly larger audience than a grant's token_display, which goes only to
- * the application that got the grant.
- *
- * THE TWO KEYS ARE THE WHOLE SIGNAL. The impl interface names token_id (`s`)
- * and protected_authentication_path (`b`) and says every other key is dropped,
- * so nothing else is put here -- not even for a frontend that would discard it,
- * because the next frontend might not.
- *
- * token_id IS NOT DERIVABLE FROM THE CARD, which the interface requires in as
- * many words: a serial, or a hash of one another party can recompute, is a
- * correlation handle across every application on the bus. It is a SHA-256 over
- * a salt this process generates at startup and never publishes, so it is stable
- * enough to pair an added token with its removal, stable for as long as the
- * token is present, and useless to anyone trying to recognise the same card in
- * another session or another process. */
-GVariant* certificate_impl_token_presence(const CertificateToken* token)
-{
-	static char* salt = NULL;
-	GVariantBuilder builder;
-	g_autofree char* identity = NULL;
-	g_autofree char* joined = NULL;
-	g_autofree char* digest = NULL;
-
-	if (salt == NULL)
-		salt = g_uuid_string_random();
-
-	identity = certificate_token_identity(token);
-	joined = g_strconcat(salt, "\x1f", identity, NULL);
-	digest = g_compute_checksum_for_string(G_CHECKSUM_SHA256, joined, -1);
-	digest[32] = '\0';
-
-	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-	g_variant_builder_add(&builder, "{sv}", "token_id", g_variant_new_string(digest));
-	g_variant_builder_add(&builder, "{sv}", "protected_authentication_path",
-	                      g_variant_new_boolean(token->protected_authentication_path));
-
-	return g_variant_builder_end(&builder);
-}
-
 static GVariant* bytes_to_variant(const GByteArray* bytes)
 {
 	return g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, bytes->data, bytes->len, 1);
 }
 
-GVariant* certificate_impl_acquire_results(CertificateCandidate* candidate, gboolean may_sign,
-                                           gboolean may_decrypt, gboolean remember)
+GVariant* certificate_impl_acquire_results(CertificateCandidate* candidate, gboolean may_sign)
 {
 	GVariantBuilder builder;
 	GVariantBuilder chain;
@@ -850,8 +767,6 @@ GVariant* certificate_impl_acquire_results(CertificateCandidate* candidate, gboo
 	 * list; a backend that returned more than it may does not get more. */
 	if (may_sign && candidate->can_sign)
 		g_strv_builder_add(operations_builder, "sign");
-	if (may_decrypt && candidate->can_decrypt)
-		g_strv_builder_add(operations_builder, "decrypt");
 	operations = g_strv_builder_end(operations_builder);
 
 	g_variant_builder_add(&builder, "{sv}", "permitted_operations",
@@ -860,16 +775,11 @@ GVariant* certificate_impl_acquire_results(CertificateCandidate* candidate, gboo
 	/* ALWAYS TRUE: the login is lazy, so the first Sign on this grant shows a
 	 * PIN window. Saying otherwise would be a lie the caller builds a UI on. */
 	g_variant_builder_add(&builder, "{sv}", "may_prompt_later", g_variant_new_boolean(TRUE));
-	g_variant_builder_add(&builder, "{sv}", "certificate_id",
-	                      g_variant_new_string(candidate->certificate_id));
-	g_variant_builder_add(&builder, "{sv}", "remember_selection",
-	                      g_variant_new_boolean(remember));
 
 	return g_variant_builder_end(&builder);
 }
 
-static void finish_acquire(Transaction* transaction, CertificateCandidate* candidate,
-                           gboolean remember)
+static void finish_acquire(Transaction* transaction, CertificateCandidate* candidate)
 {
 	CertificateImplSession* session = transaction->session;
 
@@ -898,24 +808,18 @@ static void finish_acquire(Transaction* transaction, CertificateCandidate* candi
 		return;
 	}
 
+	/* No grant covers decryption: the interface has no Decrypt method, so
+	 * operation_policy names only "sign" and nothing asks for the rest. */
 	certificate_impl_session_grant(session, candidate, transaction->purpose,
-	                               transaction->may_sign && candidate->can_sign,
-	                               transaction->may_decrypt && candidate->can_decrypt,
+	                               transaction->may_sign && candidate->can_sign, FALSE,
 	                               transaction->lifetime);
 
-	/* WHICH LINE SAYS A GRANT EXISTS SAYS HOW IT WAS MADE. A delegated grant
-	 * had no window, so counting grant-created lines counts the windows the
-	 * user actually answered. */
-	certificate_log_decision(transaction->delegated ? CERTIFICATE_REASON_GRANT_DELEGATED
-	                                                : CERTIFICATE_REASON_GRANT_CREATED,
-	                         transaction->caller.app_id,
+	certificate_log_decision(CERTIFICATE_REASON_GRANT_CREATED, transaction->caller.app_id,
 	                         certificate_identity_level_to_string(transaction->caller.level),
 	                         certificate_purpose_to_string(transaction->purpose), TRUE);
 
 	transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_SUCCESS,
-	                    certificate_impl_acquire_results(candidate,
-	                                                     transaction->may_sign,
-	                                                     transaction->may_decrypt, remember));
+	                    certificate_impl_acquire_results(candidate, transaction->may_sign));
 }
 
 /* A CANCELLATION THAT THE USER DID NOT ASK FOR IS NOT A CANCELLATION. When the
@@ -946,11 +850,7 @@ static void on_chooser_done(const CertificateChooserResult* result, gpointer use
 		return;
 	}
 
-	/* Clamped rather than trusted: the window is this backend's own code, but
-	 * the answer it produces is reported to the frontend as the user's, and a
-	 * true here that the frontend would discard is worse than useless. */
-	finish_acquire(transaction, result->chosen,
-	               result->remember_selection && transaction->offer_selection_memory);
+	finish_acquire(transaction, result->chosen);
 }
 
 static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_data)
@@ -994,45 +894,6 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 		return;
 	}
 
-	/* NO WINDOW, BY THE FRONTEND'S ACCOUNT OF A CONSENT THAT ALREADY EXISTS:
-	 * the same certificate, the same purpose, given by the user to a process
-	 * this caller's process descends from, which asked for its descendants to
-	 * be covered. See docs/IMPL-INTERFACE.md and ADR 0011.
-	 *
-	 * IT IS A BIND, NOT A CHOICE. If the named certificate is not among the
-	 * ones matching this request the answer is a refusal; falling through to
-	 * the chooser would ask the user a question the frontend has just said was
-	 * already answered, and would do it with no window on screen to explain
-	 * why. */
-	if (transaction->delegated)
-	{
-		CertificateCandidate* named = NULL;
-
-		for (guint i = 0; i < matching->len; i++)
-		{
-			CertificateCandidate* candidate = g_ptr_array_index(matching, i);
-
-			if (g_strcmp0(candidate->certificate_id, transaction->preselect) == 0)
-			{
-				named = candidate;
-				break;
-			}
-		}
-
-		if (named == NULL)
-		{
-			certificate_log_decision(CERTIFICATE_REASON_OPERATION_REFUSED,
-			                         transaction->caller.app_id, NULL, "delegated-certificate-gone",
-			                         FALSE);
-			transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
-			                    error_results("no_matching_certificate"));
-			return;
-		}
-
-		finish_acquire(transaction, named, FALSE);
-		return;
-	}
-
 	if (transaction->interaction_forbidden)
 	{
 		/* interaction_mode "forbidden" means never prompt, and consent for this
@@ -1057,11 +918,9 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 	request.caller = &transaction->caller;
 	request.purpose = transaction->purpose;
 	request.may_sign = transaction->may_sign;
-	request.may_decrypt = transaction->may_decrypt;
+	request.may_decrypt = FALSE;
 	request.lifetime_seconds = transaction->lifetime;
 	request.reason = transaction->reason;
-	request.offer_selection_memory = transaction->offer_selection_memory;
-	request.preselect_certificate = transaction->preselect;
 
 	certificate_chooser_show(transaction->parent_window, transaction->activation_token, matching,
 	                         &request,
@@ -1072,7 +931,7 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 static gboolean parse_acquire_options(Transaction* transaction, GVariant* options,
                                       const char** code)
 {
-	static const char* const policy_keys[] = { "sign", "decrypt", NULL };
+	static const char* const policy_keys[] = { "sign", NULL };
 	g_autofree char* level = NULL;
 	g_autofree char* interaction = NULL;
 	g_autoptr(GVariant) policy = NULL;
@@ -1098,30 +957,6 @@ static gboolean parse_acquire_options(Transaction* transaction, GVariant* option
 	if (!option_take_string(options, "reason", &transaction->reason, &bad) && bad)
 		return FALSE;
 	if (!option_take_string(options, "activation_token", &transaction->activation_token, &bad) &&
-	    bad)
-		return FALSE;
-	if (!option_take_string(options, "preselect_certificate", &transaction->preselect, &bad) &&
-	    bad)
-		return FALSE;
-
-	/* THE ONLY KEY THAT SKIPS A WINDOW, so it is parsed strictly and it is
-	 * useless on its own: without a certificate to bind, "do not ask" would
-	 * mean "choose for the user", which this backend does not do. */
-	transaction->delegated = FALSE;
-	if (!option_take_boolean(options, "delegated", &transaction->delegated, &bad) && bad)
-		return FALSE;
-
-	if (transaction->delegated && transaction->preselect == NULL)
-		return FALSE;
-
-	/* ABSENT MEANS NO. The key is the frontend's effective answer, so an older
-	 * frontend that does not send it is one whose permission store this
-	 * backend cannot reason about, and the safe reading of silence is that
-	 * nothing would be stored. Present and not a boolean is a malformed
-	 * request, not a default. */
-	transaction->allow_selection_memory = FALSE;
-	if (!option_take_boolean(options, "allow_selection_memory",
-	                         &transaction->allow_selection_memory, &bad) &&
 	    bad)
 		return FALSE;
 
@@ -1156,7 +991,6 @@ static gboolean parse_acquire_options(Transaction* transaction, GVariant* option
 	transaction->lifetime = MIN(transaction->lifetime, 3600u);
 
 	transaction->may_sign = TRUE;
-	transaction->may_decrypt = FALSE;
 	policy = option_take_vardict(options, "operation_policy", &bad);
 	if (bad)
 		return FALSE;
@@ -1164,26 +998,17 @@ static gboolean parse_acquire_options(Transaction* transaction, GVariant* option
 	if (policy != NULL)
 	{
 		g_autoptr(GVariant) sign = NULL;
-		g_autoptr(GVariant) decrypt = NULL;
 
 		if (!vardict_keys_known(policy, policy_keys))
 			return FALSE;
 
 		sign = g_variant_lookup_value(policy, "sign", NULL);
-		decrypt = g_variant_lookup_value(policy, "decrypt", NULL);
 
 		if (sign != NULL)
 		{
 			if (!g_variant_is_of_type(sign, G_VARIANT_TYPE_BOOLEAN))
 				return FALSE;
 			transaction->may_sign = g_variant_get_boolean(sign);
-		}
-
-		if (decrypt != NULL)
-		{
-			if (!g_variant_is_of_type(decrypt, G_VARIANT_TYPE_BOOLEAN))
-				return FALSE;
-			transaction->may_decrypt = g_variant_get_boolean(decrypt);
 		}
 	}
 
@@ -1210,7 +1035,7 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object
 	session = lookup_session(impl, arg_session_handle, arg_app_id, &code);
 	if (session == NULL)
 	{
-		answer_early(object, invocation, TRANSACTION_ACQUIRE, FALSE, CERTIFICATE_RESPONSE_OTHER,
+		answer_early(object, invocation, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
 		             error_results(code));
 		return TRUE;
 	}
@@ -1222,7 +1047,7 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object
 	if (!g_variant_lookup(arg_options, "purpose", "&s", &text) ||
 	    !certificate_purpose_parse(text, &purpose))
 	{
-		answer_early(object, invocation, TRANSACTION_ACQUIRE, FALSE, CERTIFICATE_RESPONSE_OTHER,
+		answer_early(object, invocation, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
 		             error_results("invalid_purpose"));
 		return TRUE;
 	}
@@ -1265,11 +1090,8 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object
 
 	transaction->caller.app_display_name = certificate_app_display_name(arg_app_id);
 
-	if (!certificate_filter_parse(arg_options,
-	                              purpose,
-	                              (transaction->may_sign ? CERTIFICATE_OPERATION_SIGN : 0) |
-	                                  (transaction->may_decrypt ? CERTIFICATE_OPERATION_DECRYPT
-	                                                            : 0),
+	if (!certificate_filter_parse(arg_options, purpose,
+	                              transaction->may_sign ? CERTIFICATE_OPERATION_SIGN : 0,
 	                              &transaction->filter, &error))
 	{
 		certificate_log_debug(CERTIFICATE_REASON_OPERATION_REFUSED, "malformed-filter");
@@ -1277,20 +1099,6 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object
 		                    error_results("invalid_filter"));
 		return TRUE;
 	}
-
-	/* THE CHECKBOX IS ONLY OFFERED WHERE IT CANNOT LIE. allow_selection_memory
-	 * is the frontend's effective answer -- the application asked for it AND
-	 * the identity level permits it -- and the frontend discards
-	 * remember_selection when it is false, so an offer made anyway is a
-	 * promise to the user that nothing will keep.
-	 *
-	 * The identity level is checked again here even though the frontend has
-	 * already folded it in. It costs nothing, and this backend does not draw a
-	 * "remember this for that application" checkbox on behalf of an
-	 * application it cannot name. */
-	transaction->offer_selection_memory =
-	    transaction->allow_selection_memory &&
-	    transaction->caller.level != CERTIFICATE_IDENTITY_UNKNOWN;
 
 	transaction->request = certificate_impl_request_new(
 	    g_dbus_method_invocation_get_sender(invocation), arg_app_id, arg_handle);
@@ -1368,7 +1176,7 @@ static void on_operation_done(GBytes* result, const GError* error, gpointer user
 	data = g_bytes_get_data(result, &size);
 
 	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-	g_variant_builder_add(&builder, "{sv}", transaction->decrypt ? "plaintext" : "signature",
+	g_variant_builder_add(&builder, "{sv}", "signature",
 	                      g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, data, size, 1));
 
 	transaction_respond(transaction, TRANSACTION_OPERATION, CERTIFICATE_RESPONSE_SUCCESS,
@@ -1377,10 +1185,9 @@ static void on_operation_done(GBytes* result, const GError* error, gpointer user
 
 static gboolean handle_key_operation(CertificateImpl* impl,
                                      XdpImplExperimentalCertificate* object,
-                                     GDBusMethodInvocation* invocation, gboolean decrypt,
-                                     const char* arg_handle, const char* arg_session_handle,
-                                     const char* arg_app_id, const char* arg_parent_window,
-                                     GVariant* arg_options)
+                                     GDBusMethodInvocation* invocation, const char* arg_handle,
+                                     const char* arg_session_handle, const char* arg_app_id,
+                                     const char* arg_parent_window, GVariant* arg_options)
 {
 	Transaction* transaction = NULL;
 	CertificateImplSession* session = NULL;
@@ -1401,8 +1208,8 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	session = lookup_session(impl, arg_session_handle, arg_app_id, &code);
 	if (session == NULL)
 	{
-		answer_early(object, invocation, TRANSACTION_OPERATION, decrypt,
-		             CERTIFICATE_RESPONSE_OTHER, error_results(code));
+		answer_early(object, invocation, TRANSACTION_OPERATION, CERTIFICATE_RESPONSE_OTHER,
+		             error_results(code));
 		return TRUE;
 	}
 
@@ -1411,7 +1218,6 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	transaction->object = object;
 	transaction->invocation = invocation;
 	transaction->session = g_object_ref(session);
-	transaction->decrypt = decrypt;
 	transaction->parent_window = g_strdup(arg_parent_window);
 
 	if (!option_take_string(arg_options, "mechanism", &mechanism, &bad) || bad)
@@ -1429,8 +1235,7 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 		return TRUE;
 	}
 
-	payload = g_variant_lookup_value(arg_options, decrypt ? "ciphertext" : "data",
-	                                 G_VARIANT_TYPE_BYTESTRING);
+	payload = g_variant_lookup_value(arg_options, "data", G_VARIANT_TYPE_BYTESTRING);
 
 	if (payload == NULL)
 	{
@@ -1460,7 +1265,7 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	caller_display = certificate_app_display_name(arg_app_id);
 
 	certificate_broker_perform(
-	    impl->tokens, session, decrypt, mechanism, parameters, data, arg_parent_window,
+	    impl->tokens, session, FALSE, mechanism, parameters, data, arg_parent_window,
 	    caller_display != NULL ? caller_display : arg_app_id,
 	    certificate_impl_request_get_cancellable(transaction->request), on_operation_done,
 	    transaction);
@@ -1474,18 +1279,8 @@ static gboolean handle_sign(XdpImplExperimentalCertificate* object,
                             const char* arg_parent_window, GVariant* arg_options,
                             gpointer user_data)
 {
-	return handle_key_operation(user_data, object, invocation, FALSE, arg_handle,
-	                            arg_session_handle, arg_app_id, arg_parent_window, arg_options);
-}
-
-static gboolean handle_decrypt(XdpImplExperimentalCertificate* object,
-                               GDBusMethodInvocation* invocation, const char* arg_handle,
-                               const char* arg_session_handle, const char* arg_app_id,
-                               const char* arg_parent_window, GVariant* arg_options,
-                               gpointer user_data)
-{
-	return handle_key_operation(user_data, object, invocation, TRUE, arg_handle,
-	                            arg_session_handle, arg_app_id, arg_parent_window, arg_options);
+	return handle_key_operation(user_data, object, invocation, arg_handle, arg_session_handle,
+	                            arg_app_id, arg_parent_window, arg_options);
 }
 
 /* ----------------------------------------------------------- GetCapabilities */
@@ -1526,14 +1321,12 @@ static void on_capabilities(GObject* source, GAsyncResult* result, gpointer user
 	CapabilitiesQuery* query = g_task_get_task_data(G_TASK(result));
 	GVariantBuilder builder;
 	static const char* const purposes[] = { "client_auth", "signing", "email", "ssh", NULL };
-	/* BOTH, now that there is an OAEP mechanism to decrypt with. `operations`
-	 * says what this backend implements; whether a particular card can do it is
-	 * `mechanisms` (RSA_OAEP appears only where a token really has
-	 * CKM_RSA_PKCS_OAEP) and, per grant, `permitted_operations`. Advertising
-	 * decrypt while refusing every request would have applications build a UI
-	 * on a capability that answers invalid_request, which is why it was absent
-	 * until the mechanism existed. See docs/IMPL-INTERFACE.md. */
-	static const char* const operations[] = { "sign", "decrypt", NULL };
+	/* SIGN ONLY, because that is what the interface has. The broker can
+	 * decrypt and the mechanism layer knows RSA_OAEP, but there is no Decrypt
+	 * method to reach either through, and advertising a capability nothing can
+	 * be asked for would have applications build a UI on it. See
+	 * docs/IMPL-INTERFACE.md. */
+	static const char* const operations[] = { "sign", NULL };
 
 	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
 	g_variant_builder_add(&builder, "{sv}", "purposes", g_variant_new_strv(purposes, -1));
@@ -1577,22 +1370,19 @@ static gboolean handle_get_capabilities(XdpImplExperimentalCertificate* object,
 
 /* ------------------------------------------------------------ token watching */
 
+/* THERE IS NO PRESENCE SIGNAL ON THE INTERFACE. A token appearing or leaving is
+ * not something every client on the bus is told about; what a grant holder is
+ * told is that their grant is over, which is SessionInvalidated. */
 static void on_token_event(CertificateToken* token, gboolean added, gpointer user_data)
 {
 	CertificateImpl* impl = user_data;
-	GVariant* presence = certificate_impl_token_presence(token);
 
 	certificate_log_counts(added ? CERTIFICATE_REASON_DISCOVERY_RESULT
 	                             : CERTIFICATE_REASON_TOKEN_REMOVED,
 	                       1, 0);
 
 	if (added)
-	{
-		xdp_impl_experimental_certificate_emit_token_added(impl->skeleton, presence);
 		return;
-	}
-
-	xdp_impl_experimental_certificate_emit_token_removed(impl->skeleton, presence);
 
 	/* A grant whose card has left the reader is over, and the frontend has to
 	 * be told rather than letting the application discover it at the next
@@ -1656,7 +1446,6 @@ CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTo
 	g_signal_connect(impl->skeleton, "handle-acquire-credential",
 	                 G_CALLBACK(handle_acquire_credential), impl);
 	g_signal_connect(impl->skeleton, "handle-sign", G_CALLBACK(handle_sign), impl);
-	g_signal_connect(impl->skeleton, "handle-decrypt", G_CALLBACK(handle_decrypt), impl);
 	g_signal_connect(impl->skeleton, "handle-get-capabilities",
 	                 G_CALLBACK(handle_get_capabilities), impl);
 
