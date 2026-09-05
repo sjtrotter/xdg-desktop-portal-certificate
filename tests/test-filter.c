@@ -13,6 +13,8 @@
 #include <glib.h>
 
 #include "fixture-util.h"
+#include "module/constants.h"
+#include "tokens/discovery.h"
 #include "tokens/filter.h"
 
 typedef struct
@@ -471,6 +473,29 @@ static void test_filter_parse_absent(void)
 	certificate_filter_clear(&filter);
 }
 
+/* The backend enumerates p11-kit's configured modules, and one of them may be
+ * the portal's own client-side module, which answers by calling the portal --
+ * which calls this backend. It has to be skipped by name, and by an explicit
+ * --module path as well. */
+static void test_portal_module_is_refused(void)
+{
+	g_autoptr(GError) error = NULL;
+	const char* explicit_module[] = { "/usr/lib64/pkcs11/" PKCS11_PORTAL_MODULE_BASENAME, NULL };
+
+	g_assert_true(certificate_module_is_portal_module(PKCS11_PORTAL_MODULE_NAME, NULL));
+	g_assert_true(certificate_module_is_portal_module("XDG-Desktop-Portal-Certificate", NULL));
+	g_assert_true(
+	    certificate_module_is_portal_module(NULL, "/usr/lib64/pkcs11/lib" PKCS11_PORTAL_MODULE_BASENAME));
+	g_assert_true(certificate_module_is_portal_module(NULL, PKCS11_PORTAL_MODULE_BASENAME));
+
+	g_assert_false(certificate_module_is_portal_module("opensc", NULL));
+	g_assert_false(certificate_module_is_portal_module(NULL, "/usr/lib64/opensc-pkcs11.so"));
+	g_assert_false(certificate_module_is_portal_module(NULL, NULL));
+
+	g_assert_null(certificate_tokens_new(explicit_module, &error));
+	g_assert_error(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED);
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -497,6 +522,7 @@ int main(int argc, char** argv)
 	g_test_add_func("/filter/parse-rejects-malformed", test_filter_parse_rejects_malformed);
 	g_test_add_func("/filter/parse-accepts-wellformed", test_filter_parse_accepts_wellformed);
 	g_test_add_func("/filter/parse-absent", test_filter_parse_absent);
+	g_test_add_func("/discovery/portal-module-is-refused", test_portal_module_is_refused);
 
 	return g_test_run();
 }

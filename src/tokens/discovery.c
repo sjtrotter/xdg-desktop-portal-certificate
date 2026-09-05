@@ -11,6 +11,7 @@
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
 
+#include "../module/constants.h"
 #include "../redact.h"
 
 /* How often the presence watcher asks the modules what is in the readers.
@@ -421,9 +422,31 @@ static char* piv_slot_from_id(const GByteArray* cka_id)
 
 /* ------------------------------------------------------------ module loading */
 
+gboolean certificate_module_is_portal_module(const char* name, const char* filename)
+{
+	if (name != NULL && g_ascii_strcasecmp(name, PKCS11_PORTAL_MODULE_NAME) == 0)
+		return TRUE;
+
+	if (filename != NULL)
+	{
+		g_autofree char* base = g_path_get_basename(filename);
+
+		if (g_ascii_strcasecmp(base, PKCS11_PORTAL_MODULE_BASENAME) == 0)
+			return TRUE;
+		if (g_ascii_strcasecmp(base, "lib" PKCS11_PORTAL_MODULE_BASENAME) == 0)
+			return TRUE;
+	}
+
+	return FALSE;
+}
+
 static gboolean module_is_interesting(CK_FUNCTION_LIST* module)
 {
 	g_autofree char* name = p11_kit_module_get_name(module);
+	g_autofree char* filename = p11_kit_module_get_filename(module);
+
+	if (certificate_module_is_portal_module(name, filename))
+		return FALSE;
 
 	if (name == NULL)
 		return TRUE;
@@ -456,6 +479,17 @@ CertificateTokens* certificate_tokens_new(const char* const* module_paths, GErro
 		{
 			CK_FUNCTION_LIST* module = NULL;
 			CK_RV rv;
+
+			if (certificate_module_is_portal_module(NULL, module_paths[i]))
+			{
+				g_set_error(error, CERTIFICATE_PKCS11_ERROR,
+				            CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED,
+				            "'%s' is the portal's own client-side module and this backend "
+				            "would recurse into the portal by loading it",
+				            module_paths[i]);
+				certificate_tokens_free(tokens);
+				return NULL;
+			}
 
 			module = p11_kit_module_load(module_paths[i], 0);
 			if (module == NULL)

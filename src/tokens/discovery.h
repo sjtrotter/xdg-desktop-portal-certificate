@@ -162,8 +162,23 @@ typedef struct CertificateTokens CertificateTokens;
  *  module paths (--module) and NOTHING ELSE IS LOADED. When it is NULL the
  *  p11-kit configured managed modules are used, minus the ones this backend
  *  has no business in: p11-kit's own trust module holds no client certificates
- *  and gnome-keyring's holds software keys the user did not put on a token. */
+ *  and gnome-keyring's holds software keys the user did not put on a token.
+ *
+ *  The portal's OWN client-side module is refused either way, including when
+ *  named explicitly; see certificate_module_is_portal_module(). */
 CertificateTokens* certificate_tokens_new(const char* const* module_paths, GError** error);
+
+/** Whether @name (a p11-kit module name) or @filename (its path or base name,
+ *  either may be NULL) names the Certificate portal's own client-side PKCS#11
+ *  module.
+ *
+ *  THIS BACKEND MUST NEVER LOAD IT. That module forwards every call to
+ *  org.freedesktop.portal.experimental.Certificate, which the frontend serves
+ *  by calling this backend: loading it here would make the backend enumerate a
+ *  token whose enumeration is a call back into the backend. p11-kit's
+ *  `disable-in` is a convenience and pkcs11.conf(5) says it is not a security
+ *  feature, so the refusal lives here as well. */
+gboolean certificate_module_is_portal_module(const char* name, const char* filename);
 void certificate_tokens_free(CertificateTokens* tokens);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(CertificateTokens, certificate_tokens_free)
 
