@@ -165,8 +165,9 @@ void certificate_impl_session_close(CertificateImplSession* session);
  *  which the frontend turns into GrantInvalidated. The backend does not decide
  *  that a grant is over for any reason that is not physical or temporal.
  *
- *  @reason MUST BE ONE OF THE INTERFACE'S EIGHT: released, expired,
- *  token_removed, owner_gone, policy, service_shutdown, backend_gone, error.
+ *  @reason MUST BE ONE OF THE INTERFACE'S NINE: released, expired,
+ *  token_removed, owner_gone, parent_released, policy, service_shutdown,
+ *  backend_gone, error.
  *  The frontend forwards it verbatim to applications, so an invented value is
  *  a word nobody can act on delivered as though it were part of the contract.
  *  Anything else is g_critical()ed and sent as "error". */

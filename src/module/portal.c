@@ -685,6 +685,13 @@ PortalGrant* portal_client_acquire(PortalClient* client, GError** error)
 	g_variant_builder_add(&options, "{sv}", "purpose", g_variant_new_string(purpose));
 	g_variant_builder_add(&options, "{sv}", "allow_selection_memory",
 	                      g_variant_new_boolean(TRUE));
+	/* OFF UNLESS THE CONSUMER SAYS OTHERWISE. It is the consumer, not this
+	 * module, that knows whether the processes it starts are its own work or
+	 * somebody else's code; a module that asked for delegation everywhere
+	 * would be handing a card to whatever a process happens to launch. */
+	if (g_strcmp0(g_getenv(PKCS11_PORTAL_ENV_DELEGATE), "1") == 0)
+		g_variant_builder_add(&options, "{sv}", "delegate_to_children",
+		                      g_variant_new_boolean(TRUE));
 	if (reason != NULL)
 		g_variant_builder_add(&options, "{sv}", "reason", g_variant_new_string(reason));
 	add_operation_policy(&options, purpose);
@@ -732,8 +739,21 @@ PortalGrant* portal_client_acquire(PortalClient* client, GError** error)
 	if (grant->supported_mechanisms == NULL)
 		grant->supported_mechanisms = g_new0(char*, 1);
 
-	g_debug("grant acquired: %s %u bits, sign=%d decrypt=%d", grant->key_type, grant->key_size,
-	        grant->may_sign, grant->may_decrypt);
+	{
+		const char* delegated_from = NULL;
+
+		/* WHICH GRANT THIS IS, in the one line that says a grant exists. A
+		 * derived grant means no window went up here, because an ancestor of
+		 * this process already asked the user.
+		 *
+		 * THE HANDLE ITSELF IS NOT LOGGED. A session handle is the capability
+		 * that holds the grant, and this one belongs to another process. */
+		g_variant_lookup(results, "delegated_from", "&o", &delegated_from);
+
+		g_debug("grant acquired: %s %u bits, sign=%d decrypt=%d%s", grant->key_type,
+		        grant->key_size, grant->may_sign, grant->may_decrypt,
+		        delegated_from != NULL ? ", delegated_from=parent" : "");
+	}
 
 	return g_steal_pointer(&grant);
 }

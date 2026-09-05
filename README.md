@@ -163,7 +163,7 @@ defers to it; where one of them disagrees, this is right and it is a bug. Last c
 | The private-bus stack, the headless UI runs, the joint run with the web-auth portal | **Implemented** | `tools/dev-stack.sh`, `tools/ui-smoke.sh`, and the sibling repository's `tools/portal-stack.sh` |
 | Hardware | **Partial** | **one PIV card, one reader, one middleware, once** — [TESTING.md](docs/TESTING.md) tiers 3.1–3.4, 2026-09-04. The rest of tier 3 is unrun: one PIN per grant, wrong PIN and `FINAL_TRY`, removal during an operation, a PIN-pad reader, a second card |
 | Consumers of the module | **Partial** | GnuTLS through p11-kit, and WebKitGTK's network process, both proven headless. **NSS is untested** (Firefox, Thunderbird, LibreOffice) and so is the OpenSSL 3 provider |
-| One grant across an application's processes | **Partial** | a grant belongs to the D-Bus peer that acquired it. One WebKitGTK handshake resolves the URI in two processes and so raises **two choosers**; measured, not solved. [0011](docs/decisions/0011-client-side-pkcs11-module.md) |
+| One grant across an application's processes | **Implemented** | a grant belongs to the D-Bus peer that acquired it, and a holder may mark it delegable to its own **descendants**: one WebKitGTK handshake still loads the module in two processes but raises **one chooser**. Opt-in per consumer, checked per request. [0011](docs/decisions/0011-client-side-pkcs11-module.md) |
 | Chain building | **Partial** | `chain_status` is always `leaf_only`, and says so |
 | Flatpak | **Partial** | the portal bus name is already allowed, which is the transport half. Installing the module inside a runtime, its ABI and a browser's inner sandbox are **not** proven |
 | Two concurrent grants in one process | **Not implemented** | [0006](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) failure mode 8, deferred because no consumer has asked |
@@ -303,7 +303,11 @@ Three things worth knowing before enabling it:
 Environment, for a consumer that knows more than PKCS#11 lets it say:
 `PKCS11_PORTAL_CERTIFICATE_PURPOSE` (`client_auth` by default),
 `PKCS11_PORTAL_CERTIFICATE_REASON`, `PKCS11_PORTAL_CERTIFICATE_OPERATIONS` (`sign`, `decrypt`),
-`PKCS11_PORTAL_CERTIFICATE_KEY_ALGORITHMS`, `PKCS11_PORTAL_CERTIFICATE_DISABLE=1`, and
+`PKCS11_PORTAL_CERTIFICATE_KEY_ALGORITHMS`,
+`PKCS11_PORTAL_CERTIFICATE_DELEGATE_TO_CHILDREN=1` (let this process's **descendants** reuse the
+grant it acquires instead of raising a second chooser — for a consumer whose one job spans a
+process tree, and for nothing else),
+`PKCS11_PORTAL_CERTIFICATE_DISABLE=1`, and
 `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` to let a class-only enumeration acquire a credential (for
 NSS experiments; documented as an experiment in
 [ADR 0011](docs/decisions/0011-client-side-pkcs11-module.md)).
@@ -315,12 +319,15 @@ answering the chooser. A **real** consumer has since been driven through it end 
 WebKitGTK sign-in completes with the private key on the token
 ([docs/TESTING.md](docs/TESTING.md) §2.55).
 
-**One handshake resolves the URI in two processes and therefore draws two choosers** — the
-application's own process builds the `GTlsCertificate`, WebKit's network process uses the key —
-which is the module's most visible UX defect and is not fixable inside it: a grant belongs to the
-D-Bus peer that acquired it. **The module is not a trust boundary; the portal is.**
-[0011](docs/decisions/0011-client-side-pkcs11-module.md) says what that means and what it does not
-solve.
+**One handshake resolves the URI in two processes** — the application's own process builds the
+`GTlsCertificate`, WebKit's network process uses the key — and for a long time that drew **two
+choosers** three seconds apart. It was not fixable inside the module, because a grant belongs to
+the D-Bus peer that acquired it; it was fixed in the interface. A holder that passes
+`delegate_to_children` has later requests **from descendants of its process** answered from its own
+grant, and this backend binds the same certificate with no window when the frontend says
+`delegated: true`. Two module instances, two grants, one chooser, one PIN. **The module is not a
+trust boundary; the portal is.** [0011](docs/decisions/0011-client-side-pkcs11-module.md) says what
+that means, what it trusts and what it does not solve.
 
 ## Building, and running it
 

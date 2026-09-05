@@ -431,6 +431,10 @@ typedef struct
 	gboolean interaction_forbidden;
 	gboolean allow_selection_memory;
 	gboolean offer_selection_memory;
+	/* The frontend says this exact consent already exists, for a process this
+	 * caller's process descends from. The one request this backend answers
+	 * without a window. */
+	gboolean delegated;
 
 	/* Sign/Decrypt state */
 	gboolean decrypt;
@@ -899,7 +903,12 @@ static void finish_acquire(Transaction* transaction, CertificateCandidate* candi
 	                               transaction->may_decrypt && candidate->can_decrypt,
 	                               transaction->lifetime);
 
-	certificate_log_decision(CERTIFICATE_REASON_GRANT_CREATED, transaction->caller.app_id,
+	/* WHICH LINE SAYS A GRANT EXISTS SAYS HOW IT WAS MADE. A delegated grant
+	 * had no window, so counting grant-created lines counts the windows the
+	 * user actually answered. */
+	certificate_log_decision(transaction->delegated ? CERTIFICATE_REASON_GRANT_DELEGATED
+	                                                : CERTIFICATE_REASON_GRANT_CREATED,
+	                         transaction->caller.app_id,
 	                         certificate_identity_level_to_string(transaction->caller.level),
 	                         certificate_purpose_to_string(transaction->purpose), TRUE);
 
@@ -985,6 +994,45 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 		return;
 	}
 
+	/* NO WINDOW, BY THE FRONTEND'S ACCOUNT OF A CONSENT THAT ALREADY EXISTS:
+	 * the same certificate, the same purpose, given by the user to a process
+	 * this caller's process descends from, which asked for its descendants to
+	 * be covered. See docs/IMPL-INTERFACE.md and ADR 0011.
+	 *
+	 * IT IS A BIND, NOT A CHOICE. If the named certificate is not among the
+	 * ones matching this request the answer is a refusal; falling through to
+	 * the chooser would ask the user a question the frontend has just said was
+	 * already answered, and would do it with no window on screen to explain
+	 * why. */
+	if (transaction->delegated)
+	{
+		CertificateCandidate* named = NULL;
+
+		for (guint i = 0; i < matching->len; i++)
+		{
+			CertificateCandidate* candidate = g_ptr_array_index(matching, i);
+
+			if (g_strcmp0(candidate->certificate_id, transaction->preselect) == 0)
+			{
+				named = candidate;
+				break;
+			}
+		}
+
+		if (named == NULL)
+		{
+			certificate_log_decision(CERTIFICATE_REASON_OPERATION_REFUSED,
+			                         transaction->caller.app_id, NULL, "delegated-certificate-gone",
+			                         FALSE);
+			transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
+			                    error_results("no_matching_certificate"));
+			return;
+		}
+
+		finish_acquire(transaction, named, FALSE);
+		return;
+	}
+
 	if (transaction->interaction_forbidden)
 	{
 		/* interaction_mode "forbidden" means never prompt, and consent for this
@@ -1054,6 +1102,16 @@ static gboolean parse_acquire_options(Transaction* transaction, GVariant* option
 		return FALSE;
 	if (!option_take_string(options, "preselect_certificate", &transaction->preselect, &bad) &&
 	    bad)
+		return FALSE;
+
+	/* THE ONLY KEY THAT SKIPS A WINDOW, so it is parsed strictly and it is
+	 * useless on its own: without a certificate to bind, "do not ask" would
+	 * mean "choose for the user", which this backend does not do. */
+	transaction->delegated = FALSE;
+	if (!option_take_boolean(options, "delegated", &transaction->delegated, &bad) && bad)
+		return FALSE;
+
+	if (transaction->delegated && transaction->preselect == NULL)
 		return FALSE;
 
 	/* ABSENT MEANS NO. The key is the frontend's effective answer, so an older

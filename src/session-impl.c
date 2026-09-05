@@ -314,15 +314,16 @@ void certificate_impl_session_close(CertificateImplSession* session)
 /* THE VOCABULARY IS THE INTERFACE'S, and it is closed. The frontend forwards
  * @reason verbatim into GrantInvalidated, so a value invented here goes
  * straight to applications, which have no way to learn what it means and a
- * documented list that says it cannot happen. The impl XML names these eight.
+ * documented list that says it cannot happen. The impl XML names these nine.
  *
- * Not all eight are this backend's to emit -- `released` and `policy` are
- * decisions the frontend makes, and `backend_gone` is what the frontend says
- * ABOUT this process -- but the list is the interface's rather than this
+ * Not all nine are this backend's to emit -- `released` and `policy` are
+ * decisions the frontend makes, `backend_gone` is what the frontend says
+ * ABOUT this process, and `parent_released` is what it says about a grant it
+ * derived from another one -- but the list is the interface's rather than this
  * file's, so it is written down whole and the assertion catches a typo in any
  * of them. */
 static const char* const certificate_session_reasons[] = {
-	"released", "expired",          "token_removed", "owner_gone",
+	"released", "expired",          "token_removed", "owner_gone",     "parent_released",
 	"policy",   "service_shutdown", "backend_gone",  "error",
 };
 

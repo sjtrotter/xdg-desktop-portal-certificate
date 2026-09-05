@@ -72,6 +72,9 @@
 #define CERTIFICATE_REASON_PIN_TIMEOUT "pin-timeout"
 #define CERTIFICATE_REASON_LOGIN_OK "login-ok"
 #define CERTIFICATE_REASON_GRANT_CREATED "grant-created"
+/* A grant made with no window, because the frontend said the consent for this
+ * certificate, purpose and process tree already exists. See IMPL-INTERFACE. */
+#define CERTIFICATE_REASON_GRANT_DELEGATED "grant-delegated"
 #define CERTIFICATE_REASON_GRANT_INVALIDATED "grant-invalidated"
 #define CERTIFICATE_REASON_OPERATION_REFUSED "operation-refused"
 #define CERTIFICATE_REASON_OPERATION_COMPLETED "operation-completed"

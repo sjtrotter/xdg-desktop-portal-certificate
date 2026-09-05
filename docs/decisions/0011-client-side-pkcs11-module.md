@@ -125,26 +125,55 @@ application because it is the one that called.
 - **It is one credential per process.** Two concurrent grants in one application is
   [0006](0006-failure-modes-of-naive-p11kit-forwarding.md) failure mode 8 again and is not solved;
   it is deferred, because no consumer has asked.
-- **A grant cannot be shared between an application's own processes, and the first real consumer
-  needs exactly that.** Measured with WebKitGTK: one TLS handshake resolves the URI **twice**, in
-  two processes — the application's own, to build a `GTlsCertificate`, because
-  `webkit_credential_new_for_certificate()` takes an object and not a URI; and WebKit's network
-  process, which owns the handshake and re-resolves the URI itself. Two p11-kit module instances,
-  two `AcquireCredential` calls, **two choosers about three seconds apart asking the same
-  question**, and one PIN prompt, because only the network process signs.
+- **One handshake still loads the module twice; it no longer asks the user twice.** Measured with
+  WebKitGTK: one TLS handshake resolves the URI **twice**, in two processes — the application's
+  own, to build a `GTlsCertificate`, because `webkit_credential_new_for_certificate()` takes an
+  object and not a URI; and WebKit's network process, which owns the handshake and re-resolves the
+  URI itself. Two p11-kit module instances and two `AcquireCredential` calls, which for a long
+  time meant **two choosers about three seconds apart asking the same question**, and one PIN
+  prompt, because only the network process signs.
 
   Both of those stand inside the challenge and always did; what used to stand *outside* it was a
   third chooser, from the server-chain enumeration described under "A search has to name the
-  credential" below, and that one is gone. Two remain.
+  credential" below, and that one is gone.
 
-  Nothing in the module can fix the two. A grant belongs to the D-Bus peer that acquired it, and
-  that is the property the whole design rests on: the frontend identifies the process the module is
-  loaded into, which is what makes the chooser name the right application. Sharing a grant between
-  two processes means deciding what "the same application" is, which is an interface question and
-  not a module one. The two candidate answers, neither taken: a portal method that lets a caller
-  hand a live grant to a named peer, or a WebKit API that takes a PKCS#11 URI so the application
-  process never has to import anything. Recorded here so that whoever meets the two choosers knows
-  it was measured and not missed.
+  Nothing in the module could fix the remaining two. A grant belongs to the D-Bus peer that
+  acquired it, and that is the property the whole design rests on: the frontend identifies the
+  process the module is loaded into, which is what makes the chooser name the right application.
+  Sharing a grant between two processes means deciding what "the same application" is, which is an
+  interface question and not a module one.
+
+  **What was built, in the interface: delegation down the process tree.** The frontend's
+  `AcquireCredential` takes `delegate_to_children` (`b`). A grant whose holder passed it answers a
+  later `AcquireCredential` from a **descendant of the holder's process** — same purpose, same
+  certificate filter or none, holder still alive, grant still live, and not for a caller that asked
+  for `interaction_mode: required` — as a *derived* grant: the same certificate, operations and
+  mechanisms a subset of the parent's, an expiry no later than the parent's, `delegated_from` in
+  its results, invalidated with `parent_released` when the parent ends, and never delegable
+  further. The backend is still called, with `preselect_certificate` naming the certificate and
+  `delegated: true`, which is the one key in the impl interface that tells a backend to bind and
+  show no window. The module asks for it only when
+  `PKCS11_PORTAL_CERTIFICATE_DELEGATE_TO_CHILDREN=1` is set, because it is the consumer, not the
+  module, that knows whether the processes it starts are its own work. `xdg-desktop-portal-webauth`
+  sets it in `main()`, before p11-kit can load and before the network process is forked.
+
+  The trust argument is that a parent process on the same UID can already read and write its
+  children's memory, so a descendant that gets a derived grant obtains nothing its holder could not
+  have obtained itself and forwarded — and the holder has to opt in. It is not a boundary against
+  the holder: a process that launches code it does not trust as a child must not ask for it. The
+  ancestry walk pins both ends with a pidfd, so neither pid can have been recycled, and refuses at
+  the first `/proc` hop it cannot read; the hops in between are the residual race, and it is
+  written down in the interface XML rather than hidden.
+
+  **The other candidate, not taken: a WebKit API that accepts a PKCS#11 URI**, so the application
+  process would never import the certificate and only the network process would ever load the
+  module — one instance, one grant, no delegation needed. It is the better shape and it is not
+  available: `webkit_credential_new_for_certificate()` takes a `GTlsCertificate`, there is no
+  `_for_certificate_uri()`, and adding one is a WebKitGTK release cycle away from anything this
+  project can test. It would also fix only WebKit; delegation is in the portal interface, so it
+  answers the same question for any consumer whose work spans a process tree. If such an API
+  appears, this backend should use it and stop setting the environment variable: one process that
+  needs the card is better than two that agree about it.
 
 ### Consequences for the login model
 

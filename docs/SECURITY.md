@@ -638,6 +638,49 @@ model, serial, label — never by slot number alone.
 *(Frontend concern — provided by xdg-desktop-portal, recorded here because the delegation shape is
 what a facade follow-up would have to satisfy.)*
 
+### What is implemented: delegation down the process tree
+
+`AcquireCredential` takes `delegate_to_children` (`b`, default false). A grant whose holder passed
+it answers a later `AcquireCredential` **from a descendant of the holder's process** without asking
+the user again, as a derived grant bounded by its parent in every dimension. This backend's part of
+it is `delegated: true` alongside `preselect_certificate`: bind that certificate, show no window,
+log `grant-delegated`, and refuse with `no_matching_certificate` rather than fall through to a
+chooser if the named certificate is not among the matching ones. It is the only relaxation of "a
+grant needs a window" anywhere in this interface.
+
+**The argument for it.** A parent process on the same UID can already read and write its children's
+memory — `ptrace`, `/proc/<pid>/mem`, the file descriptors it hands them. A descendant that gets a
+derived grant therefore obtains nothing its holder could not have obtained itself and forwarded, so
+the second consent dialog was buying the user nothing while training them to click through consent
+dialogs. What it cost was real: one WebKitGTK handshake raised two choosers three seconds apart
+asking the identical question, because the certificate is built in the application's process and
+the key is used in WebKit's network process.
+
+**The limits, all of which are the reason it is opt-in.**
+
+- **It is not a boundary against the holder.** A process that launches code it does not trust as a
+  child — a sandbox launcher, a plugin host, a terminal emulator — must not pass
+  `delegate_to_children`; if it does, that child gets the card. The module asks for it only when
+  `PKCS11_PORTAL_CERTIFICATE_DELEGATE_TO_CHILDREN=1` is set, because the consumer knows what it
+  starts and the module does not.
+- **It is checked at request time, never remembered.** Purpose, filter, expiry, the holder's
+  liveness and the ancestry are all re-established for each request, and none of them is cached.
+- **Ancestry is pids, and pids are not identities.** Both ends of the walk are pinned by a pidfd —
+  the caller's, from the frontend's app info, and a duplicate the grant keeps of the holder's — so
+  neither of those two pid numbers can have been recycled while the check runs. The hops in between
+  are not pinned: an intermediate process that exits mid-walk either makes its `/proc` entry
+  unreadable, which refuses, or leaves a pid the kernel could have handed to something else before
+  the walk reaches it. That needs a pid wraparound inside a few microseconds, and the walk is
+  bounded at 64 hops. It is written down in the public XML rather than hidden.
+- **A derived grant is not a second consent.** It cannot outlive its parent, cannot gain an
+  operation or a mechanism the parent lacks, is not written to selection memory, and is not itself
+  delegable. When the parent ends, for any reason, it is invalidated with `parent_released`.
+- **The certificate is checked on the way back.** If a backend answers a delegated request with a
+  certificate other than the one it was told to bind, the frontend discards the answer. Consent
+  cannot be moved to a credential nobody chose.
+
+### What a facade would still force
+
 Binding a grant to its owner's D-Bus connection alone is wrong in both directions: the process that
 actually performs the cryptography may be a browser's **network subprocess** with its own connection
 to the endpoint, so killing the grant when the owner's connection drops can kill a valid handshake,

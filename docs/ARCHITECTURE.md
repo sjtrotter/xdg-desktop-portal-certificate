@@ -42,6 +42,7 @@ upstream: the left-hand column now describes code that exists, in
 | **Grant lifetime** | `requested_lifetime` clamped to 3600 s, default 300, forwarded as `lifetime` — a decision, not a request | Obeys it. Cannot expire or renew a grant |
 | **Results clamping** | Intersects the backend's `supported_mechanisms` and `permitted_operations` with its own lists, in its own order, before the app sees them *and* before recording them on the grant | Reports what it can do; over-claiming gets clamped, not believed |
 | **Permissions** | Permission store table `certificate`, id = app id, value = the backend's `certificate_id`; written only when the app passed `allow_selection_memory` **and** the user asked to remember, never for an unidentified app; read back as `preselect_certificate` | Never touches it. Told what to preselect; reports `certificate_id` and `remember_selection` |
+| **Delegation** | Decides it entirely: `delegate_to_children` marks a grant delegable, and a later request from a **descendant** of the holder's process — same purpose, same filter, holder alive, grant live — is answered from it as a derived grant, with `delegated: true` and the certificate to bind sent to the backend | Binds what it is told, with **no window**, and refuses if that certificate is not among the matching ones. Knows nothing about processes |
 | **Request lifecycle** | `xdp_request_dex_*`; one terminal `Response`; cancellation | Exports an impl `Request` at the path the frontend chose; `Close()` only |
 | **Session lifecycle** | `xdp_session_dex_*` plus its own grant table; `RenewGrant` decided **entirely** here — the backend is never asked and no window appears | The token session behind it: PKCS#11 session, login state, handles |
 | **Backend selection** | `.portal` files and `portals.conf` (`xdp-portal-config.c`) | Declares itself in `data/certificate.portal` |
@@ -290,6 +291,14 @@ Two rules are not negotiable. **Expired and not-yet-valid certificates are shown
 selectable** — an expired certificate is a diagnosis the user needs, and hiding it produces "my card
 is empty" bug reports. **Filtering never narrows the set to one and auto-confirms**: a single
 candidate still gets a chooser, because the chooser is where consent happens.
+
+The single exception is `delegated: true`, which the frontend sends only when the consent for this
+certificate, this purpose and this process tree already exists — the caller's process descends from
+the holder of a grant whose holder asked for its descendants to be covered. Then the named
+certificate is bound with no window, and a request whose named certificate is not among the
+matching ones is refused rather than turned into a chooser. See
+[SECURITY.md](SECURITY.md#grant-lifetime-and-delegation) and
+[IMPL-INTERFACE.md](IMPL-INTERFACE.md).
 
 ### Chooser UI — [`../src/ui/chooser.h`](../src/ui/chooser.h)
 

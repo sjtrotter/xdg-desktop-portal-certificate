@@ -451,17 +451,26 @@ $ ninja -C build && tools/softhsm-fixture.sh
 $ cd ../xdg-desktop-portal-webauth && tools/portal-stack.sh
 ```
 
-Run on 2026-09-04, it passes, and each hop is a log line from the process that made it:
+Re-run on 2026-09-05 after delegation landed, it passes, and each hop is a log line from the
+process that made it:
 
 ```
-  ok    3 p11-kit loaded the module here   xdg-desktop-portal-webauth:227563): pkcs11-portal-certificate-DEBUG
+  ok    3 p11-kit loaded the module here   xdg-desktop-portal-webauth:378854): pkcs11-portal-certificate-DEBUG
   ok    3 the module got a credential here ... grant acquired
-  ok    3 the module ran in the network process (process:227639): ... grant acquired
+  ok    3 the module ran in the network process (process:378930): ... grant acquired
   ok    4 the frontend identified the caller chooser-shown app_id=(none) identity=unidentified
   ok    5 the backend created a grant      grant-created
+  ok    5 the network process reused the grant grant-delegated
+  ok    5 the module was told so           grant acquired: RSA 2048 bits, sign=1 decrypt=0, delegated_from=parent
   ok    6 the PIN was accepted             login-ok
   ok    6 the signature was produced       operation-completed
   ok    7 the server saw the card's CN     client-cn=Portal Test User
+
+module instances: 2
+choosers granted: 1
+grants delegated: 1
+PIN prompts:      1
+signatures:       1
 ```
 
 Three things that run established, and none of them was predictable from the code:
@@ -470,17 +479,24 @@ Three things that run established, and none of them was predictable from the cod
   `CKM_SHA256_RSA_PKCS_PSS`, the module's PSS parameter mapping, the portal's `Sign` with `mgf` and
   `salt_length`, and this backend's own PSS assembly. The `pkcs11-tool` phase of
   `module-smoke.sh` exercises v1.5 and would not have caught a PSS mistake.
-- **ONE HANDSHAKE, TWO GRANTS, TWO CHOOSERS.** The consumer resolves the URI twice, in two
+- **ONE HANDSHAKE, TWO GRANTS, ONE CHOOSER.** The consumer resolves the URI twice, in two
   processes: once in the application's own process to build a `GTlsCertificate`, and again in
   WebKit's network process, which owns the handshake. Each is a separate p11-kit module instance
-  with a grant of its own, so this backend draws two choosers about three seconds apart asking the
-  same question. Only one PIN prompt, because only the network process signs. **This is the
-  module's most visible UX defect and it is not fixable in the module**: a grant belongs to the
-  D-Bus peer that acquired it, which is the point of the design. What would fix it is a way for one
-  application to reuse a live grant across its own processes — worth an interface discussion, not
-  a patch.
+  with a grant of its own. That used to be two choosers about three seconds apart asking the same
+  question — the module's most visible UX defect, and not fixable in the module, because a grant
+  belongs to the D-Bus peer that acquired it and that is the point of the design.
 
-  Two, and no longer three. The live Entra run on 2026-09-05 saw a *third* chooser, two seconds
+  It was fixed in the *interface* instead. The backend sets
+  `PKCS11_PORTAL_CERTIFICATE_DELEGATE_TO_CHILDREN=1` in its own `main()`, so the module asks for
+  `delegate_to_children`; the network process is a **child** of that process, so the frontend
+  answers its `AcquireCredential` from the grant the parent already holds and calls this backend
+  with `delegated: true` and the certificate to bind. Two module instances, two grants, one
+  chooser, one PIN — counted at the bottom of every `portal-stack.sh` run, and the hop
+  `grant-delegated` is what says which grant was which. **A second chooser is a regression.** See
+  [ADR 0011](decisions/0011-client-side-pkcs11-module.md) and
+  [SECURITY.md](SECURITY.md#grant-lifetime-and-delegation) for what the delegation trusts.
+
+  One, and no longer three. The live Entra run on 2026-09-05 saw a *third* chooser, two seconds
   after the sign-in window opened and before any client-certificate challenge, from GnuTLS
   verifying the identity provider's own certificate chain through this module. Phase 0 of
   `module-smoke.sh` is the check that it stays gone.
@@ -812,7 +828,9 @@ no-matching-certificate
 chooser-shown         the consent window went up
 consent-granted       the user picked one
 chooser-cancelled     the user did not
-grant-created
+grant-created         a grant a user answered a window for
+grant-delegated       a grant made with NO window, because the frontend said the consent for
+                      this certificate, purpose and process tree already existed
 pin-prompt-selected   detail=gtk | system -- which process drew the PIN field
 pin-prompted          detail=on-screen | protected-path
 pin-prompt-failed     detail=system-prompter[-unreachable] -- the shell's prompt did not answer

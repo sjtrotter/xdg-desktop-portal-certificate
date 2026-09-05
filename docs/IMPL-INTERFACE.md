@@ -90,7 +90,8 @@ cost:
 | `app_id` | Established by the frontend from `xdp_invocation_get_app_info()`. Empty string when unidentified. |
 | `app_identity_level` | `verified_sandboxed` \| `derived_host` \| `unidentified`. **The backend must display this.** An application name shown without saying how it was established is a lie by omission. |
 | `lifetime` | Seconds the frontend has *decided* to allow, after applying its 3600 s ceiling — not the caller's `requested_lifetime`. |
-| `preselect_certificate` | A stable certificate id the frontend read from the permission store. Preselection only. |
+| `preselect_certificate` | A stable certificate id the frontend read from the permission store, or — with `delegated` — the certificate the backend must bind. Preselection only without it. |
+| `delegated` | **The one key that tells a backend not to show a window.** The frontend has established that the consent for this certificate, this purpose and this process tree already exists. Never sent without `preselect_certificate`. See below. |
 | `allow_selection_memory` | Whether the backend may offer to remember this selection. The **effective** value: the application asked for it *and* the identity level is not `unidentified`. |
 
 **And two fields that are gone.** `app_display_name` is not on the branch interface: the backend
@@ -199,6 +200,31 @@ consent dialog into a PIN dialog, which is the failure mode this project exists 
 For `forbidden` there is no path to a grant at all, and `AcquireCredential` answers 2. That is the
 XML's own reading: consent here *is* a prompt.
 
+### `delegated` is the one exception, and it is the frontend's to assert
+
+`delegated: true` tells the backend to bind the certificate named by `preselect_certificate` and
+answer **with no window at all**. It is not a shortcut the backend may take on its own evidence,
+and there is nothing in this process that could establish it: it is the frontend saying that the
+user already consented to this certificate, for this purpose, with this filter, in a process this
+caller's process descends from, and that the holder of that consent asked for its descendants to be
+covered (`delegate_to_children` on the public interface).
+
+What this backend does with it, in `on_enumerated()`:
+
+- refuses the request outright if `delegated` arrives without `preselect_certificate` —
+  "do not ask the user" with no certificate to bind would mean "choose one for them";
+- enumerates and filters exactly as it would otherwise, so a delegated request cannot reach a
+  certificate the filter excludes;
+- binds the candidate whose `certificate_id` matches, and **refuses with
+  `no_matching_certificate`** if there is none. It does not fall through to the chooser: that would
+  put a window in front of a user who was told this question was already answered, with nothing on
+  screen to explain why;
+- logs `grant-delegated` instead of `grant-created`, so counting `grant-created` counts the windows
+  a user actually answered.
+
+The PIN is untouched. A delegated grant logs in at its first `Sign` like any other, which is why
+one WebKitGTK handshake now shows one chooser and one PIN prompt rather than two and one.
+
 ### `SessionInvalidated` speaks the public vocabulary
 
 The impl XML used to list three reasons — `token_removed`, `device_error`, `backend_shutdown` —
@@ -207,8 +233,11 @@ backend's string through unchanged, so the smaller list was a trap in both direc
 the ordinary case, was not in it; `backend_shutdown` was in it and is not a value any application
 has ever been told about. The impl XML now carries the public list verbatim:
 
-> `released`, `expired`, `token_removed`, `owner_gone`, `policy`, `service_shutdown`,
-> `backend_gone`, `error`
+> `released`, `expired`, `token_removed`, `owner_gone`, `parent_released`, `policy`,
+> `service_shutdown`, `backend_gone`, `error`
+
+`parent_released` is in the list so that the two lists stay identical; only the frontend emits it,
+for a grant it derived from another one when that one ended.
 
 **A value outside it is a `g_critical()` and goes on the bus as `error`.** The list is in
 `src/session-impl.c`, checked in `certificate_impl_session_invalidate()`, because a typo in a

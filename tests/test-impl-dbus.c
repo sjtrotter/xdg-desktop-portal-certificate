@@ -453,6 +453,10 @@ static void test_options_are_validated(Fixture* fixture, gconstpointer user_data
 		{ "{'purpose': <'client_auth'>, 'allow_selection_memory': <'yes'>}", "invalid_request" },
 		{ "{'purpose': <'client_auth'>, 'allow_selection_memory': <uint32 1>}",
 		  "invalid_request" },
+		{ "{'purpose': <'client_auth'>, 'delegated': <'yes'>}", "invalid_request" },
+		/* "do not ask the user" with no certificate to bind would be
+		 * "choose one for them", which this backend does not do. */
+		{ "{'purpose': <'client_auth'>, 'delegated': <true>}", "invalid_request" },
 		{ "{'purpose': <'client_auth'>, 'operation_policy': <{'sign': <'yes'>}>}",
 		  "invalid_request" },
 		{ "{'purpose': <'client_auth'>, 'operation_policy': <{'delete': <true>}>}",
@@ -518,6 +522,26 @@ static void test_selection_memory_is_accepted(Fixture* fixture, gconstpointer us
 		if (g_strcmp0(code, "invalid_request") == 0)
 			g_error("options %s were rejected as malformed", cases[i]);
 	}
+}
+
+/* 'delegated' with a certificate to bind is a well formed request: the answer
+ * here is a refusal either way, because there is no card in this test, but it
+ * must not be the one that means "this request was malformed" -- and it must
+ * not be the one that means "the chooser was cancelled" either, because no
+ * chooser may go up for a delegated request. */
+static void test_delegation_is_accepted(Fixture* fixture, gconstpointer user_data)
+{
+	guint32 response = 0;
+	g_autofree char* code = NULL;
+	GVariant* options =
+	    acquire_options("'delegated': <true>, 'preselect_certificate': <'cert-1'>");
+
+	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
+
+	acquire(fixture, SESSION_PATH, APP_A, options, &response, &code);
+
+	g_assert_cmpuint(response, ==, 2);
+	g_assert_cmpstr(code, !=, "invalid_request");
 }
 
 /* THE FRONTEND TYPE-CHECKS ONE KEY. `signature` and `plaintext` are the only
@@ -1010,6 +1034,7 @@ int main(int argc, char** argv)
 	ADD("/impl/session-path-is-reusable", test_session_path_is_reusable);
 	ADD("/impl/options-are-validated", test_options_are_validated);
 	ADD("/impl/selection-memory-is-accepted", test_selection_memory_is_accepted);
+	ADD("/impl/delegation-is-accepted", test_delegation_is_accepted);
 	ADD("/impl/results-types", test_results_types);
 	ADD("/impl/token-presence-carries-no-identity", test_token_presence_carries_no_identity);
 	ADD("/impl/sign-without-grant", test_sign_without_grant);

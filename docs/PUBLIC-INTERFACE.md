@@ -85,6 +85,15 @@ returns a `Request` the caller can `Close()`. The acquire response carries
 - `certificate_filter` narrows what is offered (`issuers`, `key_usage`, `eku`,
   `key_algorithms`, `token_label`, `piv_slot`). A filter never widens, and is not a
   security boundary.
+- `delegate_to_children` (default false) lets the grant this call produces answer a later
+  `AcquireCredential` from a **descendant of the calling process**, with no second window.
+  The frontend takes it only when the purpose matches, the caller's filter is absent or
+  identical, the holder's process is alive, the grant is live, and the caller did not ask
+  for `interaction_mode: required`; it then calls this backend with `preselect_certificate`
+  and `delegated: true`, which is the one case where a backend answers without a window.
+  What the caller gets is a *derived* grant, described below. It exists because one
+  WebKitGTK handshake loads the module in two processes and used to ask the user twice; see
+  [ADR 0011](decisions/0011-client-side-pkcs11-module.md).
 
 ### Results that matter
 
@@ -92,7 +101,8 @@ returns a `Request` the caller can `Close()`. The acquire response carries
 capability), `certificate_der`, `chain_der`, `chain_status` (`complete` / `partial` /
 `leaf_only`, which describes completeness and not trust), `token_display`, `key_type`,
 `key_size`, `key_curve`, `supported_mechanisms`, `permitted_operations`, `expires_at`,
-`may_prompt_later`.
+`may_prompt_later`, and — on a derived grant only — `delegated_from`, the session handle of
+the grant it came from.
 
 `GetCapabilities` answers `purposes`, `operations`, `mechanisms`, `selection_memory`,
 `protected_authentication_path`, `max_grant_lifetime`, `max_grant_total_lifetime`.
@@ -112,8 +122,15 @@ which asks the user again. Nothing in this backend implements or can extend that
 recorded here because a backend must not assume a grant it was told about lives as long as
 its own `Sign` calls keep arriving. `GrantInvalidated(o session_handle, s reason)` says why a grant stopped
 being usable before it was released; `reason` is one of `released`, `expired`,
-`token_removed`, `owner_gone`, `policy`, `service_shutdown`, `backend_gone`, `error`, and
-consumers must tolerate values they do not know.
+`token_removed`, `owner_gone`, `parent_released`, `policy`, `service_shutdown`,
+`backend_gone`, `error`, and consumers must tolerate values they do not know.
+
+**A derived grant is a subset of the one it came from and dies with it.** Same certificate,
+`permitted_operations` and `supported_mechanisms` intersected with the parent's, the
+parent's consent deadline, an expiry never later than the parent's at acquisition or at any
+renewal, and `parent_released` when the parent ends for any reason. It is never itself
+delegable: a descendant of its holder is a descendant of the original holder too, and
+matches the original grant directly.
 
 ## Accessibility as acceptance criteria
 
