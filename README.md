@@ -15,8 +15,11 @@ PKCS#1 v1.5 signatures against a PIV card.
 **The real-hardware claim is narrow.** [docs/TESTING.md](docs/TESTING.md) tier 3 is the run
 against a real card; tiers 3.1–3.4 passed once, on 2026-09-04, with one PIV card in one reader,
 on a GNOME Wayland session, through both PIN paths (this backend's window and gnome-shell's
-system prompter). That is one card and one reader, not a claim about PIV hardware in general,
-and the rest of tier 3 is still the author's to run.
+system prompter). On 2026-09-05 the same card signed a real Microsoft Entra sign-in for an Azure
+Virtual Desktop tenant through the web-auth portal consumer: one chooser at the certificate
+challenge, one PIN, the authorization code returned to the caller. That is one card, one reader
+and one identity provider, not a claim about PIV hardware in general, and the rest of tier 3 is
+still the author's to run.
 
 **There is now a PKCS#11 path for applications that cannot call D-Bus** — a module loaded into
 the application's own process, not an endpoint served from here. A GnuTLS mutual-TLS handshake
@@ -69,8 +72,8 @@ copied from xdg-desktop-portal any more — it *is* xdg-desktop-portal: `app_id`
 by the frontend and passed to this backend as an argument, so the process drawing the
 window that names an application never had to guess which application it was.
 
-The frontend is a local-only branch, `experimental/certificate-webauthentication`, twelve
-commits `3f46e3c..7635aa8`. It has been built and tested (84 pytest cases for this portal,
+The frontend is a local-only branch, `experimental/certificate-webauthentication`, 18
+commits `3f46e3c..436bf2a`. It has been built and tested (84 pytest cases for this portal,
 all green, against a python-dbusmock backend) and **has not been proposed to anyone**. Its
 interfaces live in the `org.freedesktop.portal.experimental.*` namespace, which is what
 upstream set aside for portals that are not finished — not a claim that this one has been
