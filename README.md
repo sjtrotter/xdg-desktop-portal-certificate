@@ -22,8 +22,10 @@ and the rest of tier 3 is still the author's to run.
 
 **There is now a PKCS#11 path for applications that cannot call D-Bus** — a module loaded into
 the application's own process, not an endpoint served from here. A GnuTLS mutual-TLS handshake
-has completed through it, driven by `g_tls_certificate_new_from_pkcs11_uris()`, which is the
-constructor WebKitGTK reaches. See "For applications that speak PKCS#11" below,
+has completed through it, driven by `g_tls_certificate_new_from_pkcs11_uris()`, and **so has a
+real WebKitGTK one**: `xdg-desktop-portal-webauth` signs in through this backend's chooser and PIN
+prompt, headless, with the card's common name in the server's log
+([docs/TESTING.md](docs/TESTING.md) §2.55). See "For applications that speak PKCS#11" below,
 [0011](docs/decisions/0011-client-side-pkcs11-module.md), and
 [docs/SPIKES.md](docs/SPIKES.md) for what that does and does not answer. The socket-served
 facade `OpenPkcs11Endpoint` would have reached is not being built.
@@ -266,7 +268,15 @@ Environment, for a consumer that knows more than PKCS#11 lets it say:
 
 [`tools/module-smoke.sh`](tools/module-smoke.sh) runs the whole thing — `p11tool`, `pkcs11-tool
 --sign` verified with `openssl`, and a real mutual-TLS handshake — under Xvfb with xdotool
-answering the chooser. **The module is not a trust boundary; the portal is.**
+answering the chooser. A **real** consumer has since been driven through it end to end as well:
+`xdg-desktop-portal-webauth`'s `tools/portal-stack.sh` runs both portals on one private bus, and a
+WebKitGTK sign-in completes with the private key on the token
+([docs/TESTING.md](docs/TESTING.md) §2.55).
+
+**One handshake resolves the URI in two processes and therefore draws two choosers** — the
+application's own process builds the `GTlsCertificate`, WebKit's network process uses the key —
+which is the module's most visible UX defect and is not fixable inside it: a grant belongs to the
+D-Bus peer that acquired it. **The module is not a trust boundary; the portal is.**
 [0011](docs/decisions/0011-client-side-pkcs11-module.md) says what that means and what it does not
 solve.
 

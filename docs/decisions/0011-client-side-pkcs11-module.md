@@ -76,6 +76,22 @@ application because it is the one that called.
 - **It is one credential per process.** Two concurrent grants in one application is
   [0006](0006-failure-modes-of-naive-p11kit-forwarding.md) failure mode 8 again and is not solved;
   it is deferred, because no consumer has asked.
+- **A grant cannot be shared between an application's own processes, and the first real consumer
+  needs exactly that.** Measured with WebKitGTK: one TLS handshake resolves the URI **twice**, in
+  two processes — the application's own, to build a `GTlsCertificate`, because
+  `webkit_credential_new_for_certificate()` takes an object and not a URI; and WebKit's network
+  process, which owns the handshake and re-resolves the URI itself. Two p11-kit module instances,
+  two `AcquireCredential` calls, **two choosers about three seconds apart asking the same
+  question**, and one PIN prompt, because only the network process signs.
+
+  Nothing in the module can fix it. A grant belongs to the D-Bus peer that acquired it, and that
+  is the property the whole design rests on: the frontend identifies the process the module is
+  loaded into, which is what makes the chooser name the right application. Sharing a grant between
+  two processes means deciding what "the same application" is, which is an interface question and
+  not a module one. The two candidate answers, neither taken: a portal method that lets a caller
+  hand a live grant to a named peer, or a WebKit API that takes a PKCS#11 URI so the application
+  process never has to import anything. Recorded here so that whoever meets the two choosers knows
+  it was measured and not missed.
 
 ### Consequences for the login model
 
@@ -99,6 +115,15 @@ whose enumeration is a call back into itself. Three fences, because
 2. the module refuses to run in any process whose executable is named `xdg-desktop-portal*`;
 3. `disable-in:` in the installed `xdg-desktop-portal-certificate.module`.
 
+Fence 2 is **two exact executable names**, `xdg-desktop-portal` and
+`xdg-desktop-portal-certificate`, and it was a prefix match on `xdg-desktop-portal` until the first
+consumer arrived. That consumer is `xdg-desktop-portal-webauth`, a portal BACKEND — it enumerates
+no tokens, owns no card, and calls the portal exactly as an application does, but it needs this
+module loaded in its own process to build a certificate before WebKit will carry one to its network
+process. The prefix rule refused it, and the only symptom was GnuTLS reporting that the object was
+not available. **A backend named after the portal is not the portal**; only the two that would
+recurse are on the list.
+
 ### enable-in / disable-in
 
 The shipped module file enables the module everywhere and disables it in the portal processes. Two
@@ -118,8 +143,13 @@ wanted.
 - `OpenPkcs11Endpoint` is not needed for the consumers it was designed for, and nothing in this
   repository is waiting for it any more. `src/export/facade.h` is a pointer to this file.
 - S1 and S3 are answered — see [SPIKES.md](../SPIKES.md) — by a real GnuTLS mutual-TLS handshake
-  through `g_tls_certificate_new_from_pkcs11_uris()`, which is the constructor WebKitGTK reaches.
-  NSS and the OpenSSL 3 provider are not answered and remain S1's open half.
+  through `g_tls_certificate_new_from_pkcs11_uris()`, which is the constructor WebKitGTK reaches,
+  and since 2026-09-04 by **WebKitGTK itself**: `xdg-desktop-portal-webauth`'s
+  `tools/portal-stack.sh` runs both portals on one private bus and signs in through this backend's
+  chooser and PIN prompt, headless, with the card's common name in the server's log. The mechanism
+  the handshake actually used is `RSA_PSS`, because TLS 1.3 asks for it — `module-smoke.sh`'s
+  `pkcs11-tool` phase only ever exercised v1.5. NSS and the OpenSSL 3 provider are not answered and
+  remain S1's open half.
 - **The token's names are a contract with another repository.**
   `src/module/portal-token.h` is the same file as `xdg-desktop-portal-webauth`'s
   `backend/src/tls/portal-token.h` — **byte for byte, licence line included**, since that project

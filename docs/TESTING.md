@@ -373,8 +373,9 @@ Three phases:
 1. **`p11tool --provider … --list-all`** — GnuTLS enumerating the token. The chooser appears at the
    search, and the certificate, the public key and the private key come back with matching `CKA_ID`
    and a URI naming `token=Portal%20Certificate;object=Portal%20Certificate`. The script builds
-   the URIs from the shared contract in `src/module/portal-token.h`; `URI_OBJECT=` empties the
-   `object=` attribute, which is how the single-object import's requirement was found.
+   the URIs from the shared contract in `src/module/portal-token.h`, which **now carries the
+   `object=` attribute itself**; `URI_OBJECT=` empties it, which is how the single-object import's
+   requirement was found and is how to watch it fail again.
 2. **`pkcs11-tool --sign --mechanism SHA256-RSA-PKCS`**, then `pkcs11-tool --read-object --type
    cert`, then `openssl dgst -sha256 -verify` — the signature must verify **against the certificate
    the module handed back**, not against the fixture's PEM.
@@ -415,6 +416,55 @@ $ LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0     
 
 `--phase 2` cannot be run this way: OpenSC's `pkcs11-tool` `dlopen()`s modules with `RTLD_DEEPBIND`,
 which the sanitizer runtime refuses. That is a property of `pkcs11-tool`, not of the module.
+
+### 2.55 WebKitGTK, through the module, proven headless
+
+`tools/module-smoke.sh` phase 3 proves the constructor. It does not prove the *consumer*, because
+`tests/gtls-client` is a program written for this repository and WebKit is not.
+
+The sibling repository does. `xdg-desktop-portal-webauth`'s `tools/portal-stack.sh` stands up
+**both portals on one private bus inside one headless X server** — this backend against the SoftHSM
+fixture, that backend as a WebKitGTK web view, the development frontend with
+`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate,web-authentication`, a p11-kit module directory
+naming the module built here, and a TLS server that demands a client certificate and trusts only
+the fixture card's own certificate.
+
+```console
+$ ninja -C build && tools/softhsm-fixture.sh
+$ cd ../xdg-desktop-portal-webauth && tools/portal-stack.sh
+```
+
+Run on 2026-09-04, it passes, and each hop is a log line from the process that made it:
+
+```
+  ok    3 p11-kit loaded the module here   xdg-desktop-portal-webauth:227563): pkcs11-portal-certificate-DEBUG
+  ok    3 the module got a credential here ... grant acquired
+  ok    3 the module ran in the network process (process:227639): ... grant acquired
+  ok    4 the frontend identified the caller chooser-shown app_id=(none) identity=unidentified
+  ok    5 the backend created a grant      grant-created
+  ok    6 the PIN was accepted             login-ok
+  ok    6 the signature was produced       operation-completed
+  ok    7 the server saw the card's CN     client-cn=Portal Test User
+```
+
+Three things that run established, and none of them was predictable from the code:
+
+- **`RSA_PSS`**, not `RSA_PKCS`. TLS 1.3 asks for PSS, so the path exercised is `C_SignInit` with
+  `CKM_SHA256_RSA_PKCS_PSS`, the module's PSS parameter mapping, the portal's `Sign` with `mgf` and
+  `salt_length`, and this backend's own PSS assembly. The `pkcs11-tool` phase of
+  `module-smoke.sh` exercises v1.5 and would not have caught a PSS mistake.
+- **ONE HANDSHAKE, TWO GRANTS, TWO CHOOSERS.** The consumer resolves the URI twice, in two
+  processes: once in the application's own process to build a `GTlsCertificate`, and again in
+  WebKit's network process, which owns the handshake. Each is a separate p11-kit module instance
+  with a grant of its own, so this backend draws two choosers about three seconds apart asking the
+  same question. Only one PIN prompt, because only the network process signs. **This is the
+  module's most visible UX defect and it is not fixable in the module**: a grant belongs to the
+  D-Bus peer that acquired it, which is the point of the design. What would fix it is a way for one
+  application to reuse a live grant across its own processes — worth an interface discussion, not
+  a patch.
+- **The exclusion list had to stop being a prefix match.** The module refused to run in any process
+  named `xdg-desktop-portal*`, which includes `xdg-desktop-portal-webauth` — a *consumer*, not the
+  portal. It is now two exact names.
 
 ### 2.6 The check that has not been run: Firefox
 
