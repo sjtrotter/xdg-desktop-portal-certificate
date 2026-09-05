@@ -442,6 +442,41 @@ static void add_operation_policy(GVariantBuilder* options, const char* purpose)
 
 /* ------------------------------------------------------------------- client */
 
+/* THE TWO PROGRAMS THAT WOULD RECURSE, BY EXACT NAME. The frontend routes the
+ * calls this module makes, and the certificate backend enumerates p11-kit's
+ * modules to find tokens -- loading this one in either would make a search for a
+ * token a call back into the searcher.
+ *
+ * THIS USED TO BE A PREFIX MATCH ON "xdg-desktop-portal", AND THAT WAS WRONG.
+ * It refused in every process whose name merely began that way, which includes
+ * xdg-desktop-portal-webauth -- the first consumer this module was written for,
+ * and a process that enumerates nothing, owns no card and calls the portal
+ * exactly as an application does. A portal BACKEND is not the portal; only these
+ * two are, and only they recurse. `disable-in:` in the installed module file
+ * names the same two, and PKCS11_PORTAL_CERTIFICATE_DISABLE=1 is the switch for
+ * anything else that has to be kept out. */
+static const char* const portal_excluded_programs[] = {
+	"xdg-desktop-portal",
+	"xdg-desktop-portal-certificate",
+};
+
+gboolean portal_program_is_excluded(const char* program)
+{
+	gsize i;
+
+	if (program == NULL)
+		return FALSE;
+
+	for (i = 0; i < G_N_ELEMENTS(portal_excluded_programs); i++)
+	{
+		if (strcmp(program, portal_excluded_programs[i]) == 0)
+			return TRUE;
+	}
+
+	return FALSE;
+}
+
+
 gboolean portal_client_self_excluded(void)
 {
 	g_autofree char* target = g_file_read_link("/proc/self/exe", NULL);
@@ -455,10 +490,7 @@ gboolean portal_client_self_excluded(void)
 
 	name = g_path_get_basename(target);
 
-	/* The frontend and every portal backend, this project's included. Loading
-	 * this module there would make the certificate backend enumerate a module
-	 * that calls the portal that calls the certificate backend. */
-	return g_str_has_prefix(name, "xdg-desktop-portal");
+	return portal_program_is_excluded(name);
 }
 
 static void probe_capabilities(PortalClient* client)
@@ -478,7 +510,12 @@ static void probe_capabilities(PortalClient* client)
 
 	if (reply == NULL)
 	{
-		g_debug("the Certificate portal is not available");
+		/* THE MESSAGE, not just the fact. "not available" alone is what a
+		 * consumer sees when the portal is absent, when the experimental gate
+		 * is off, and when the frontend refuses to identify this process --
+		 * three different problems with three different fixes, and no way to
+		 * tell them apart without the error. */
+		g_debug("the Certificate portal is not available: %s", error->message);
 		return;
 	}
 

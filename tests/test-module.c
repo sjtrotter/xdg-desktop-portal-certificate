@@ -18,6 +18,7 @@
 #include "module/der.h"
 #include "module/mechanism.h"
 #include "module/objects.h"
+#include "module/portal.h"
 #include "module/constants.h"
 
 #ifndef CERTIFICATE_FIXTURE_DIR
@@ -596,6 +597,33 @@ static void test_token_constants_match_the_uris(void)
 	                PKCS11_PORTAL_MODULE_NAME ".module");
 }
 
+/* THE PROCESSES THIS MODULE REFUSES TO RUN IN, and the ones it must not refuse.
+ * The list used to be a prefix match on "xdg-desktop-portal", which kept the
+ * module out of xdg-desktop-portal-webauth -- the first consumer it was written
+ * for, and a process that enumerates nothing and calls the portal exactly as an
+ * application does. Only the frontend and this project's own backend recurse. */
+static void test_excluded_programs_are_exact(void)
+{
+	g_assert_true(portal_program_is_excluded("xdg-desktop-portal"));
+	g_assert_true(portal_program_is_excluded("xdg-desktop-portal-certificate"));
+
+	g_assert_false(portal_program_is_excluded("xdg-desktop-portal-webauth"));
+	g_assert_false(portal_program_is_excluded("xdg-desktop-portal-gtk"));
+	g_assert_false(portal_program_is_excluded("xdg-desktop-portal-certificated"));
+	g_assert_false(portal_program_is_excluded("firefox"));
+	g_assert_false(portal_program_is_excluded(""));
+	g_assert_false(portal_program_is_excluded(NULL));
+
+	/* The test binary is not one of them, so the /proc/self/exe form agrees --
+	 * unless the environment kill switch is set, which is the one way any
+	 * process can be kept out. */
+	g_assert_false(portal_client_self_excluded());
+	g_setenv(PKCS11_PORTAL_ENV_DISABLE, "1", TRUE);
+	g_assert_true(portal_client_self_excluded());
+	g_unsetenv(PKCS11_PORTAL_ENV_DISABLE);
+	g_assert_false(portal_client_self_excluded());
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -618,6 +646,7 @@ int main(int argc, char** argv)
 	g_test_add_func("/module/objects/refusal-fingerprint",
 	                test_refusal_fingerprint_ignores_the_class);
 	g_test_add_func("/module/token/constants", test_token_constants_match_the_uris);
+	g_test_add_func("/module/token/excluded-programs", test_excluded_programs_are_exact);
 
 	return g_test_run();
 }

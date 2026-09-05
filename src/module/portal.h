@@ -69,8 +69,16 @@ void portal_client_release(PortalClient* client, const PortalGrant* grant);
  *  call. */
 gboolean portal_client_grant_gone(PortalClient* client, const PortalGrant* grant);
 
-/** Whether this process must not talk to the portal at all: the certificate
- *  backend and the portal frontend would recurse into themselves. */
+/** Whether this process must not talk to the portal at all: the portal frontend
+ *  and this project's own backend would recurse into themselves. Matched on the
+ *  executable's exact base name -- a portal BACKEND that merely starts with
+ *  "xdg-desktop-portal", such as xdg-desktop-portal-webauth, is an ordinary
+ *  consumer and is not excluded. PKCS11_PORTAL_CERTIFICATE_DISABLE=1 excludes
+ *  any process by hand. */
 gboolean portal_client_self_excluded(void);
+
+/** The name half of the check above, without reading /proc/self/exe, so that a
+ *  test can name programs it is not. */
+gboolean portal_program_is_excluded(const char* program);
 
 #endif /* PKCS11_PORTAL_PORTAL_H */

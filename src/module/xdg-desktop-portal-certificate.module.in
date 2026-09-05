@@ -10,8 +10,10 @@
 #
 # MUST NOT BE LOADED BY THE PORTAL ITSELF. xdg-desktop-portal and the
 # certificate backend enumerate PKCS#11 modules, and this one calls them back.
-# The module refuses to run in any process named xdg-desktop-portal*, the
-# backend skips it by name, and the disable-in below is the third fence.
+# The module refuses to run in either of those two by name, the backend skips it
+# by name, and the disable-in below is the third fence. OTHER portal backends
+# are ordinary consumers -- xdg-desktop-portal-webauth is the first one -- and
+# are deliberately not on the list.
 #
 # enable-in / disable-in take process base names and are NOT a security feature
 # (pkcs11.conf(5) says so). To offer the portal token to one application only:

@@ -6,10 +6,13 @@
 # of the backend and links none of it; see
 # docs/decisions/0011-client-side-pkcs11-module.md.
 
+# portal.c is here rather than beside module.c so that the tests link the real
+# D-Bus client's rules -- the exclusion list above all -- instead of a copy.
 module_sources = files(
   'der.c',
   'mechanism.c',
   'objects.c',
+  'portal.c',
 )
 
 module_deps = [glib_dep, gobject_dep, gio_dep, gnutls_dep, p11kit_dep]
@@ -43,7 +46,7 @@ endif
 
 pkcs11_portal_module = shared_library(
   'pkcs11-portal-certificate',
-  ['module.c', 'portal.c'],
+  ['module.c'],
   name_prefix: 'lib',
   dependencies: [module_core_dep],
   c_args: module_args,
