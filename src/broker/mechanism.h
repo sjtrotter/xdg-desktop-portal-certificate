@@ -28,8 +28,8 @@
  *  DECRYPTION IS RSA_OAEP AND NOTHING ELSE. PKCS#1 v1.5 decryption tells the
  *  caller whether the padding was well formed -- response 0 with a plaintext,
  *  or a failure -- and that is a Bleichenbacher oracle over the key on the
- *  card, worth more than the signing oracle every other rule in this file
- *  exists to prevent. The interface refuses v1.5 for Decrypt and says a backend
+ *  card, worth more than the raw-padding capability every other rule in this
+ *  file exists to prevent. The interface refuses v1.5 for Decrypt and says a backend
  *  must not implement it behind another mechanism name either. This one does
  *  not: certificate_mechanism_parse() with @for_decrypt accepts one name.
  *
@@ -57,9 +57,10 @@
  *     because it does not know the modulus.
  *
  *  Refusing to sign a caller-supplied blob of arbitrary length under a raw
- *  mechanism is deliberate: a signing oracle over unstructured bytes is a
+ *  mechanism is deliberate: raw v1.5 padding of unstructured bytes is a
  *  different and much larger thing to consent to than a signature over a
- *  digest of known length.
+ *  digest of known length. It does NOT make this less than a signing
+ *  capability over whatever the caller hashes; nothing here could.
  */
 
 /** The digest algorithms this backend will build a signature around. */

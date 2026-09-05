@@ -132,11 +132,16 @@ there. This backend resolves it one way, for every mechanism:
   calls `CKM_RSA_PKCS`. For `RSA_PSS` it builds `CK_RSA_PKCS_PSS_PARAMS`. For `ECDSA` it passes the
   digest through, which is what `CKM_ECDSA` wants.
 
-**Why not accept a raw blob under `CKM_RSA_PKCS`.** Because that is a signing oracle over
-unstructured bytes, and it is a materially larger thing for a user to consent to than a signature
-over a digest of known length: with it, a caller can have the card produce a signature over
-anything, including a structure that means something in a protocol nobody was thinking about.
-Requiring a named hash and a matching length costs a caller one option and removes that.
+**Why not accept a raw blob under `CKM_RSA_PKCS`.** Because raw v1.5 padding of unstructured
+bytes is a materially larger thing for a user to consent to than a signature over a digest of known
+length: with it, a caller can have the card produce a signature over a structure it chose whole,
+including one that means something in a protocol nobody was thinking about. Requiring a named hash
+and a matching length costs a caller one option and removes that.
+
+**And what it does not buy.** A caller can still hash any message it likes and get that digest
+signed — that is what a signing interface is. The rule establishes exactly two things: no signature
+over bytes the caller did not hash itself, and no raw v1.5 padding of an arbitrary blob. Everything
+else about the capability is bounded by the grant, not by the shape of `data`.
 
 The cost is that a TLS 1.1-and-earlier `CertificateVerify`, which signs a raw MD5+SHA1
 concatenation with no `DigestInfo`, cannot be produced through this interface. That is not a
@@ -237,8 +242,9 @@ the plaintext" or "that failed" — two outcomes that are distinguishable on the
 the user consented to once, repeated, that is Bleichenbacher's attack: it recovers plaintext and
 can forge a signature with the same key, for as long as the grant lasts, with no further consent
 and no rate limit on either side of the boundary. `Sign` is deliberately constrained to a digest of
-a named length so that it cannot be a signing oracle; letting `Decrypt` hand over the equivalent
-capability through a different door would make that constraint decorative. The impl XML says a
+a named length so that raw v1.5 padding of caller-chosen bytes is out of reach; letting `Decrypt`
+hand over the equivalent capability through a different door would make that constraint
+decorative. The impl XML says a
 backend **must not implement v1.5 decryption behind some other mechanism name either**, and the one
 branch in `src/broker/mechanism.c` that decrypts accepts one name.
 

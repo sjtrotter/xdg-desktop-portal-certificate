@@ -58,9 +58,9 @@ static void test_rsa_pkcs1_maps_and_wraps(void)
 	certificate_mechanism_clear(&mechanism);
 }
 
-/* A digest that is not the length the named hash produces is refused. Signing
- * an arbitrary blob under a raw mechanism is a signing oracle, and a much larger
- * thing to consent to than a signature over a digest of known length. */
+/* A digest that is not the length the named hash produces is refused. Raw v1.5
+ * padding of an arbitrary blob is a much larger thing to consent to than a
+ * signature over a digest of known length. */
 static void test_wrong_digest_length_is_refused(void)
 {
 	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");

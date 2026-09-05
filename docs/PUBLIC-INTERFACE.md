@@ -73,8 +73,11 @@ returns a `Request` the caller can `Close()`. The acquire response carries
   nothing else. A v1.5 decryption whose outcome the caller can observe is a padding
   oracle over the card's key, so it is a signing mechanism here and not a decryption one.
 - `data` on `Sign` is **always a digest** of the `hash` named in `parameters`, and its
-  length must be exactly that digest's length. That is what keeps `Sign` from being a
-  general signing oracle.
+  length must be exactly that digest's length. What that buys is narrow and worth stating
+  exactly: a caller cannot get a signature over bytes it did not hash itself, and cannot
+  have an arbitrary blob wrapped in raw PKCS#1 v1.5 padding and signed. It is still a
+  signing capability over any message the caller chooses to hash, as every signing API is;
+  the grant's purpose, expiry and `permitted_operations` are what bound it.
 - `reason` (≤ 256 chars) is application-supplied text, shown as such and never in the
   trusted identity position.
 - `allow_selection_memory` permits *preselection only*, is ignored for applications whose
