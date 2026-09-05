@@ -476,6 +476,15 @@ Not yet done, and it is the next thing worth doing, because NSS is the other hal
 2. In Firefox: Settings → Privacy & Security → Security Devices → Load, and give it
    `libpkcs11-portal-certificate.so`. (Firefox does not read p11-kit configuration; it wants the
    path.)
+
+   On a system whose Firefox and NSS build **do** go through p11-kit's proxy module, the
+   recommended way to try this is a per-user `.module` file with `enable-in: firefox` instead of
+   step 2's manual "Load" — the same mechanism `xdg-desktop-portal-webauth`'s
+   `tools/portal-stack.sh --live` uses for itself (see its `docs/TESTING.md` and
+   [0011](decisions/0011-client-side-pkcs11-module.md#enable-in--disable-in)): `enable-in` alone,
+   not `disable-in` alongside it — `pkcs11.conf(5)` says not to set both on one module, and
+   p11-kit only consults `enable-in` when both are present — so a file naming just `firefox` never
+   loads the module into anything else on the machine, and is removed by deleting the file.
 3. Start the portal stack with a card or the SoftHSM fixture, and visit a site that asks for a
    client certificate.
 4. **Expect the portal's chooser**, drawn by this backend, at the moment Firefox looks for a
