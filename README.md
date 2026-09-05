@@ -73,7 +73,7 @@ by the frontend and passed to this backend as an argument, so the process drawin
 window that names an application never had to guess which application it was.
 
 The frontend is a local-only branch, `experimental/certificate-webauthentication`, 18
-commits `3f46e3c..436bf2a`. It has been built and tested (84 pytest cases for this portal,
+commits `3f46e3c..436bf2a`. It has been built and tested (106 pytest cases for this portal,
 all green, against a python-dbusmock backend) and **has not been proposed to anyone**. Its
 interfaces live in the `org.freedesktop.portal.experimental.*` namespace, which is what
 upstream set aside for portals that are not finished — not a claim that this one has been
