@@ -19,7 +19,10 @@ informed by the edge cases Remmina's plugin documents but not derived from its s
 reason the original decision gave for choosing GPL-2.0-or-later therefore no longer applies.
 
 **It matches the code's actual destination.** `xdg-desktop-portal`, `xdg-desktop-portal-gtk` and
-`xdg-desktop-portal-gnome` are all LGPL-2.1-or-later. This repository already carries one file
+`xdg-desktop-portal-gnome` are all LGPL-2.1-or-later at project level [[S36](../SOURCES.md)] —
+with the caveat that xdg-desktop-portal's `meson.build` still declares `LGPL-2.0-or-later` against
+192 file headers that say 2.1, and that xdg-desktop-portal-gtk's per-file headers say "version 2 …
+or any later version". This repository already carries one file
 derived from `xdg-desktop-portal-gtk`/libgxdp under that licence
 (`src/ui/external-window.c`), and [UPSTREAMING.md](../UPSTREAMING.md) describes this backend's
 own eventual path into an out-of-tree or in-tree backend alongside those projects. Matching their licence removes the relicensing step the superseded decision below called out as

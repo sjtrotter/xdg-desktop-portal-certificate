@@ -73,8 +73,10 @@ by the frontend and passed to this backend as an argument, so the process drawin
 window that names an application never had to guess which application it was.
 
 The frontend is a local-only branch, `experimental/certificate-webauthentication`, 18
-commits `3f46e3c..436bf2a`. It has been built and tested (106 pytest cases for this portal,
-all green, against a python-dbusmock backend) and **has not been proposed to anyone**. Its
+commits on top of upstream `c95490a` — currently `bcedf85..209f9ff`, and rebased, so the
+ids move and the count is the stable part. It has been built and tested (106 pytest cases
+for this portal, all green, against a python-dbusmock backend) and **has not been proposed
+to anyone**. Its
 interfaces live in the `org.freedesktop.portal.experimental.*` namespace, which is what
 upstream set aside for portals that are not finished — not a claim that this one has been
 accepted. [docs/UPSTREAMING.md](docs/UPSTREAMING.md) has the whole picture, including what
@@ -104,13 +106,18 @@ to use it has exactly two options, and both are bad.
 PIN dialog, handle a card pulled out mid-flow, handle p11-kit's trust tokens that hold no client
 certificates, handle a token that reports empty by failing, handle the PIN retry counter you must
 not spend. Almost nobody does this. It is why smart-card sign-in works in the applications
-that embed NSS or load a PKCS#11 module themselves — Firefox, Thunderbird, Chromium,
-LibreOffice, Evolution — and in approximately nothing else on the desktop.
+that load a PKCS#11 module themselves — Firefox, Thunderbird, Chromium — and in
+approximately nothing else on the desktop. LibreOffice and Evolution look like exceptions
+and are not: they sign through NSS and load no module of their own, so they see a card only
+where the *distribution* has made NSS load `p11-kit-proxy.so`, which is a Fedora patch
+rather than upstream behaviour [[S54](docs/SOURCES.md)].
 
 **Get blanket access.** A Flatpak asks for [`--socket=pcsc`](https://docs.flatpak.org/en/latest/sandbox-permissions.html)
-and is then talking to `pcscd` directly: every card, every reader, every slot, every APDU, for the
-lifetime of the application, with no user-visible moment of consent. That is how Firefox and
-Chromium Flatpaks do it today, because there is nothing else.
+[[S43](docs/SOURCES.md)] and is then talking to `pcscd` directly: every card, every reader, every
+slot, every APDU, for the lifetime of the application, with no user-visible moment of consent.
+That is how Firefox's Flatpak does it today, because there is nothing else
+[[S53](docs/SOURCES.md)]. Chromium's Flathub manifest does not take that socket — it takes
+`--device=all` and `--filesystem=home`, which is broader rather than narrower.
 
 Both failures compound into a third: **there is no window the user can learn to trust.** The PIN
 prompt is the moment a person authorises a hardware token to authenticate as them. Today that
@@ -121,8 +128,8 @@ therefore trivially imitable.
 
 | | Mechanism | Who owns the PIN prompt |
 |---|---|---|
-| **Windows** | Card minidriver under the [Base CSP / smart card KSP](https://learn.microsoft.com/en-us/windows/security/identity-protection/smart-cards/smart-card-architecture); applications use CNG and certificates appear in the store by propagation | The OS (the Base CSP/KSP layer owns PIN entry and caching) |
-| **macOS** | [CryptoTokenKit](https://developer.apple.com/documentation/cryptotokenkit) driver publishes token keys into the Keychain; applications use ordinary Keychain/`SecKey` APIs | The system |
+| **Windows** | Card minidriver under the [Base CSP / smart card KSP](https://learn.microsoft.com/en-us/windows/security/identity-protection/smart-cards/smart-card-architecture); applications use CNG and certificates appear in the store by propagation | The OS — the Base CSP/KSP layer owns PIN entry and caching [[S51](docs/SOURCES.md)] |
+| **macOS** | [CryptoTokenKit](https://developer.apple.com/documentation/cryptotokenkit) driver publishes token keys into the Keychain; applications use ordinary Keychain/`SecKey` APIs | The system — a token extension "has no UI component" [[S52](docs/SOURCES.md)] |
 | **Linux** | PKCS#11 module loaded directly into every application that cares | Whichever application drew a dialog first |
 
 The Linux row is the whole reason for this project. The interesting part of the other two rows is
@@ -135,8 +142,9 @@ application a raw, general-purpose token interface and calls it mediation.
 
 xdg-desktop-portal brokers cryptographic credentials the way
 [`org.freedesktop.portal.Camera`](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Camera.html)
-brokers cameras: it does not hand over the device. An application calls `AcquireCredential` naming
-a purpose. The **frontend** works out who is asking and whether it may ask; **this backend** — not
+brokers cameras: it does not hand over the device, it hands back a PipeWire file descriptor
+[[S38](docs/SOURCES.md)]. An application calls `AcquireCredential` naming a purpose. The
+**frontend** works out who is asking and whether it may ask; **this backend** — not
 the application — shows a chooser naming the application *the frontend identified*, how well it is
 identified, the purpose in the backend's own words, and the candidate certificates on each token;
 the frontend returns a **grant**: the chosen certificate as DER, its chain and chain status, the
@@ -146,14 +154,14 @@ performs the operation and returns the result.
 The PIN never crosses D-Bus, the private key never leaves the card, and the application never holds
 a PKCS#11 handle. `Decrypt` works the same way and takes **`RSA_OAEP` and nothing else**: PKCS#1
 v1.5 decryption is refused by name, because answering "padding valid" or "padding invalid" for a
-card key over D-Bus is an oracle against that key. Every OAEP failure comes back in the same words,
-and one grant buys 32 decryptions.
+card key over D-Bus is an oracle against that key [[S49](docs/SOURCES.md)]. Every OAEP failure
+comes back in the same words [[S50](docs/SOURCES.md)], and one grant buys 32 decryptions.
 [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) has the detail.
 
 ## Current capabilities
 
 **This table is the one place that says what works.** Every other document in this repository
-defers to it; where one of them disagrees, this is right and it is a bug. Last checked 2026-09-04.
+defers to it; where one of them disagrees, this is right and it is a bug. Last checked 2026-09-05.
 
 | | Status | |
 |---|---|---|
@@ -196,7 +204,7 @@ org.freedesktop.portal.experimental.Certificate      [EXPERIMENTAL, gated]
                                       piv_slot, key_algorithms }
                  operation_policy { sign, decrypt }
                  requested_lifetime (clamped to 3600), interaction_mode,
-                 allow_selection_memory, reason (untrusted)
+                 allow_selection_memory, delegate_to_children, reason (untrusted)
   Sign / Decrypt     (o session, s parent_window, a{sv}) → o handle      [Request]
   RenewGrant         (o session, a{sv})                  → t expires_at
   ReleaseGrant       (o session)
@@ -249,8 +257,8 @@ What the application sees is one token, `Portal Certificate`, holding the one ce
 picked in the portal's chooser, its public key and its private key. The chooser appears the first
 time the application searches **for this token's credential** — by the object label, by a
 `CKA_ID`, or for the private key. There is no PIN prompt in the application: the token advertises
-`CKF_PROTECTED_AUTHENTICATION_PATH`, `C_Login` succeeds without doing anything, and the backend
-asks for the PIN in its own window at the first signature.
+`CKF_PROTECTED_AUTHENTICATION_PATH` [[S12](docs/SOURCES.md)], `C_Login` succeeds without doing
+anything, and the backend asks for the PIN in its own window at the first signature.
 
 ```console
 $ PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1 \
@@ -263,9 +271,10 @@ Object 0:
 
 The environment variable is there because **a search that names no object does not raise a
 chooser**, and `--list-all` is exactly that search. GnuTLS verifying any *server's* certificate
-chain sends issuer and subject lookups through every configured p11-kit module, this one included,
-at every handshake; answering those with a window put a chooser in front of a user who had only
-opened a sign-in page. Issuer, subject, serial, trust-category and class-only searches now answer
+chain sends issuer and subject lookups into p11-kit at every handshake, and on the system this was
+measured on they reached this module [[S19](docs/SOURCES.md)]; answering those with a window put a
+chooser in front of a user who had only opened a sign-in page. Issuer, subject, serial,
+trust-category and class-only searches now answer
 nothing while there is no grant, and never prompt. A URI naming `object=Portal%20Certificate` — the
 one an application actually imports by — does, which is why nothing above this line needs the
 variable.
@@ -281,8 +290,10 @@ pkcs11:model=portal-cert;manufacturer=freedesktop.org;token=Portal%20Certificate
 
 **For `g_tls_certificate_new_from_pkcs11_uris()`, append `;object=Portal%20Certificate`.** That is
 not decoration and it is not optional: GnuTLS's *single-object* import refuses a URI that names no
-object and wants `object=` (`CKA_LABEL`) or `id=`, while *enumeration* — `p11tool --list-all`,
-`gnutls_pkcs11_obj_list_import_url4` — is happy with the token URI above. `CKA_LABEL` is therefore
+object and wants `object=` (`CKA_LABEL`) or `id=` [[S17](docs/SOURCES.md)], while *enumeration* —
+`p11tool --list-all`, `gnutls_pkcs11_obj_list_import_url4` — is happy with the token URI above
+[[S18](docs/SOURCES.md)]. The constructor itself takes no module argument, so the module has to be
+configured in p11-kit before the URI can resolve [[S20](docs/SOURCES.md)]. `CKA_LABEL` is therefore
 a constant rather than the certificate's common name, which an application could not know in
 advance; the certificate's real identity is in its DER.
 
@@ -297,11 +308,12 @@ Three things worth knowing before enabling it:
 - **The module is opt-in by name.** The shipped `xdg-desktop-portal-certificate.module` carries
   `enable-in: xdg-desktop-portal-webauth, WebKitNetworkProcess` — the two processes one mutual-TLS
   handshake through WebKitGTK needs — and no other consumer loads it. p11-kit matches the base name
-  of `argv[0]`. Add `firefox, thunderbird` (the file has the line commented, with the NSS caveat)
-  or write your own file into `~/.config/pkcs11/modules`, which overrides the system one. Do not
+  of `argv[0]` [[S5](docs/SOURCES.md)]. Add `firefox, thunderbird` (the file has the line
+  commented, with the NSS caveat) or write your own file into `~/.config/pkcs11/modules`, whose
+  fields take precedence over the system file of the same name [[S7](docs/SOURCES.md)]. Do not
   add `disable-in` beside `enable-in`: `pkcs11.conf(5)` says not to set both, and p11-kit consults
-  only the allowlist when both are there. Neither list is a security feature; both decide where a
-  window may appear.
+  only the allowlist when both are there [[S5](docs/SOURCES.md), [S6](docs/SOURCES.md)]. Neither
+  list is a security feature; both decide where a window may appear.
 
 Environment, for a consumer that knows more than PKCS#11 lets it say:
 `PKCS11_PORTAL_CERTIFICATE_PURPOSE` (`client_auth` by default),
@@ -347,7 +359,8 @@ frontend branch's dependency, not a backend's.
 **gcr-4 is optional** (`-Dgcr=auto`). With it, the PIN can be asked for by the desktop
 shell's own system prompter instead of by a window this backend draws:
 `--pin-prompt=auto|gtk|system`, where `auto` — the default — means the system prompter when
-`org.gnome.keyring.SystemPrompter` is on the session bus. Without gcr-4 the option does not
+`org.gnome.keyring.SystemPrompter` has an owner on the session bus or is activatable there
+[[S55](docs/SOURCES.md)]. Without gcr-4 the option does not
 exist and the in-process window is the only prompt. **What that moves is where the PIN is
 typed, not whether this process holds one**: `C_Login` takes a PIN, so it still arrives
 here, into the same locked, wiped, non-dumpable page.
@@ -370,8 +383,9 @@ Nothing is logged in for this and no PIN is asked for.
 **Only hardware tokens are offered by default.** p11-kit on an ordinary desktop presents
 software key stores as tokens — the GNOME keyring's module is the usual one — and a window
 headed "security token" that offers keys out of the user's home directory says something
-untrue about where the key is. A token whose slot does not set `CKF_HW_SLOT` is skipped, and
-`--list-tokens` prints it anyway with a `SKIPPED` line saying why. `--allow-software-tokens`
+untrue about where the key is. A token whose slot does not set `CKF_HW_SLOT`
+[[S11](docs/SOURCES.md)] is skipped, and `--list-tokens` prints it anyway with a `SKIPPED`
+line saying why. `--allow-software-tokens`
 turns the default off. It is a default and **not a security boundary**: the flag is a claim
 by a module that is already loaded into this process.
 
@@ -475,9 +489,9 @@ data/         the impl interface XML (verbatim copies of the branch's), certific
               the D-Bus service file
 tests/        the unit tests, their fixture certificates, and the SoftHSM device test
 tools/        dev-stack.sh, certificate-e2e.py, softhsm-fixture.sh, ui-smoke.sh,
-              trigger-certificate.sh
+              module-smoke.sh, trigger-certificate.sh
 docs/         architecture, both interfaces, security, testing, spikes, roadmap,
-              upstreaming, decisions
+              upstreaming, sources, decisions
 ```
 
 ## Documents
@@ -493,6 +507,7 @@ docs/         architecture, both interfaces, security, testing, spikes, roadmap,
 | [docs/TESTING.md](docs/TESTING.md) | **the exact commands**, including the run with a real card in a reader |
 | [docs/SPIKES.md](docs/SPIKES.md) | the questions that decide whether this is buildable |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | phases, effort estimate, and its assumptions |
+| [docs/SOURCES.md](docs/SOURCES.md) | the primary source behind every claim this repository makes about another system |
 | [docs/decisions/](docs/decisions/) | why the shape is the shape |
 
 ## License
@@ -510,5 +525,6 @@ attribution kept. Consumers only speak D-Bus, so the licence places no constrain
 
 These documents and the code were written with AI assistance — Anthropic Claude and OpenAI
 Codex — under the author's direction, and the author is responsible for every claim in them. The
-prior-art citations were checked against primary sources; the ones that could not be verified are
-called out where they appear.
+prior-art citations were checked against primary sources, which are listed in
+[docs/SOURCES.md](docs/SOURCES.md); where a source confirms less than the claim did, the claim was
+narrowed and the entry says so.

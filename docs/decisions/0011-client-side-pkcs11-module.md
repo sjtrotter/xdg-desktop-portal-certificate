@@ -16,7 +16,8 @@ fuzzing target. None of it was reachable, because the frontend branch deliberate
 
 Meanwhile the consumers that make the project worth doing cannot call the D-Bus API at all.
 WebKitGTK's network process reaches TLS through glib-networking and
-`g_tls_certificate_new_from_pkcs11_uris()`. Firefox and Thunderbird reach it through NSS.
+`g_tls_certificate_new_from_pkcs11_uris()` [[S20](../SOURCES.md), [S21](../SOURCES.md),
+[S22](../SOURCES.md)]. Firefox and Thunderbird reach it through NSS.
 LibreOffice reaches it through NSS. Every one of them wants a `CK_FUNCTION_LIST`, and every one of
 them already loads whatever p11-kit has configured.
 
@@ -113,7 +114,8 @@ application because it is the one that called.
 
 - **The application process holds a PKCS#11 handle to a synthetic token.** It holds no key, no PIN
   and no card. `CKA_VALUE` on the private key answers `CKR_ATTRIBUTE_SENSITIVE`; there is nothing
-  behind it to leak.
+  behind it to leak. That attribute is this module's own, on its own synthetic object — PKCS#11
+  defines no `CKA_VALUE` for an RSA private key [[S15](../SOURCES.md)].
 - **The module is not a trust boundary. The portal is.** Everything the module refuses, the portal
   refuses again on the other side of D-Bus. The refusals here are for the sake of consumers that
   would otherwise misbehave, not for the sake of a boundary. Anyone hardening this file should
@@ -128,8 +130,9 @@ application because it is the one that called.
 - **One handshake still loads the module twice; it no longer asks the user twice.** Measured with
   WebKitGTK: one TLS handshake resolves the URI **twice**, in two processes — the application's
   own, to build a `GTlsCertificate`, because `webkit_credential_new_for_certificate()` takes an
-  object and not a URI; and WebKit's network process, which owns the handshake and re-resolves the
-  URI itself. Two p11-kit module instances and two `AcquireCredential` calls, which for a long
+  object and not a URI [[S24](../SOURCES.md)]; and WebKit's network process, which owns the
+  handshake and re-resolves the URI itself [[S22](../SOURCES.md)]. Two p11-kit module instances
+  and two `AcquireCredential` calls, which for a long
   time meant **two choosers about three seconds apart asking the same question**, and one PIN
   prompt, because only the network process signs.
 
@@ -169,16 +172,19 @@ application because it is the one that called.
   process would never import the certificate and only the network process would ever load the
   module — one instance, one grant, no delegation needed. It is the better shape and it is not
   available: `webkit_credential_new_for_certificate()` takes a `GTlsCertificate`, there is no
-  `_for_certificate_uri()`, and adding one is a WebKitGTK release cycle away from anything this
-  project can test. It would also fix only WebKit; delegation is in the portal interface, so it
+  `_for_certificate_uri()` [[S24](../SOURCES.md)], and adding one is a WebKitGTK release cycle
+  away from anything this project can test. It would also fix only WebKit; delegation is in the
+  portal interface, so it
   answers the same question for any consumer whose work spans a process tree. If such an API
   appears, this backend should use it and stop setting the environment variable: one process that
   needs the card is better than two that agree about it.
 
 ### Consequences for the login model
 
-The token sets `CKF_LOGIN_REQUIRED` **and** `CKF_PROTECTED_AUTHENTICATION_PATH`. The second is not
-a convenience: it is what stops a TLS stack asking the user for a PIN it must never receive. With
+The token sets `CKF_LOGIN_REQUIRED` **and** `CKF_PROTECTED_AUTHENTICATION_PATH`
+[[S12](../SOURCES.md)]. The second is not a convenience: it is what stops a TLS stack asking the
+user for a PIN it must never receive — WebKitGTK has a whole authentication scheme for exactly
+that request [[S23](../SOURCES.md)]. With
 it, GnuTLS and NSS call `C_Login(CKU_USER, NULL, 0)`, the module answers `CKR_OK` without doing
 anything, and the portal's backend collects the PIN in its own window at the first `Sign`. That is
 [SPIKES.md](../SPIKES.md) S2's "lazy login", now answered against a module rather than in theory.
@@ -190,7 +196,7 @@ side of the boundary for them to unlock.
 **This module must never be loaded by the portal frontend or by the certificate backend.** The
 backend enumerates p11-kit's configured modules; loading this one would make it enumerate a token
 whose enumeration is a call back into itself. Three fences, because
-`pkcs11.conf(5)` says `disable-in` "is not a security feature":
+`pkcs11.conf(5)` says `disable-in` "is not a security feature" [[S5](../SOURCES.md)]:
 
 1. `certificate_module_is_portal_module()` in `src/tokens/discovery.c`, applied to the configured
    modules and to an explicit `--module` path;
@@ -224,16 +230,18 @@ The shipped file now carries an **`enable-in:` allowlist**:
 enable-in: xdg-desktop-portal-webauth, WebKitNetworkProcess
 ```
 
-p11-kit matches the **base name of `argv[0]`**. Those two are the pair one mutual-TLS handshake
-needs: the web-authentication backend, which must build a `GTlsCertificate` before WebKit will
+p11-kit matches the **base name of `argv[0]`** [[S5](../SOURCES.md), [S6](../SOURCES.md)]. Those
+two are the pair one mutual-TLS handshake needs: the web-authentication backend, which must
+build a `GTlsCertificate` before WebKit will
 carry one anywhere, and WebKitGTK's network process, which owns the handshake and resolves the URI
 itself. `firefox, thunderbird` is in the file as a commented line with the NSS caveat attached.
 
 **`disable-in:` is gone from the file, and must not come back.** `pkcs11.conf(5)` says "Do not
 specify both enable-in and disable-in for the same module", and p11-kit's
-`is_module_enabled_unlocked()` returns out of the `enable-in` branch before it looks at
-`disable-in` — so with both set the denylist is dead weight that reads as though it were doing
-something. The two portal processes are excluded because they are not on the allowlist, and by the
+`is_module_enabled_unlocked()` takes the `enable-in` branch and never reaches `disable-in` — so
+with both set the denylist is dead weight that reads as though it were doing something
+[[S5](../SOURCES.md), [S6](../SOURCES.md)]. The two portal processes are excluded because they
+are not on the allowlist, and by the
 two fences in code above.
 
 Neither list is a security control. Both are ways to decide where a window may appear.
@@ -249,9 +257,11 @@ consumer wants a credential. The first version of that gate asked only whether t
 as conservative and is not, because **certificate searches are not only about the client's
 certificate**. GnuTLS verifying a *server's* chain calls `gnutls_pkcs11_get_raw_issuer()` and
 `_gnutls_pkcs11_crt_is_known()`, and those issue `C_FindObjectsInit` for `CKO_CERTIFICATE` with
-`CKA_SUBJECT`, `CKA_ISSUER` or a trust category **across every p11-kit module configured on the
-machine**, this one included, at every handshake. The live Entra run on 2026-09-05 measured the
-consequence: a chooser two seconds after the sign-in window opened, before any client-certificate
+`CKA_SUBJECT`, `CKA_ISSUER` or a trust category, through p11-kit, at every handshake
+[[S19](../SOURCES.md)]. How far that sweep reaches is a property of the GnuTLS build and the
+trust-store configuration rather than a guarantee; on the machine this ran on it reached this
+module. The live Entra run on 2026-09-05 measured the consequence: a chooser two seconds after
+the sign-in window opened, before any client-certificate
 challenge, for a certificate nothing had asked for.
 
 **A search now acquires a credential only when it can mean nothing else.** The table is in
@@ -280,8 +290,10 @@ first pass. That is the right trade: the enumeration is not what the user was as
 import is.
 
 A deployment adds names by editing the installed file, or by dropping its own
-`xdg-desktop-portal-certificate.module` into `~/.config/pkcs11/modules`, which overrides the
-system one entirely. `tools/module-smoke.sh`, `tools/ui-smoke.sh` and the web-auth repository's
+`xdg-desktop-portal-certificate.module` into `~/.config/pkcs11/modules`, whose fields take
+precedence over the system file of the same name — p11-kit merges the two, user first, rather
+than replacing one with the other [[S7](../SOURCES.md)]. `tools/module-smoke.sh`,
+`tools/ui-smoke.sh` and the web-auth repository's
 `tools/portal-stack.sh` all write their own file into a private `XDG_CONFIG_HOME` and are
 unaffected by what is shipped; `portal-stack.sh --live` writes the real per-user file with the same
 `enable-in` line as above.
@@ -296,8 +308,9 @@ unaffected by what is shipped; `portal-stack.sh --live` writes the real per-user
   `tools/portal-stack.sh` runs both portals on one private bus and signs in through this backend's
   chooser and PIN prompt, headless, with the card's common name in the server's log. The mechanism
   the handshake actually used is `RSA_PSS`, because TLS 1.3 asks for it — `module-smoke.sh`'s
-  `pkcs11-tool` phase only ever exercised v1.5. NSS and the OpenSSL 3 provider are not answered and
-  remain S1's open half.
+  `pkcs11-tool` phase only ever exercised v1.5, and TLS 1.3 requires PSS for an RSA key
+  [[S25](../SOURCES.md)]. NSS and the OpenSSL 3 provider are not answered and remain S1's open
+  half.
 - **The token's names are a contract with another repository.**
   `src/module/portal-token.h` is the same file as `xdg-desktop-portal-webauth`'s
   `backend/src/tls/portal-token.h` — **byte for byte, licence line included**, since that project
@@ -307,18 +320,20 @@ unaffected by what is shipped; `portal-stack.sh --live` writes the real per-user
   constant is changing an interface, and `cmp` between the two copies is the check.
 - **`CKA_LABEL` is a constant, not the certificate's subject CN**, and that is a consequence of
   the consumer rather than a preference. GnuTLS's single-object import — the one behind
-  `g_tls_certificate_new_from_pkcs11_uris()` — refuses a URI that names no object, so a consumer
-  must be able to write `object=` down before anything has been chosen, and it cannot know a
-  common name in advance. A token holding exactly one credential can be allowed to name it after
+  `g_tls_certificate_new_from_pkcs11_uris()` — refuses a URI that names no object
+  [[S17](../SOURCES.md)], so a consumer must be able to write `object=` down before anything has
+  been chosen, and it cannot know a common name in advance. A token holding exactly one
+  credential can be allowed to name it after
   itself. The certificate's real identity is in its DER.
 
   **The contract's URIs carry `object=`, and they did not at first.** Measured, not assumed:
   `pkcs11:model=portal-cert;manufacturer=freedesktop.org;token=Portal%20Certificate;type=cert`
   is refused by `gnutls_x509_crt_import_url()` and by
   `g_tls_certificate_new_from_pkcs11_uris()` — GnuTLS's `find_single_obj_cb()` wants `object=`
-  (CKA_LABEL) or `id=` and fails with `GNUTLS_E_PKCS11_REQUESTED_OBJECT_NOT_AVAILABLE` before any
-  chooser appears; the same URI with `;object=Portal%20Certificate` succeeds and completes the
-  handshake. Enumeration accepts either. The first version of the contract named only the token,
+  (CKA_LABEL) or `id=`, and the import fails before any chooser appears; the same URI with
+  `;object=Portal%20Certificate` succeeds and completes the handshake. Enumeration accepts either
+  [[S17](../SOURCES.md), [S18](../SOURCES.md)]. The first version of the contract named only
+  the token,
   which left every single-object consumer to append the attribute itself and got the web-auth
   backend exactly nowhere; `XDG_PORTAL_CERTIFICATE_CERT_URI` and `_KEY_URI` now carry it,
   `XDG_PORTAL_CERTIFICATE_TOKEN_URI` is the token-only form an enumerating consumer wants, and
@@ -328,6 +343,7 @@ unaffected by what is shipped; `portal-stack.sh --live` writes the real per-user
   every time. The grant now ends at `C_Finalize`, at its own expiry, or when the portal
   invalidates it.
 - **TLS 1.0 and 1.1 cannot work through this module and will not be made to.** They sign an
-  MD5 ‖ SHA-1 concatenation with `CKM_RSA_PKCS`, which has no hash name the portal's `Sign` will
-  accept and no DigestInfo to parse. It is refused with `CKR_MECHANISM_INVALID`. Both protocols
+  MD5 ‖ SHA-1 concatenation with `CKM_RSA_PKCS` [[S26](../SOURCES.md)], which has no hash name the
+  portal's `Sign` will accept and no DigestInfo to parse. It is refused with
+  `CKR_MECHANISM_INVALID`. Both protocols
   are long dead.

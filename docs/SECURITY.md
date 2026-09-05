@@ -52,7 +52,7 @@ such throughout the rest of this document.
 | The PIN never leaves the process, never enters a GVariant, a GError or a log line | `src/ui/pin.c` | there is no entry point that returns a PIN; the caller passes a login function |
 | **Which process draws the PIN field is a choice, and it is recorded**: `gtk` (this backend's window) or `system` (the desktop shell's prompter, over `GcrSystemPrompt`). `--pin-prompt=auto|gtk|system`; auto picks `system` when `org.gnome.keyring.SystemPrompter` has an owner or is activatable | `src/ui/pin.c`, `pin_impl()`; `src/ui/pin-gtk.c`; `src/ui/pin-system.c` | every rule in this section holds for both, and the journal says which was used (`pin-prompt-selected detail=...`). `tests/test-pin-system.c` drives the system path end to end against gcr's own prompter on a private bus; `tools/ui-smoke.sh --pin-prompt=system` runs the whole stack through it |
 | The system prompter is **never chosen by default by anything but `main()`** | `src/ui/pin.c`, `pin_prompt_kind` | the module default is `gtk`. Linking this code must not be enough to start putting prompts on a session's shell because a name happened to be on the bus, and a test that reached the operator's own prompter would be a test that spends a PIN attempt |
-| No prompt this backend opens ever offers "remember" | `src/ui/pin-gtk.c` (no such control); `src/ui/pin-system.c`, `gcr_prompt_set_choice_label(NULL)` | `tests/test-pin-system.c` asserts the choice label reaching the prompter is empty and that `password-new` is false |
+| No prompt this backend opens ever offers "remember" | `src/ui/pin-gtk.c` (no such control); `src/ui/pin-system.c`, `gcr_prompt_set_choice_label(NULL)` [[S56](SOURCES.md)] | `tests/test-pin-system.c` asserts the choice label reaching the prompter is empty and that `password-new` is false |
 | A **login timeout**: a `C_Login` that has not returned after `--login-timeout` seconds (60 by default, 0 disables) takes the prompt down, fails the interaction with its own reason, and abandons the login if it lands afterwards | `src/ui/pin.c`, `on_login_timeout()`; `src/broker/operations.c`, `CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT` | `tests/test-pin-system.c` `/pin-system/login-timeout`. **The residual is stated below**: the module call itself cannot be interrupted, so the caller is still answered only when it returns |
 | The PIN buffer is page-aligned, `mlock()`ed where the rlimit allows, `MADV_DONTDUMP`ed, and `explicit_bzero()`ed on every exit path | `src/ui/pin.c`, `PinBuffer` | wiped before the callback runs, on success, failure, cancel and window destroy; an `mlock()` failure is warned about once and does not refuse the login |
 | The login worker gets a **private copy** of the PIN that it owns and wipes itself | `src/ui/pin.c`, `pin_buffer_dup()` | `tests/test-cancellation.c` asserts the worker still sees the whole PIN after the window was cancelled |
@@ -75,7 +75,7 @@ such throughout the rest of this document.
 | Login is **lazy**: at first private-key use, not at grant time | `src/broker/operations.c` | the UI smoke run shows the PIN window appearing at `Sign` |
 | Every mechanism and parameter is re-validated against the mechanism **and the key** | `src/broker/mechanism.c` | `tests/test-mechanism.c`, including the RSA-PSS salt that does not fit |
 | `data` is a digest of a stated length, never an arbitrary blob | `src/broker/mechanism.c` | `tests/test-mechanism.c` |
-| **`Decrypt` is `RSA_OAEP` only**; PKCS#1 v1.5 decryption is refused by name | `src/broker/mechanism.c` | a v1.5 decryption whose outcome the caller can observe is a Bleichenbacher oracle over the card's key. `tests/test-mechanism.c`, `tests/test-broker-device.c` (an openssl-encrypted ciphertext, round tripped through the token) and `tests/test-impl-dbus.c` |
+| **`Decrypt` is `RSA_OAEP` only**; PKCS#1 v1.5 decryption is refused by name | `src/broker/mechanism.c` | a v1.5 decryption whose outcome the caller can observe is a Bleichenbacher oracle over the card's key [[S49](SOURCES.md), [S50](SOURCES.md)]. `tests/test-mechanism.c`, `tests/test-broker-device.c` (an openssl-encrypted ciphertext, round tripped through the token) and `tests/test-impl-dbus.c` |
 | Every `Decrypt` failure is reported as **one indistinguishable error**; the real reason goes to the journal | `src/broker/operations.c` | `tests/test-broker-decrypt.c` drives two different internal causes and asserts the caller sees the same domain, code and words. It equalises the answer, not the timing |
 | A grant buys **32 decryptions**, charged per attempt, checked and incremented **under the device lock** | `src/broker/operations.c`, `CERTIFICATE_MAX_DECRYPTS_PER_GRANT` | `tests/test-broker-decrypt.c`. Nothing else on either side counts them, and every practical attack on RSA decryption needs orders of magnitude more; re-consenting is what buys more. The unlocked check before the mechanism is parsed is a fast refusal, not the one that decides: read-then-increment without the lock is a budget two callers can both spend the last unit of |
 | An OAEP ciphertext must be **exactly one modulus** long, and the label at most 256 bytes | `src/broker/mechanism.c` | `tests/test-mechanism.c`, `tests/test-broker-device.c`. The frontend cannot check the length: it does not know the modulus |
@@ -91,7 +91,7 @@ such throughout the rest of this document.
 | Every PKCS#11 call runs off the main thread, `GetCapabilities` and the closing `C_Logout`/`C_CloseSession` included — **with one deliberate exception, at shutdown** | `src/broker/`, `src/tokens/discovery.c`, `src/certificate-impl.c`, `src/session-impl.c` | `GetCapabilities` used to enumerate every slot from the method handler, and `Close()`, expiry, token removal and frontend loss used to close the card from the main thread — under a lock a worker holds for the whole of a `C_Login`, so the PIN window stopped redrawing while it happened. Both now run on workers (`certificate_impl_session_release_device_async()`). The exception is `certificate_impl_shutdown()`, which waits **up to two seconds** for those workers so that `C_Logout` is issued before the process exits; when the wait runs out it says so in the journal and exits anyway. Session finalize also closes synchronously, and cannot race a worker: the asynchronous close holds a reference for its whole life, so by then there is nothing left to close |
 | Every request is tied to one `GCancellable` that `Close()` cancels, and a cancelled operation answers 1 rather than 2 | `src/request-impl.c`, `src/certificate-impl.c` | `tests/test-cancellation.c` |
 | Discovery does not log in | `src/tokens/discovery.c` | `tests/test-broker-device.c` |
-| **Only hardware tokens are offered by default.** A token whose slot does not set `CKF_HW_SLOT` is skipped unless `--allow-software-tokens` is given or the module was named with `--module` | `src/tokens/discovery.c`, `token_skip_reason()` | p11-kit on an ordinary desktop presents software key stores as tokens, and a window headed "security token" offering keys from the user's home directory says something untrue about where the key is. `--list-tokens` prints the skipped tokens and the reason. **Not a security boundary**: the flag is a claim by a module already loaded into this process |
+| **Only hardware tokens are offered by default.** A token whose slot does not set `CKF_HW_SLOT` [[S11](SOURCES.md)] is skipped unless `--allow-software-tokens` is given or the module was named with `--module` | `src/tokens/discovery.c`, `token_skip_reason()` | p11-kit on an ordinary desktop presents software key stores as tokens, and a window headed "security token" offering keys from the user's home directory says something untrue about where the key is. `--list-tokens` prints the skipped tokens and the reason. **Not a security boundary**: the flag is a claim by a module already loaded into this process |
 | The chooser and the PIN window follow the session's light/dark setting | `src/main.c`, `follow_colour_scheme()` | read from GSettings rather than from the settings portal, because `PR_SET_DUMPABLE(0)` makes the portal unable to identify this process. Measured, both ways; the decision is recorded under **PIN handling** below |
 | The reference counts on the objects a worker thread can outlive are atomic | `src/ui/pin.c`, `src/ui/chooser.c`, `src/broker/operations.c` | `g_atomic_int_inc` / `g_atomic_int_dec_and_test`. They were plain `int`s defended by a comment about which callbacks happen to be on the main thread today |
 | The scratch directories `tools/` writes into and `rm -rf`s must be under `$TMPDIR` **and** carry this project's marker file | `tools/lib.sh`, `fixture_check()` | the previous check was ownership only, which a mistyped `SOFTHSM_DIR` pointing at `$HOME` passes. A directory that exists without the marker is refused, not emptied |
@@ -117,7 +117,8 @@ Stated plainly, because the temptation to overclaim here is enormous:
 
 - **For sandboxed applications this can be a strong boundary.** A Flatpak or Snap has an identity a
   containment framework can vouch for, cannot reach `pcscd` without a permission it need no longer
-  hold, cannot read the service's memory, and cannot see the PIN. Replacing `--socket=pcsc` with a
+  hold, cannot read the service's memory, and cannot see the PIN. Replacing `--socket=pcsc`
+  [[S43](SOURCES.md)] with a
   consented, scoped, revocable grant is a real improvement in a real threat model.
 - **For ordinary host applications this is an identity-and-consent boundary, not an isolation
   boundary.** It makes the user's decision explicit, attributable and revocable. It does not stop a
@@ -186,8 +187,12 @@ xdg-desktop-portal's approach is no longer "the model to follow": it is the impl
 the frontend is xdg-desktop-portal. Sandboxed callers have identities supplied by their containment
 framework; host applications are normally inferred through standardised cgroups; and a host
 registry lets an unsandboxed peer associate itself with a desktop-file app ID while the
-[documentation warns that mechanism is expected to change](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.host.portal.Registry.html).
-`xdp_invocation_get_app_info()` is where it happens.
+documentation warns that the mechanism "is expected to eventually be deprecated and may be
+removed" — a disclaimer on the
+[API reference](https://flatpak.github.io/xdg-desktop-portal/docs/api-reference.html) rather than
+on the [Registry interface page](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.host.portal.Registry.html)
+itself [[S40](SOURCES.md)].
+`xdp_invocation_get_app_info()` is where it happens [[S37](SOURCES.md)].
 
 The frontend resolves identity into three honesty levels, forwards which one it got as
 `app_identity_level`, and **this backend displays it**:
@@ -289,7 +294,7 @@ used, once, as `pin-prompt-selected detail=gtk|system`.
 
 | | `gtk` | `system` |
 |---|---|---|
-| Who draws the field | this backend | the desktop shell (gnome-shell), over `GcrSystemPrompt` |
+| Who draws the field | this backend | the desktop shell (gnome-shell), over `GcrSystemPrompt` [[S55](SOURCES.md)] |
 | Where the typed characters first land | a `GtkPasswordEntry` in this process | the shell's own entry, in the shell |
 | How the PIN reaches `C_Login` | already here | gcr's secret exchange — an ephemeral Diffie–Hellman over D-Bus, so the plaintext is not in a bus message — into gcr's secure memory, then copied into the same locked page |
 | Parented to the requesting application's window | yes, through `xdg_foreign` or an X11 XID | **no**, in practice: `GcrPrompt:caller-window` is sent with the portal's scheme stripped, and gnome-shell's prompter ignores it and draws a session-modal dialog of its own |
@@ -323,8 +328,11 @@ reached the interaction fails with `no_display` and says so in the journal — t
 fallback to the in-process window, because which process asked for the PIN is a fact about the
 interaction and must not depend on timing.
 
-**One gcr defect is worked around here and is worth knowing about.** gcr 4.4 completes a prompt
-round *twice*, and closing the prompt is not enough to avoid it. `perform_close()` — which
+**One gcr defect is worked around here and is worth knowing about — and it is not a reported
+one.** Nothing in gcr's issue tracker, merge requests or NEWS describes it [[S57](SOURCES.md)];
+what follows is a reading of gcr 4.4's source, plus a test here that crashed without the
+workaround. gcr 4.4 completes a prompt round *twice*, and closing the prompt is not enough to
+avoid it. `perform_close()` — which
 `gcr_prompt_close()`, a `PromptDone` from the prompter, and the prompter's bus name vanishing all
 reach — takes the round's pending result and completes it from an idle; if the `PerformPrompt`
 method call is still on the wire and then comes back an error,
@@ -393,7 +401,8 @@ unanswered and then fails it, and asserts the log line.
   grant time. Pre-logging in spends the user's presence before it is needed, and across the facade
   it would buy nothing anyway, because **PKCS#11 login state is per application and does not cross
   the forwarding boundary**.
-- **Protected authentication path**: when the token sets `CKF_PROTECTED_AUTHENTICATION_PATH`, the
+- **Protected authentication path**: when the token sets `CKF_PROTECTED_AUTHENTICATION_PATH`
+  [[S12](SOURCES.md)], the
   login is made with a null PIN and the token or reader collects the secret. The service shows an
   instructional dialog **with no editable PIN field** and never receives the PIN. Emulating a PIN
   field for such a token would be a lie about where the secret goes. **The `FINAL_TRY`
@@ -403,7 +412,10 @@ unanswered and then fails it, and asserts the log line.
 - **Retry handling.** Remaining attempts are displayed only when the token reports them reliably and
   are **never invented**; the user is warned before the final known attempt, and the flags are
   **re-read from the token after every refusal**, because `CKF_USER_PIN_FINAL_TRY` is normally set
-  by the attempt that just failed. Once it is set, the prompt requires a second, explicit
+  by the attempt that just failed. PKCS#11 defines the flag but says nothing about when a token
+  updates it, and lets a token leave it false always [[S13](SOURCES.md)], so the re-read is an
+  operational rule rather than something the specification promises. Once it is set, the prompt
+  requires a second, explicit
   confirmation before spending the attempt — unconditionally, protected authentication paths
   included — and one prompt offers at most three attempts in total. An **empty** answer is not an
   attempt at all: it is refused before any submission, in `src/ui/pin.c` so that both
@@ -560,7 +572,9 @@ misled about what this token is:
   offer *administration*;
 - `CKF_RW_SESSION` is refused with `CKR_TOKEN_WRITE_PROTECTED`; SO login with
   `CKR_USER_TYPE_INVALID`;
-- the private key has **no `CKA_VALUE`**: that attribute and the RSA secret factors answer
+- the private key has **no `CKA_VALUE`** to read — an attribute this module defines on its own
+  synthetic object, though PKCS#11 defines none for an RSA private key [[S15](SOURCES.md)]:
+  that attribute and the RSA secret factors answer
   `CKR_ATTRIBUTE_SENSITIVE`. `CKA_SENSITIVE` is `TRUE` and `CKA_EXTRACTABLE` is `FALSE`, which is
   what the token behind the portal reports and what a consumer must be told;
 - only the granted leaf certificate, its public key and its private key are objects. The
@@ -580,7 +594,8 @@ misled about what this token is:
 **A search has to name the credential before a chooser appears.** The window opens at
 `C_FindObjectsInit`, so which searches may open one is a security question and not an ergonomic
 one. It used to be "any search naming a class this token has", which is wrong in a way that only a
-real handshake shows: GnuTLS verifying a **server's** certificate chain issues
+real handshake shows [[S19](SOURCES.md)]: GnuTLS verifying a **server's** certificate chain
+issues
 `C_FindObjectsInit` for `CKO_CERTIFICATE` with `CKA_ISSUER`, `CKA_SUBJECT` or a trust category
 through **every configured p11-kit module**, so a sign-in page that had asked for nothing raised a
 chooser for this token seconds after it loaded. Measured against a live identity provider on
@@ -610,7 +625,7 @@ never a PKCS#11 URI, and there is no PIN to leak.
 **The recursion rule.** This module must never be loaded by xdg-desktop-portal or by this backend:
 the backend enumerates p11-kit's modules, and this one answers by calling the portal that calls the
 backend. Three fences, because `pkcs11.conf(5)` states plainly that neither `enable-in` nor
-`disable-in` is a security feature: `certificate_module_is_portal_module()` in
+`disable-in` is a security feature [[S5](SOURCES.md)]: `certificate_module_is_portal_module()` in
 `src/tokens/discovery.c` (applied to configured modules *and* to an explicit `--module` path), the
 module's own refusal to run in a process whose executable is named `xdg-desktop-portal` or
 `xdg-desktop-portal-certificate`, and the installed module file's `enable-in:` allowlist, which
@@ -698,6 +713,7 @@ model:
 
 The fd-lifetime rules the
 [USB portal documents](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Usb.html)
+[[S39](SOURCES.md)]
 — usable until released, until the connection closes, until the device is removed, or until the
 portal revokes them — are the precedent and are deliberately mirrored.
 

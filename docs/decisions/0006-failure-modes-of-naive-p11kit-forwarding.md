@@ -23,7 +23,8 @@ otherwise rediscover the original idea and think it obvious.
 pkcs11:token=…` — and the implementation installs a token filter. There is no documented
 certificate-or-key object capability. On a PIV card, "scoped to the token" means the whole card.
 [p11-kit manual](https://p11-glue.github.io/p11-glue/p11-kit/manual/p11-kit.html),
-[server.c](https://github.com/p11-glue/p11-kit/blob/master/p11-kit/server.c).
+[server.c](https://github.com/p11-glue/p11-kit/blob/120050e353e8f43d7c40bbcc047f667f903f4de5/p11-kit/server.c)
+[[S1](../SOURCES.md)].
 
 **2. The consumer, not the service, owns the forwarded sessions.**
 TLS libraries open their own sessions and call `C_Login` when the private key is used. A session the
@@ -34,18 +35,22 @@ connection.
 PKCS#11 defines login state as shared among the sessions of **an application**, not universally
 across arbitrary applications or module instances. Whether a particular card or driver caches login
 device-wide is implementation behaviour and must never become an API contract.
-[PKCS#11 v3.1](https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.1/os/pkcs11-spec-v3.1-os.html).
+[PKCS#11 v3.1](https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.1/os/pkcs11-spec-v3.1-os.html)
+§5.6 [[S14](../SOURCES.md)].
 
 **4. A standard remote module is still a general PKCS#11 interface.**
 p11-kit's own remoting documentation demonstrates forwarded tokens being used to generate and copy
 objects. **Transport does not impose policy.** Rejecting dangerous entry points and constraining
 searches, handles, mechanisms and sessions requires a separate filtering module.
-[p11-kit remoting](https://p11-glue.github.io/p11-glue/p11-kit/manual/remoting.html).
+[p11-kit remoting](https://p11-glue.github.io/p11-glue/p11-kit/manual/remoting.html)
+[[S2](../SOURCES.md), [S4](../SOURCES.md)].
 
 **5. Runtime module discovery may simply fail.**
-A PKCS#11 URI identifies a token or object. It cannot name a Unix socket and it cannot register a
-provider. The documented GnuTLS/OpenSSL path needs `p11-kit-client.so` configured **plus**
-`P11_KIT_SERVER_ADDRESS` — process-level configuration, poorly matched to per-request grants.
+A PKCS#11 URI identifies a token or object [[S47](../SOURCES.md)]. It cannot name a Unix socket
+and it cannot register a provider. The documented GnuTLS/OpenSSL path needs `p11-kit-client.so`
+configured **plus** an address — `P11_KIT_SERVER_ADDRESS`, or a `server-address:` field in the
+`.module` file — read once at module initialisation. Several *static* endpoints are expressible
+that way, one module file each; a *per-request* one is not [[S3](../SOURCES.md)].
 
 **6. WebKit's TLS may happen in another process.**
 Setting an environment variable, or registering a module, after WebKit's network process has started
@@ -58,13 +63,15 @@ grant when the UI process's D-Bus connection disappears can terminate a valid ha
 alive for the subprocess permits use after the initiating request ended.
 
 **8. Multiple simultaneous grants collide.**
-`p11-kit-client.so` conventionally finds one endpoint through one `P11_KIT_SERVER_ADDRESS`. Two
-certificates, two origins or two concurrent requests in one process need either several dynamically
-loaded module instances or a multiplexing broker with grant-aware virtual slots.
+`p11-kit-client.so` conventionally finds one endpoint through one address, fixed at
+initialisation [[S3](../SOURCES.md)]. Two certificates, two origins or two concurrent requests in
+one process need either several dynamically loaded module instances or a multiplexing broker with
+grant-aware virtual slots.
 
 **9. Token-scoped forwarding defeats the consent claim.**
-A PIV card holds authentication, signing, key-management and card-authentication keys. If the
-consent dialog says "this certificate" and the endpoint exposes the token, the dialog is lying.
+A PIV card holds authentication, signing, key-management and card-authentication keys — slots 9A,
+9C, 9D and 9E [[S45](../SOURCES.md)]. If the consent dialog says "this certificate" and the
+endpoint exposes the token, the dialog is lying.
 
 **10. `purpose` is not enforceable through ordinary forwarding.**
 A service cannot determine that a `C_Sign` is part of a TLS handshake rather than a PDF signature or
@@ -83,9 +90,10 @@ slot and token, only the granted leaf certificate and keys and explicitly select
 certificates, synthetic handles mapped to broker-owned handles, read-only sessions only, no SO login,
 refusal of `C_InitToken`/`C_InitPIN`/`C_SetPIN`/`C_CreateObject`/`C_CopyObject`/`C_DestroyObject`/
 `C_SetAttributeValue`/key generation/wrap/unwrap/derivation/RNG seeding/operation-state export, a
-mechanism allow-list with parameter validation including RSA-PSS, rate limits, invalidation on
-removal and expiry, and filtering of the **PKCS#11 v3 interface tables** as well as the v2 function
-list.
+mechanism allow-list with parameter validation including RSA-PSS [[S48](../SOURCES.md)], rate
+limits, invalidation on removal and expiry, and filtering of the **PKCS#11 v3 interface tables** as
+well as the v2 function list — which means all three of `C_GetFunctionList`, `C_GetInterfaceList`
+and `C_GetInterface` [[S16](../SOURCES.md)].
 
 **That facade is substantial, security-sensitive engineering — not plumbing.** It is a PKCS#11
 implementation facing a hostile peer over a wire protocol, it belongs in its own process, and it is

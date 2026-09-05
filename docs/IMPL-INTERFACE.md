@@ -506,7 +506,9 @@ everything at `Sign` time against the key it actually opened.
 
 ### PIV slots are best effort, and a filter that names one is strict
 
-`piv_slot` is derived from `CKA_ID`: `0x9a`/`0x01` is `authentication`, `0x9c`/`0x02` is
+`piv_slot` is derived from `CKA_ID` — OpenSC's PIV driver uses `0x01`–`0x04` and other
+middleware uses the PIV key reference itself [[S45](SOURCES.md), [S46](SOURCES.md)]:
+`0x9a`/`0x01` is `authentication`, `0x9c`/`0x02` is
 `signature`, `0x9d`/`0x03` is `key_management`, `0x9e`/`0x04` is `card_authentication`. Anything
 else yields no slot rather than a guess. A `certificate_filter` that names a slot therefore does
 **not** match a certificate whose slot could not be determined: guessing would offer the wrong key,

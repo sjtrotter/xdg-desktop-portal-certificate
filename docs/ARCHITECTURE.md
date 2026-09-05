@@ -125,7 +125,8 @@ the architecture rather than the wording:
 - **Login state does not transfer.** The consumer's TLS stack opens its own sessions and makes its
   own `C_Login` call; a session the service logged into is not the session the consumer gets. Any
   device-wide login caching is provider behaviour and must never become an API contract.
-- `p11-kit-client.so` is located through process-level p11-kit configuration plus one
+- `p11-kit-client.so` is located through process-level p11-kit configuration — a
+  `server-address:` field in a `.module` file, or one
   `P11_KIT_SERVER_ADDRESS`, which does not accommodate several concurrent per-request grants inside
   one process.
 - A PKCS#11 URI cannot name a socket, and `g_tls_certificate_new_from_pkcs11_uris()` has no module
@@ -142,7 +143,8 @@ shipping the brokered half and deferring the facade half entirely.
 
 The clearest existing statement of the layering is Frank Morgner's, in
 [xdg-desktop-portal#662](https://github.com/flatpak/xdg-desktop-portal/issues/662#issuecomment-1479992623)
-(2023-03-22), and it is worth using his vocabulary rather than inventing one. There are two things
+(2023-03-22) [[S30](SOURCES.md)], and it is worth using his vocabulary rather than inventing
+one. There are two things
 a sandbox can be given a remote copy of, and they are not the same thing:
 
 ```
@@ -185,19 +187,21 @@ Failure mode 4 in [0006](decisions/0006-failure-modes-of-naive-p11kit-forwarding
 does not impose policy* — is the one people reasonably doubt, because `p11-kit server` and
 `p11-kit-client.so` are shipped, supported and in production use. The evidence is in p11-kit's own
 wire format. In
-[`p11-kit/rpc-message.h`](https://github.com/p11-glue/p11-kit/blob/master/p11-kit/rpc-message.h),
-the call enumeration carries `P11_RPC_CALL_C_InitToken` (line 53), `P11_RPC_CALL_C_InitPIN`
-(line 54) and `P11_RPC_CALL_C_SetPIN` (line 55) alongside `P11_RPC_CALL_C_Login` (line 58) and
-`P11_RPC_CALL_C_LoginUser` (line 75), and the signature table spells their arguments out:
+[`p11-kit/rpc-message.h`](https://github.com/p11-glue/p11-kit/blob/120050e353e8f43d7c40bbcc047f667f903f4de5/p11-kit/rpc-message.h)
+at `120050e3`, the call enumeration carries `P11_RPC_CALL_C_InitToken` (line 61),
+`P11_RPC_CALL_C_InitPIN` (line 66) and `P11_RPC_CALL_C_SetPIN` (line 67) alongside
+`P11_RPC_CALL_C_Login` (line 70) and `P11_RPC_CALL_C_LoginUser` (line 119), and the signature
+table spells their arguments out:
 
 ```
-line 142   { P11_RPC_CALL_C_InitToken,  "C_InitToken",  "uayz",  "" },
-line 144   { P11_RPC_CALL_C_SetPIN,     "C_SetPIN",     "uayay", "" },
-line 148   { P11_RPC_CALL_C_Login,      "C_Login",      "uuay",  "" },
+line 178   { P11_RPC_CALL_C_InitToken,  "C_InitToken",  "uayz",  "" },
+line 184   { P11_RPC_CALL_C_SetPIN,     "C_SetPIN",     "uayay", "" },
+line 187   { P11_RPC_CALL_C_Login,      "C_Login",      "uuay",  "" },
 ```
 
 `ay` is a plain byte array: the PIN crosses the socket as a buffer like any other argument, and
-card administration is a call away for anyone holding the far end. That is not a criticism of
+card administration is a call away for anyone holding the far end — the server dispatches every
+one of them [[S4](SOURCES.md)]. That is not a criticism of
 p11-kit — the protocol is a faithful PKCS#11 pass-through and is documented as one. It is the point:
 **a faithful pass-through cannot be the place a policy lives.** Any filtering has to be a separate
 component in front of it, which is exactly what Daiki Ueno's 2023 design concedes when it requires
@@ -212,7 +216,7 @@ not re-described here; read `desktop-portal/certificate.c` on the branch.
 ### The impl skeleton — [`../src/certificate-impl.h`](../src/certificate-impl.h), [`request-impl.h`](../src/request-impl.h), [`session-impl.h`](../src/session-impl.h)
 
 Owns `org.freedesktop.impl.portal.desktop.certificate` on the session bus and exports
-`/org/freedesktop/portal/desktop`. One file per portal interface, exactly as
+`/org/freedesktop/portal/desktop` [[S35](SOURCES.md)]. One file per portal interface, exactly as
 xdg-desktop-portal-gtk does it. The impl `Request` has `Close()` and no `Response` signal:
 the result of an impl call is the method's own return value, and exactly one object — the
 frontend's `Request` — is responsible for the at-most-one-terminal-response rule.
@@ -236,22 +240,24 @@ Enumerates slots and tokens through p11-kit's configured modules, asynchronously
 The Remmina RDP plugin's PKCS#11 support
 ([`patches/0005-…-PKCS11-client-certificates-in-WebKit.patch`](https://gitlab.com/Remmina/Remmina),
 GPL-2.0-or-later, not copied here) is the working prior art, and its scars are the requirements
-list. It proved, on real hardware:
+list — recorded here by the author of those patches rather than cited to anyone else
+[[S58](SOURCES.md)]. It proved, on real hardware:
 
 - enumeration by driving a **fixed argv** (`p11tool --list-certs --only-urls`) in a cancellable,
   time-bounded subprocess with a bounded output buffer, rather than loading arbitrary modules into
   the UI process;
 - **asynchronous discovery with cancellation**, so a missing reader or a wedged middleware daemon
   never blocks the main loop;
-- p11-kit's own **trust tokens** (`model=p11-kit-trust`) never hold client certificates and are
-  skipped without spawning anything;
+- p11-kit's own **trust tokens** (`model=p11-kit-trust`) never hold client certificates
+  [[S8](SOURCES.md)] and are skipped without spawning anything;
 - a token holding **no matching object** makes the tool exit non-zero with no output — not an error
   and it must not abort discovery, while a non-zero exit *with* output, a signal death, an
   output-limit breach or a token-listing failure all must;
 - locating the tool at run time rather than assuming a path;
 - certificate loading off the UI thread, because a card can take seconds;
 - `g_tls_certificate_new_from_pkcs11_uris()`
-  ([GLib 2.68+](https://docs.gtk.org/gio/ctor.TlsCertificate.new_from_pkcs11_uris.html)) turning a
+  ([GLib 2.68+](https://docs.gtk.org/gio/ctor.TlsCertificate.new_from_pkcs11_uris.html),
+  [S20](SOURCES.md)) turning a
   chosen URI into a usable `GTlsCertificate` — the *ends* of the WebKit chain, though not the
   middle; see [SPIKES.md](SPIKES.md) S3;
 - a PIN answered **once per challenge plus one engine-initiated retry**, then expired, so the card's
@@ -281,7 +287,7 @@ All filters optional, all AND-ed:
 | `key_usage` | X.509 key-usage bits that must be present |
 | `key_algorithms` | acceptable key types and signature schemes the caller can actually use |
 | `token_label` | restrict to one token |
-| `piv_slot` | PIV slot by name — `authentication` (9A), `signature` (9C), `key_management` (9D), `card_authentication` (9E) |
+| `piv_slot` | PIV slot by name — `authentication` (9A), `signature` (9C), `key_management` (9D), `card_authentication` (9E) [[S45](SOURCES.md)] |
 
 **There is no `any` purpose.** A request that will not say what it is for cannot be described to
 the user in the service's own words, cannot be given a consent policy, and cannot be filtered. The
@@ -357,7 +363,8 @@ unlocked and restates the verified caller, purpose and operation class.
 - The service **distinguishes and reports separately**: incorrect PIN, blocked PIN, cancelled
   prompt, device error, and token removal. It never automatically retries after an ambiguous
   transport failure, and all retries are user-initiated.
-- **Protected authentication path.** When the token sets `CKF_PROTECTED_AUTHENTICATION_PATH` — PIN
+- **Protected authentication path.** When the token sets `CKF_PROTECTED_AUTHENTICATION_PATH`
+  [[S12](SOURCES.md)] — PIN
   pad readers, biometric tokens — the underlying login is made with a null PIN and the token or
   reader collects the secret itself. The service shows an **instructional dialog with no editable
   PIN field** and never receives the PIN. Emulating a PIN field for such a token would be a lie
@@ -445,7 +452,8 @@ own process**. It is not part of the backend and links none of it.
   are ignored; the backend collects the real PIN in its own window at the first `Sign`.
 - **`CKA_LABEL` is a constant**, not the certificate's subject CN, because GnuTLS's
   single-object import — the one behind `g_tls_certificate_new_from_pkcs11_uris()` — refuses a
-  URI that names no object, and an application cannot know a common name in advance. The token
+  URI that names no object [[S17](SOURCES.md)], and an application cannot know a common name
+  in advance. The token
   URIs are in [`../src/module/portal-token.h`](../src/module/portal-token.h), **which is shared
   verbatim with the web-auth backend**; a single-object import appends
   `;object=Portal%20Certificate`.
@@ -459,7 +467,8 @@ own process**. It is not part of the backend and links none of it.
   fences: `certificate_module_is_portal_module()` in
   [`../src/tokens/discovery.h`](../src/tokens/discovery.h), the module's own refusal to run in a
   process named `xdg-desktop-portal` or `xdg-desktop-portal-certificate`, and the shipped module
-  file's `enable-in:` allowlist, which names neither.
+  file's `enable-in:` allowlist, which names neither and is not a security feature
+  [[S5](SOURCES.md)].
 
 **It is not a trust boundary and it is not where hardening belongs.** Everything it refuses,
 the portal refuses again across D-Bus. See

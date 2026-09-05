@@ -7,8 +7,9 @@
       data/org.freedesktop.impl.portal.experimental.Certificate.xml
 
   on the xdg-desktop-portal branch experimental/certificate-webauthentication,
-  at commit 436bf2a "certificate: Answer a descendant from the grant its
-  parent holds".
+  at commit 209f9ff "certificate: Answer a descendant from the grant its
+  parent holds". (The branch is rebased on upstream, so that id moves; the
+  content of this file did not change across the last rebase.)
 
   IT MUST TRACK THAT FILE. The interface is defined by the portal frontend, not
   by this backend; a divergence here is a backend that no longer implements the

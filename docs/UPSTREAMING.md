@@ -123,7 +123,12 @@ The three "open items" the previous version of this document listed have all mov
    "what protected host resource is being mediated?" answered first. The honest answer
    here: **use of a hardware-backed private key, and the trusted consent and PIN UI around
    it**, replacing a blanket `--socket=pcsc` grant with a scoped, revocable, attributable
-   one. Nothing has been opened.
+   one. No such issue has been opened. What exists is two comments the author posted on
+   2026-09-05, announcing the work in
+   [flatpak#5756](https://github.com/flatpak/flatpak/issues/5756#issuecomment-5553235336) and
+   crossposting it into
+   [#662](https://github.com/flatpak/xdg-desktop-portal/issues/662#issuecomment-5553242646)
+   [[S28](SOURCES.md)]. Neither is the discussion this item asks for.
 2. **Talk to the credentials people before freezing any name.**
    [0003](decisions/0003-own-namespace-before-freedesktop.md)'s ordering constraint is
    unchanged by any of this:
@@ -131,13 +136,11 @@ The three "open items" the previous version of this document listed have all mov
    proposing `org.freedesktop.portal.Credentials` for FIDO2 and passkeys, and
    certificate-backed signing may belong there as a credential *type* rather than beside it
    as a rival portal. `Certificate` is still an incubation name.
-3. **Fix the commit trailer.** The branch's commits carry
-   `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
-   `gitlint` passes on that, but `.gitlint.conf/co-authored-by-coding-agent.py` exists
-   precisely to reject AI co-author trailers and asks for
-   `Assisted-by: AGENT_NAME:MODEL_VERSION` instead. A real PR should use
-   `Assisted-by: Claude:Fable-5.1`. This is noted in the branch write-up and is a
-   rewrite-the-commits job, not a code change.
+3. ~~**Fix the commit trailer.**~~ **Done.** The branch's commits carried
+   `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`, which
+   `.gitlint.conf/co-authored-by-coding-agent.py` exists precisely to reject in favour of
+   `Assisted-by: AGENT_NAME:MODEL_VERSION`. All eighteen now carry
+   `Assisted-by: Claude:claude-fable-5-1`.
 4. **`OpenPkcs11Endpoint` as a follow-up**, with the facade rules from
    [SECURITY.md](SECURITY.md), a review of the fd hand-off, and something better than
    python-dbusmock to test it against.
@@ -147,7 +150,8 @@ The three "open items" the previous version of this document listed have all mov
    written but never read back in a test; rate limiting is not implemented at all.
 6. **Everything in [ROADMAP.md](ROADMAP.md) phase 0 and 1**, which is about hardware and has
    barely moved. The branch has now driven one PIV card in one reader, on 2026-09-04, through
-   this repository's backend ([TESTING.md](TESTING.md) tiers 3.2–3.4) — one card, one reader,
+   this repository's backend ([TESTING.md](TESTING.md) tiers 3.2–3.4; 3.1 needs no
+   frontend) — one card, one reader,
    and not a hardware claim. It has never been run against a **web engine**, and apart from that
    one run the python-dbusmock templates are the only implementations that have ever answered
    these interfaces.
@@ -159,9 +163,11 @@ argument below is with a five-year-old thread, and posting into it without havin
 was read would be rude as well as unconvincing. Read in full on 2026-09-04.
 
 **[xdg-desktop-portal#662, "PKCS#11 portal"](https://github.com/flatpak/xdg-desktop-portal/issues/662).**
-Opened by `yoe`, who works on the Belgian eID software (`Fedict/eid-mw`), on 2021-11-17; 21 comments; last activity
-2023-07-11; dormant, unassigned, and it produced no interface. The positions worth knowing, because
-each is an objection this design has to survive:
+Opened by `yoe`, who works on the Belgian eID software (`Fedict/eid-mw`), on 2021-11-17; still
+open, unassigned, and it produced no interface. Substantive discussion ran to 2023-07-11 over 21
+comments; the 22nd is the author's own, from 2026-09-05 [[S28](SOURCES.md)]. The first row of the
+table below is the issue body rather than a comment. The positions worth knowing, because each is
+an objection this design has to survive:
 
 | Who | When | Position |
 |---|---|---|
@@ -178,6 +184,9 @@ each is an objection this design has to survive:
 | **Mikenux** | 2023-06-28 | Review at scale is impossible; the only legitimate escape from prompting is the *user* choosing to always grant, with re-evaluation on app update |
 | **jmpolom** | 2023-07-11 | The last word, and the strongest dissent. Notarization is user-hostile and must be ruled out; yoe's original proposal is still the most reasonable; granular prompts will produce MFA-style fatigue; the brick argument is not watertight because a host app can do the same; **rate limits belong lower in the stack**, "not in this portal though, that is for certain"; wants one coarse per-app "allow PKCS#11" |
 
+Every quotation in that table is cited comment by comment in [[S29](SOURCES.md)], and the
+layering diagram in [ARCHITECTURE.md](ARCHITECTURE.md) is [[S30](SOURCES.md)].
+
 Two camps, then: *coarse forwarding* (yoe, jmpolom, frankmorgner's UX wing) and *mediated access
 with consent* (ueno, 3v1n0, Erick555, Mikenux, and — on the security model — jadahl and
 mcatanzaro). **Nobody argued for brokered operations, and nobody argued against them: the option
@@ -185,7 +194,8 @@ was never raised.** Where this project agrees with the thread it should say so p
 consent model here is Mikenux's answer and jadahl's ruling, and there is no blessed-app list
 anywhere in it.
 
-**Ueno's "Flatpak portal design for smartcard access" (2023), attached to that issue.** D-Bus to
+**Ueno's "Flatpak portal design for smartcard access" (2023), attached to that issue**
+[[S31](SOURCES.md)]**.** D-Bus to
 *gain* access so permissions land in the normal permission UI, p11-kit RPC for the calls
 themselves. Three states — no access, enumerating, accessing — and two methods,
 `StartForwarding(fd) → handle` and `AccessToken(token_uri, {writable, destructive}) → handle`,
@@ -198,13 +208,15 @@ motivation but not solved by the mechanism. Decision [0006](decisions/0006-failu
 failure mode 9 is the disagreement: a PIV card holds four keys, so a token-scoped grant makes a
 certificate-scoped consent sentence untrue.
 
-**[p11-kit#294](https://github.com/p11-glue/p11-kit/issues/294)** (open since 2020-05-01). Morgner
+**[p11-kit#294](https://github.com/p11-glue/p11-kit/issues/294)** (open since 2020-05-01)
+[[S9](SOURCES.md)]. Morgner
 asks for PKCS#11 modules to be sandboxed; Ueno answers that it is partly possible already with the
 `remote:` configuration option plus bubblewrap (comment `622359664`), and that doing it
 transparently might want a new `sandbox-profile:` option (comment `968077421`). **That option does
 not exist**; it is a plan, and Ueno says in #662 that it is out of scope for the portal proposal.
 
-**[valentindavid/pkcs11-demo](https://github.com/valentindavid/pkcs11-demo).** Two snaps joined by
+**[valentindavid/pkcs11-demo](https://github.com/valentindavid/pkcs11-demo)**
+[[S32](SOURCES.md)]**.** Two snaps joined by
 snapd's content interface: an `opensc` snap running a confined `pcscd` plus
 `p11-kit server -f --name … pkcs11:` — the bare URI, i.e. **every module, unfiltered** — and a
 strictly-confined consumer shipping only `p11-kit-client.so`. It is yoe's and jmpolom's proposal,
@@ -221,8 +233,10 @@ SUNET fork adds TLS-PSK and seccomp but still no per-client authorization or cal
 Neither is OpenSC-maintained.
 
 **[xdg-desktop-portal PR #1889](https://github.com/flatpak/xdg-desktop-portal/pull/1889)**,
-"Introduce Credentials portal (experimental)". Already load-bearing here for the naming and gating
-convention (above), and relevant a second time: certificate-backed signing may belong there as a
+"Introduce Credentials portal (experimental)" — **open, not merged**, so the experimental
+namespace and the gate live on its branch rather than in `main` [[S27](SOURCES.md)]. Already
+load-bearing here for the naming and gating convention (above), and relevant a second time:
+certificate-backed signing may belong there as a
 credential **type** rather than beside it as a rival portal. That is the maintainers' call.
 
 ## What does not change, and must not

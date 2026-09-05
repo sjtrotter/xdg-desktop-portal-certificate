@@ -9,7 +9,8 @@ Status: **superseded in part** by [0006](0006-failure-modes-of-naive-p11kit-forw
 The founding idea of this project was an analogy. `org.freedesktop.portal.Camera` does not hand an
 application `/dev/video0`; it hands back a
 [PipeWire remote file descriptor](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Camera.html)
-and the application's ordinary media stack works. So: do not hand an application the card. Hand it
+[[S38](../SOURCES.md)] and the application's ordinary media stack works. So: do not hand an
+application the card. Hand it
 something *scoped*, and let its ordinary TLS stack work.
 
 The alternative considered was a **signing API** — the service holds the key and the application
@@ -27,10 +28,13 @@ independent review found.
 The original decision assumed the scoped thing could be produced by
 [p11-kit's remoting mechanism](https://p11-glue.github.io/p11-glue/p11-kit/manual/remoting.html) —
 `p11-kit server` exporting a certificate-and-key-scoped, already-logged-in module. **It cannot.**
-`p11-kit server` takes **token** URIs; its unit of exposure is a token. It forwards the general
-PKCS#11 interface, including object creation and key generation. Login state does not cross the
-boundary. And `p11-kit-client.so` is found through process-level configuration plus a single
-`P11_KIT_SERVER_ADDRESS`, which does not accommodate concurrent per-request grants. The ten failure
+`p11-kit server` takes **token** URIs; its unit of exposure is a token [[S1](../SOURCES.md)]. It
+forwards the general PKCS#11 interface, including object creation and key generation
+[[S2](../SOURCES.md), [S4](../SOURCES.md)]. Login state does not cross the boundary
+[[S14](../SOURCES.md)]. And `p11-kit-client.so` is found through process-level configuration —
+`P11_KIT_SERVER_ADDRESS`, or a `server-address:` field in a `.module` file, both read once at
+module initialisation — which does not accommodate concurrent per-request grants
+[[S3](../SOURCES.md)]. The ten failure
 modes are in [0006](0006-failure-modes-of-naive-p11kit-forwarding.md).
 
 The second error was treating "a module endpoint" as strictly safer than "a signing API". It is not.

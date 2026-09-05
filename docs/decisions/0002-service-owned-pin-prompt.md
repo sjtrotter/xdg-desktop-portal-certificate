@@ -21,14 +21,17 @@ learn to trust a window that never looks the same twice.
 Three precedents matter.
 
 **GNOME's gcr system prompter.** [gcr](https://gitlab.gnome.org/GNOME/gcr) provides `GcrPrompt`,
-`GcrSystemPrompt` and the implementor-side `GcrSystemPrompter`, communicating over a D-Bus interface
-(`org.gnome.keyring.Prompter`, with a `.service` file activating `gcr-prompter`). gnome-keyring uses
-it, and both gnome-shell and `gcr-prompter` implement the prompter side. It is a genuine precedent
+`GcrSystemPrompt` and the implementor-side `GcrSystemPrompter`, communicating over the D-Bus
+interface `org.gnome.keyring.internal.Prompter` — which gcr's own introspection XML labels internal
+and liable to change — at `/org/gnome/keyring/Prompter`, on the well-known name
+`org.gnome.keyring.SystemPrompter`. gcr does not own that name; gnome-shell does, and a `.service`
+file activating `gcr-prompter` is the fallback [[S55](../SOURCES.md)]. It is a genuine precedent
 for a **system-owned, system-modal prompt whose implementation is separable from the thing needing
 it** — and it is GNOME's, shaped around gnome-keyring's needs, with no KDE equivalent.
 
-**Windows and macOS.** The Base CSP / smart card KSP layer owns PIN entry and caching on Windows;
-CryptoTokenKit and the Keychain own it on macOS. In neither case does the application see the PIN,
+**Windows and macOS.** The Base CSP / smart card KSP layer owns PIN entry and caching on Windows
+[[S51](../SOURCES.md)]; CryptoTokenKit and the Keychain own it on macOS, where a token extension
+"has no UI component" [[S52](../SOURCES.md)]. In neither case does the application see the PIN,
 and in neither case does the application draw the prompt.
 
 **Remmina's RDP plugin.** The working prior art this project builds on had to draw its own PIN
@@ -50,7 +53,8 @@ the behaviour to keep and the situation to end.
   ([0006](0006-failure-modes-of-naive-p11kit-forwarding.md)); on the facade, a consumer's `C_Login`
   is an authorisation-state transition carrying no PIN.
 - **Protected authentication path is honoured, not emulated**: when the token sets
-  `CKF_PROTECTED_AUTHENTICATION_PATH`, the login uses a null PIN, the token or reader collects the
+  `CKF_PROTECTED_AUTHENTICATION_PATH` [[S12](../SOURCES.md)], the login uses a null PIN, the
+  token or reader collects the
   secret, and the service shows an instructional dialog with **no editable PIN field**.
 - **A PIN prompt is not consent.** Consent is the chooser: verified caller, sandbox status, purpose
   in the service's words, certificate, token, duration, and whether later operations may happen

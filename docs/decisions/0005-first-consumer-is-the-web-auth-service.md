@@ -18,8 +18,10 @@ is the xdg-desktop-portal branch `experimental/certificate-webauthentication`. I
 owns, and therefore the backend that calls the Certificate portal, as an ordinary client of the
 public `org.freedesktop.portal.experimental.Certificate` interface on
 `org.freedesktop.portal.Desktop`. Entra ID sign-in on a smart-card tenant redirects
-to `certauth.<authority>`, which challenges for a TLS client certificate that lives on a PIV card. It
-has that requirement today, from real hardware, in a real tenant.
+to `certauth.<authority>`, which challenges for a TLS client certificate that lives on a PIV card.
+It has that requirement today, from real hardware, in a real tenant — an observation from this
+project's own runs ([TESTING.md](../TESTING.md) §2.55 and the live sign-in of 2026-09-05), not a
+documented behaviour anyone else has verified here.
 
 It is also the project that would otherwise have had to build this. Its own
 `docs/decisions/0007-certificate-adapter.md` is the mirror of this decision, made from the other

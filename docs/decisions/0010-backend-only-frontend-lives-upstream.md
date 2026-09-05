@@ -12,9 +12,11 @@ that acceptance upstream would be "a rename rather than a redesign". That decisi
 right about the *shape* and wrong about the *route*, and the reason it was wrong is
 simply that the author did not yet know how new portals actually get developed.
 
-The evidence is in the xdg-desktop-portal tree and in
+The evidence is
 [PR #1889](https://github.com/flatpak/xdg-desktop-portal/pull/1889), "Introduce
-Credentials portal (experimental)". A new portal is not incubated in a separate
+Credentials portal (experimental)" — which is **open, not merged**, so the
+experimental namespace and the gate live on its branch and not in `main`
+[[S27](../SOURCES.md)]. A new portal is not incubated in a separate
 repository under a separate namespace and then proposed as a finished thing. It is
 developed **in the frontend's own tree**, under an `experimental` namespace, gated off by
 default. Sebastian Wick, on that PR, 2026-01-28:
@@ -27,7 +29,9 @@ default. Sebastian Wick, on that PR, 2026-01-28:
 So there is a sanctioned way to write an unfinished portal frontend, it is inside
 xdg-desktop-portal, and the names it uses are `org.freedesktop.portal.experimental.*` and
 `org.freedesktop.impl.portal.experimental.*` — not because acceptance has been granted,
-but because that is the namespace upstream set aside for exactly this state.
+but because that is the namespace upstream set aside for exactly this state. It is a
+maintainer's instruction on an open pull request, which is the strongest form the
+convention currently takes; it is not yet in a release.
 
 Against that, a separately-namespaced frontend in this repository was worse in every
 direction. It reimplemented `Request`, `Session`, app-id derivation, permission-store
@@ -42,9 +46,11 @@ made this repository claim a public bus name that no application had any reason 
 repository is an out-of-tree backend and nothing else.**
 
 - The frontend is `xdg-desktop-portal`, branch
-  `experimental/certificate-webauthentication`, commits `3f46e3c..661e441`, with
-  `703fb22 certificate: Add an experimental Certificate portal` as the one that matters
-  here. It defines both
+  `experimental/certificate-webauthentication`, with
+  `certificate: Add an experimental Certificate portal` as the commit that matters
+  here. (The ids this ADR first named, `3f46e3c..661e441` and `703fb22`, are pre-rebase;
+  the branch is rebased on upstream, so the README carries the current range.) It
+  defines both
   `org.freedesktop.portal.experimental.Certificate` (public) and
   `org.freedesktop.impl.portal.experimental.Certificate` (impl), implements the
   `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` gate, and ships a python-dbusmock backend and
@@ -74,8 +80,11 @@ We no longer ship a frontend, so the rule no longer has a subject. What is left 
 backend, and an out-of-tree backend that does not install into
 `${datadir}/xdg-desktop-portal/portals` is a backend that can never be selected. Both
 reference points do exactly this: `xdg-desktop-portal-gtk` installs `gtk.portal` there,
-and `xdg-desktop-portal-termfilechooser` installs `termfilechooser.portal` there and
-tells the user to name it in `portals.conf`.
+and `xdg-desktop-portal-termfilechooser` installs `termfilechooser.portal` there
+[[S33](../SOURCES.md), [S41](../SOURCES.md)]. Naming a backend in `portals.conf` is the
+documented selection mechanism [[S34](../SOURCES.md)]; upstream termfilechooser's own
+README does not mention it and relies on the deprecated `UseIn` key, while the widely
+used fork does tell the user to write the `portals.conf` line.
 
 The honest caveat, kept rather than dropped: **the interface named in that file is
 experimental and gated upstream.** A stock xdg-desktop-portal has never heard of

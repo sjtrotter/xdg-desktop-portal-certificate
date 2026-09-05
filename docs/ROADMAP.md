@@ -52,9 +52,10 @@ their caveats:
   is plumbing xdg-desktop-portal already has" is no longer written twice
   ([0010](decisions/0010-backend-only-frontend-lives-upstream.md)). What remains of that line is
   keeping this backend's impl XML in step with the branch, which is not measured in weeks;
-- the frontend's own hardware-independent testing is done and green (40 pytest cases for this
-  portal against a python-dbusmock backend), which removes some of phase 0 item 10 below but none
-  of the hardware items.
+- the frontend's own hardware-independent testing is done and green (106 pytest cases for this
+  portal against a python-dbusmock backend — 53 test functions, each run against a host and a
+  Flatpak caller identity), which removes some of phase 0 item 10 below but none of the hardware
+  items.
 
 | | |
 |---|---|

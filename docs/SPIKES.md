@@ -98,7 +98,8 @@ six.
    one synthetic token, one certificate and one private key**, with synthetic handles mapped to
    underlying ones.
 2. Serve it over a socket with
-   [`p11_kit_remote_serve_module()`](https://github.com/p11-glue/p11-kit/blob/master/p11-kit/remote.h)
+   [`p11_kit_remote_serve_module()`](https://github.com/p11-glue/p11-kit/blob/120050e353e8f43d7c40bbcc047f667f903f4de5/p11-kit/remote.h)
+   [[S10](SOURCES.md)]
    (behind `P11_KIT_FUTURE_UNSTABLE_API`). Confirm this entry point is usable and stable enough to
    depend on, and what happens when it is not present in the distro's p11-kit.
 3. Drive it from `p11-kit-client.so` and complete **one real GnuTLS mutual-TLS client handshake**

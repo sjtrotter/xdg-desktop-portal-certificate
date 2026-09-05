@@ -13,6 +13,7 @@ Status: accepted (for the sketch), amended by [0010](0010-backend-only-frontend-
 > That is not the squatting this ADR argues against. `org.freedesktop.portal.experimental.*`
 > and `org.freedesktop.impl.portal.experimental.*` are the namespace upstream **set aside
 > for unfinished portals** — see [PR #1889](https://github.com/flatpak/xdg-desktop-portal/pull/1889),
+> which is open rather than merged [[S27](../SOURCES.md)],
 > quoted in [0010](0010-backend-only-frontend-lives-upstream.md) — and an interface in it
 > carries no claim of acceptance: it is not exported at all unless the portal is started
 > with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`, and it may change or be
@@ -36,7 +37,8 @@ is what applications would eventually call, and it saves a rename.
 
 It is also a claim of ownership and acceptance that does not exist. The
 [D-Bus specification](https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names)
-recommends a reverse-domain namespace the project actually controls, and xdg-desktop-portal's
+recommends a reverse-domain namespace the project actually controls [[S42](../SOURCES.md)], and
+xdg-desktop-portal's
 namespace belongs to xdg-desktop-portal. Squatting it means either the eventual real interface
 collides with a prototype, or the prototype's mistakes become the standard by accident.
 
@@ -78,8 +80,11 @@ The acceptance path in [ROADMAP.md](../ROADMAP.md) phase 3 has one ordering cons
 more than the rest: **talk to the credentials people before freezing anything.**
 
 The [linux-credentials / credentialsd](https://github.com/linux-credentials/credentialsd) project is
-already proposing `org.freedesktop.portal.Credentials` for FIDO2 and passkeys — a D-Bus service and
-reference UI mediating authenticator access for sandboxed applications. Certificate-backed signing
+already proposing a credentials portal for FIDO2 and passkeys — a D-Bus service and reference UI
+mediating authenticator access for sandboxed applications [[S44](../SOURCES.md)]. The name
+actually under discussion upstream is `org.freedesktop.portal.experimental.Credentials`, on
+PR #1889 [[S27](../SOURCES.md)]; `org.freedesktop.portal.Credentials` is where it would land, not
+where it is. Certificate-backed signing
 is plausibly a **credential type** under that proposal, sharing its request, identity and consent
 machinery, rather than a rival portal beside it. The specific question to ask is exactly that, and it
 should be asked before any name or signature is frozen.

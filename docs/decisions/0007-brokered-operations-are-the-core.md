@@ -50,7 +50,8 @@ Brokered operations can enforce what a session cannot:
   property the shape *permits* and a forwarded session does not, which is a different claim from
   having it, and the difference matters: jmpolom's objection in
   [xdg-desktop-portal#662](https://github.com/flatpak/xdg-desktop-portal/issues/662) (2023-07-11)
-  is that rate limiting belongs lower in the stack, near the hardware. He is right that a portal
+  is that rate limiting belongs lower in the stack, near the hardware [[S29](../SOURCES.md)]. He
+  is right that a portal
   cannot rate-limit the host; what a portal can bound is the use of a grant it issued itself, and
   that is the only version of this claim worth making;
 - **revocation that takes effect immediately**, including mid-handshake;

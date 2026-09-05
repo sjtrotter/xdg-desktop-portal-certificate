@@ -61,7 +61,9 @@ narrowest of the four. The interface's own `purpose` enum already disproves the 
 
 **Why not `Credentials`.** It is the most tempting alternative, and it is taken: the
 [linux-credentials / credentialsd](https://github.com/linux-credentials/credentialsd) project is
-already proposing `org.freedesktop.portal.Credentials` for FIDO2 and passkeys, referenced
+already proposing a credentials portal for FIDO2 and passkeys [[S44](../SOURCES.md)] — the name
+under discussion upstream is `org.freedesktop.portal.experimental.Credentials`
+[[S27](../SOURCES.md)] — referenced
 repeatedly in this repository's own documents ([0003](0003-own-namespace-before-freedesktop.md),
 README "Relation to xdg-desktop-portal", [ROADMAP.md](../ROADMAP.md) phase 3). Shipping our own
 `io.github.sjtrotter.portal.Credentials` would collide with that name in exactly the namespace
