@@ -95,14 +95,22 @@ capability), `certificate_der`, `chain_der`, `chain_status` (`complete` / `parti
 `may_prompt_later`.
 
 `GetCapabilities` answers `purposes`, `operations`, `mechanisms`, `selection_memory`,
-`protected_authentication_path`, `max_grant_lifetime`.
+`protected_authentication_path`, `max_grant_lifetime`, `max_grant_total_lifetime`.
 
 ## Lifetime
 
 A grant always expires. `expires_at` is frontend-generated and can be sooner than
 `requested_lifetime` asked for. `RenewGrant` is decided **entirely** in the frontend — the
 backend is never asked and no window appears — and never expands the permitted operations
-or mechanisms. `GrantInvalidated(o session_handle, s reason)` says why a grant stopped
+or mechanisms.
+
+**Renewal is bounded in total, not only per renewal.** Each consent carries an absolute
+deadline, `max_grant_total_lifetime` seconds (8 h) after `AcquireCredential` succeeded, which
+renewal never moves: a renewal before it is clamped to it, and one after it fails with
+`org.freedesktop.portal.Error.NotAllowed`. The only way on is a fresh `AcquireCredential`,
+which asks the user again. Nothing in this backend implements or can extend that; it is
+recorded here because a backend must not assume a grant it was told about lives as long as
+its own `Sign` calls keep arriving. `GrantInvalidated(o session_handle, s reason)` says why a grant stopped
 being usable before it was released; `reason` is one of `released`, `expired`,
 `token_removed`, `owner_gone`, `policy`, `service_shutdown`, `backend_gone`, `error`, and
 consumers must tolerate values they do not know.
