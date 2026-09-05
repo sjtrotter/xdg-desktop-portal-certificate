@@ -47,12 +47,61 @@ The facade was a server. This is a client.
 | Reachable from a Flatpak | needs an fd relayed through two services | yes: the portal bus name is already allowed |
 | Who the frontend thinks is calling | the backend's peer, relayed | **the application itself**, derived the ordinary way |
 | Hostile peer | a wire protocol from an untrusted process | the application's own calls, in the application's own address space |
-| Cost | 5–9 person-weeks, its own fuzzing target | one library, one D-Bus client |
+| Cost | 5–9 person-weeks, its own fuzzing target | one library, one D-Bus client, one fuzzing target |
 
 The last two rows are the argument. **The facade had to defend a boundary; this module is on the
 application's side of one.** A compromised application that abuses this module can call `Sign` as
-itself — which it could already do by calling the D-Bus interface directly. It gains nothing. That
-is why the code that used to need a threat model needs a test suite instead.
+itself — which it could already do by calling the D-Bus interface directly. It gains nothing.
+
+### The module's threat model, which is smaller but not empty
+
+An earlier draft of this decision said the code that used to need a threat model needs a test suite
+instead. That was wrong, and three independent reviews said so in the same words: *"already
+compromised application gains nothing" ignores "previously uncompromised application acquires this
+code"*. A consumer that loads this module gains a DER parser, a D-Bus client, a worker thread and
+an attribute protocol **inside its own address space**, next to its own secrets and its own
+authority. The threat model is smaller than the facade's. It is not absent.
+
+What it has to answer:
+
+1. **The portal's reply is the hostile input, and it is only trusted-ish.** `certificate_der`,
+   `chain_der`, `key_type`, `key_curve` and `supported_mechanisms` arrive over D-Bus from
+   `org.freedesktop.portal.Desktop` and are parsed in the consumer's process by `objects.c` and
+   `der.c`. The frontend is a trusted service and the bus authenticates it, but "trusted" is a
+   statement about intent, not about the bytes: the certificate DER came off a card, through a
+   backend, through a frontend, and none of them promise it is well formed. **This code must parse
+   defensively regardless of who sent it**, because the alternative is that a malformed
+   certificate on a card — or a compromised backend, or a portal implementation with a bug —
+   becomes memory corruption in a browser.
+2. **Certificate operations are reachable from the network.** A TLS server chooses when to ask for
+   a client certificate, chooses the acceptable issuers and chooses the mechanism and parameters of
+   the `CertificateVerify`. Those choices reach `mechanism.c` and `portal_digestinfo_parse()`
+   through GnuTLS or NSS with no user in between. A remote peer therefore drives this parser
+   several times per handshake and can retry.
+3. **What an attacker with control of the portal reply could do.** Nothing to the card and nothing
+   to the PIN: neither is on this side. What is in reach is the consumer's process — a
+   heap overflow in the SPKI split, a length confusion in the attribute protocol, a read past the
+   end of a `GBytes`. The value at risk is the browser's, not the portal's. That is the whole point
+   of writing this down: the asset this module can damage does not belong to the project that
+   ships it.
+4. **Lifecycle in somebody else's process.** `C_Initialize` may be called after `fork()`;
+   `C_Finalize` may be called while another thread is in a call; the library may be `dlclose()`d.
+   The module claims no fork safety (`CKF_OS_LOCKING_OK` handling in `module.c`), and the claim is
+   honest rather than a defence. A consumer that forks after initialising gets a worker thread that
+   does not exist in the child, which is a hang and not a compromise — but it is a defect this
+   module owns, not one the portal boundary absorbs.
+
+What answers it, and what does not:
+
+- **`tests/fuzz-der.c`** drives the TLV reader, the DigestInfo parser, `portal_objects_new()` on an
+  arbitrary certificate DER, and the attribute protocol (`portal_object_matches`,
+  `portal_objects_find`, `portal_object_get_attributes`, `portal_template_wants_credential`,
+  `portal_template_fingerprint`) with hostile templates. It builds as a libFuzzer target when clang
+  is available, and always builds as a corpus replay binary that `meson test` runs under ASan/UBSan.
+- **Opt-in loading** (below) keeps the code out of processes that never asked for it, which is the
+  cheapest reduction in exposure available and the one this decision should have started with.
+- **What does not answer it:** the argument that the module is not a trust boundary. That argument
+  is about the *portal's* assets and it is still correct. It says nothing about the consumer's.
 
 **The identity story gets better, not worse.** The facade would have been called by an application
 whose identity the frontend could not see; the frontend would have derived the *backend's* peer.

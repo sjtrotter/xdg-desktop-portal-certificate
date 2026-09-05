@@ -500,16 +500,56 @@ chose. It does **not** hold a private key, a PIN, a PKCS#11 session on a real to
 to a card. There is nothing in its address space that was not either sent by the portal or already
 public.
 
-**The threat model is short, and that is the point.** A compromised application holding this module
-can call `Sign` — as itself, under a grant the user consented to, for as long as the grant lives.
-It could already do exactly that by calling `org.freedesktop.portal.experimental.Certificate`
-directly, which needs no module and no configuration. **The module grants no capability the D-Bus
-interface does not**, and every refusal it makes is made again by the portal on the other side of
-the bus. It is a convenience for consumers, not a boundary.
+**It grants no capability the D-Bus interface does not.** A compromised application holding this
+module can call `Sign` — as itself, under a grant the user consented to, for as long as the grant
+lives. It could already do exactly that by calling
+`org.freedesktop.portal.experimental.Certificate` directly, which needs no module and no
+configuration. Every refusal the module makes is made again by the portal on the other side of the
+bus. **It is not a trust boundary for the portal's assets**, and hardening aimed at those belongs
+in `desktop-portal/certificate.c` and `src/broker/`.
 
-That is why the facade's requirements list above does not apply here. The facade would have faced
-a hostile peer across a socket; this faces the process it lives in, which does not need to attack
-what it can already ask for.
+**That is a statement about the portal's assets, not the consumer's, and the difference is the
+whole threat model.** A previously uncompromised application that loads this module acquires a DER
+parser, an attribute protocol, a D-Bus client and a worker thread inside its own address space,
+beside its own secrets and its own authority. Four things follow.
+
+**1. The portal's reply is hostile input, and "trusted" does not mean "well formed."**
+`certificate_der`, `chain_der`, `key_type`, `key_curve` and `supported_mechanisms` cross D-Bus from
+the frontend and are parsed here, in the consumer, by `src/module/objects.c` and
+`src/module/der.c`. The bus authenticates the frontend and the frontend is a trusted service; the
+bytes are another matter. The DER came off a card, through this backend, through the frontend, and
+none of the three promises it parses. **This code parses defensively regardless of who sent it**,
+because the alternative is that a malformed certificate on a card — or a bug in any service on that
+path — becomes memory corruption in a browser.
+
+**2. Certificate operations are reachable from the network.** A TLS server decides when to ask for
+a client certificate, which issuers it will accept, and the mechanism and parameters of the
+`CertificateVerify`. Those choices arrive at `src/module/mechanism.c` and
+`portal_digestinfo_parse()` through GnuTLS or NSS with no user in between, several times per
+handshake, and a remote peer can retry. Hostile input here is not a hypothetical adversary with
+D-Bus access; it is the ordinary operation of the feature.
+
+**3. What an attacker who controlled the portal's reply could reach.** Not the card and not the
+PIN: neither is on this side, and there is nothing in the module's address space that was not
+either sent by the portal or already public. What is in reach is **the consumer's process** — a
+length confusion in the SubjectPublicKeyInfo split, a read past the end of a `GBytes`, a bad size
+in the `C_GetAttributeValue` protocol. The asset at risk belongs to the browser or the mail client,
+not to this project, which is exactly why it has to be written down here.
+
+**4. Lifecycle in somebody else's process.** `C_Initialize` may be called after `fork()`,
+`C_Finalize` may be called while another thread is inside a call, and the library may be
+`dlclose()`d. The module **claims no fork safety**, and the claim is honest rather than a defence:
+a consumer that forks after initialising gets a worker thread that does not exist in the child,
+which is a hang rather than a compromise, but it is this module's defect and the portal boundary
+does not absorb it. Unload and re-initialise are covered by `test-module`; fork is not.
+
+**What answers this, and what does not.** `tests/fuzz-der.c` drives the TLV reader, the DigestInfo
+parser, `portal_objects_new()` on arbitrary certificate DER, and the attribute protocol with
+hostile templates — as a libFuzzer target where clang is available, and always as a corpus replay
+binary `meson test` runs under ASan and UBSan. Opt-in loading (below) keeps the code out of
+processes that never asked for it. What does **not** answer it is the argument at the top of this
+section: "the application could already call the portal itself" is about the portal's assets and
+says nothing about the consumer's.
 
 **What it still refuses, and why.** Not to defend a boundary, but so that a consumer cannot be
 misled about what this token is:

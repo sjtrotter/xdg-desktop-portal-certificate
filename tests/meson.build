@@ -102,6 +102,41 @@ exe = executable(
 
 test('module', exe, protocol: 'tap', env: test_env)
 
+# THE HOSTILE-INPUT SURFACE OF THAT SAME MODULE, in one entry point: the DER
+# reader, the DigestInfo parser, portal_objects_new() on an arbitrary
+# certificate, and the C_GetAttributeValue protocol against a template built out
+# of the input. docs/SECURITY.md says why code running in a browser's process
+# needs this even though the module is not a trust boundary: the asset it can
+# damage belongs to the consumer, not to the portal.
+#
+# ALWAYS BUILT AS A CORPUS REPLAY, so that `meson test` under -Db_sanitize
+# covers it on every machine. tests/fixtures/fuzz-corpus is where a finding gets
+# checked in; PKCS11_PORTAL_FUZZ_CORPUS points it somewhere else.
+exe = executable(
+  'fuzz-der',
+  ['fuzz-der.c'],
+  dependencies: [module_core_dep],
+  include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+  c_args: test_args,
+  install: false,
+)
+
+test('fuzz-der', exe, protocol: 'tap', env: test_env, timeout: 120)
+
+# AND AS A REAL FUZZER WHERE THE COMPILER HAS ONE. Not a `meson test`: it does
+# not terminate on its own. Run it by hand, or in CI with -max_total_time.
+if cc.get_id() == 'clang' and cc.has_link_argument('-fsanitize=fuzzer')
+  executable(
+    'fuzz-der-libfuzzer',
+    ['fuzz-der.c'],
+    dependencies: [module_core_dep],
+    include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+    c_args: test_args + ['-DPKCS11_PORTAL_FUZZING_ENGINE=1', '-fsanitize=fuzzer-no-link'],
+    link_args: ['-fsanitize=fuzzer'],
+    install: false,
+  )
+endif
+
 # THE WEBKIT PATH, IN ITS SMALLEST FORM. Built, not run by `meson test`: it
 # needs a portal, a chooser and a person. tools/module-smoke.sh runs it under
 # Xvfb with xdotool standing in for the person.
