@@ -17,7 +17,7 @@ $ ninja -C build
 $ meson test -C build
 ```
 
-Ten suites:
+Twelve suites:
 
 | Suite | Needs | What it covers |
 |---|---|---|
@@ -28,8 +28,10 @@ Ten suites:
 | `broker-device` | a SoftHSM fixture, and `openssl(1)` for the OAEP half | `C_Login`, `C_Sign`, signature verification, an **RSA-OAEP round trip** against a ciphertext `openssl pkeyutl` produced, and that opening the device for a **different** candidate throws away the previous grant's login and key handle. **Skips itself** without one; see tier 2 |
 | `broker-decrypt` | a SoftHSM fixture | the two properties that make `Decrypt` safe to offer: **one indistinguishable error** for every failure, and the **per-grant budget**. **Skips itself** without one |
 | `broker-regrant` | a SoftHSM fixture with both an RSA and an EC key | a second `AcquireCredential` on a live session, end to end: the signature after the re-grant **verifies against the new certificate**, and the operation in between is refused rather than signed with the old grant's key. **Skips itself** without one |
+| `filter` (second half) | nothing | also: that the backend **refuses to load the portal's own client-side module**, by p11-kit name and by an explicit `--module` path. Loading it would make the backend enumerate a token whose enumeration calls the backend |
 | `tools-lib` | nothing | the two helpers in `tools/lib.sh` that decide something dangerous: that the generated `portals.conf` is the **effective** per-interface resolution of the machine's whole configuration chain rather than a copy of the first file (a user `Screenshot=none` survives an `/etc` file that names a backend for it), that our `Certificate` line replaces any existing one, that a private run switches the `Secret` backend off and a `--live` one does not, and that the fixture checks refuse a forged marker, a symlinked path, an ancestor that is not ours, a mode that is not 0700, and a directory this project did not make |
 | `pin-system` | nothing (it stands up its own `GTestDBus`, and gcr's own system prompter or a hand-written hostile one on it) | the OTHER PIN prompt, end to end and with nobody typing: that `--pin-prompt=auto` picks the system prompter when the name is on the bus, that the application, purpose, token and reader reach the prompt, that no "remember" choice is ever offered, that a wrong PIN comes back as a **warning on the prompt that is already up** rather than a second prompt, that an **empty answer never reaches `C_Login`**, the three-attempt cap, cancel from the prompter, `Request.Close()` closing it, a **Cancel in the shell after the PIN was submitted** answering `cancelled` and abandoning the login that succeeds anyway, the prompter **vanishing** during the open, during a password round and during a confirmation round, a **close racing a transport error** (gcr completing one round twice), the `FINAL_TRY` second confirmation **and that refusing it leaves the card unasked — on a protected authentication path too**, the token flags reaching the warning without a number, the login timeout, and a protected-authentication-path token asking for nothing. Built only when the build found gcr-4 |
+| `module` | nothing | the **client-side PKCS#11 module**'s rules with no bus at all: the DigestInfo parser (every accepted spelling, and the refusals — a wrong digest length, a trailing byte, a truncated structure, and the TLS 1.0/1.1 MD5‖SHA-1 concatenation), the definite-length DER reader (a non-minimal long form, an indefinite length, an overrun, a high tag), the mechanism map and the fact that it follows the portal's advertised list rather than a hardcoded one, the three objects a grant becomes, that the private key's `CKA_VALUE` and RSA factors answer `CKR_ATTRIBUTE_SENSITIVE` while `CKA_ID` in the same template is still answered, `C_GetAttributeValue`'s size-query and buffer-too-small protocol, template matching including a `CKA_ID` that does not match, that a search for a class this token does not have never provokes a chooser, that the refusal fingerprint ignores `CKA_CLASS` so a certificate search and a key search count as one, and that the URIs in `portal-token.h` still name what the module presents |
 | `impl-dbus` | nothing (it stands up its own `GTestDBus`) | the D-Bus boundary: a stranger calling every method including both `Close()`s, cross-`app_id` session use, session-path reuse, strict option validation, the results vardict's types, a frontend **replaced while its call is already in the backend's queue**, and the frontend vanishing while a call is in flight |
 | `cancellation` | a display for four of six, a SoftHSM fixture for two | cancelling while `C_Login` is in flight, cancelling before the window is up, cancelling **while the device call is in progress**, a cancelled login that succeeded anyway being logged out again (and a normal one not being), and one of two callers sharing a PIN window cancelling **on its own** |
 
@@ -352,6 +354,89 @@ client verifies the signature. **The fixture PIN is a test PIN in a scratch dire
 reuse it.**
 
 Clean up with `tools/softhsm-fixture.sh --clean`.
+
+### 2.5 The client-side PKCS#11 module, driven by three consumers
+
+`tools/module-smoke.sh` runs the same private-bus stack as `tools/ui-smoke.sh` — frontend, backend,
+SoftHSM fixture, Xvfb, xdotool — but **nothing in it speaks D-Bus**. Everything talks PKCS#11 to
+`build/src/module/libpkcs11-portal-certificate.so`, and the module does the talking.
+
+```console
+$ ninja -C build
+$ tools/softhsm-fixture.sh
+$ tools/module-smoke.sh
+$ tools/module-smoke.sh --phase 3        # just the handshake
+```
+
+Three phases:
+
+1. **`p11tool --provider … --list-all`** — GnuTLS enumerating the token. The chooser appears at the
+   search, and the certificate, the public key and the private key come back with matching `CKA_ID`
+   and a URI naming `token=Portal%20Certificate;object=Portal%20Certificate`. The script builds
+   the URIs from the shared contract in `src/module/portal-token.h`; `URI_OBJECT=` empties the
+   `object=` attribute, which is how the single-object import's requirement was found.
+2. **`pkcs11-tool --sign --mechanism SHA256-RSA-PKCS`**, then `pkcs11-tool --read-object --type
+   cert`, then `openssl dgst -sha256 -verify` — the signature must verify **against the certificate
+   the module handed back**, not against the fixture's PEM.
+3. **`tests/gtls-client`** — `g_tls_certificate_new_from_pkcs11_uris()` and a real mutual-TLS
+   handshake against a python `ssl` server that requires and verifies a client certificate. This is
+   the constructor WebKitGTK reaches through glib-networking, and it is
+   [SPIKES.md](SPIKES.md) S3 in its smallest honest form.
+
+**Nothing is installed system wide.** p11-kit reads user module files from
+`$XDG_CONFIG_HOME/pkcs11/modules`, so the script points `XDG_CONFIG_HOME` at a directory under its
+own `$LOGDIR` holding one `.module` file with an absolute path in it. A python server rather than
+`gnutls-serv`: the fixture certificates are self-signed leaves without `basicConstraints CA:TRUE`,
+which GnuTLS will not accept as an anchor and OpenSSL will when it is the peer's own certificate in
+the trust store.
+
+Expect, on a pass:
+
+```
+handshake completed
+server said: PASS Portal Test User (RSA)
+client certificate: {'organizationName': 'Example Org', 'commonName': 'Portal Test User (RSA)'}
+protocol: TLSv1.3 cipher: TLS_AES_256_GCM_SHA384
+module-smoke: PASS
+```
+
+**When a consumer gives up and says nothing, `MODULE_LOG_CALLS=1` is the way in**: it adds
+`log-calls: yes` to the run's module file, and p11-kit then logs every call into the module on the
+consumer's stderr. That is how "GnuTLS opens a session, closes it, and never searches" was traced
+to a URI that named no object.
+
+Under a sanitizer, the module can be driven by a real consumer rather than only by its unit tests:
+
+```console
+$ meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
+$ ninja -C build-asan
+$ LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0     MODULE_SO=$PWD/build-asan/src/module/libpkcs11-portal-certificate.so     GTLS_CLIENT=$PWD/build-asan/tests/gtls-client     tools/module-smoke.sh --phase "1 3"
+```
+
+`--phase 2` cannot be run this way: OpenSC's `pkcs11-tool` `dlopen()`s modules with `RTLD_DEEPBIND`,
+which the sanitizer runtime refuses. That is a property of `pkcs11-tool`, not of the module.
+
+### 2.6 The check that has not been run: Firefox
+
+Not yet done, and it is the next thing worth doing, because NSS is the other half of
+[SPIKES.md](SPIKES.md) S1.
+
+1. Install the module and its `.module` file, or point `XDG_CONFIG_HOME` at a directory holding
+   one, as `tools/module-smoke.sh` does.
+2. In Firefox: Settings → Privacy & Security → Security Devices → Load, and give it
+   `libpkcs11-portal-certificate.so`. (Firefox does not read p11-kit configuration; it wants the
+   path.)
+3. Start the portal stack with a card or the SoftHSM fixture, and visit a site that asks for a
+   client certificate.
+4. **Expect the portal's chooser**, drawn by this backend, at the moment Firefox looks for a
+   certificate — followed by Firefox's own certificate dialog offering exactly the one that was
+   granted, and a PIN prompt from the backend rather than from Firefox.
+
+What to write down: whether NSS calls `C_Login` and what it does with `CKR_OK`, whether it respects
+`CKF_PROTECTED_AUTHENTICATION_PATH` and so asks for no PIN of its own, whether it re-enumerates
+often enough to provoke a second chooser, and whether it copes with a token whose object set
+changes when the grant expires. The same run, with Thunderbird and an S/MIME message, exercises
+`C_Decrypt`.
 
 ---
 ## 3. A real PIV card. Tiers 3.1–3.4 have been run, once.

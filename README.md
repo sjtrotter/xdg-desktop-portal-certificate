@@ -18,9 +18,15 @@ PKCS#1 v1.5 signatures against a PIV card.
 against a real card; tiers 3.1–3.4 passed once, on 2026-09-04, with one PIV card in one reader,
 on a GNOME Wayland session, through both PIN paths (this backend's window and gnome-shell's
 system prompter). That is one card and one reader, not a claim about PIV hardware in general,
-and the rest of tier 3 is still the author's to run. The PKCS#11 compatibility facade is not
-reachable — `OpenPkcs11Endpoint` is on neither interface — and the two spikes that decide
-whether it can exist at all are still unrun ([docs/SPIKES.md](docs/SPIKES.md)).
+and the rest of tier 3 is still the author's to run.
+
+**There is now a PKCS#11 path for applications that cannot call D-Bus** — a module loaded into
+the application's own process, not an endpoint served from here. A GnuTLS mutual-TLS handshake
+has completed through it, driven by `g_tls_certificate_new_from_pkcs11_uris()`, which is the
+constructor WebKitGTK reaches. See "For applications that speak PKCS#11" below,
+[0011](docs/decisions/0011-client-side-pkcs11-module.md), and
+[docs/SPIKES.md](docs/SPIKES.md) for what that does and does not answer. The socket-served
+facade `OpenPkcs11Endpoint` would have reached is not being built.
 
 > The GitHub repository was renamed `xdg-desktop-portal-certificate` to match the binary on
 > 2026-09-04 — see [0009](docs/decisions/0009-name-it-certificate.md), which is why the
@@ -189,6 +195,81 @@ org.freedesktop.impl.portal.experimental.Certificate
 Every impl call carries `app_id` — including `GetCapabilities`, which is one of the things
 the move upstream changed. That is the whole point of the boundary.
 
+## For applications that speak PKCS#11
+
+WebKitGTK's network process, Firefox, Thunderbird and LibreOffice reach TLS and S/MIME through
+PKCS#11, not through D-Bus. They cannot call the interface above and they are not going to be
+rewritten to. They can, however, all load a p11-kit module.
+
+So there is one: **`libpkcs11-portal-certificate.so`**, in
+[`src/module/`](src/module/), installed into p11-kit's module directory with
+`xdg-desktop-portal-certificate.module`. p11-kit loads it **into the application's own
+process**, and it turns
+`C_Sign` into the portal's `Sign` over the public D-Bus interface. It is not part of this backend
+and links none of it.
+
+```
+  application ── PKCS#11 ─▶ libpkcs11-portal-certificate.so ── D-Bus ─▶ xdg-desktop-portal
+                                (in the application)                          │  impl
+                                                                              ▼
+                                                                        this backend ─▶ the card
+```
+
+What the application sees is one token, `Portal Certificate`, holding the one certificate the user
+picked in the portal's chooser, its public key and its private key. The chooser appears the first
+time the application searches for a certificate or a key. There is no PIN prompt in the
+application: the token advertises `CKF_PROTECTED_AUTHENTICATION_PATH`, `C_Login` succeeds without
+doing anything, and the backend asks for the PIN in its own window at the first signature.
+
+```console
+$ p11tool --provider ./build/src/module/libpkcs11-portal-certificate.so --list-all
+# ... the chooser appears, and then:
+Object 0:
+	URL: pkcs11:model=portal-cert;manufacturer=freedesktop.org;token=Portal%20Certificate;id=...;object=Portal%20Certificate;type=cert
+	Type: X.509 Certificate (RSA-2048)
+```
+
+The URIs an application writes down are constants, and they are in
+[`src/module/portal-token.h`](src/module/portal-token.h) — **a file shared verbatim with the
+web-auth backend, because a URI is all that crosses between the two projects**:
+
+```
+pkcs11:model=portal-cert;manufacturer=freedesktop.org;token=Portal%20Certificate;type=cert
+pkcs11:model=portal-cert;manufacturer=freedesktop.org;token=Portal%20Certificate;type=private
+```
+
+**For `g_tls_certificate_new_from_pkcs11_uris()`, append `;object=Portal%20Certificate`.** That is
+not decoration and it is not optional: GnuTLS's *single-object* import refuses a URI that names no
+object and wants `object=` (`CKA_LABEL`) or `id=`, while *enumeration* — `p11tool --list-all`,
+`gnutls_pkcs11_obj_list_import_url4` — is happy with the token URI above. `CKA_LABEL` is therefore
+a constant rather than the certificate's common name, which an application could not know in
+advance; the certificate's real identity is in its DER.
+
+Three things worth knowing before enabling it:
+
+- **With no portal, or with the experimental gate off, the module offers no slot** and
+  `C_Initialize` still succeeds. An application that loads every configured module must not break
+  because one of them has nothing to say.
+- **It must not be enabled inside xdg-desktop-portal or inside this backend.** The backend
+  enumerates p11-kit modules; this one answers by calling the portal that calls the backend. It
+  refuses to run there three separate ways, and the shipped module file carries `disable-in:`.
+- **`enable-in:` and `disable-in:` in `xdg-desktop-portal-certificate.module` take process base
+  names** and are
+  not a security feature (`pkcs11.conf(5)` says so). `enable-in: firefox, thunderbird` offers the
+  portal token to those two and nothing else; that is the setting for a deployment that wants the
+  portal path for its browser and the real card module for everything else.
+
+Environment, for a consumer that knows more than PKCS#11 lets it say:
+`PKCS11_PORTAL_CERTIFICATE_PURPOSE` (`client_auth` by default),
+`PKCS11_PORTAL_CERTIFICATE_REASON`, `PKCS11_PORTAL_CERTIFICATE_OPERATIONS` (`sign`, `decrypt`),
+`PKCS11_PORTAL_CERTIFICATE_KEY_ALGORITHMS`, and `PKCS11_PORTAL_CERTIFICATE_DISABLE=1`.
+
+[`tools/module-smoke.sh`](tools/module-smoke.sh) runs the whole thing — `p11tool`, `pkcs11-tool
+--sign` verified with `openssl`, and a real mutual-TLS handshake — under Xvfb with xdotool
+answering the chooser. **The module is not a trust boundary; the portal is.**
+[0011](docs/decisions/0011-client-side-pkcs11-module.md) says what that means and what it does not
+solve.
+
 ## Building, and running it
 
 ```console
@@ -345,7 +426,8 @@ docs/         architecture, both interfaces, security, testing, spikes, roadmap,
 | [docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md) | a pointer to the branch's XML, and a summary |
 | [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) | the interface this backend implements, why the XML here is a tracking copy, and why applications cannot reach it |
 | [docs/UPSTREAMING.md](docs/UPSTREAMING.md) | where the frontend branch is, what its XML forced this repository to change, and what remains before a PR |
-| [docs/SECURITY.md](docs/SECURITY.md) | threat model, PIN handling, grant scoping, caller identity |
+| [docs/SECURITY.md](docs/SECURITY.md) | threat model, PIN handling, grant scoping, caller identity, what runs in the application's process |
+| [docs/decisions/0011-client-side-pkcs11-module.md](docs/decisions/0011-client-side-pkcs11-module.md) | why the PKCS#11 surface is a module in the application rather than an endpoint served from here |
 | [docs/TESTING.md](docs/TESTING.md) | **the exact commands**, including the run with a real card in a reader |
 | [docs/SPIKES.md](docs/SPIKES.md) | the questions that decide whether this is buildable |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | phases, effort estimate, and its assumptions |

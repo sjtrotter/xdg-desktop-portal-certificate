@@ -100,7 +100,8 @@ such throughout the rest of this document.
 
 | | |
 |---|---|
-| The synthetic PKCS#11 facade | there is no method to reach it: `OpenPkcs11Endpoint` is on neither interface. `src/export/facade.h` holds the requirements |
+| The synthetic PKCS#11 facade | not being built. There is no method to reach it — `OpenPkcs11Endpoint` is on neither interface — and the consumers it was for are served by the **client-side module** instead: [0011](decisions/0011-client-side-pkcs11-module.md), and "The client-side PKCS#11 module" below. The facade's requirements survive under "Grant scoping" in case an fd-returning method is ever added |
+| Two concurrent grants in one application | the client-side module presents one credential per process. [0006](decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) failure mode 8, deferred rather than solved, because no consumer has asked |
 | Rate limiting | neither side does it. The frontend is the right place; it is on that branch's open-items list. The three-attempt cap on one PIN window is a bound on one prompt, not a rate limit: nothing counts requests per caller or per hour |
 | Chain building | `chain_status` is always `leaf_only`, honestly |
 | A D-Bus policy denying this backend's name to everything but the portal's uid | recorded in [IMPL-INTERFACE.md](IMPL-INTERFACE.md) as a deployment option, not shipped |
@@ -450,11 +451,11 @@ consent policy, and performs the operation on its own session. Neither check is 
 frontend is the only side that knows which application is asking, and the backend is the only side
 that knows what the card will accept. (Rate limiting is in neither yet; see above.)
 
-**The PKCS#11 facade must enforce the same thing at a much harder interface**, which is why it is
-experimental and why it is a separate milestone — and why the frontend branch does not have a
-method that returns an endpoint at all. `OpenPkcs11Endpoint` is on neither interface. What follows
-is therefore the acceptance criteria for a follow-up rather than a description of something
-reachable. The minimum it must do:
+**The facade below is not being built** — see
+[0011](decisions/0011-client-side-pkcs11-module.md) and the next section. What follows is kept
+because it is the acceptance criteria for any future fd-returning method, and because deleting it
+would mean rediscovering it. It is *not* the requirements list for the client-side module, which
+is on the other side of the boundary and defends nothing. The minimum a served facade must do:
 
 - one synthetic slot, one synthetic token;
 - only the granted leaf certificate, its keys, and explicitly selected chain certificates — no
@@ -488,6 +489,76 @@ copy. None of that exists on either side today.
 handles, object creation, key generation, wrapping or derivation does not need `C_FindObjects` to
 reach the rest of the card. Every entry point is either refused or constrained; there is no
 allow-by-default path.
+
+## The client-side PKCS#11 module
+
+**What runs in the application's process.** `libpkcs11-portal-certificate.so`
+([`../src/module/`](../src/module/)), loaded by p11-kit into any consumer that speaks PKCS#11 and
+not D-Bus. It holds: a `GDBusConnection` to the session bus, a worker thread running its own
+`GMainContext`, the session handle of at most one grant, and the DER of the certificate the user
+chose. It does **not** hold a private key, a PIN, a PKCS#11 session on a real token, or any handle
+to a card. There is nothing in its address space that was not either sent by the portal or already
+public.
+
+**The threat model is short, and that is the point.** A compromised application holding this module
+can call `Sign` — as itself, under a grant the user consented to, for as long as the grant lives.
+It could already do exactly that by calling `org.freedesktop.portal.experimental.Certificate`
+directly, which needs no module and no configuration. **The module grants no capability the D-Bus
+interface does not**, and every refusal it makes is made again by the portal on the other side of
+the bus. It is a convenience for consumers, not a boundary.
+
+That is why the facade's requirements list above does not apply here. The facade would have faced
+a hostile peer across a socket; this faces the process it lives in, which does not need to attack
+what it can already ask for.
+
+**What it still refuses, and why.** Not to defend a boundary, but so that a consumer cannot be
+misled about what this token is:
+
+- every write to a token — `C_InitToken`, `C_InitPIN`, `C_SetPIN`, `C_CreateObject`,
+  `C_DestroyObject`, `C_SetAttributeValue`, all key generation, all wrap/unwrap, all derivation,
+  RNG — answers `CKR_FUNCTION_NOT_SUPPORTED`. A service that mediates *use* must not appear to
+  offer *administration*;
+- `CKF_RW_SESSION` is refused with `CKR_TOKEN_WRITE_PROTECTED`; SO login with
+  `CKR_USER_TYPE_INVALID`;
+- the private key has **no `CKA_VALUE`**: that attribute and the RSA secret factors answer
+  `CKR_ATTRIBUTE_SENSITIVE`. `CKA_SENSITIVE` is `TRUE` and `CKA_EXTRACTABLE` is `FALSE`, which is
+  what the token behind the portal reports and what a consumer must be told;
+- only the granted leaf certificate, its public key and its private key are objects. The
+  intermediates in `chain_der` are deliberately not, so that a URI naming `type=cert` on this
+  token is unambiguous;
+- object handles carry a generation counter, so a handle from a released grant is invalid rather
+  than ambiguous;
+- mechanisms are an allow-list and their parameters are checked before the call, not forwarded:
+  RSA-PSS `hashAlg`/`mgf`/`sLen`, OAEP `hashAlg`/`mgf`/label length. The portal checks them again
+  against the modulus, which is the only place the modulus size is known;
+- the PKCS#11 v3 interface table is implemented rather than left absent, so `C_GetInterface` offers
+  the same functions as `C_GetFunctionList` and not a different set;
+- only `C_GetFunctionList`, `C_GetInterfaceList` and `C_GetInterface` are exported from the shared
+  object, so that an application loading several PKCS#11 modules cannot have one module's `C_Sign`
+  resolve to another's.
+
+**There is no PIN on this side.** The token sets `CKF_PROTECTED_AUTHENTICATION_PATH`, so a TLS
+stack does not ask for one; `C_Login` returns `CKR_OK` without doing anything, and **any PIN bytes
+an application passes are ignored and never forwarded** — there is nothing here for them to unlock,
+and the portal's interface has no field one could travel in. The real PIN is collected by the
+backend, in the backend's own window, at the first `Sign`.
+
+**Logging.** `G_MESSAGES_DEBUG=pkcs11-portal-certificate` and nothing else. Counts, mechanism
+names, key type and size, and grant outcomes. Never a signature, never DER, never application data,
+never a PKCS#11 URI, and there is no PIN to leak.
+
+**The recursion rule.** This module must never be loaded by xdg-desktop-portal or by this backend:
+the backend enumerates p11-kit's modules, and this one answers by calling the portal that calls the
+backend. Three fences, because `pkcs11.conf(5)` states plainly that `disable-in` is not a security
+feature: `certificate_module_is_portal_module()` in `src/tokens/discovery.c` (applied to configured
+modules *and* to an explicit `--module` path), the module's own refusal to run in a process whose
+executable is named `xdg-desktop-portal*`, and `disable-in:` in the installed module file.
+
+**What it does not fix.** The application still learns which certificate it was given and can use
+the key for anything the grant permits, for as long as the grant lives —
+[0006](decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) failure mode 10 is untouched,
+and `purpose` still constrains selection and consent language rather than proving what a signature
+was used for. Rate limiting is still in neither half.
 
 ## Card removal, and what happens to a grant
 

@@ -1,7 +1,10 @@
 # 7. Brokered operations are the core; the PKCS#11 facade is compatibility
 
 Date: 2026-09-03
-Status: accepted (for the sketch)
+Status: accepted (for the sketch); the **compatibility half is superseded** by
+[0011](0011-client-side-pkcs11-module.md), which serves the same consumers with a client-side
+p11-kit module instead of a socket-served facade. The core half -- brokered operations are the
+contract -- is unchanged and is what the module calls.
 
 ## Context
 
@@ -65,6 +68,10 @@ misread it, and the interface says so in those words.
 
 ### Why the facade still has to exist
 
+*(Superseded by [0011](0011-client-side-pkcs11-module.md). The reach argument below is exactly
+right and is why 0011 exists; what changed is which process the `CK_FUNCTION_LIST` runs in. Read
+the rest of this section as the requirement, and 0011 as the answer.)*
+
 Because the reach argument from [0001](0001-mediate-via-scoped-pkcs11-forwarding.md) is still true.
 GnuTLS, NSS and OpenSSL want a `CK_FUNCTION_LIST`, and asking every consumer to restructure its TLS
 code around a D-Bus signing call is asking for adoption that will not come. The facade is how a
@@ -77,6 +84,8 @@ implementation and a weaker per-operation story.
   `ReleaseGrant`, `GetCapabilities`, `TokenAdded`/`TokenRemoved`/`GrantInvalidated`.
 - **Compatibility:** `OpenPkcs11Endpoint(session_handle, options) → {endpoint_fd,
   certificate_uri, private_key_uri, endpoint_version}`, **experimental**, milestone 2.
+  *(Not built, not on either interface, and no longer needed by the consumers it was for:
+  [0011](0011-client-side-pkcs11-module.md).)*
 - **Never both automatically.** The caller asks for the capability it can actually use, and
   `GetCapabilities` says whether this implementation has it, so callers negotiate instead of probing
   by failing.
@@ -104,3 +113,8 @@ implementation and a weaker per-operation story.
 - **This is the ADR to revisit if adoption stalls.** If nobody will integrate a signing call, the
   facade stops being a concession and becomes the product — and the security model gets worse in a
   way that must then be documented rather than quietly accepted.
+- **It was revisited, and adoption is the reason.** [0011](0011-client-side-pkcs11-module.md)
+  makes the PKCS#11 surface a client-side module rather than a served endpoint. The security model
+  did *not* get worse in the way this paragraph feared, because the module holds no key, no PIN
+  and no card, and the portal remains the boundary — but the honest reading of that ADR is that
+  most consumers will use the compatibility path and never see the brokered API.

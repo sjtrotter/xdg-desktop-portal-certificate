@@ -17,9 +17,15 @@ and implementing the portal. Why it lives there rather than here is
 [0008](decisions/0008-build-to-the-upstream-shape.md), which 0010 preserves.
 
 **The core contract is unchanged by the split**: credential selection plus brokered
-operations. The application never receives the key, never receives the PIN, and never
-receives a PKCS#11 handle either — the compatibility endpoint that would have given it
-one is not in the interface at all (see "The endpoint that is not there" below).
+operations. The application never receives the key and never receives the PIN.
+
+**There are now three ways to consume it**, and the third is new: the D-Bus interface
+directly; the D-Bus interface through a library; and a **client-side PKCS#11 module** that
+runs inside the application and turns `C_Sign` into `Sign`
+([0011](decisions/0011-client-side-pkcs11-module.md)). An application on the third path does
+hold a PKCS#11 handle — to a synthetic token in its own process, holding no key, no PIN and
+no card. The fd-returning endpoint that would have been a fourth way is still not in the
+interface, and nothing is waiting for it (see "The endpoint that is not there" below).
 
 ## Who does what
 
@@ -94,9 +100,16 @@ untested. It is a follow-up, to land with the facade rules in [SECURITY.md](SECU
 
 Everything this document used to say about relaying a descriptor through two processes is
 therefore a description of future work, not of the current contract.
-[`../src/export/facade.h`](../src/export/facade.h) is kept for the same reason: its
-requirements list is the acceptance criteria for that follow-up, and deleting it would
-mean rediscovering it.
+
+**And nothing is waiting for it.** The consumers the endpoint existed for — WebKitGTK
+through glib-networking, Firefox and Thunderbird through NSS — are served by the
+client-side module below, which needs no new interface method, works inside a Flatpak
+because the portal bus name is already allowed there, and lets the frontend identify the
+calling process rather than a relay.
+[`../src/export/facade.h`](../src/export/facade.h) is now a pointer to it; the facade's
+requirements list survives in [SECURITY.md](SECURITY.md) and
+[0006](decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) in case an fd-returning
+method is ever added.
 
 ## The correction this design is built on
 
@@ -393,55 +406,54 @@ particular `C_Login` return codes are a known compatibility hazard and are part 
 [SPIKES.md](SPIKES.md) S2 — which only becomes answerable when there is an endpoint to answer it
 about.
 
-### The synthetic PKCS#11 facade — [`../src/export/facade.h`](../src/export/facade.h)
+### The client-side PKCS#11 module — [`../src/module/`](../src/module/)
 
-**EXPERIMENTAL, and currently unreachable: the interface has no method that returns an
-endpoint.** See "The endpoint that is not there" above. What follows is the requirements
-list for the follow-up, kept so it does not have to be rediscovered.
+**Implemented.** `libpkcs11-portal-certificate.so`, installed into p11-kit's module
+directory with `xdg-desktop-portal-certificate.module`, and loaded by p11-kit **into the application's
+own process**. It is not part of the backend and links none of it.
 
-It is not the real token forwarded. It is a `CK_FUNCTION_LIST` the broker implements, served over a
-socket, which:
+```
+  application (Epiphany, Firefox, Thunderbird, LibreOffice, curl, …)
+      │  C_GetSlotList / C_FindObjects / C_SignInit / C_Sign
+      ▼
+  libpkcs11-portal-certificate.so          ← IN THE APPLICATION'S PROCESS
+      │  org.freedesktop.portal.experimental.Certificate
+      │  CreateSession → AcquireCredential → Sign
+      ▼
+  xdg-desktop-portal  ──impl──▶  this backend  ──▶  p11-kit ──▶ the card
+```
 
-- exposes **one synthetic slot** containing **one synthetic token**;
-- exposes **only** the granted leaf certificate, its public key, its private key, and explicitly
-  selected chain certificates — nothing else on the card, and no unrelated public or private
-  objects;
-- **maps synthetic handles** to broker-owned underlying handles; a client-supplied handle is a
-  lookup key, never an address;
-- allows **read-only sessions only**; `CKF_RW_SESSION` is refused;
-- refuses **SO login** entirely, and treats user `C_Login` as an authorisation-state transition;
-- refuses `C_InitToken`, `C_InitPIN`, `C_SetPIN`, `C_CreateObject`, `C_CopyObject`,
-  `C_DestroyObject`, `C_SetAttributeValue`, all key generation, all wrap/unwrap, all derivation
-  unless a grant explicitly requires it, RNG seeding, and operation-state export/import;
-- restricts `C_GetAttributeValue` so sensitive and unexpected attributes cannot leak;
-- exposes only the allow-listed mechanisms, validates their parameters, and refuses encryption and
-  decryption unless the grant permits them;
-- rate-limits, and terminates on expiry, revocation or card removal;
-- implements the **PKCS#11 v3 interface tables** as well as the classic v2 function list — filtering
-  only `C_GetFunctionList` leaves `C_GetInterface` as an unfiltered way back in.
+- **One slot, one token**, labelled `Portal Certificate`, always present while the portal
+  answers `GetCapabilities`. With no portal, or with the experimental gate off,
+  `C_GetSlotList` reports **zero slots** and `C_Initialize` still succeeds: an application
+  that loads every configured module must not break because one of them has nothing to say.
+- **The chooser appears at `C_FindObjectsInit`**, the first moment the module knows the
+  application wants a credential. A search for a class this token does not have — a trust
+  lookup, a data object — never provokes one, and a refusal is remembered for ten seconds so
+  that an application searching in a loop does not prompt in a loop.
+- **`CKF_PROTECTED_AUTHENTICATION_PATH` is set**, so no TLS stack asks the user for a PIN.
+  `C_Login(CKU_USER, …)` returns `CKR_OK` without doing anything and any PIN bytes passed
+  are ignored; the backend collects the real PIN in its own window at the first `Sign`.
+- **`CKA_LABEL` is a constant**, not the certificate's subject CN, because GnuTLS's
+  single-object import — the one behind `g_tls_certificate_new_from_pkcs11_uris()` — refuses a
+  URI that names no object, and an application cannot know a common name in advance. The token
+  URIs are in [`../src/module/portal-token.h`](../src/module/portal-token.h), **which is shared
+  verbatim with the web-auth backend**; a single-object import appends
+  `;object=Portal%20Certificate`.
+- **Mechanisms are the portal's, translated.** `CKM_RSA_PKCS` input is a DigestInfo, parsed
+  to (hash, digest); the `CKM_SHA*_` families hash locally; `CKM_RSA_PKCS_PSS` carries its
+  parameters into `mgf`/`salt_length`; `CKM_ECDSA` infers the hash from the digest length and
+  returns the raw `r ‖ s` PKCS#11 expects. `CKM_RSA_PKCS_OAEP` is the only decryption
+  mechanism. Everything else is `CKR_MECHANISM_INVALID`, and everything not listed above is
+  `CKR_FUNCTION_NOT_SUPPORTED` — including every way to write to a token.
+- **It must never be loaded by the frontend or by this backend**, which would recurse. Three
+  fences: `certificate_module_is_portal_module()` in
+  [`../src/tokens/discovery.h`](../src/tokens/discovery.h), the module's own refusal to run in
+  a process named `xdg-desktop-portal*`, and `disable-in:` in the module file.
 
-The transport can reuse p11-kit's RPC server entry point,
-`p11_kit_remote_serve_module(CK_FUNCTION_LIST *module, int in_fd, int out_fd)`, declared in
-[`p11-kit/remote.h`](https://github.com/p11-glue/p11-kit/blob/master/p11-kit/remote.h) behind
-`P11_KIT_FUTURE_UNSTABLE_API`. **Transport is the small part.** The value p11-kit adds here is a
-wire protocol, not a policy.
-
-**The endpoint would be returned as a Unix file descriptor, not a path.** A path is discoverable, is
-subject to filesystem races, and needs a bind mount to cross a sandbox; an fd passed over D-Bus is
-already the capability and already crosses. `certificate_uri` and `private_key_uri` would be returned
-*with* it and are meaningful only on it; a URI without an endpoint that resolves it is not a
-capability and is never returned alone. **No `pin-value` or `pin-source` attribute appears in any
-URI this service emits, ever**, and error paths truncate any URI that arrives carrying one.
-
-**The likely real architecture, per [SPIKES.md](SPIKES.md) S3.** Handing out a *new* module per
-grant probably does not work for GLib/WebKitGTK consumers: a PKCS#11 URI cannot name a socket,
-`g_tls_certificate_new_from_pkcs11_uris()` has no module parameter, and WebKit's network process
-may already have started before the module exists. The most plausible workaround is the opposite
-shape: **one broker module, permanently registered in p11-kit configuration at install time, which
-exposes synthetic grant-bound slots** and finds the live grant through the calling process's
-identity and the returned URI. That changes the contract from "here is a new module" to "here is a
-URI your already-registered broker module can resolve". It is described here as the likely
-architecture, and S3 is what decides.
+**It is not a trust boundary and it is not where hardening belongs.** Everything it refuses,
+the portal refuses again across D-Bus. See
+[0011](decisions/0011-client-side-pkcs11-module.md) and [SECURITY.md](SECURITY.md).
 
 ### Where the grant registry went
 

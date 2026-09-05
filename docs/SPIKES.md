@@ -1,18 +1,42 @@
 # Go / no-go spikes
 
-Status: EXPERIMENTAL. **None of these have been run, and the project should not exist as a
-production repository until S1 and S3 have answers.** That has not changed, and neither building
-the backend nor reading one real card changed it: what the backend proves is that brokered `Sign`
-works, which was never the doubtful part.
+Status: EXPERIMENTAL. **S1 and S3 have answers now, and they are not the answers these pages
+expected.** Both were written about a facade served over a socket from a helper process beside this
+backend, reached through an `OpenPkcs11Endpoint` that was never added to either interface. What was
+built instead is a PKCS#11 module that runs in the APPLICATION's process and forwards to the public
+portal interface over D-Bus — [0011](decisions/0011-client-side-pkcs11-module.md). S3's own list of
+workarounds had already named the shape ("one permanently registered broker module ... exposing
+synthetic grant-bound slots"); the only thing it got wrong was which process the module runs in.
+
+**What has actually run**, on 2026-09-04, against the SoftHSM fixture on a private bus under Xvfb
+(`tools/module-smoke.sh`):
+
+- GnuTLS enumerating the token through the module (`p11tool --list-all`), with the chooser
+  appearing at the search and the certificate, public key and private key all present;
+- `pkcs11-tool --sign --mechanism SHA256-RSA-PKCS`, verified with `openssl dgst` against the
+  certificate the module handed back;
+- **a real mutual-TLS handshake**, TLS 1.3, from a GLib client built with
+  `g_tls_certificate_new_from_pkcs11_uris()` — the constructor WebKitGTK reaches through
+  glib-networking — against a server that required and verified the client certificate;
+- the same, with the module built under AddressSanitizer, clean.
+
+**What is still unrun** is the rest of S1 (NSS, the OpenSSL 3 provider, fuzzing, concurrency) and
+all of S3's browser-process questions: WebKitGTK itself has not been driven, only the API it uses.
+
+The rest of this document is unchanged except where marked, because a spike's questions outlive the
+answer to one of them.
 
 What the implementation has answered, partially — against a software token, and since 2026-09-04
 against one PIV card in one reader as well ([TESTING.md](TESTING.md) tiers 3.1–3.4):
 
-- **S2's backend half.** The login model is settled in code: this backend keeps its own PKCS#11
-  session per grant, logs in lazily at first private-key use, and the PIN prompt is its own window.
-  That is the *brokered* answer. S2's real question — what happens once a forwarded module is
-  involved and a TLS stack opens its own sessions — is untouched, because there is no module to
-  forward.
+- **S2, both halves.** The backend keeps its own PKCS#11 session per grant, logs in lazily at
+  first private-key use, and the PIN prompt is its own window. The module half is answered too, and
+  the answer is `CKF_PROTECTED_AUTHENTICATION_PATH`: with it set, GnuTLS calls
+  `C_Login(CKU_USER, NULL, 0)` and never asks the user for a PIN, which is what makes "the PIN
+  never reaches the consumer" a property rather than a wish. A TLS stack opening its own sessions
+  turned out to matter for a different reason than expected: GnuTLS opens and closes one for every
+  object import and every signature, so a grant released with the last PKCS#11 session put the
+  chooser up again each time. The grant now outlives the sessions.
 - **S4's software half.** Tokens are identified by manufacturer, model, serial and label together
   and re-resolved on every use, so a different card in the same slot is a different token by
   construction. The insertion and removal watcher polls every two seconds and debounces over two
@@ -25,14 +49,14 @@ against one PIV card in one reader as well ([TESTING.md](TESTING.md) tiers 3.1�
   "Backend call failed" rather than a hang — which is how the one use-after-free found so far was
   noticed.
 
-S1 and S3 are exactly where they were.
+S1 and S3 have moved; see the status paragraph above and
+[0011](decisions/0011-client-side-pkcs11-module.md).
 
 Two things changed since this list was written. The frontend is now an xdg-desktop-portal branch
 ([0010](decisions/0010-backend-only-frontend-lives-upstream.md)), so **S5 is largely answered
 already** — against a mock backend, in somebody else's test harness — and what is left of it is
-noted in place. And `OpenPkcs11Endpoint` is not on either interface: the branch deferred it, so
-**S1 and S2 have nothing to run against until it is added upstream**. That does not make them less
-important; it makes them blocked on a patch rather than on hardware.
+noted in place. And `OpenPkcs11Endpoint` is still not on either interface — but S1 and S2 are no
+longer blocked on it, because the module they now describe needs no interface method at all.
 
 Phase 0 of [ROADMAP.md](ROADMAP.md) is a **time-boxed feasibility spike of 2–4 weeks**, not a build.
 The rule for all of them: a spike is throwaway code that answers one question. It does not become
@@ -40,15 +64,17 @@ the product, it does not get a test suite, and it does not get merged.
 
 | | Question | Decides |
 |---|---|---|
-| **S1** | Can a broker-controlled synthetic PKCS#11 facade actually be built and consumed? | Whether the compatibility endpoint exists at all |
-| **S2** | Who prompts for the PIN, and when, once a module is involved? | The login model, and whether the consent story survives contact with real TLS stacks |
-| **S3** | Can WebKitGTK complete a client-certificate handshake through it? | Whether the first consumer can use this project — the weakest link in the design |
+| **S1** | Can a broker-controlled synthetic PKCS#11 module actually be built and consumed? | Whether the compatibility path exists at all. **GnuTLS: yes. NSS and the OpenSSL provider: unrun** |
+| **S2** | Who prompts for the PIN, and when, once a module is involved? | The login model. **Answered: `CKF_PROTECTED_AUTHENTICATION_PATH`, and no stack tried to synthesise a PIN** |
+| **S3** | Can WebKitGTK complete a client-certificate handshake through it? | Whether the first consumer can use this project. **The GLib constructor WebKit uses: yes. WebKit itself: unrun** |
 | **S4** | What happens with removal, reinsertion, and several readers? | Whether the lifetime model is right, and how much of it is card-specific |
 | **S5** | Does the frontend/backend split survive contact with fd passing, prompts and a dying backend? | Mostly answered by the branch's pytest suite; the fd half is blocked on there being an fd |
 
-**S3 is the one that decides whether this project is worth publishing.** Run S1 and S3 together;
-S3's failure modes are S1's requirements list. Until S3 passes, `xdg-desktop-portal-webauth` keeps
-its in-process certificate handling behind an internal adapter, so that it can use either path.
+**S3 was the one that decided whether this project is worth publishing**, and its central question —
+can a real TLS stack complete a client-certificate handshake against a synthetic token this project
+serves — is answered yes. What remains of it is a browser rather than a design risk.
+`xdg-desktop-portal-webauth` should still keep its in-process adapter until WebKitGTK itself has
+been driven.
 
 ---
 
@@ -105,6 +131,29 @@ six.
 **Pass** = a real GnuTLS mutual-TLS handshake through the facade, every hostile call refused, a
 credible answer for concurrency, and the fd surviving the relay. **Fail** = brokered operations only; delete `OpenPkcs11Endpoint`
 from the interface rather than shipping it weakened.
+
+### What was actually run, 2026-09-04
+
+The module was built in the **application's** process rather than served over a socket
+([0011](decisions/0011-client-side-pkcs11-module.md)), so steps 2, 6, 8 and 9 do not apply: there
+is no RPC transport, no `P11_KIT_SERVER_ADDRESS`, no fd and no relay. Of the rest:
+
+- **step 1 — done**, and the module is synthetic rather than a wrapper: it wraps no module at all
+  and reaches the card only through the portal;
+- **step 3 — done.** A GnuTLS mutual-TLS client handshake completed against a server that required
+  and verified the client certificate. `tools/module-smoke.sh` phase 3;
+- **step 4 — NSS and the OpenSSL 3 provider are unrun.** This is the largest open piece of S1;
+- **step 5 — by construction rather than by test.** Every entry point in the hostile-client list
+  answers `CKR_FUNCTION_NOT_SUPPORTED`, SO login answers `CKR_USER_TYPE_INVALID`, `CKF_RW_SESSION`
+  answers `CKR_TOKEN_WRITE_PROTECTED`, a fabricated or stale handle answers
+  `CKR_OBJECT_HANDLE_INVALID` because handles carry a grant generation, sensitive attributes answer
+  `CKR_ATTRIBUTE_SENSITIVE`, and RSA-PSS parameters are validated before the call. The PKCS#11 v3
+  table is implemented rather than absent, so `C_GetInterface` is not a different set of functions.
+  `tests/test-module.c` covers the attribute and template halves; **the refusals themselves have
+  unit coverage only through the function table, not a hostile driver**;
+- **step 7 — no fuzzing has been done**, and the argument for why it is no longer the first thing
+  that should be fuzzed is in [0011](decisions/0011-client-side-pkcs11-module.md): the module faces
+  the process it lives in, not a wire.
 
 ---
 
@@ -197,6 +246,28 @@ existed and may not see an environment variable or a module registered afterward
 
 **Pass** = one real WebKitGTK client-certificate handshake, on at least one distro version.
 **Fail** = do not publish this repository as a dependency of anything; keep it as an experiment.
+
+### What was actually run, 2026-09-04
+
+Steps 1, 3 and 4 are done, and step 8 is answered by not arising. `tests/gtls-client.c` builds a
+`GTlsCertificate` with `g_tls_certificate_new_from_pkcs11_uris()` and completes a TLS 1.3
+mutual-TLS handshake; the module is found through an ephemeral p11-kit configuration under
+`XDG_CONFIG_HOME`, so nothing is installed system wide and nothing is inherited. No Unix socket is
+opened by anyone, because there is no endpoint: the module is in the process that needs it, and any
+process that loads p11-kit loads it, whenever it starts.
+
+**Steps 2, 5, 6, 7 and 9 are unrun**, and WebKitGTK itself has not been started. What has been
+proved is that the API WebKit reaches works; what has not is WebKit's process model around it.
+Two findings that a browser will meet immediately:
+
+- **the URI must name an object.** GnuTLS's single-object import refuses
+  `pkcs11:model=portal-cert;manufacturer=freedesktop.org;token=Portal%20Certificate;type=cert`
+  and wants `object=` or `id=`. Enumeration
+  (`p11tool --list-all`, `gnutls_pkcs11_obj_list_import_url4`) accepts the token-only URI; the
+  single-object path does not. `CKA_LABEL` is a constant so that an application can write the URI
+  down in advance;
+- **one grant per process, and it must outlive the PKCS#11 sessions**, or a stack that opens a
+  session per operation prompts per operation.
 
 ---
 
