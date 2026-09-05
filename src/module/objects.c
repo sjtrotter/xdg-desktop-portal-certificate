@@ -558,29 +558,127 @@ CK_RV portal_object_get_attributes(const PortalObject* object, CK_ATTRIBUTE_PTR 
 	return CKR_OK;
 }
 
-gboolean portal_template_wants_credential(CK_ATTRIBUTE_PTR templ, CK_ULONG count)
+/* -------------------------------------------------------------- the gate */
+
+/* WHAT A SEARCH HAS TO SAY BEFORE A WINDOW OPENS.
+ *
+ * The chooser appears at C_FindObjectsInit, because that is the first moment
+ * this module learns that the consumer wants a credential. The trouble is that
+ * it is not the only thing a consumer searches for. GnuTLS verifying a SERVER's
+ * certificate chain calls gnutls_pkcs11_get_raw_issuer() and
+ * _gnutls_pkcs11_crt_is_known(), which issue C_FindObjectsInit for CKO_
+ * CERTIFICATE with CKA_SUBJECT, CKA_ISSUER or a trust category ACROSS EVERY
+ * p11-kit MODULE ON THE MACHINE -- this one included, and long before any
+ * client-certificate challenge. A chooser two seconds after a sign-in window
+ * opened, for a certificate nobody asked for, is that.
+ *
+ * So the class alone is not enough. A search acquires a credential only when it
+ * can mean nothing else:
+ *
+ *   CKA_LABEL == "Portal Certificate"   the object label of the shared
+ *                                       contract; what a PKCS#11 URI naming
+ *                                       an object imports by
+ *   CKA_ID                              a non-empty key identifier; a consumer
+ *                                       that has one got it from us
+ *   CKA_CLASS == CKO_PRIVATE_KEY        nothing on a server's chain is a
+ *     (with CKA_SIGN / CKA_DECRYPT)     private key
+ *
+ * Everything else -- an issuer, subject or serial lookup, a trust category, a
+ * data object, a plain "list the certificates", an empty template -- answers no
+ * objects while there is no grant, and never asks for one. Once a grant exists,
+ * ordinary matching applies and these searches see the three objects like any
+ * other.
+ *
+ * PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1 puts class-only enumeration back on the
+ * acquiring side. NSS asks for CKO_CERTIFICATE with nothing else and has no way
+ * to name an object; that is an experiment, not a supported configuration, and
+ * a process that sets it is asking for a chooser it did not otherwise get. */
+static gboolean template_names_our_label(const CK_ATTRIBUTE* attribute)
 {
+	gsize length = strlen(PKCS11_PORTAL_OBJECT_LABEL);
+
+	return attribute->pValue != NULL && attribute->ulValueLen != CK_UNAVAILABLE_INFORMATION &&
+	       (gsize) attribute->ulValueLen == length &&
+	       memcmp(attribute->pValue, PKCS11_PORTAL_OBJECT_LABEL, length) == 0;
+}
+
+PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG count)
+{
+	CK_OBJECT_CLASS object_class = 0;
+	gboolean have_class = FALSE;
+	gboolean have_label = FALSE;
+	gboolean label_is_ours = FALSE;
+	gboolean have_identifier = FALSE;
+	gboolean key_shaped = TRUE;
+
 	if (count == 0)
-		return TRUE;
+		return PORTAL_TEMPLATE_ENUMERATES;
 	if (templ == NULL)
-		return FALSE;
+		return PORTAL_TEMPLATE_UNRELATED;
 
 	for (CK_ULONG i = 0; i < count; i++)
 	{
-		CK_OBJECT_CLASS object_class;
+		switch (templ[i].type)
+		{
+			case CKA_CLASS:
+				if (templ[i].pValue != NULL && templ[i].ulValueLen == sizeof(object_class))
+				{
+					memcpy(&object_class, templ[i].pValue, sizeof(object_class));
+					have_class = TRUE;
+				}
+				break;
 
-		if (templ[i].type != CKA_CLASS)
-			continue;
-		if (templ[i].pValue == NULL || templ[i].ulValueLen != sizeof(object_class))
-			return FALSE;
+			case CKA_LABEL:
+				have_label = TRUE;
+				label_is_ours = template_names_our_label(&templ[i]);
+				break;
 
-		memcpy(&object_class, templ[i].pValue, sizeof(object_class));
+			case CKA_ID:
+				have_identifier = have_identifier ||
+				                  (templ[i].pValue != NULL &&
+				                   templ[i].ulValueLen != CK_UNAVAILABLE_INFORMATION &&
+				                   templ[i].ulValueLen > 0);
+				break;
 
-		return object_class == CKO_CERTIFICATE || object_class == CKO_PUBLIC_KEY ||
-		       object_class == CKO_PRIVATE_KEY;
+			default:
+				break;
+		}
+
+		if (templ[i].type != CKA_CLASS && templ[i].type != CKA_SIGN &&
+		    templ[i].type != CKA_DECRYPT)
+			key_shaped = FALSE;
 	}
 
-	return TRUE;
+	/* A LABEL DECIDES ON ITS OWN, both ways. One that is ours names this
+	 * token's credential and nothing else; one that is not names some other
+	 * object, and adding a CKA_ID to it does not make it ours. */
+	if (have_label)
+		return label_is_ours ? PORTAL_TEMPLATE_NAMES_CREDENTIAL : PORTAL_TEMPLATE_UNRELATED;
+
+	if (have_identifier)
+		return PORTAL_TEMPLATE_NAMES_CREDENTIAL;
+
+	if (have_class && object_class == CKO_PRIVATE_KEY && key_shaped)
+		return PORTAL_TEMPLATE_NAMES_CREDENTIAL;
+
+	if (count == 1 && have_class &&
+	    (object_class == CKO_CERTIFICATE || object_class == CKO_PUBLIC_KEY))
+		return PORTAL_TEMPLATE_ENUMERATES;
+
+	return PORTAL_TEMPLATE_UNRELATED;
+}
+
+gboolean portal_template_wants_credential(CK_ATTRIBUTE_PTR templ, CK_ULONG count)
+{
+	switch (portal_template_intent(templ, count))
+	{
+		case PORTAL_TEMPLATE_NAMES_CREDENTIAL:
+			return TRUE;
+		case PORTAL_TEMPLATE_ENUMERATES:
+			return g_strcmp0(g_getenv(PKCS11_PORTAL_ENV_ENUMERATE), "1") == 0;
+		default:
+			return FALSE;
+	}
 }
 
 guint portal_template_fingerprint(CK_ATTRIBUTE_PTR templ, CK_ULONG count)

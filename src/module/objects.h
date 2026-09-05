@@ -68,9 +68,30 @@ GArray* portal_objects_find(PortalObjects* objects, CK_ATTRIBUTE_PTR templ, CK_U
 CK_RV portal_object_get_attributes(const PortalObject* object, CK_ATTRIBUTE_PTR templ,
                                    CK_ULONG count);
 
-/** Whether a search for @templ could be satisfied by this token at all, i.e.
- *  whether it names a class this module has. A search for anything else must
- *  never provoke a chooser. */
+/** What a C_FindObjectsInit template can be taken to mean. */
+typedef enum
+{
+	/** A search this token could never answer, or one whose answer is about
+	 *  some other certificate: an issuer, subject or serial lookup, a trust
+	 *  category, a data object, a label naming something else. It gets no
+	 *  objects while there is no grant, and it never acquires one. */
+	PORTAL_TEMPLATE_UNRELATED = 0,
+
+	/** "List what is on this token": an empty template, or a class on its own.
+	 *  It acquires only when PKCS11_PORTAL_CERTIFICATE_ENUMERATE says so. */
+	PORTAL_TEMPLATE_ENUMERATES,
+
+	/** A search that can only mean "give me the client credential": the object
+	 *  label of the shared contract, a CKA_ID, or the private key. */
+	PORTAL_TEMPLATE_NAMES_CREDENTIAL
+} PortalTemplateIntent;
+
+/** Which of the three @templ is. Reads no environment; the gate below does. */
+PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG count);
+
+/** Whether a search for @templ may acquire a credential, which is the same
+ *  question as whether it may put a chooser on the user's screen. A search for
+ *  anything else must never provoke one. */
 gboolean portal_template_wants_credential(CK_ATTRIBUTE_PTR templ, CK_ULONG count);
 
 /** A stable fingerprint of @templ, ignoring CKA_CLASS, for the refusal memory:

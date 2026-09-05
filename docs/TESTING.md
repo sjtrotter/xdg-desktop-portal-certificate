@@ -366,16 +366,29 @@ $ ninja -C build
 $ tools/softhsm-fixture.sh
 $ tools/module-smoke.sh
 $ tools/module-smoke.sh --phase 3        # just the handshake
+$ tools/module-smoke.sh --phase 0        # just the "no chooser" proof
 ```
 
-Three phases:
+Four phases:
 
-1. **`p11tool --provider … --list-all`** — GnuTLS enumerating the token. The chooser appears at the
-   search, and the certificate, the public key and the private key come back with matching `CKA_ID`
-   and a URI naming `token=Portal%20Certificate;object=Portal%20Certificate`. The script builds
-   the URIs from the shared contract in `src/module/portal-token.h`, which **now carries the
-   `object=` attribute itself**; `URI_OBJECT=` empties it, which is how the single-object import's
-   requirement was found and is how to watch it fail again.
+0. **A search that names no object must not ask for one.** `p11tool --list-all-certs` on the
+   **token-only** URI, and `pkcs11-tool --list-objects`, are both run with the chooser driver
+   running, and the count of `grant-created` lines in `backend.log` must be the same before and
+   after. Neither command finds anything, and that is the pass. This is the gate added on
+   2026-09-05: GnuTLS verifying a *server's* certificate chain sends `CKA_ISSUER` and
+   `CKA_SUBJECT` lookups through every configured p11-kit module at every handshake, and answering
+   those with a chooser put a window in front of a user who had only opened a sign-in page. The
+   table of what does and does not acquire is in `portal_template_intent()`
+   (`src/module/objects.c`) and asserted row by row in `tests/test-module.c`
+   (`/module/objects/credential-search`).
+1. **`p11tool --provider … --list-all`** — GnuTLS enumerating the token, run with
+   `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`, which is the opt-in that puts class-only enumeration
+   back on the acquiring side and the only place in this repository that sets it. The chooser
+   appears at the search, and the certificate, the public key and the private key come back with
+   matching `CKA_ID` and a URI naming `token=Portal%20Certificate;object=Portal%20Certificate`. The
+   script builds the URIs from the shared contract in `src/module/portal-token.h`, which **now
+   carries the `object=` attribute itself**; `URI_OBJECT=` empties it, which is how the
+   single-object import's requirement was found and is how to watch it fail again.
 2. **`pkcs11-tool --sign --mechanism SHA256-RSA-PKCS`**, then `pkcs11-tool --read-object --type
    cert`, then `openssl dgst -sha256 -verify` — the signature must verify **against the certificate
    the module handed back**, not against the fixture's PEM.
@@ -394,6 +407,10 @@ the trust store.
 Expect, on a pass:
 
 ```
+=== 0  a search that names no object must not ask for one ===
+grants before=0 after=0
+module-smoke: neither search acquired a credential
+...
 handshake completed
 server said: PASS Portal Test User (RSA)
 client certificate: {'organizationName': 'Example Org', 'commonName': 'Portal Test User (RSA)'}
@@ -462,6 +479,11 @@ Three things that run established, and none of them was predictable from the cod
   D-Bus peer that acquired it, which is the point of the design. What would fix it is a way for one
   application to reuse a live grant across its own processes — worth an interface discussion, not
   a patch.
+
+  Two, and no longer three. The live Entra run on 2026-09-05 saw a *third* chooser, two seconds
+  after the sign-in window opened and before any client-certificate challenge, from GnuTLS
+  verifying the identity provider's own certificate chain through this module. Phase 0 of
+  `module-smoke.sh` is the check that it stays gone.
 - **The exclusion list had to stop being a prefix match.** The module refused to run in any process
   named `xdg-desktop-portal*`, which includes `xdg-desktop-portal-webauth` — a *consumer*, not the
   portal. It is now two exact names.
@@ -476,6 +498,11 @@ Not yet done, and it is the next thing worth doing, because NSS is the other hal
 2. In Firefox: Settings → Privacy & Security → Security Devices → Load, and give it
    `libpkcs11-portal-certificate.so`. (Firefox does not read p11-kit configuration; it wants the
    path.)
+
+   **Start Firefox with `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`,** or it will see an empty token.
+   NSS searches by `CKA_CLASS` alone and has no way to name an object, and a class-only search does
+   not acquire a credential by default — see §2.5 phase 0. That variable exists for this
+   experiment; whether NSS is usable *with* it is exactly what this check is for.
 
    On a system whose Firefox and NSS build **do** go through p11-kit's proxy module, the
    recommended way to try this is to add `firefox` to the `enable-in:` line of the installed

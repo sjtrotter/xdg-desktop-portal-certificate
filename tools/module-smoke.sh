@@ -12,13 +12,27 @@
 # build/src/module/libpkcs11-portal-certificate.so and the module does the
 # talking:
 #
-#   1  p11tool --provider ... --list-all      GnuTLS enumerating the token
+#   0  p11tool --list-all-certs on a TOKEN-ONLY URI, and pkcs11-tool
+#                                             --list-objects: two searches that
+#                                             name no object, and NEITHER may
+#                                             put a chooser up
+#   1  p11tool --provider ... --list-all      GnuTLS enumerating the token, with
+#                                             PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1
 #   2  pkcs11-tool --sign                     one signature, verified with
 #                                             openssl against the certificate
 #                                             the module handed back
 #   3  tests/gtls-client                      g_tls_certificate_new_from_pkcs11_uris()
 #                                             plus a real mutual-TLS handshake
 #                                             against a python server
+#
+# PHASE 0 IS THE ONE THAT CHANGED IN 2026-09. A chooser used to appear for any
+# search whose CKA_CLASS this token has, which meant GnuTLS verifying a SERVER's
+# certificate chain -- issuer and subject lookups issued across every p11-kit
+# module on the machine -- raised one seconds after a sign-in window opened, for
+# a certificate nobody had asked for. Only a search that names the object label,
+# a CKA_ID or the private key acquires now; src/module/objects.c has the table.
+# Phase 1 is an enumerating consumer and opts back in by hand, which is what
+# PKCS11_PORTAL_CERTIFICATE_ENUMERATE is for and the only thing it is for.
 #
 # Phase 3 is the one that matters. It is docs/SPIKES.md S3 in its smallest
 # honest form: the constructor WebKitGTK reaches through glib-networking has no
@@ -38,6 +52,7 @@
 #
 #     tools/module-smoke.sh
 #     tools/module-smoke.sh --phase 3        # just the handshake
+#     tools/module-smoke.sh --phase 0        # just the "no chooser" proof
 
 set -u
 
@@ -64,7 +79,7 @@ URI_OBJECT="${URI_OBJECT-;object=Portal%20Certificate}"
 CERT_URI="${URI_TOKEN}${URI_OBJECT};type=cert"
 KEY_URI="${URI_TOKEN}${URI_OBJECT};type=private"
 SCREEN="${SCREEN:-:78}"
-PHASES="${PHASES:-1 2 3}"
+PHASES="${PHASES:-0 1 2 3}"
 
 die() {
 	echo "${0##*/}: $*" >&2
@@ -287,10 +302,48 @@ inner() {
 	"$LOGDIR/driver.sh" >"$LOGDIR/driver.log" 2>&1 &
 	DRIVER=$!
 
-	if phase_wanted 1; then
+	# THE COUNT IS THE PROOF. A grant is a chooser the user answered, so the
+	# question "did that search put a window up" is answered by how many
+	# grant-created lines the backend wrote, not by whether the command
+	# succeeded -- both of these are expected to succeed and find nothing.
+	grants_created() {
+		grep -c 'grant-created' "$LOGDIR/backend.log" 2>/dev/null || true
+	}
+
+	if phase_wanted 0; then
+		local before after
+		echo
+		echo "=== 0  a search that names no object must not ask for one ==="
+		before="$(grants_created)"
+
+		timeout 180 p11tool --provider "$MODULE_SO" --list-all-certs "$URI_TOKEN" \
+			>"$LOGDIR/quiet-p11tool.log" 2>&1
+		timeout 180 pkcs11-tool --module "$MODULE_SO" --list-objects \
+			>"$LOGDIR/quiet-pkcs11-tool.log" 2>&1
+
+		after="$(grants_created)"
+		echo "grants before=$before after=$after"
+
+		if [ "$before" != "$after" ]; then
+			echo "module-smoke: an enumeration raised a chooser"
+			grep -E 'grant-created|chooser-shown' "$LOGDIR/backend.log" | tail -5
+			rc=1
+		elif grep -qE '^\s*Object [0-9]+:' "$LOGDIR/quiet-p11tool.log"; then
+			echo "module-smoke: p11tool got objects out of an unacquired token"
+			cat "$LOGDIR/quiet-p11tool.log"
+			rc=1
+		else
+			echo "module-smoke: neither search acquired a credential"
+		fi
+	fi
+
+	if phase_wanted 1 && [ "$rc" = 0 ]; then
 		echo
 		echo "=== 1  p11tool --list-all through the module ==="
-		if timeout 180 p11tool --provider "$MODULE_SO" --list-all \
+		# The opt-in, and the only place in this repository that sets it: this
+		# is a consumer that names no object because it is asking what is there.
+		if PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1 timeout 180 \
+			p11tool --provider "$MODULE_SO" --list-all \
 			>"$LOGDIR/p11tool.log" 2>&1; then
 			grep -E "Object |Type:|Label:|URL:" "$LOGDIR/p11tool.log" | head -20
 			grep -q "Private key" "$LOGDIR/p11tool.log" || {
@@ -386,7 +439,7 @@ inner() {
 }
 
 export PIN LOGDIR REPO XDP_BUILD BACKEND MODULE_SO GTLS_CLIENT XDOTOOL SOFTHSM_MODULE \
-	SOFTHSM_DIR PHASES CERT_LABEL CERT_URI KEY_URI
+	SOFTHSM_DIR PHASES CERT_LABEL CERT_URI KEY_URI URI_TOKEN
 dbus-run-session -- bash -c \
 	"$(declare -f xdp_wait_for_name); $(declare -f phase_wanted); $(declare -f inner); inner"
 rc=$?

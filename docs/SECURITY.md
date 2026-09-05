@@ -577,6 +577,26 @@ misled about what this token is:
   object, so that an application loading several PKCS#11 modules cannot have one module's `C_Sign`
   resolve to another's.
 
+**A search has to name the credential before a chooser appears.** The window opens at
+`C_FindObjectsInit`, so which searches may open one is a security question and not an ergonomic
+one. It used to be "any search naming a class this token has", which is wrong in a way that only a
+real handshake shows: GnuTLS verifying a **server's** certificate chain issues
+`C_FindObjectsInit` for `CKO_CERTIFICATE` with `CKA_ISSUER`, `CKA_SUBJECT` or a trust category
+through **every configured p11-kit module**, so a sign-in page that had asked for nothing raised a
+chooser for this token seconds after it loaded. Measured against a live identity provider on
+2026-09-05.
+
+A credential is now acquired only for a search that can mean nothing else: `CKA_LABEL` equal to the
+contract's object label, a non-empty `CKA_ID`, or `CKA_CLASS == CKO_PRIVATE_KEY` (with `CKA_SIGN`
+or `CKA_DECRYPT` if the consumer adds them). Issuer, subject, serial, trust-category and
+class-only searches, and empty templates, answer **no objects** while there is no grant and never
+prompt. Once a grant exists they match like any other search — the gate decides when a window may
+open, not what the token holds. `portal_template_intent()` in `src/module/objects.c` is the whole
+of it, `tests/test-module.c` is the table as assertions, and `tools/module-smoke.sh` phase 0 counts
+`grant-created` across a token-only `p11tool --list-all-certs` and a `pkcs11-tool --list-objects`
+to prove neither raised one. `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` moves class-only enumeration
+back onto the acquiring side for NSS experiments and nothing else.
+
 **There is no PIN on this side.** The token sets `CKF_PROTECTED_AUTHENTICATION_PATH`, so a TLS
 stack does not ask for one; `C_Login` returns `CKR_OK` without doing anything, and **any PIN bytes
 an application passes are ignored and never forwarded** — there is nothing here for them to unlock,

@@ -133,8 +133,12 @@ application because it is the one that called.
   two `AcquireCredential` calls, **two choosers about three seconds apart asking the same
   question**, and one PIN prompt, because only the network process signs.
 
-  Nothing in the module can fix it. A grant belongs to the D-Bus peer that acquired it, and that
-  is the property the whole design rests on: the frontend identifies the process the module is
+  Both of those stand inside the challenge and always did; what used to stand *outside* it was a
+  third chooser, from the server-chain enumeration described under "A search has to name the
+  credential" below, and that one is gone. Two remain.
+
+  Nothing in the module can fix the two. A grant belongs to the D-Bus peer that acquired it, and
+  that is the property the whole design rests on: the frontend identifies the process the module is
   loaded into, which is what makes the chooser name the right application. Sharing a grant between
   two processes means deciding what "the same application" is, which is an interface question and
   not a module one. The two candidate answers, neither taken: a portal method that lets a caller
@@ -204,6 +208,47 @@ something. The two portal processes are excluded because they are not on the all
 two fences in code above.
 
 Neither list is a security control. Both are ways to decide where a window may appear.
+
+### A search has to name the credential before a window opens
+
+The allowlist decides which *processes* load the module. It says nothing about which *searches*
+inside those processes may put a chooser up, and that turned out to be the larger half.
+
+The chooser appears at `C_FindObjectsInit`, because that is the first moment the module learns the
+consumer wants a credential. The first version of that gate asked only whether the template named a
+`CKA_CLASS` this token has — `CKO_CERTIFICATE`, `CKO_PUBLIC_KEY` or `CKO_PRIVATE_KEY` — which reads
+as conservative and is not, because **certificate searches are not only about the client's
+certificate**. GnuTLS verifying a *server's* chain calls `gnutls_pkcs11_get_raw_issuer()` and
+`_gnutls_pkcs11_crt_is_known()`, and those issue `C_FindObjectsInit` for `CKO_CERTIFICATE` with
+`CKA_SUBJECT`, `CKA_ISSUER` or a trust category **across every p11-kit module configured on the
+machine**, this one included, at every handshake. The live Entra run on 2026-09-05 measured the
+consequence: a chooser two seconds after the sign-in window opened, before any client-certificate
+challenge, for a certificate nothing had asked for.
+
+**A search now acquires a credential only when it can mean nothing else.** The table is in
+`portal_template_intent()` in `src/module/objects.c`:
+
+| Template | Meaning | Acquires? |
+|---|---|---|
+| `CKA_LABEL == "Portal Certificate"` | the object label of the shared contract; what a PKCS#11 URI naming an object imports by | yes |
+| a non-empty `CKA_ID` | a consumer that has one got it from us | yes |
+| `CKA_CLASS == CKO_PRIVATE_KEY`, alone or with `CKA_SIGN`/`CKA_DECRYPT` | nothing on a server's chain is a private key | yes |
+| `CKA_CLASS` alone (`CKO_CERTIFICATE`, `CKO_PUBLIC_KEY`), or an empty template | "list what is on this token" | only with the opt-in below |
+| `CKA_ISSUER`, `CKA_SUBJECT`, `CKA_SERIAL_NUMBER`, `CKA_TRUSTED`, `CKA_CERTIFICATE_CATEGORY`, `CKA_TOKEN`, a `CKA_LABEL` that is not ours, `CKO_DATA`, a malformed `CKA_CLASS` | somebody else's certificate, or nothing this token has | **never** |
+
+A search on the last row answers zero objects while there is no grant, and never asks for one. Once
+a grant exists, ordinary attribute matching applies and every one of these sees the three objects
+like any other search: the gate decides when a **window** may open, not what a token holds.
+
+`PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` moves the fourth row onto the acquiring side, and only the
+fourth row. NSS asks for `CKO_CERTIFICATE` with nothing else and has no way to name an object, so
+an NSS experiment needs it; nothing else does, and a process that sets it is asking for choosers it
+would not otherwise get. It is documented as an experiment because that is what it is — S1's NSS
+half is still open.
+
+The cost is that a consumer which enumerates and then imports by URI sees an empty token on the
+first pass. That is the right trade: the enumeration is not what the user was asked about, and the
+import is.
 
 A deployment adds names by editing the installed file, or by dropping its own
 `xdg-desktop-portal-certificate.module` into `~/.config/pkcs11/modules`, which overrides the

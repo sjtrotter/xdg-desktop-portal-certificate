@@ -61,6 +61,12 @@
 #define PKCS11_PORTAL_ENV_TIMEOUT "PKCS11_PORTAL_CERTIFICATE_TIMEOUT_MS"
 #define PKCS11_PORTAL_ENV_DISABLE "PKCS11_PORTAL_CERTIFICATE_DISABLE"
 
+/* Opt back into acquiring a credential for a class-only enumeration -- a search
+ * that names no object and no key identifier. NSS searches that way and cannot
+ * be told to do otherwise; nothing else needs this, and a process that sets it
+ * gets choosers that it would not otherwise get. See objects.c. */
+#define PKCS11_PORTAL_ENV_ENUMERATE "PKCS11_PORTAL_CERTIFICATE_ENUMERATE"
+
 #define PKCS11_PORTAL_DEFAULT_PURPOSE "client_auth"
 
 /* The frontend truncates `reason` at 256 characters; so does this. */

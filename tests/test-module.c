@@ -500,22 +500,109 @@ static void test_template_matching(void)
 	g_assert_null(portal_objects_lookup(objects, 0));
 }
 
+/* THE GATING TABLE, which is the whole of the answer to "why did a chooser
+ * appear when nobody asked for a certificate". Each row is a template a real
+ * consumer sends; the column is whether it may acquire a credential. */
 static void test_only_a_credential_search_provokes_a_chooser(void)
 {
 	CK_OBJECT_CLASS certificate = CKO_CERTIFICATE;
+	CK_OBJECT_CLASS public_key = CKO_PUBLIC_KEY;
 	CK_OBJECT_CLASS private_key = CKO_PRIVATE_KEY;
 	CK_OBJECT_CLASS data_object = CKO_DATA;
-	CK_ATTRIBUTE want_certificate[] = { { CKA_CLASS, &certificate, sizeof(certificate) } };
+	CK_BBOOL yes = CK_TRUE;
+	CK_ULONG category = CK_CERTIFICATE_CATEGORY_TOKEN_USER;
+	char label[] = PKCS11_PORTAL_OBJECT_LABEL;
+	char other_label[] = "Some Other Certificate";
+	guint8 identifier[4] = { 1, 2, 3, 4 };
+	guint8 name[8] = { 0x30, 0x06, 0x31, 0x04, 0x13, 0x02, 'x', 'y' };
+
+	/* Names the credential: acquires. */
+	CK_ATTRIBUTE by_label[] = { { CKA_LABEL, label, sizeof(label) - 1 } };
+	CK_ATTRIBUTE cert_by_label[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
+		                             { CKA_LABEL, label, sizeof(label) - 1 } };
+	CK_ATTRIBUTE key_by_label[] = { { CKA_CLASS, &private_key, sizeof(private_key) },
+		                            { CKA_LABEL, label, sizeof(label) - 1 } };
+	CK_ATTRIBUTE by_identifier[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
+		                             { CKA_ID, identifier, sizeof(identifier) } };
 	CK_ATTRIBUTE want_private[] = { { CKA_CLASS, &private_key, sizeof(private_key) } };
+	CK_ATTRIBUTE signing_key[] = { { CKA_CLASS, &private_key, sizeof(private_key) },
+		                          { CKA_SIGN, &yes, sizeof(yes) } };
+
+	/* Enumerates: acquires only with the environment opt-in. */
+	CK_ATTRIBUTE want_certificate[] = { { CKA_CLASS, &certificate, sizeof(certificate) } };
+	CK_ATTRIBUTE want_public[] = { { CKA_CLASS, &public_key, sizeof(public_key) } };
+
+	/* Unrelated: never acquires. GnuTLS verifying a SERVER's chain sends the
+	 * issuer and subject rows at every handshake, through every module. */
+	CK_ATTRIBUTE by_issuer[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
+		                         { CKA_ISSUER, name, sizeof(name) } };
+	CK_ATTRIBUTE by_subject[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
+		                          { CKA_SUBJECT, name, sizeof(name) } };
+	CK_ATTRIBUTE by_serial[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
+		                         { CKA_ISSUER, name, sizeof(name) },
+		                         { CKA_SERIAL_NUMBER, identifier, sizeof(identifier) } };
+	CK_ATTRIBUTE trusted[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
+		                       { CKA_TRUSTED, &yes, sizeof(yes) } };
+	CK_ATTRIBUTE in_category[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
+		                           { CKA_CERTIFICATE_CATEGORY, &category, sizeof(category) } };
+	CK_ATTRIBUTE on_token[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
+		                        { CKA_TOKEN, &yes, sizeof(yes) } };
+	CK_ATTRIBUTE wrong_label[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
+		                           { CKA_LABEL, other_label, sizeof(other_label) - 1 } };
+	CK_ATTRIBUTE wrong_label_right_id[] = { { CKA_LABEL, other_label,
+		                                      sizeof(other_label) - 1 },
+		                                    { CKA_ID, identifier, sizeof(identifier) } };
 	CK_ATTRIBUTE want_data[] = { { CKA_CLASS, &data_object, sizeof(data_object) } };
 	CK_ATTRIBUTE malformed[] = { { CKA_CLASS, NULL, 0 } };
+	CK_ATTRIBUTE empty_identifier[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
+		                                { CKA_ID, identifier, 0 } };
 
+	g_assert_cmpint(portal_template_intent(by_label, 1), ==, PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(cert_by_label, 2), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(key_by_label, 2), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(by_identifier, 2), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(want_private, 1), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(signing_key, 2), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+
+	g_assert_cmpint(portal_template_intent(NULL, 0), ==, PORTAL_TEMPLATE_ENUMERATES);
+	g_assert_cmpint(portal_template_intent(want_certificate, 1), ==,
+	                PORTAL_TEMPLATE_ENUMERATES);
+	g_assert_cmpint(portal_template_intent(want_public, 1), ==, PORTAL_TEMPLATE_ENUMERATES);
+
+	g_assert_cmpint(portal_template_intent(by_issuer, 2), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(by_subject, 2), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(by_serial, 3), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(trusted, 2), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(in_category, 2), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(on_token, 2), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(wrong_label, 2), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(wrong_label_right_id, 2), ==,
+	                PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(want_data, 1), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(malformed, 1), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(empty_identifier, 2), ==, PORTAL_TEMPLATE_UNRELATED);
+
+	/* The gate itself: only the first group opens a window by default. */
+	g_unsetenv(PKCS11_PORTAL_ENV_ENUMERATE);
+	g_assert_true(portal_template_wants_credential(cert_by_label, 2));
+	g_assert_true(portal_template_wants_credential(want_private, 1));
+	g_assert_false(portal_template_wants_credential(NULL, 0));
+	g_assert_false(portal_template_wants_credential(want_certificate, 1));
+	g_assert_false(portal_template_wants_credential(by_issuer, 2));
+	g_assert_false(portal_template_wants_credential(want_data, 1));
+
+	/* The NSS escape hatch moves the middle group, and only the middle group. */
+	g_setenv(PKCS11_PORTAL_ENV_ENUMERATE, "1", TRUE);
 	g_assert_true(portal_template_wants_credential(NULL, 0));
 	g_assert_true(portal_template_wants_credential(want_certificate, 1));
-	g_assert_true(portal_template_wants_credential(want_private, 1));
-	/* A trust lookup or a data search must never put a window up. */
+	g_assert_false(portal_template_wants_credential(by_issuer, 2));
 	g_assert_false(portal_template_wants_credential(want_data, 1));
-	g_assert_false(portal_template_wants_credential(malformed, 1));
+	g_unsetenv(PKCS11_PORTAL_ENV_ENUMERATE);
 }
 
 static void test_refusal_fingerprint_ignores_the_class(void)

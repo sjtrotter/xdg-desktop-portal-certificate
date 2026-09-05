@@ -246,17 +246,28 @@ and links none of it.
 
 What the application sees is one token, `Portal Certificate`, holding the one certificate the user
 picked in the portal's chooser, its public key and its private key. The chooser appears the first
-time the application searches for a certificate or a key. There is no PIN prompt in the
-application: the token advertises `CKF_PROTECTED_AUTHENTICATION_PATH`, `C_Login` succeeds without
-doing anything, and the backend asks for the PIN in its own window at the first signature.
+time the application searches **for this token's credential** — by the object label, by a
+`CKA_ID`, or for the private key. There is no PIN prompt in the application: the token advertises
+`CKF_PROTECTED_AUTHENTICATION_PATH`, `C_Login` succeeds without doing anything, and the backend
+asks for the PIN in its own window at the first signature.
 
 ```console
-$ p11tool --provider ./build/src/module/libpkcs11-portal-certificate.so --list-all
+$ PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1 \
+    p11tool --provider ./build/src/module/libpkcs11-portal-certificate.so --list-all
 # ... the chooser appears, and then:
 Object 0:
 	URL: pkcs11:model=portal-cert;manufacturer=freedesktop.org;token=Portal%20Certificate;id=...;object=Portal%20Certificate;type=cert
 	Type: X.509 Certificate (RSA-2048)
 ```
+
+The environment variable is there because **a search that names no object does not raise a
+chooser**, and `--list-all` is exactly that search. GnuTLS verifying any *server's* certificate
+chain sends issuer and subject lookups through every configured p11-kit module, this one included,
+at every handshake; answering those with a window put a chooser in front of a user who had only
+opened a sign-in page. Issuer, subject, serial, trust-category and class-only searches now answer
+nothing while there is no grant, and never prompt. A URI naming `object=Portal%20Certificate` — the
+one an application actually imports by — does, which is why nothing above this line needs the
+variable.
 
 The URIs an application writes down are constants, and they are in
 [`src/module/portal-token.h`](src/module/portal-token.h) — **a file shared verbatim with the
@@ -294,7 +305,10 @@ Three things worth knowing before enabling it:
 Environment, for a consumer that knows more than PKCS#11 lets it say:
 `PKCS11_PORTAL_CERTIFICATE_PURPOSE` (`client_auth` by default),
 `PKCS11_PORTAL_CERTIFICATE_REASON`, `PKCS11_PORTAL_CERTIFICATE_OPERATIONS` (`sign`, `decrypt`),
-`PKCS11_PORTAL_CERTIFICATE_KEY_ALGORITHMS`, and `PKCS11_PORTAL_CERTIFICATE_DISABLE=1`.
+`PKCS11_PORTAL_CERTIFICATE_KEY_ALGORITHMS`, `PKCS11_PORTAL_CERTIFICATE_DISABLE=1`, and
+`PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` to let a class-only enumeration acquire a credential (for
+NSS experiments; documented as an experiment in
+[ADR 0011](docs/decisions/0011-client-side-pkcs11-module.md)).
 
 [`tools/module-smoke.sh`](tools/module-smoke.sh) runs the whole thing — `p11tool`, `pkcs11-tool
 --sign` verified with `openssl`, and a real mutual-TLS handshake — under Xvfb with xdotool
