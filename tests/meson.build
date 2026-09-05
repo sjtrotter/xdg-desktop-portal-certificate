@@ -88,6 +88,33 @@ foreach name, source : service_test_cases
   test(name, exe, protocol: 'tap', env: test_env, timeout: 120)
 endforeach
 
+# THE CLIENT-SIDE PKCS#11 MODULE. It links the module's own objects, not a copy:
+# the DigestInfo parser and the attribute protocol are the parts a consumer
+# reaches without a bus, and they are where a mistake is silent.
+exe = executable(
+  'test-module',
+  ['test-module.c'],
+  dependencies: [module_core_dep],
+  include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+  c_args: test_args,
+  install: false,
+)
+
+test('module', exe, protocol: 'tap', env: test_env)
+
+# THE WEBKIT PATH, IN ITS SMALLEST FORM. Built, not run by `meson test`: it
+# needs a portal, a chooser and a person. tools/module-smoke.sh runs it under
+# Xvfb with xdotool standing in for the person.
+if glib_dep.version().version_compare('>= 2.68')
+  executable(
+    'gtls-client',
+    ['gtls-client.c'],
+    dependencies: [glib_dep, gobject_dep, gio_dep],
+    include_directories: [config_inc],
+    install: false,
+  )
+endif
+
 # THE SHELL HELPERS IN tools/lib.sh. Two of them decide something dangerous --
 # which portals.conf the development stack gets, and which directories it will
 # remove -- and both were wrong at some point in a way no successful run showed.
