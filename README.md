@@ -149,6 +149,33 @@ card key over D-Bus is an oracle against that key. Every OAEP failure comes back
 and one grant buys 32 decryptions.
 [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) has the detail.
 
+## Current capabilities
+
+**This table is the one place that says what works.** Every other document in this repository
+defers to it; where one of them disagrees, this is right and it is a bug. Last checked 2026-09-04.
+
+| | Status | |
+|---|---|---|
+| Token discovery, X.509 parsing, purpose rules, `certificate_filter` | **Implemented** | unit-tested against fixture certificates; `--list-tokens` prints what it found |
+| The chooser and the PIN prompt | **Implemented** | GTK window or the desktop shell's prompter (`--pin-prompt`), protected authentication path, retry, final-try confirmation, login timeout |
+| Brokered `Sign` — `RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA`, lazy login | **Implemented** | verified against SoftHSM and, once, against a PIV card |
+| Brokered `Decrypt` — `RSA_OAEP` and nothing else | **Implemented** | one indistinguishable error per failure, 32 attempts per grant |
+| Token insertion and removal watching, `SessionInvalidated` | **Implemented** | polled and debounced. Never exercised with a card physically leaving a reader |
+| The client-side PKCS#11 module | **Implemented** | one token, one credential per process. `tools/module-smoke.sh` drives `p11tool`, `pkcs11-tool --sign` and a real mutual-TLS handshake through it |
+| The private-bus stack, the headless UI runs, the joint run with the web-auth portal | **Implemented** | `tools/dev-stack.sh`, `tools/ui-smoke.sh`, and the sibling repository's `tools/portal-stack.sh` |
+| Hardware | **Partial** | **one PIV card, one reader, one middleware, once** — [TESTING.md](docs/TESTING.md) tiers 3.1–3.4, 2026-09-04. The rest of tier 3 is unrun: one PIN per grant, wrong PIN and `FINAL_TRY`, removal during an operation, a PIN-pad reader, a second card |
+| Consumers of the module | **Partial** | GnuTLS through p11-kit, and WebKitGTK's network process, both proven headless. **NSS is untested** (Firefox, Thunderbird, LibreOffice) and so is the OpenSSL 3 provider |
+| One grant across an application's processes | **Partial** | a grant belongs to the D-Bus peer that acquired it. One WebKitGTK handshake resolves the URI in two processes and so raises **two choosers**; measured, not solved. [0011](docs/decisions/0011-client-side-pkcs11-module.md) |
+| Chain building | **Partial** | `chain_status` is always `leaf_only`, and says so |
+| Flatpak | **Partial** | the portal bus name is already allowed, which is the transport half. Installing the module inside a runtime, its ABI and a browser's inner sandbox are **not** proven |
+| Two concurrent grants in one process | **Not implemented** | [0006](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) failure mode 8, deferred because no consumer has asked |
+| Rate limiting | **Not implemented** | on either side of the bus. The three-attempt cap on one PIN window is not one |
+| Attesting what a signature is *for* | **Not implemented** | failure mode 10. `purpose` constrains selection and consent language, and proves nothing about use |
+| Fork safety in the module | **Not implemented** | a consumer that forks after `C_Initialize` gets a worker thread the child does not have |
+| The synthetic PKCS#11 facade | **Not implemented** | and not being built: `OpenPkcs11Endpoint` is on neither interface, and [0011](docs/decisions/0011-client-side-pkcs11-module.md) replaced it |
+| Translation, packaging, a KDE backend | **Not implemented** | — |
+| Independent security review, a second maintainer, a second card stack | **Not implemented** | the gap every reviewer named first |
+
 ## Interfaces
 
 **Public**, on `org.freedesktop.portal.Desktop` at `/org/freedesktop/portal/desktop` —

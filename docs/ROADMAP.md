@@ -22,28 +22,16 @@ about where the saving landed without pretending the rest of the numbers got any
 
 ## Where the code actually is
 
-| | Status |
-|---|---|
-| The frontend, the impl interface, app-id derivation, the grant registry, the permission store, backend discovery | **Done**, upstream, on the branch. 40 pytest cases green against a mock backend |
-| PKCS#11 module loading, slot and token enumeration, certificate and key discovery, X.509 parsing | **Done**. `--list-tokens` prints it |
-| The purpose rules and `certificate_filter` | **Done**, unit-tested against seven real fixture certificates |
-| The mechanism mapping and its parameter validation | **Done**, unit-tested, including the RSA-PSS salt that does not fit the key |
-| The chooser | **Done**. Identity level in words, caller text quoted and labelled, expiry as a word |
-| The PIN prompt | **Done**, including protected authentication path, retry, and locked-token handling |
-| Brokered `Sign`, lazy login, one PKCS#11 session per grant | **Done**. Verified against SoftHSM for RSA PKCS#1 v1.5, RSA-PSS and ECDSA |
-| Brokered `Decrypt` | **`RSA_OAEP` only**, now that the frontend's allow list has it. PKCS#1 v1.5 decryption stays refused: over D-Bus it is a padding oracle against the card's key. Every failure is one error and a grant buys 32 attempts; see [IMPL-INTERFACE.md](IMPL-INTERFACE.md) |
-| Token insertion and removal watching, `SessionInvalidated` | **Done**, polled, debounced. Never tested with a card actually leaving a reader |
-| The end-to-end client, the private-bus stack, the headless UI run | **Done** |
-| Chain building | **Not done.** `chain_status` is always `leaf_only` |
-| Rate limiting | **Not done**, on either side |
-| The synthetic PKCS#11 facade | **Not started, and unreachable**: `OpenPkcs11Endpoint` is on neither interface |
-| Anything on hardware | **Not done.** This is the gap that matters |
-| Translation, packaging, a KDE backend | **Not started** |
+**In one table, in [README.md](../README.md#current-capabilities)**, and nowhere else. This
+document used to keep a second one; two lists of what works is how a project ends up claiming both
+that hardware is untested and that a card passed. The README's table is the authority and this
+paragraph is the pointer to it.
 
-The two-to-four-week feasibility spike below is therefore **half-answered**: the brokered path is
-built and works, which was never the doubtful half. S1 and S3 — can a synthetic facade exist, and
-can a browser use it — are untouched, and they are the ones that decide the shape of everything
-after brokered `Sign`.
+What that table means for the plan below: the brokered path is built and works, which was never
+the doubtful half. S1 and S3 — can a consumer that speaks only PKCS#11 use this, and can a browser
+— are answered for GnuTLS and WebKitGTK by the client-side module
+([0011](decisions/0011-client-side-pkcs11-module.md)) and unanswered for NSS. What is left is
+hardware breadth, the two-chooser problem, and an owner who is not the author.
 
 ## Effort figures and their assumptions
 

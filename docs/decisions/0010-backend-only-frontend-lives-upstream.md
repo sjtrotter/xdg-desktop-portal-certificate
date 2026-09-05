@@ -109,18 +109,34 @@ makes it safe, and is not the same claim as "this is a supported portal".
   no `app_display_name`. Those are recorded in [UPSTREAMING.md](../UPSTREAMING.md) and in
   [PUBLIC-INTERFACE.md](../PUBLIC-INTERFACE.md), and this repository's documents follow
   the XML rather than the other way round.
-- **The delegation gap closes for free.** [0005](0005-first-consumer-is-the-web-auth-service.md)
-  and 0008 both said the web-auth service naming the wrong application in this project's
-  chooser is only solved when both interfaces live in one trusted frontend process. Both
-  interfaces are now in one frontend process — xdg-desktop-portal, on the same branch —
-  so the fix that was described as arriving "automatically at acceptance" has arrived
-  early. The caveat is unchanged and must stay: it works *only* in-process, and passing
-  an unattested app id across a process boundary is still not to be done.
+- **The delegation gap gets an obvious answer, in-process.**
+  [0005](0005-first-consumer-is-the-web-auth-service.md) and 0008 both said the web-auth
+  service naming the wrong application in this project's chooser is only solved when both
+  interfaces live in one trusted frontend process. Both interfaces are now in one frontend
+  process — xdg-desktop-portal, on the same branch — so the fix that was described as
+  arriving "automatically at acceptance" is available early.
+
+  **An earlier version of this line said trustworthy delegation can happen *only*
+  in-process. That is wrong, and it should not be repeated.** What is forbidden is
+  narrower and more precise: **trusting a caller's assertion about somebody else's
+  identity**. A frontend that hands its own certificate side the app id it derived itself
+  is the cheapest way to avoid that, because nothing is asserted and nothing crosses a
+  boundary — but it is not the only way. Authenticated IPC, where the frontend derives the
+  peer's identity itself rather than believing a field, would do it; so would a
+  capability the frontend issues to a named peer and later recognises, which is one of the
+  two candidate designs [0011](0011-client-side-pkcs11-module.md) records for the
+  two-chooser problem. None of those is built. The rule to carry forward is "never believe
+  a caller about a third party", not "never cross a process".
 - **The spikes get cheaper.** [SPIKES.md](../SPIKES.md) S5 asked whether the
   frontend/backend boundary survives contact with a running system. Half of it is now
-  answered by somebody else's test suite: the branch's `tests/test_certificate.py` covers
-  cancellation across two hops, a backend that over-claims being clamped, and the
-  experimental gate.
+  answered by the branch's `tests/test_certificate.py`, which covers cancellation across
+  two hops, a backend that over-claims being clamped, and the experimental gate.
+- **The branch is ours until it is accepted.** Moving the frontend into xdg-desktop-portal's
+  tree buys review in the right place and reuse of `Request`, `Session` and app-id
+  derivation. It does **not** transfer maintenance: an unmerged branch is this author's to
+  rebase, to keep green and to redesign when upstream asks. Any sentence in this repository
+  that reads as though the frontend became somebody else's problem is describing the
+  intended end state, not today.
 - **This repository is smaller and its claims are narrower.** It no longer documents a
   public interface as though it owned one. [PUBLIC-INTERFACE.md](../PUBLIC-INTERFACE.md)
   is a pointer to the branch's XML with a summary, and the authority is the XML.

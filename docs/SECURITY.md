@@ -689,10 +689,14 @@ Named because they are unsolved, not because they are minor.
   immediate peer. The fix both projects described as arriving "at acceptance" has arrived early:
   both portals are now in **one frontend process**, which derives the web-authentication caller's
   app id and can hand it to the certificate side in-process, with no attestation crossing a bus.
-  What remains open is that the frontend does not actually do this yet, and — permanently — that
-  the fix does not generalise: across two processes, passing an app id would be an unattested
-  assertion of someone else's identity, which is the identity-laundering this document forbids. It
-  is not to be done that way. See
+  What remains open is that the frontend does not actually do this yet, and that the rule this
+  turns on is narrower than it was first written down as. The forbidden thing is **believing a
+  caller about a third party's identity**: an app id passed in a field, by a peer that could have
+  put anything there, is identity laundering and is not to be built. It is *not* forbidden to
+  delegate across a process boundary at all — authenticated IPC where the frontend derives each
+  peer's identity itself, or a capability the frontend issues to a named peer and later recognises,
+  would both satisfy the rule. Neither is built, and in-process is simply the cheapest way to
+  satisfy it. See
   [0005](decisions/0005-first-consumer-is-the-web-auth-service.md) and
   [0010](decisions/0010-backend-only-frontend-lives-upstream.md).
 - **Module loading for facade consumers**, and there is no facade to load. `OpenPkcs11Endpoint` is

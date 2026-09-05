@@ -54,7 +54,8 @@ S1 and S3 have moved; see the status paragraph above and
 
 Two things changed since this list was written. The frontend is now an xdg-desktop-portal branch
 ([0010](decisions/0010-backend-only-frontend-lives-upstream.md)), so **S5 is largely answered
-already** — against a mock backend, in somebody else's test harness — and what is left of it is
+already** — against a mock backend, in the test harness that branch brings with it, which until
+the branch is accepted is this author's to run and to keep passing — and what is left of it is
 noted in place. And `OpenPkcs11Endpoint` is still not on either interface — but S1 and S2 are no
 longer blocked on it, because the module they now describe needs no interface method at all.
 
@@ -310,8 +311,9 @@ anything is built on it.
 
 ## S5 — The frontend/backend boundary
 
-**Largely answered, and by somebody else's tests.** The frontend is an xdg-desktop-portal branch
-with a python-dbusmock backend and 40 passing pytest cases, which cover steps 2, 4 and part of 6
+**Largely answered, by the branch's own tests — which are still this author's.** The frontend is
+an xdg-desktop-portal branch with a python-dbusmock backend and 40 passing pytest cases, which
+cover steps 2, 4 and part of 6
 below against a mock. What is left is the fd relay (blocked: no `OpenPkcs11Endpoint`), and running
 the same cases against a backend that talks to real hardware rather than a mock. The steps are kept
 because "a mock passed" is not "a card passed".
