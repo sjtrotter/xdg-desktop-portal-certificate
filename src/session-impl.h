@@ -37,13 +37,23 @@
  *  never asked to. It DOES keep its own copy of the expiry, because a backend
  *  that holds a logged-in card session for longer than the grant it was told
  *  about is holding a capability nobody authorised -- see
- *  docs/IMPL-INTERFACE.md, "The backend enforces the lifetime too".
+ *  docs/IMPL-INTERFACE.md, "The backend enforces the lifetime too". Announcing
+ *  the expiry is the frontend's, though: it closes this session at the
+ *  lifetime, and the timer here runs CERTIFICATE_EXPIRY_GRACE_SECONDS later so
+ *  that the two never announce the same expiry twice.
  *
  *  Close() from the portal: close the PKCS#11 session, C_Logout where the token
  *  permits -- WITHOUT CLAIMING THE CARD HAS FORGOTTEN, because some tokens and
  *  middleware cache authentication at a level nothing here controls -- cancel
  *  any in-flight operation, and free every handle.
  */
+
+/** How long after the grant's lifetime this process tears the session down on
+ *  its own. Expiry belongs to the frontend: it tells the application and closes
+ *  this session at the lifetime, and that Close cancels the timer. This grace
+ *  period keeps the two from racing to announce the same expiry, and is the
+ *  backstop for a frontend that never called. */
+#define CERTIFICATE_EXPIRY_GRACE_SECONDS 30
 
 #define CERTIFICATE_TYPE_IMPL_SESSION (certificate_impl_session_get_type())
 G_DECLARE_FINAL_TYPE(CertificateImplSession, certificate_impl_session, CERTIFICATE, IMPL_SESSION,

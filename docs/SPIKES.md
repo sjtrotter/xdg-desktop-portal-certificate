@@ -336,7 +336,7 @@ assumes, after contact with a running system and a real card?
 4. **A backend that lies.** A test backend that returns mechanisms outside the allow-list,
    `permitted_operations` the purpose forbids, and a `remember_selection` the caller never asked
    for. **Every one must be clamped by the frontend and logged**, not honoured. *(Done on the
-   branch: `test_backend_results_are_clamped`. Note `expires_at` is not in the list any more — it is
+   branch: `test_grant_is_bounded_by_the_request`. Note `expires_at` is not in the list any more — it is
    frontend-generated and a backend has no way to send one.)*
 5. **A caller that tries to reach the impl interface directly**, sandboxed and unsandboxed. Confirm
    the sender check refuses it, and record honestly what an unsandboxed process on an unhardened

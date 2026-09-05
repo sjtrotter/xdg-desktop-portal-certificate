@@ -96,7 +96,7 @@ cost:
 |---|---|
 | `app_id` | Established by the frontend from `xdp_invocation_get_app_info()`. Empty string when unidentified. |
 | `app_identity_level` | `sandboxed` \| `host` \| `unidentified`. **The backend must display this.** An application name shown without saying how it was established is a lie by omission. |
-| `lifetime` | Seconds the frontend has *decided* to allow, after applying its 3600 s ceiling — not the caller's `requested_lifetime`. |
+| `lifetime` | Seconds the frontend has *decided* to allow, after applying its 3600 s ceiling — not the caller's `requested_lifetime`. The frontend arms a monotonic timer at this length and closes the session when it fires; this backend's own teardown timer waits `CERTIFICATE_EXPIRY_GRACE_SECONDS` longer so that the two do not announce the same expiry twice. |
 
 **And two fields that are gone.** `app_display_name` is not on the branch interface: the backend
 gets an app id and an identity level, and any human-readable name is its own to derive or to omit.
@@ -113,10 +113,11 @@ The frontend **requires** `certificate_der`, `supported_mechanisms` and
 `permitted_operations`, type-checks every optional key against the type the
 public interface declares, and fails the acquisition over any of it. It also
 **intersects**: `supported_mechanisms` against its allow list
-(`RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA`), `permitted_operations` against what the purpose permits,
-and `expires_at` is not the backend's to send at all — it is frontend-generated. A backend that
-returns more than it was allowed to does not get more; it gets clamped, and the branch has a test
-for exactly that (`test_backend_results_are_clamped`).
+(`RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA`) and `permitted_operations` against what the application
+asked for in `operation_policy`; `expires_at` is not the backend's to send at all — it is
+frontend-generated. A backend that returns more than it was allowed to does not get more; it gets
+clamped, and the branch has a test for exactly that
+(`test_grant_is_bounded_by_the_request`).
 
 ## What the XML left ambiguous, and how this backend resolved it
 
@@ -227,7 +228,7 @@ What this backend actually emits, and when:
 | Reason | When |
 |---|---|
 | `token_removed` | the card leaves the reader, or a different card takes its place, or a login fails because the token is gone |
-| `expired` | the grant's lifetime ran out. **The backend enforces it too**, even though the frontend refuses an expired grant before this process is called: the check here is not what stops the operation, it is what stops this process sitting on a logged-in card session after the authorisation for it has run out |
+| `expired` | the grant's lifetime ran out. **Announcing it is the frontend's**, which emits `GrantInvalidated(expired)` and closes the session at the lifetime; this backend enforces the deadline too, because the check here is what stops this process sitting on a logged-in card session after the authorisation for it has run out, and its own teardown runs `CERTIFICATE_EXPIRY_GRACE_SECONDS` later so it is the backstop rather than a second announcement |
 | `owner_gone` | `org.freedesktop.portal.Desktop` changed hands and the grant belonged to the previous owner. A grant belongs to the frontend connection that created it; a replacement portal must not inherit a logged-in card session it never asked for |
 | `service_shutdown` | this backend is exiting. It was spelled `backend_shutdown`, which is in neither vocabulary |
 

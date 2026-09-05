@@ -91,7 +91,10 @@ the type the interface declares, and an acquisition whose results do not satisfy
 answers `2` with `reason` `backend_protocol_error`.
 
 `GetCapabilities` answers `purposes`, `operations`, `mechanisms`,
-`protected_authentication_path` and `max_grant_lifetime`.
+`protected_authentication_path`, `has_display` and `max_grant_lifetime`. The first three
+are this backend's lists intersected with the frontend's own; `has_display` is forwarded
+as this backend reported it, because an application that cannot be shown a chooser needs
+to know before it asks for one.
 
 ## Lifetime
 
@@ -99,15 +102,25 @@ A grant always expires, and **there is no renewal**: the lifetime is fixed at ac
 clamped to 3600 s, and the only way on is a fresh session and a fresh consent. `expires_at`
 is frontend-generated, can be sooner than `requested_lifetime` asked for, and is a wall-clock
 value for display — the frontend enforces the lifetime on the monotonic clock, so moving the
-system clock moves the number and not the grant.
+system clock afterwards changes neither the grant nor that number, and the two stop agreeing.
+
+**Announcing the expiry is the frontend's.** It arms a monotonic timer at the lifetime it
+decided; when the timer fires it emits `GrantInvalidated(expired)` to the session's owner and
+closes the session, and that `Close()` is what ends this backend's card session. This backend
+keeps its own copy of the deadline — operations stop at it — but its own teardown timer runs
+`CERTIFICATE_EXPIRY_GRACE_SECONDS` later, so the ordinary path is the frontend's and an
+application hears about one expiry once. The timer here is the backstop for a frontend that
+never called.
 
 Nothing in this backend can extend a grant; it is recorded here because a backend must not
 assume a grant it was told about lives as long as its own `Sign` calls keep arriving.
 `GrantInvalidated(o session_handle, s reason)` says why a grant stopped being usable before
 it was released, and is emitted **to the session's owner alone**: a session object path
 carries the owner's unique bus name, so a broadcast would tell every application on the bus
-which peers hold certificate grants. `reason` is one of `token_removed`, `policy`,
-`backend_gone` or `error`, and consumers must tolerate values they do not know.
+which peers hold certificate grants. `reason` is one of `expired`, `token_removed`, `policy`,
+`backend_gone` or `error`, and consumers must tolerate values they do not know. A session
+which never acquired a credential has no grant to invalidate: the frontend closes it without
+the signal.
 
 ## Accessibility as acceptance criteria
 

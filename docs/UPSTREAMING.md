@@ -18,17 +18,19 @@ remote       upstream → https://github.com/flatpak/xdg-desktop-portal.git
              origin   → https://github.com/sjtrotter/xdg-desktop-portal.git
 branch       experimental/certificate-webauthentication
 base         upstream/main = 86bd3e2  po: Update Russian translation
-commits      02b679a  xdp: Add a gate for experimental portals            ┐ series 1
-             e587d47  session-dex: Add xdp_session_dex_close()            ┘
-             214af63  web-authentication: Add an experimental
-                      WebAuthentication portal                           ┐
-             d74fab2  doc: List the experimental portals in the           │ series 2
+commits      22818e6  xdp: Add a gate for experimental portals              series 1
+             faf82d4  request-dex: Let a portal close an impl request     ┐
+             a6b06d4  web-authentication: Add an experimental             │
+                      WebAuthentication portal                            │ series 2
+             ad72af8  doc: List the experimental portals in the           │
                       interface reference                                 │
-             8efe3ef  tests: Add WebAuthentication portal tests           ┘
-             0e5c595  request-dex: Let a portal see that a request was    ┐
-                      closed                                              │ series 3
-             1dec352  certificate: Add an experimental Certificate portal │ ← this one
-             42664d2  tests: Add Certificate portal tests                 ┘
+             d21a4dc  tests: Add WebAuthentication portal tests           ┘
+             0bff521  session-dex: Add xdp_session_dex_close()            ┐
+             1385b47  session-dex: Fix the wrapped session store          │
+             2ab8cca  request-dex: Let a portal see that a request was    │ series 3
+                      closed                                              │
+             a4c1f62  certificate: Add an experimental Certificate portal │ ← this one
+             1aaffaf  tests: Add Certificate portal tests                 ┘
 ```
 
 **Three series, proposed in that order**, because they are three separate questions: a
@@ -36,10 +38,14 @@ gate for experimental portals at all, then the smaller interface, then the one t
 repository implements. The gate is 40 lines and needs the maintainers' answer
 independently of whether they like either interface.
 
-`1dec352` is the commit this repository tracks. `e587d47` adds an `xdp_session_dex_close()`
-that upstream was missing and that a session-shaped portal cannot do without; `0e5c595`
-adds the accessor that lets a portal decline to commit state for a request the application
-has closed.
+`a4c1f62` is the commit this repository tracks. Series 3 carries three small changes to
+shared frontend code, each landing with its first user: `0bff521` adds an
+`xdp_session_dex_close()` that upstream was missing and that a session-shaped portal cannot
+do without; `1385b47` fixes `xdp_session_dex_store_new_wrapped()`, which has never worked —
+it read the address of the session field rather than the field, so the store aborted in a
+cast — and which the Certificate portal is the first thing to use, keeping a grant on the
+session object rather than in a table keyed by its object path; `2ab8cca` adds the accessor
+that lets a portal decline to commit state for a request the application has closed.
 
 **What came out of the branch before it was shown to anyone**, after two independent
 reviews: process-tree delegation and every change under `shared/` it needed, `Decrypt`,
@@ -49,8 +55,8 @@ The delegation commits are archived on
 backend follows the interface, not the archive.
 
 Test results: `meson test --suite integration --suite unit` green except the pre-existing
-`usb` failure (`umockdev-run` is not installed here), `tests/test_certificate.py` 84
-passed, `tests/test_webauthentication.py` 54 passed, `gitlint --commits
+`usb` failure (`umockdev-run` is not installed here), `tests/test_certificate.py` 98
+passed, `tests/test_webauthentication.py` 69 passed, `gitlint --commits
 upstream/main..HEAD` passes, `black --check` passes.
 
 ## Why `experimental` is not a claim of acceptance

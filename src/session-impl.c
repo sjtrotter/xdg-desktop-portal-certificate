@@ -167,7 +167,14 @@ static gboolean on_lifetime_expired(gpointer user_data)
 	/* THE BACKEND ENFORCES THE LIFETIME TOO. The frontend refuses an expired
 	 * grant before this backend is called at all, so this is not the check that
 	 * stops the operation -- it is what stops this process from sitting on a
-	 * logged-in card session after the authorisation for it has run out. */
+	 * logged-in card session after the authorisation for it has run out.
+	 *
+	 * EXPIRY BELONGS TO THE FRONTEND, which arms its own timer at the lifetime
+	 * it decided, tells the application and closes this session. That Close
+	 * cancels this timer, so this handler is what happens when the frontend did
+	 * not: it runs CERTIFICATE_EXPIRY_GRACE_SECONDS late for exactly that
+	 * reason, so that the ordinary path is the frontend's and the application
+	 * hears about the expiry once. */
 	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "lifetime-expired");
 	certificate_impl_session_invalidate(session, "expired");
 
@@ -205,7 +212,11 @@ void certificate_impl_session_grant(CertificateImplSession* session,
 	if (session->expiry_source != 0)
 		g_source_remove(session->expiry_source);
 
-	session->expiry_source = g_timeout_add_seconds(lifetime, on_lifetime_expired, session);
+	/* The operations stop at the lifetime -- certificate_impl_session_is_expired()
+	 * uses expires_at, not this timer. Only the teardown waits for the grace
+	 * period, so that the frontend's Close is what normally ends the session. */
+	session->expiry_source = g_timeout_add_seconds(lifetime + CERTIFICATE_EXPIRY_GRACE_SECONDS,
+	                                               on_lifetime_expired, session);
 }
 
 gboolean certificate_impl_session_is_expired(CertificateImplSession* session)
