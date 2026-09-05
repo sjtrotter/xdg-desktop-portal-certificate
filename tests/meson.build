@@ -1,4 +1,5 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
 #
 # Tier 1 of tests/README.md: everything that needs no card, so it can run in CI
 # and on a machine with an empty reader. The card path is exercised by

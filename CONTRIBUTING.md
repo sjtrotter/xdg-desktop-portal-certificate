@@ -54,10 +54,8 @@ Specifically valuable:
 ## Code, when there is any
 
 - C11, GLib, meson. Warnings are on; keep them clean.
-- `SPDX-License-Identifier: GPL-2.0-or-later` in every file. See
-  [docs/decisions/0004-license.md](docs/decisions/0004-license.md) for why, and for the Apache-2.0
-  alternative that would require a clean-room rewrite of the chooser and PIN handling.
-- Code derived from Remmina keeps its Remmina copyright attribution alongside the SPDX header.
+- `SPDX-License-Identifier: LGPL-2.1-or-later` and `SPDX-FileCopyrightText` in every file. See
+  [docs/decisions/0004-license.md](docs/decisions/0004-license.md) for why.
 - Logging goes through `src/redact.h`, which accepts only the fields it may emit. Do not add a
   `printf`-shaped logging call; a filter that must recognise a secret has already been handed one.
 - The synthetic PKCS#11 facade (`src/export/facade.h`) is hostile-input code and is currently

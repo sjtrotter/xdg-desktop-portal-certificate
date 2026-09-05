@@ -13,8 +13,8 @@
   interface XML where an out-of-tree backend can codegen from it. See
   docs/IMPL-INTERFACE.md.
 
-  The file is LGPL-2.1-or-later, which is compatible with this repository's
-  GPL-2.0-or-later; see docs/decisions/0004-license.md.
+  The file is LGPL-2.1-or-later, the same licence as this repository; see
+  docs/decisions/0004-license.md.
 -->
 <!--
  SPDX-License-Identifier: LGPL-2.1-or-later

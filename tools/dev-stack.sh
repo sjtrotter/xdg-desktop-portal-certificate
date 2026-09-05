@@ -1,5 +1,6 @@
 #!/bin/bash
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
 #
 # dev-stack.sh -- run the experimental Certificate portal end to end: a
 # development xdg-desktop-portal frontend from the branch

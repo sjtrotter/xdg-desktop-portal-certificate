@@ -1,5 +1,6 @@
 #!/bin/bash
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
 #
 # softhsm-fixture.sh -- build a SoftHSM token holding an RSA and an EC key, each
 # with a self-signed certificate, so that the whole path can be rehearsed

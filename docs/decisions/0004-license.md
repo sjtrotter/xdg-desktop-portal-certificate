@@ -1,7 +1,47 @@
-# 4. GPL-2.0-or-later
+# 4. LGPL-2.1-or-later
+
+Date: 2026-09-04
+Status: accepted, supersedes the GPL-2.0-or-later decision below
+
+## Decision
+
+License this repository **LGPL-2.1-or-later**. Ship the LGPL-2.1 text as `LICENSE`, add a
+REUSE-style `LICENSES/LGPL-2.1-or-later.txt`, and carry `SPDX-License-Identifier:
+LGPL-2.1-or-later` plus `SPDX-FileCopyrightText: 2026 Stephen J. Trotter
+<stephen.j.trotter@gmail.com>` in every source file.
+
+## Why
+
+**No Remmina code was ever copied.** The GPL-2.0-or-later decision below was made in
+anticipation of lifting roughly 900 lines from Remmina's RDP plugin. That lift never happened —
+the discovery, chooser and PIN-prompt code in this repository is an independent implementation,
+informed by the edge cases Remmina's plugin documents but not derived from its source. The
+reason the original decision gave for choosing GPL-2.0-or-later therefore no longer applies.
+
+**It matches the code's actual destination.** `xdg-desktop-portal`, `xdg-desktop-portal-gtk` and
+`xdg-desktop-portal-gnome` are all LGPL-2.1-or-later. This repository already carries one file
+derived from `xdg-desktop-portal-gtk`/libgxdp under that licence
+(`src/ui/external-window.c`), and [UPSTREAMING.md](../UPSTREAMING.md) describes this backend's
+own eventual path into an out-of-tree or in-tree backend alongside those projects. Matching their licence removes the relicensing step the superseded decision below called out as
+a cost, in its "Consequences" section.
+
+**No constraint on D-Bus consumers.** This was already true under GPL-2.0-or-later — consumers
+talk to this service over D-Bus, never by linking — and LGPL-2.1-or-later keeps it true while
+also removing any ambiguity about whether the *implementation* could later be linked into another
+project's process (an out-of-tree backend is a separate binary either way, but an LGPL backend
+imposes no licensing question if that ever changes).
+
+## Superseded
+
+The decision below, dated 2026-09-03, is retained as the record of the original reasoning. It no
+longer reflects this repository's licence.
+
+---
+
+# 4. GPL-2.0-or-later (superseded)
 
 Date: 2026-09-03
-Status: accepted (for the sketch)
+Status: superseded by the decision above, 2026-09-04
 
 ## Context
 

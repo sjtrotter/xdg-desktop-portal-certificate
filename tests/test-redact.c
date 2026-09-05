@@ -1,7 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
  *
  * The redaction rules. The important tests here are the NEGATIVE ones: a
  * library error string carrying a PKCS#11 URI with a pin-value attribute must

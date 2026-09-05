@@ -1,7 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
  *
  * The export/unexport shape mirrors xdg-desktop-portal-gtk's src/session.c,
  * LGPL-2.1-or-later, Copyright (C) 2016 Red Hat, Inc.

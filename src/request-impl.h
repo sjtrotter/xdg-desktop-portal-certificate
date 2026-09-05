@@ -1,14 +1,13 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
  *
  * The shape of this file -- a GObject deriving from the generated
  * XdpImplRequestSkeleton, exported at the handle path, with a default
  * handle_close that unexports and completes -- is xdg-desktop-portal-gtk's
- * src/request.h, LGPL-2.1-or-later, Copyright (C) 2016 Red Hat, Inc,
- * by Alexander Larsson and Matthias Clasen. Reused under the "or later" clause
- * into this GPL-2.0-or-later project; see docs/decisions/0004-license.md.
+ * src/request.h, Copyright (C) 2016 Red Hat, Inc, by Alexander Larsson and
+ * Matthias Clasen; see docs/decisions/0004-license.md.
  */
 #ifndef CERTIFICATE_IMPL_REQUEST_H
 #define CERTIFICATE_IMPL_REQUEST_H

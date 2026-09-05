@@ -1,9 +1,9 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later
+/* SPDX-License-Identifier: LGPL-2.1-or-later
  *
  * xdg-desktop-portal-certificate - an out-of-tree xdg-desktop-portal BACKEND for
  * certificate-backed private keys.
  *
- * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
+ * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * The D-Bus activated per-user service that owns
  * org.freedesktop.impl.portal.desktop.certificate and implements

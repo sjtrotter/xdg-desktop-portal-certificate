@@ -1,7 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
  *
  * The cryptographic path, end to end, against a real PKCS#11 module: discovery,
  * C_OpenSession, C_Login, the mechanism mapping, C_Sign, and a verification of

@@ -1,5 +1,6 @@
 #!/bin/bash
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
 #
 # test-tools-lib.sh -- the two parts of tools/lib.sh that decide something
 # dangerous: which portals.conf the development stack ends up with, and which

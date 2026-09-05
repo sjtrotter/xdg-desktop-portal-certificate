@@ -1,11 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
+ * SPDX-FileCopyrightText: 2016 Red Hat, Inc.
  *
  * xdg-desktop-portal-certificate
- * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
  *
  * Derived from xdg-desktop-portal-gtk's src/externalwindow-wayland.c and
  * src/externalwindow-x11.c and from libgxdp's gxdp-external-window-*.c,
- * LGPL-2.1-or-later, Copyright (C) 2016 Red Hat, Inc, by Jonas Ådahl.
+ * by Jonas Ådahl.
  */
 
 #include "external-window.h"

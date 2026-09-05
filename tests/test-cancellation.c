@@ -1,7 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
  *
  * CANCELLING WHILE THE CARD IS BUSY. This is the regression test for the worst
  * bug the 2026 review found: cancelling the PIN window while C_Login was in

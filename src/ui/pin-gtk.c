@@ -1,7 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- * Copyright (C) 2026 the xdg-desktop-portal-certificate authors
  *
  * THE IN-PROCESS PIN WINDOW. This file draws widgets and reports what the user
  * did; every decision -- whether an attempt may be spent, whether a retry is

@@ -1,5 +1,7 @@
 # xdg-desktop-portal-certificate
 
+Author: Stephen J. Trotter (sjtrotter)
+
 **This repository is an xdg-desktop-portal BACKEND.** It is not a portal, it owns no
 public interface, and no application talks to it. It draws a certificate chooser and a PIN
 prompt, discovers PKCS#11 tokens, and performs private-key operations when
@@ -353,11 +355,13 @@ docs/         architecture, both interfaces, security, testing, spikes, roadmap,
 
 ## License
 
-GPL-2.0-or-later. No code was copied from Remmina's RDP plugin; the hardware edge cases its
-smart-card path uncovered informed the discovery code, and the licence was chosen so that lifting
-code from it later would be possible — the reasoning, and the Apache-2.0 alternative, are in
-[docs/decisions/0004-license.md](docs/decisions/0004-license.md). The one piece of derived code
-is `src/ui/external-window.c`, adapted from libgxdp (LGPL-2.1-or-later, Red Hat) with its
+LGPL-2.1-or-later. This matches `xdg-desktop-portal`, `xdg-desktop-portal-gtk` and
+`xdg-desktop-portal-gnome`, so code can move into any of them without a relicensing step; the
+reasoning, and the earlier GPL-2.0-or-later decision this supersedes, are in
+[docs/decisions/0004-license.md](docs/decisions/0004-license.md). No code was ever copied from
+Remmina's RDP plugin; the hardware edge cases its smart-card path uncovered informed the discovery
+code, but the implementation here is independent. The one piece of derived code is
+`src/ui/external-window.c`, adapted from libgxdp (also LGPL-2.1-or-later, Red Hat) with its
 attribution kept. Consumers only speak D-Bus, so the licence places no constraint on them.
 
 ## AI assistance

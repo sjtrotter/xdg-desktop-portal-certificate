@@ -1,4 +1,5 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
 
 # ONE gdbus-codegen run over all three impl interfaces, with the common prefix
 # stripped, so the generated symbols read the way upstream's do:
