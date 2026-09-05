@@ -1,7 +1,5 @@
 # xdg-desktop-portal-certificate
 
-Author: Stephen J. Trotter (sjtrotter)
-
 **This repository is an xdg-desktop-portal BACKEND.** It is not a portal, it owns no
 public interface, and no application talks to it. It draws a certificate chooser and a PIN
 prompt, discovers PKCS#11 tokens, and performs private-key operations when
