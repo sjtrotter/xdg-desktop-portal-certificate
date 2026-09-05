@@ -92,9 +92,20 @@ Three rules that are easy to break by accident:
 - **Do not edit `data/org.freedesktop.impl.portal.experimental.Certificate.xml`.** It is a tracking
   copy.
 
+## Running the tests
+
+`meson setup build && meson test -C build` runs the headless suites (tier 0 of
+[docs/TESTING.md](docs/TESTING.md)); a sanitizer build and the software-token and real-card tiers
+are documented there too. Run at least tier 0 before sending a change.
+
+## Sign-off and licence
+
+A `Signed-off-by` trailer (`git commit -s`) is welcome but not required. By sending a change you
+agree it is licensed under this project's licence, LGPL-2.1-or-later.
+
 ## AI assistance
 
 These documents were drafted with AI assistance (Anthropic Claude and OpenAI Codex) under the
-author's direction. If you use the same, say so in the commit message, and be responsible for every
+author's direction. If you use the same, say so in the commit body, and be responsible for every
 claim you land — including the citations. Several claims in the first draft of this repository were
 wrong, and checking them against primary sources is what found it.

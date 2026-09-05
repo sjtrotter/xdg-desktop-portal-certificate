@@ -78,13 +78,17 @@ category that already belongs to somebody else's proposal.
 
 ## The repository name
 
-The git repository stays `smartcard-portal` for now. That is a directory name and a URL, not an
-interface claim, and [0003](0003-own-namespace-before-freedesktop.md) already establishes the
-distinction. Renaming the GitHub repository itself is a separate decision, is the author's call to
-make on its own schedule, and is not decided by this ADR. Places in this repository's own prose
-that genuinely mean the physical hardware — "a private key on a smart card," "a PIV smart card" —
-keep that wording; only the interface, the binaries, the header and the data directory changed
-names here.
+**Update, 2026-09-04.** The GitHub repository was renamed `xdg-desktop-portal-certificate` to
+match the binary. The paragraph below is the record of the original decision to defer that
+rename; it no longer describes the current state.
+
+The git repository stayed `smartcard-portal` at first. That was a directory name and a URL, not
+an interface claim, and [0003](0003-own-namespace-before-freedesktop.md) already establishes the
+distinction. Renaming the GitHub repository itself was a separate decision, was the author's call
+to make on its own schedule, and was not decided by this ADR. Places in this repository's own
+prose that genuinely mean the physical hardware — "a private key on a smart card," "a PIV smart
+card" — keep that wording; only the interface, the binaries, the header and the data directory
+changed names here.
 
 ## Consequences
 

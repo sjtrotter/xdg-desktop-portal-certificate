@@ -9,7 +9,7 @@ branch is the specification**. See
 ## Where it is
 
 ```
-repository   /home/betty/Projects/xdg-desktop-portal   (remote: flatpak/xdg-desktop-portal)
+repository   a local checkout of xdg-desktop-portal   (remote: flatpak/xdg-desktop-portal)
 branch       experimental/certificate-webauthentication
 commit       703fb22  certificate: Add an experimental Certificate portal
 public XML   data/org.freedesktop.portal.experimental.Certificate.xml

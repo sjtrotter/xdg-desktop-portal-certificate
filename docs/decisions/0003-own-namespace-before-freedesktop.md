@@ -97,8 +97,9 @@ one more reason [0007](0007-brokered-operations-are-the-core.md) makes brokered 
   `webauth-service` keeps an internal adapter around its use of this one.
 - The freedesktop conversation, when it happens, is about a design with an implementation and
   consumers behind it rather than a name.
-- The repository directory is still called `smartcard-portal`. It is a directory name; the README
-  says so.
+- The repository directory was called `smartcard-portal` at first; the GitHub repository was
+  renamed `xdg-desktop-portal-certificate` on 2026-09-04, see
+  [0009](0009-name-it-certificate.md).
 - **The interface itself was later renamed**, from its original hardware-derived name to a
   capability-scoped one; see [0009](0009-name-it-certificate.md). This ADR's argument about
   namespace ownership is unaffected — only the `<Name>` slot changed, not the shape.

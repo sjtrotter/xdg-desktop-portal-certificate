@@ -22,10 +22,8 @@ and the rest of tier 3 is still the author's to run. The PKCS#11 compatibility f
 reachable — `OpenPkcs11Endpoint` is on neither interface — and the two spikes that decide
 whether it can exist at all are still unrun ([docs/SPIKES.md](docs/SPIKES.md)).
 
-> **The directory is still called `smartcard-portal`.** That is a directory name and a
-> URL, not a claim. The binary, the D-Bus names and everything else are
-> `xdg-desktop-portal-certificate`; renaming the GitHub repository to match is a separate,
-> later decision — see [0009](docs/decisions/0009-name-it-certificate.md), which is why the
+> The GitHub repository was renamed `xdg-desktop-portal-certificate` to match the binary on
+> 2026-09-04 — see [0009](docs/decisions/0009-name-it-certificate.md), which is why the
 > interface is named after the certificate rather than after the hardware, and
 > [0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md), which is why the
 > repository is a backend.
