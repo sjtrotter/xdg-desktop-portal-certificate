@@ -602,11 +602,10 @@ static char* create_session(PortalClient* client, GError** error)
 	if (results == NULL)
 		return NULL;
 
-	/* The XML types this `o` and the frontend sends `s`
-	 * (desktop-portal/certificate.c:690). Both are read, because a consumer
-	 * that only reads one is broken by whichever end is fixed first. */
-	if (!g_variant_lookup(results, "session_handle", "s", &session) &&
-	    !g_variant_lookup(results, "session_handle", "o", &session))
+	/* `o`, as the XML types it. The frontend used to send `s` here; the fix
+	 * is xdg-desktop-portal 77b37ab "certificate: Return session_handle as
+	 * the object path it is typed as". */
+	if (!g_variant_lookup(results, "session_handle", "o", &session))
 	{
 		g_set_error_literal(error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_FAILED,
 		                    "CreateSession returned no session handle");
