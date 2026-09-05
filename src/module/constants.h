@@ -31,19 +31,17 @@
 #define PKCS11_PORTAL_MODULE_BASENAME "libpkcs11-portal-certificate.so"
 #define PKCS11_PORTAL_MODULE_NAME "xdg-desktop-portal-certificate"
 
-/* CKA_LABEL IS A CONSTANT AND NOT THE SUBJECT CN, and this is not cosmetic.
- * GnuTLS's single-object import -- which is what
- * g_tls_certificate_new_from_pkcs11_uris() reaches, and therefore what
- * WebKitGTK reaches -- refuses a URI that names no object: it wants `object=`
- * (CKA_LABEL) or `id=`. An application has to write those URIs down before
- * anything has been chosen, and it cannot know the certificate's common name in
- * advance. A token holding exactly one credential can afford to name it after
- * itself, and the certificate's real identity is in its DER.
+/* CKA_LABEL IS A CONSTANT AND NOT THE SUBJECT CN, and the reason is in
+ * portal-token.h beside the URIs it explains: GnuTLS's single-object import
+ * refuses a URI that names no object, and a consumer has to write the URI down
+ * before anything has been chosen.
  *
- * The shared contract's URIs name the TOKEN and not the object, which is what
- * an enumerating consumer needs; a consumer using the single-object import
- * appends PKCS11_PORTAL_URI_OBJECT_ATTRIBUTE. */
-#define PKCS11_PORTAL_OBJECT_LABEL XDG_PORTAL_CERTIFICATE_TOKEN_LABEL
+ * The shared contract now carries the attribute itself --
+ * XDG_PORTAL_CERTIFICATE_CERT_URI and _KEY_URI are what a single-object import
+ * takes, XDG_PORTAL_CERTIFICATE_TOKEN_URI is what an enumerating consumer
+ * takes. This is the attribute on its own, for the tests and for anything
+ * building a URI a piece at a time. */
+#define PKCS11_PORTAL_OBJECT_LABEL XDG_PORTAL_CERTIFICATE_OBJECT_LABEL
 #define PKCS11_PORTAL_URI_OBJECT_ATTRIBUTE ";object=Portal%20Certificate"
 
 /* The public portal interface. The module is an ordinary application client of

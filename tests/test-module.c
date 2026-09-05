@@ -548,24 +548,38 @@ static void test_token_constants_match_the_uris(void)
 	                    XDG_PORTAL_CERTIFICATE_TOKEN_MANUFACTURER, escaped);
 	g_autoptr(PortalGrant) grant = fixture_grant("client-auth-rsa.pem", "RSA", 2048, TRUE, FALSE);
 	g_autoptr(PortalObjects) objects = portal_objects_new(grant, 7, NULL);
-	g_autoptr(GBytes) label = attribute_of(object_of_class(objects, CKO_CERTIFICATE), CKA_LABEL);
-	g_autofree char* label_text =
-	    g_strndup(g_bytes_get_data(label, NULL), g_bytes_get_size(label));
-	g_autofree char* object_attribute =
-	    g_strdup_printf(";object=%s", escaped);
+	g_autofree char* object_attribute = g_strdup_printf(";object=%s", escaped);
+	g_autofree char* expected_certificate =
+	    g_strconcat(expected, object_attribute, ";type=cert", NULL);
+	g_autofree char* expected_key =
+	    g_strconcat(expected, object_attribute, ";type=private", NULL);
+	const CK_OBJECT_CLASS classes[] = { CKO_CERTIFICATE, CKO_PUBLIC_KEY, CKO_PRIVATE_KEY };
+	size_t i;
 
-	/* portal-token.h is shared with another repository and the URI in it is
-	 * what that repository builds. If this assertion fails, the two sides have
+	/* portal-token.h is shared with another repository and the URIs in it are
+	 * what that repository builds. If these assertions fail, the two sides have
 	 * stopped naming the same token. */
 	g_assert_cmpstr(XDG_PORTAL_CERTIFICATE_TOKEN_URI, ==, expected);
-	g_assert_true(g_str_has_prefix(XDG_PORTAL_CERTIFICATE_CERT_URI,
-	                               XDG_PORTAL_CERTIFICATE_TOKEN_URI));
-	g_assert_true(g_str_has_suffix(XDG_PORTAL_CERTIFICATE_KEY_URI, ";type=private"));
 
-	/* CKA_LABEL is a constant, and the attribute a single-object import has to
-	 * append is built from it. */
-	g_assert_cmpstr(label_text, ==, PKCS11_PORTAL_OBJECT_LABEL);
+	/* THE object= IS PART OF THE CONTRACT, because GnuTLS's single-object
+	 * import -- g_tls_certificate_new_from_pkcs11_uris(), and therefore
+	 * WebKitGTK -- refuses a URI that names no object. A cert URI that lost it
+	 * would still enumerate and would still fail every handshake. */
+	g_assert_cmpstr(XDG_PORTAL_CERTIFICATE_CERT_URI, ==, expected_certificate);
+	g_assert_cmpstr(XDG_PORTAL_CERTIFICATE_KEY_URI, ==, expected_key);
 	g_assert_cmpstr(PKCS11_PORTAL_URI_OBJECT_ATTRIBUTE, ==, object_attribute);
+
+	/* ALL THREE OBJECTS carry that label, or the URI names one of them and not
+	 * the pair the consumer asked for. */
+	for (i = 0; i < G_N_ELEMENTS(classes); i++)
+	{
+		g_autoptr(GBytes) label = attribute_of(object_of_class(objects, classes[i]), CKA_LABEL);
+		g_autofree char* label_text =
+		    g_strndup(g_bytes_get_data(label, NULL), g_bytes_get_size(label));
+
+		g_assert_cmpstr(label_text, ==, PKCS11_PORTAL_OBJECT_LABEL);
+		g_assert_cmpstr(label_text, ==, XDG_PORTAL_CERTIFICATE_OBJECT_LABEL);
+	}
 
 	/* CK_TOKEN_INFO's fields are fixed width and are not NUL terminated. */
 	g_assert_cmpuint(strlen(XDG_PORTAL_CERTIFICATE_TOKEN_LABEL), <=, 32);

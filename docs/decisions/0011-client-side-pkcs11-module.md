@@ -121,12 +121,12 @@ wanted.
   through `g_tls_certificate_new_from_pkcs11_uris()`, which is the constructor WebKitGTK reaches.
   NSS and the OpenSSL 3 provider are not answered and remain S1's open half.
 - **The token's names are a contract with another repository.**
-  `src/module/portal-token.h` is the same file as webauth-service's
-  `backend/src/tls/portal-token.h`, down to the include guard: label `Portal Certificate`,
-  manufacturer `freedesktop.org`, model `portal-cert`, module configuration file
-  `xdg-desktop-portal-certificate.module`, and the token URI built from those three. Only the
-  licence line differs, because a header compiled into this library cannot carry a stronger
-  licence than the library. Changing a constant is changing an interface.
+  `src/module/portal-token.h` is the same file as `xdg-desktop-portal-webauth`'s
+  `backend/src/tls/portal-token.h` — **byte for byte, licence line included**, since that project
+  relicensed to LGPL-2.1-or-later on 2026-09-04: label `Portal Certificate`, manufacturer
+  `freedesktop.org`, model `portal-cert`, module configuration file
+  `xdg-desktop-portal-certificate.module`, and the URIs built from those three. Changing a
+  constant is changing an interface, and `cmp` between the two copies is the check.
 - **`CKA_LABEL` is a constant, not the certificate's subject CN**, and that is a consequence of
   the consumer rather than a preference. GnuTLS's single-object import — the one behind
   `g_tls_certificate_new_from_pkcs11_uris()` — refuses a URI that names no object, so a consumer
@@ -134,12 +134,17 @@ wanted.
   common name in advance. A token holding exactly one credential can be allowed to name it after
   itself. The certificate's real identity is in its DER.
 
-  **The contract's URIs do not carry `object=`, and a single-object import therefore has to append
-  it.** Measured, not assumed: `pkcs11:model=portal-cert;manufacturer=freedesktop.org;token=Portal%20Certificate;type=cert`
+  **The contract's URIs carry `object=`, and they did not at first.** Measured, not assumed:
+  `pkcs11:model=portal-cert;manufacturer=freedesktop.org;token=Portal%20Certificate;type=cert`
   is refused by `gnutls_x509_crt_import_url()` and by
-  `g_tls_certificate_new_from_pkcs11_uris()`; the same URI with `;object=Portal%20Certificate`
-  succeeds and completes the handshake. Enumeration accepts either. The attribute to append is
-  `PKCS11_PORTAL_URI_OBJECT_ATTRIBUTE` in `src/module/constants.h`.
+  `g_tls_certificate_new_from_pkcs11_uris()` — GnuTLS's `find_single_obj_cb()` wants `object=`
+  (CKA_LABEL) or `id=` and fails with `GNUTLS_E_PKCS11_REQUESTED_OBJECT_NOT_AVAILABLE` before any
+  chooser appears; the same URI with `;object=Portal%20Certificate` succeeds and completes the
+  handshake. Enumeration accepts either. The first version of the contract named only the token,
+  which left every single-object consumer to append the attribute itself and got the web-auth
+  backend exactly nowhere; `XDG_PORTAL_CERTIFICATE_CERT_URI` and `_KEY_URI` now carry it,
+  `XDG_PORTAL_CERTIFICATE_TOKEN_URI` is the token-only form an enumerating consumer wants, and
+  `PKCS11_PORTAL_URI_OBJECT_ATTRIBUTE` in `src/module/constants.h` is the attribute alone.
 - **A grant outlives the PKCS#11 sessions.** GnuTLS opens and closes a session for each object
   import and each signature; releasing the grant with the last session put the chooser up again
   every time. The grant now ends at `C_Finalize`, at its own expiry, or when the portal

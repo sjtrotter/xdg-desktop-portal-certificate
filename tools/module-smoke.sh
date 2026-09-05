@@ -55,9 +55,10 @@ XVFB="${XVFB:-$(command -v Xvfb || true)}"
 XDOTOOL="${XDOTOOL:-$(command -v xdotool || true)}"
 PIN="${PIN:-123456}"
 CERT_LABEL="${CERT_LABEL:-Portal Certificate}"
-# The URIs src/module/portal-token.h agrees with the web-auth backend, plus the
-# object= a single-object import needs. $URI_OBJECT can be emptied to check what
-# the bare contract URI does.
+# The URIs src/module/portal-token.h agrees with the web-auth backend. The
+# object= is part of that contract now -- XDG_PORTAL_CERTIFICATE_CERT_URI and
+# _KEY_URI carry it -- because a single-object import refuses a URI without one.
+# $URI_OBJECT can be emptied to watch that refusal happen.
 URI_TOKEN="pkcs11:model=portal-cert;manufacturer=freedesktop.org;token=Portal%20Certificate"
 URI_OBJECT="${URI_OBJECT-;object=Portal%20Certificate}"
 CERT_URI="${URI_TOKEN}${URI_OBJECT};type=cert"

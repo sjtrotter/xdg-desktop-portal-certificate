@@ -292,7 +292,18 @@ def create_session(portal):
     if response != 0:
         die(EXIT_UNAVAILABLE, f"CreateSession answered {response}")
 
-    return results.get("session_handle", path)
+    # The results carry the handle; the path computed above is only what the
+    # session_handle_token predicts it will be, and it is compared rather than
+    # substituted. The frontend used to answer with an "s" here and the two
+    # readings had to be reconciled; the fix is xdg-desktop-portal 77b37ab
+    # "certificate: Return session_handle as the object path it is typed as".
+    handle = results.get("session_handle")
+    if handle is None:
+        die(EXIT_UNAVAILABLE, "CreateSession returned no session_handle")
+    if handle != path:
+        print(f"note: session handle {handle} is not the predicted {path}", file=sys.stderr)
+
+    return handle
 
 
 def build_filter(args):
