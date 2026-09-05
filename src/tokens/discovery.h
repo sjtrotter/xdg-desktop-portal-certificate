@@ -176,7 +176,7 @@ CertificateTokens* certificate_tokens_new(const char* const* module_paths, GErro
  *  org.freedesktop.portal.experimental.Certificate, which the frontend serves
  *  by calling this backend: loading it here would make the backend enumerate a
  *  token whose enumeration is a call back into the backend. p11-kit's
- *  `disable-in` is a convenience and pkcs11.conf(5) says it is not a security
+ *  `enable-in` is a convenience and pkcs11.conf(5) says it is not a security
  *  feature, so the refusal lives here as well. */
 gboolean certificate_module_is_portal_module(const char* name, const char* filename);
 void certificate_tokens_free(CertificateTokens* tokens);

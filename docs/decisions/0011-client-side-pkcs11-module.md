@@ -112,8 +112,12 @@ whose enumeration is a call back into itself. Three fences, because
 
 1. `certificate_module_is_portal_module()` in `src/tokens/discovery.c`, applied to the configured
    modules and to an explicit `--module` path;
-2. the module refuses to run in any process whose executable is named `xdg-desktop-portal*`;
-3. `disable-in:` in the installed `xdg-desktop-portal-certificate.module`.
+2. the module refuses to run in any process whose executable is named `xdg-desktop-portal` or
+   `xdg-desktop-portal-certificate`;
+3. the installed module file's `enable-in:` list, which names two consumers and neither of those
+   two processes. This is the weakest of the three and always was — `pkcs11.conf(5)` says so — but
+   an allowlist that cannot name them by accident is a better third fence than a denylist that has
+   to remember to.
 
 Fence 2 is **two exact executable names**, `xdg-desktop-portal` and
 `xdg-desktop-portal-certificate`, and it was a prefix match on `xdg-desktop-portal` until the first
@@ -124,19 +128,40 @@ process. The prefix rule refused it, and the only symptom was GnuTLS reporting t
 not available. **A backend named after the portal is not the portal**; only the two that would
 recurse are on the list.
 
-### enable-in / disable-in
+### The module is opt-in by name, and the shipped file is the allowlist
 
-The shipped module file enables the module everywhere and disables it in the portal processes. Two
-adjustments are worth documenting rather than guessing at:
+**The first version of this file enabled the module for every p11-kit consumer** and disabled it in
+three processes. That is wrong for a component whose object search can raise a window: `curl`,
+`ssh`, a mail fetcher or a background service that enumerates PKCS#11 objects at start-up would
+have provoked a chooser nobody asked for and nobody is there to answer. The ten-second refusal
+cache in `module.c` makes that survivable; it does not make it defensible.
 
-- **`enable-in: firefox, thunderbird`** — offer the portal token to named applications only. This
-  is the setting for a deployment that wants the portal path for its browser and the real card
-  module for everything else.
-- **`disable-in: some-batch-job`** — keep it away from a program that enumerates modules at
-  start-up and would provoke a chooser nobody is there to answer.
+The shipped file now carries an **`enable-in:` allowlist**:
 
-Neither is a security control. Both are ways to keep a window from appearing where it is not
-wanted.
+```
+enable-in: xdg-desktop-portal-webauth, WebKitNetworkProcess
+```
+
+p11-kit matches the **base name of `argv[0]`**. Those two are the pair one mutual-TLS handshake
+needs: the web-authentication backend, which must build a `GTlsCertificate` before WebKit will
+carry one anywhere, and WebKitGTK's network process, which owns the handshake and resolves the URI
+itself. `firefox, thunderbird` is in the file as a commented line with the NSS caveat attached.
+
+**`disable-in:` is gone from the file, and must not come back.** `pkcs11.conf(5)` says "Do not
+specify both enable-in and disable-in for the same module", and p11-kit's
+`is_module_enabled_unlocked()` returns out of the `enable-in` branch before it looks at
+`disable-in` — so with both set the denylist is dead weight that reads as though it were doing
+something. The two portal processes are excluded because they are not on the allowlist, and by the
+two fences in code above.
+
+Neither list is a security control. Both are ways to decide where a window may appear.
+
+A deployment adds names by editing the installed file, or by dropping its own
+`xdg-desktop-portal-certificate.module` into `~/.config/pkcs11/modules`, which overrides the
+system one entirely. `tools/module-smoke.sh`, `tools/ui-smoke.sh` and the web-auth repository's
+`tools/portal-stack.sh` all write their own file into a private `XDG_CONFIG_HOME` and are
+unaffected by what is shipped; `portal-stack.sh --live` writes the real per-user file with the same
+`enable-in` line as above.
 
 ## Consequences
 

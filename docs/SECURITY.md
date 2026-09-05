@@ -549,10 +549,12 @@ never a PKCS#11 URI, and there is no PIN to leak.
 
 **The recursion rule.** This module must never be loaded by xdg-desktop-portal or by this backend:
 the backend enumerates p11-kit's modules, and this one answers by calling the portal that calls the
-backend. Three fences, because `pkcs11.conf(5)` states plainly that `disable-in` is not a security
-feature: `certificate_module_is_portal_module()` in `src/tokens/discovery.c` (applied to configured
-modules *and* to an explicit `--module` path), the module's own refusal to run in a process whose
-executable is named `xdg-desktop-portal*`, and `disable-in:` in the installed module file.
+backend. Three fences, because `pkcs11.conf(5)` states plainly that neither `enable-in` nor
+`disable-in` is a security feature: `certificate_module_is_portal_module()` in
+`src/tokens/discovery.c` (applied to configured modules *and* to an explicit `--module` path), the
+module's own refusal to run in a process whose executable is named `xdg-desktop-portal` or
+`xdg-desktop-portal-certificate`, and the installed module file's `enable-in:` allowlist, which
+names two consumers and neither portal process.
 
 **What it does not fix.** The application still learns which certificate it was given and can use
 the key for anything the grant permits, for as long as the grant lives —

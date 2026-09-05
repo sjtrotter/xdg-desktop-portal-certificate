@@ -452,9 +452,9 @@ static void add_operation_policy(GVariantBuilder* options, const char* purpose)
  * xdg-desktop-portal-webauth -- the first consumer this module was written for,
  * and a process that enumerates nothing, owns no card and calls the portal
  * exactly as an application does. A portal BACKEND is not the portal; only these
- * two are, and only they recurse. `disable-in:` in the installed module file
- * names the same two, and PKCS11_PORTAL_CERTIFICATE_DISABLE=1 is the switch for
- * anything else that has to be kept out. */
+ * two are, and only they recurse. The installed module file's `enable-in:` list
+ * names neither of them, and PKCS11_PORTAL_CERTIFICATE_DISABLE=1 is the switch
+ * for anything else that has to be kept out. */
 static const char* const portal_excluded_programs[] = {
 	"xdg-desktop-portal",
 	"xdg-desktop-portal-certificate",

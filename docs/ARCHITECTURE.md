@@ -448,8 +448,9 @@ own process**. It is not part of the backend and links none of it.
   `CKR_FUNCTION_NOT_SUPPORTED` — including every way to write to a token.
 - **It must never be loaded by the frontend or by this backend**, which would recurse. Three
   fences: `certificate_module_is_portal_module()` in
-  [`../src/tokens/discovery.h`](../src/tokens/discovery.h), the module's own refusal to run in
-  a process named `xdg-desktop-portal*`, and `disable-in:` in the module file.
+  [`../src/tokens/discovery.h`](../src/tokens/discovery.h), the module's own refusal to run in a
+  process named `xdg-desktop-portal` or `xdg-desktop-portal-certificate`, and the shipped module
+  file's `enable-in:` allowlist, which names neither.
 
 **It is not a trust boundary and it is not where hardening belongs.** Everything it refuses,
 the portal refuses again across D-Bus. See

@@ -8,25 +8,44 @@
 # NOT CRITICAL. A machine with no Certificate portal, or with the experimental
 # gate off, must still load every other module: this one then offers no slot.
 #
-# MUST NOT BE LOADED BY THE PORTAL ITSELF. xdg-desktop-portal and the
-# certificate backend enumerate PKCS#11 modules, and this one calls them back.
-# The module refuses to run in either of those two by name, the backend skips it
-# by name, and the disable-in below is the third fence. OTHER portal backends
-# are ordinary consumers -- xdg-desktop-portal-webauth is the first one -- and
-# are deliberately not on the list.
+# OPT IN BY NAME. A credential search through this module can raise a chooser,
+# and a program that enumerates PKCS#11 objects at start-up did not ask a user
+# for anything. So the shipped file names the consumers that want the portal
+# token and nobody else. p11-kit matches the base name of argv[0]; add a name
+# to enable-in below, or drop a file of your own into
+# ~/.config/pkcs11/modules/xdg-desktop-portal-certificate.module which
+# overrides this one.
 #
-# enable-in / disable-in take process base names and are NOT a security feature
-# (pkcs11.conf(5) says so). To offer the portal token to one application only:
+#   xdg-desktop-portal-webauth  the web-authentication portal's backend, which
+#                               builds a GTlsCertificate before WebKit will
+#                               carry one to its network process
+#   WebKitNetworkProcess        WebKitGTK's network process, which owns the TLS
+#                               handshake and resolves the URI a second time
+#
+# For Firefox or Thunderbird, uncomment the line below. NSS reaches PKCS#11 its
+# own way and this path has not been tested; expect a second, browser-owned
+# certificate dialog on top of the portal's chooser.
 #
 #     enable-in: firefox, thunderbird
 #
-# To keep it away from one:
+# DO NOT ADD disable-in HERE. pkcs11.conf(5) says "Do not specify both
+# enable-in and disable-in for the same module", and p11-kit's
+# is_module_enabled_unlocked() takes the enable-in branch and returns before it
+# ever looks at disable-in: with both set the disable-in is dead weight. An
+# allowlist is strictly narrower than a denylist anyway.
 #
-#     disable-in: some-batch-job
+# MUST NOT BE LOADED BY THE PORTAL ITSELF. xdg-desktop-portal and the
+# certificate backend enumerate PKCS#11 modules, and this one calls them back.
+# Neither is on the list above, and neither can be added: the module refuses to
+# run in a process named after either of them, and the backend skips this
+# module by name when it enumerates. Those two fences are in code, because
+# pkcs11.conf(5) says enable-in and disable-in are not a security feature.
+# OTHER portal backends are ordinary consumers -- xdg-desktop-portal-webauth is
+# the first one -- and that is why one of them is on the list.
 
 module: @module@
 critical: no
-disable-in: xdg-desktop-portal, xdg-desktop-portal-certificate, p11-kit-server
+enable-in: xdg-desktop-portal-webauth, WebKitNetworkProcess
 
 # Low, so that a real token is found before this one by anything that walks the
 # module list in priority order.

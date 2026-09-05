@@ -254,12 +254,15 @@ Three things worth knowing before enabling it:
   because one of them has nothing to say.
 - **It must not be enabled inside xdg-desktop-portal or inside this backend.** The backend
   enumerates p11-kit modules; this one answers by calling the portal that calls the backend. It
-  refuses to run there three separate ways, and the shipped module file carries `disable-in:`.
-- **`enable-in:` and `disable-in:` in `xdg-desktop-portal-certificate.module` take process base
-  names** and are
-  not a security feature (`pkcs11.conf(5)` says so). `enable-in: firefox, thunderbird` offers the
-  portal token to those two and nothing else; that is the setting for a deployment that wants the
-  portal path for its browser and the real card module for everything else.
+  refuses to run there three separate ways, and neither is on the shipped allowlist.
+- **The module is opt-in by name.** The shipped `xdg-desktop-portal-certificate.module` carries
+  `enable-in: xdg-desktop-portal-webauth, WebKitNetworkProcess` — the two processes one mutual-TLS
+  handshake through WebKitGTK needs — and no other consumer loads it. p11-kit matches the base name
+  of `argv[0]`. Add `firefox, thunderbird` (the file has the line commented, with the NSS caveat)
+  or write your own file into `~/.config/pkcs11/modules`, which overrides the system one. Do not
+  add `disable-in` beside `enable-in`: `pkcs11.conf(5)` says not to set both, and p11-kit consults
+  only the allowlist when both are there. Neither list is a security feature; both decide where a
+  window may appear.
 
 Environment, for a consumer that knows more than PKCS#11 lets it say:
 `PKCS11_PORTAL_CERTIFICATE_PURPOSE` (`client_auth` by default),
