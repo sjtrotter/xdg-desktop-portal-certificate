@@ -98,6 +98,8 @@ certificate_service_dep = declare_dependency(
   dependencies: certificate_deps + certificate_ui_deps,
 )
 
+subdir('module')
+
 executable(
   'xdg-desktop-portal-certificate',
   ['main.c'],

@@ -7,3 +7,17 @@ option(
   value: 'auto',
   description: 'PIN entry through the desktop shell\'s system prompter (gcr-4). Adds --pin-prompt=system; without it that option does not exist and the in-process GTK window is the only prompt.',
 )
+
+option(
+  'p11_module_path',
+  type: 'string',
+  value: '',
+  description: 'Where to install the PKCS#11 module. Empty means ${libdir}/pkcs11; p11-kit resolves a relative module: line against ITS OWN directory, which pkg-config reports as p11_module_path.',
+)
+
+option(
+  'p11_module_configs',
+  type: 'string',
+  value: '',
+  description: 'Where to install portal-certificate.module. Empty means ${datadir}/p11-kit/modules.',
+)

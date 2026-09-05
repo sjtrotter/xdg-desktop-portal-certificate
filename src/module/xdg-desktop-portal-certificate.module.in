@@ -1,0 +1,31 @@
+# The client-side PKCS#11 module of the experimental Certificate portal.
+# See pkcs11.conf(5), and docs/decisions/0011-client-side-pkcs11-module.md.
+#
+# It presents ONE token, "Portal Certificate", holding the one certificate the
+# user chose in the portal's chooser, and forwards signing to the portal. It
+# holds no key, no PIN and no card.
+#
+# NOT CRITICAL. A machine with no Certificate portal, or with the experimental
+# gate off, must still load every other module: this one then offers no slot.
+#
+# MUST NOT BE LOADED BY THE PORTAL ITSELF. xdg-desktop-portal and the
+# certificate backend enumerate PKCS#11 modules, and this one calls them back.
+# The module refuses to run in any process named xdg-desktop-portal*, the
+# backend skips it by name, and the disable-in below is the third fence.
+#
+# enable-in / disable-in take process base names and are NOT a security feature
+# (pkcs11.conf(5) says so). To offer the portal token to one application only:
+#
+#     enable-in: firefox, thunderbird
+#
+# To keep it away from one:
+#
+#     disable-in: some-batch-job
+
+module: @module@
+critical: no
+disable-in: xdg-desktop-portal, xdg-desktop-portal-certificate, p11-kit-server
+
+# Low, so that a real token is found before this one by anything that walks the
+# module list in priority order.
+priority: -10

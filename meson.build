@@ -55,6 +55,7 @@ add_project_arguments(
 
 prefix = get_option('prefix')
 datadir = prefix / get_option('datadir')
+libdir = prefix / get_option('libdir')
 # The backend is D-Bus activated and is not meant to be run from a shell, so it
 # belongs in libexecdir -- as xdg-desktop-portal-gtk's backend does.
 libexecdir = prefix / get_option('libexecdir')
@@ -105,6 +106,29 @@ configure_file(output: 'config.h', configuration: config)
 
 config_inc = include_directories('.')
 
+# WHERE p11-kit ITSELF LOOKS. A module file whose `module:` line is a bare name
+# is resolved against p11-kit's own module directory and nowhere else, so the
+# two paths below decide whether the installed module file needs an absolute
+# path. src/module/meson.build makes that choice.
+p11kit_module_path = p11kit_dep.get_variable(
+  pkgconfig: 'p11_module_path',
+  default_value: libdir / 'pkcs11',
+)
+p11kit_module_configs = p11kit_dep.get_variable(
+  pkgconfig: 'p11_module_configs',
+  default_value: datadir / 'p11-kit' / 'modules',
+)
+
+p11_module_path = get_option('p11_module_path')
+if p11_module_path == ''
+  p11_module_path = libdir / 'pkcs11'
+endif
+
+p11_module_configs = get_option('p11_module_configs')
+if p11_module_configs == ''
+  p11_module_configs = datadir / 'p11-kit' / 'modules'
+endif
+
 subdir('data')
 subdir('src')
 subdir('tests')
@@ -141,6 +165,10 @@ summary(
     'frontend gate': 'XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate',
     'core contract': 'credential selection + brokered Sign',
     'PKCS#11 facade': 'deferred; OpenPkcs11Endpoint is not in the branch interface',
+    'client-side PKCS#11 module': p11_module_path / 'libpkcs11-portal-certificate.so',
+    'p11-kit module file': p11_module_configs / 'xdg-desktop-portal-certificate.module',
+    'p11-kit reports its module dir as': p11kit_module_path,
+    'p11-kit reports its module-file dir as': p11kit_module_configs,
   },
   section: 'interfaces',
 )
@@ -150,6 +178,7 @@ summary(
     'chooser and PIN prompt': true,
     'brokered Sign / Decrypt': true,
     'PKCS#11 compatibility facade': false,
+    'client-side PKCS#11 module': true,
     'frontend branch merged upstream': false,
     'safe to depend on': false,
   },
