@@ -576,6 +576,10 @@ $ LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0     
 
 ### 2.6 Firefox: what NSS actually does, and what to expect
 
+Confirmed by the author on 2026-09-06 with Firefox, a throwaway profile, the module loaded from
+Security Devices and a PIV card: the portal chooser, Firefox's own picker, then the PIN prompt,
+and the site accepted the certificate. No "Protected Authentication" alert.
+
 Two module defects were found here on 2026-09-06, both by driving NSS headlessly with §2.56 and by
 reading NSS's and Firefox's own source [[S59](SOURCES.md)]. The live report they explain: the
 module was loaded into a fresh profile with `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`, a site that
