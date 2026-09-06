@@ -566,6 +566,66 @@ this repository; see [0004](decisions/0004-license.md). The edge-case list in
 project's author, who wrote the patches — it is not independently citable, and it is the one place
 here where the "primary source" is the author's own prior work.
 
+**[S59] NSS authenticates to a token BEFORE it will list anything on it, and Firefox's password
+callback for a protected authentication path is a modal alert a person has to dismiss.** Read
+2026-09-06.
+
+The login gate is NSS's. `lib/pk11wrap/pk11slot.c` sets `slot->needLogin` from the token's
+`CKF_LOGIN_REQUIRED` and nothing else (`PK11_InitToken()`; the same two lines appear in
+`PK11_TokenRefresh()`), and `lib/pk11wrap/pk11auth.c` has
+
+```c
+PRBool
+pk11_LoginStillRequired(PK11SlotInfo *slot, void *wincx)
+{
+    return slot->needLogin && !PK11_IsLoggedIn(slot, wincx);
+}
+```
+
+with `PK11_Authenticate()` calling `PK11_DoPassword()` when that is true and returning
+`SECSuccess` without doing anything when it is false. `PK11_DoPassword()` then calls the
+**application's** password callback — `pk11_GetPassword()` — for a protected-authentication-path
+token as well as for any other; the flag changes what the callback is expected to return
+(`PK11_PW_AUTHENTICATED` or `PK11_PW_RETRY`), not whether it is called.
+`pk11_IsLoggedIn()` asks the token with `C_GetSessionInfo` and treats
+`CKS_RW_USER_FUNCTIONS`/`CKS_RO_USER_FUNCTIONS` as logged in, caching the answer for one second.
+`CKR_USER_ALREADY_LOGGED_IN` is accepted as success alongside `CKR_OK` in `pk11_CheckPassword()`.
+Source: [`lib/pk11wrap/pk11auth.c`](https://searchfox.org/nss/source/lib/pk11wrap/pk11auth.c) and
+[`lib/pk11wrap/pk11slot.c`](https://searchfox.org/nss/source/lib/pk11wrap/pk11slot.c),
+read from `nss-dev/nss` `master`.
+
+Firefox is the caller that makes this visible. `FindClientCertificatesWithPrivateKeys()` in
+[`security/manager/ssl/nsNSSComponent.cpp`](https://searchfox.org/mozilla-central/source/security/manager/ssl/nsNSSComponent.cpp)
+walks every slot of every loaded module and, for a slot that is not the internal one,
+
+```cpp
+        // If this isn't a "friendly" slot, authenticate to expose certificates.
+        if (!PK11_IsFriendly(slot) &&
+            PK11_Authenticate(slot, true, nullptr) != SECSuccess) {
+          MOZ_LOG(gPIPNSSLog, LogLevel::Debug, ("    (couldn't authenticate)"));
+          continue;
+        }
+        UniqueCERTCertList certsInSlot(PK11_ListCertsInSlot(slot));
+```
+
+— so on a token claiming `CKF_LOGIN_REQUIRED` the login happens **before** the first
+`C_FindObjectsInit`, and a slot that cannot be authenticated is skipped entirely. A module loaded
+through "Security Devices → Load" is not "friendly": `PK11_IsFriendly()` is
+`slot->isInternal || (slot->defaultFlags & SECMOD_FRIENDLY_FLAG)`, and that flag comes from a
+`Flags=friendly` in the module's NSS spec string, which the Load dialog does not write.
+
+Firefox's callback is `PK11PasswordPrompt()` in
+[`security/manager/ssl/nsNSSCallbacks.cpp`](https://searchfox.org/mozilla-central/source/security/manager/ssl/nsNSSCallbacks.cpp),
+and for `PK11_ProtectedAuthenticationPath(slot)` it runs `ShowProtectedAuthPrompt()`, which
+dispatches `PK11_CheckUserPassword(slot, nullptr)` to a background task, then calls
+`prompt->Alert(nullptr, promptString)` — a **modal alert with an OK button**, localised as
+`protected-auth-alert`, "Please authenticate to the security device (%(tokenName)s)" — and only
+`SpinEventLoopUntil()`s for the background task **after** `Alert()` returns. The dialog is
+therefore not driven by `C_Login` at all: it stays up until the person dismisses it, and while it
+is up the main thread is inside `Alert()`'s nested event loop, so nothing else — including the
+certificate search — has started. Older Firefox used a `nsProtectedAuthThread` that closed its own
+window when the login returned; that class is gone from current mozilla-central.
+
 ## What is deliberately not cited
 
 - **Every claim about this repository's own code, tests, tools and runs.** Those are checkable in

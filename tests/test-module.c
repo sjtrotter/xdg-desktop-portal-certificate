@@ -510,6 +510,7 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 	CK_OBJECT_CLASS private_key = CKO_PRIVATE_KEY;
 	CK_OBJECT_CLASS data_object = CKO_DATA;
 	CK_BBOOL yes = CK_TRUE;
+	CK_BBOOL no = CK_FALSE;
 	CK_ULONG category = CK_CERTIFICATE_CATEGORY_TOKEN_USER;
 	char label[] = PKCS11_PORTAL_OBJECT_LABEL;
 	char other_label[] = "Some Other Certificate";
@@ -527,10 +528,20 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 	CK_ATTRIBUTE want_private[] = { { CKA_CLASS, &private_key, sizeof(private_key) } };
 	CK_ATTRIBUTE signing_key[] = { { CKA_CLASS, &private_key, sizeof(private_key) },
 		                          { CKA_SIGN, &yes, sizeof(yes) } };
+	/* NSS's PK11_ListPrivKeysInSlot(). CKA_TOKEN == CK_TRUE says the object is
+	 * persistent, which all three of ours are; it names nothing, so it is passed
+	 * over and this is the private-key row. */
+	CK_ATTRIBUTE nss_private_keys[] = { { CKA_CLASS, &private_key, sizeof(private_key) },
+		                                { CKA_TOKEN, &yes, sizeof(yes) } };
 
 	/* Enumerates: acquires only with the environment opt-in. */
 	CK_ATTRIBUTE want_certificate[] = { { CKA_CLASS, &certificate, sizeof(certificate) } };
 	CK_ATTRIBUTE want_public[] = { { CKA_CLASS, &public_key, sizeof(public_key) } };
+	/* NSS's PK11_ListCertsInSlot(), which is what Firefox's client-authentication
+	 * path starts from. */
+	CK_ATTRIBUTE nss_certificates[] = { { CKA_TOKEN, &yes, sizeof(yes) },
+		                                { CKA_CLASS, &certificate, sizeof(certificate) } };
+	CK_ATTRIBUTE only_on_token[] = { { CKA_TOKEN, &yes, sizeof(yes) } };
 
 	/* Unrelated: never acquires. GnuTLS verifying a SERVER's chain sends the
 	 * issuer and subject rows at every handshake, through every module. */
@@ -545,8 +556,15 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 		                       { CKA_TRUSTED, &yes, sizeof(yes) } };
 	CK_ATTRIBUTE in_category[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
 		                           { CKA_CERTIFICATE_CATEGORY, &category, sizeof(category) } };
-	CK_ATTRIBUTE on_token[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
-		                        { CKA_TOKEN, &yes, sizeof(yes) } };
+	/* A SESSION object is not a thing this token has, so CKA_TOKEN == CK_FALSE
+	 * stays on the refusing side while CK_TRUE is passed over. */
+	CK_ATTRIBUTE not_on_token[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
+		                           { CKA_TOKEN, &no, sizeof(no) } };
+	/* NSS's CERT_FindCertByIssuerAndSN, with the CKA_TOKEN NSS always adds. */
+	CK_ATTRIBUTE nss_by_serial[] = { { CKA_TOKEN, &yes, sizeof(yes) },
+		                             { CKA_CLASS, &certificate, sizeof(certificate) },
+		                             { CKA_ISSUER, name, sizeof(name) },
+		                             { CKA_SERIAL_NUMBER, identifier, sizeof(identifier) } };
 	CK_ATTRIBUTE wrong_label[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
 		                           { CKA_LABEL, other_label, sizeof(other_label) - 1 } };
 	CK_ATTRIBUTE wrong_label_right_id[] = { { CKA_LABEL, other_label,
@@ -568,18 +586,24 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
 	g_assert_cmpint(portal_template_intent(signing_key, 2), ==,
 	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(nss_private_keys, 2), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
 
 	g_assert_cmpint(portal_template_intent(NULL, 0), ==, PORTAL_TEMPLATE_ENUMERATES);
 	g_assert_cmpint(portal_template_intent(want_certificate, 1), ==,
 	                PORTAL_TEMPLATE_ENUMERATES);
 	g_assert_cmpint(portal_template_intent(want_public, 1), ==, PORTAL_TEMPLATE_ENUMERATES);
+	g_assert_cmpint(portal_template_intent(nss_certificates, 2), ==,
+	                PORTAL_TEMPLATE_ENUMERATES);
+	g_assert_cmpint(portal_template_intent(only_on_token, 1), ==, PORTAL_TEMPLATE_ENUMERATES);
 
 	g_assert_cmpint(portal_template_intent(by_issuer, 2), ==, PORTAL_TEMPLATE_UNRELATED);
 	g_assert_cmpint(portal_template_intent(by_subject, 2), ==, PORTAL_TEMPLATE_UNRELATED);
 	g_assert_cmpint(portal_template_intent(by_serial, 3), ==, PORTAL_TEMPLATE_UNRELATED);
 	g_assert_cmpint(portal_template_intent(trusted, 2), ==, PORTAL_TEMPLATE_UNRELATED);
 	g_assert_cmpint(portal_template_intent(in_category, 2), ==, PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(on_token, 2), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(not_on_token, 2), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(nss_by_serial, 4), ==, PORTAL_TEMPLATE_UNRELATED);
 	g_assert_cmpint(portal_template_intent(wrong_label, 2), ==, PORTAL_TEMPLATE_UNRELATED);
 	g_assert_cmpint(portal_template_intent(wrong_label_right_id, 2), ==,
 	                PORTAL_TEMPLATE_UNRELATED);
@@ -591,16 +615,21 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 	g_unsetenv(PKCS11_PORTAL_ENV_ENUMERATE);
 	g_assert_true(portal_template_wants_credential(cert_by_label, 2));
 	g_assert_true(portal_template_wants_credential(want_private, 1));
+	g_assert_true(portal_template_wants_credential(nss_private_keys, 2));
 	g_assert_false(portal_template_wants_credential(NULL, 0));
 	g_assert_false(portal_template_wants_credential(want_certificate, 1));
+	g_assert_false(portal_template_wants_credential(nss_certificates, 2));
 	g_assert_false(portal_template_wants_credential(by_issuer, 2));
 	g_assert_false(portal_template_wants_credential(want_data, 1));
 
-	/* The NSS escape hatch moves the middle group, and only the middle group. */
+	/* The NSS escape hatch moves the middle group, and only the middle group.
+	 * nss_certificates is the row Firefox needs it for. */
 	g_setenv(PKCS11_PORTAL_ENV_ENUMERATE, "1", TRUE);
 	g_assert_true(portal_template_wants_credential(NULL, 0));
 	g_assert_true(portal_template_wants_credential(want_certificate, 1));
+	g_assert_true(portal_template_wants_credential(nss_certificates, 2));
 	g_assert_false(portal_template_wants_credential(by_issuer, 2));
+	g_assert_false(portal_template_wants_credential(nss_by_serial, 4));
 	g_assert_false(portal_template_wants_credential(want_data, 1));
 	g_unsetenv(PKCS11_PORTAL_ENV_ENUMERATE);
 }

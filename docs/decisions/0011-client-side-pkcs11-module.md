@@ -183,15 +183,40 @@ application because it is the one that called.
 
 ### Consequences for the login model
 
-The token sets `CKF_LOGIN_REQUIRED` **and** `CKF_PROTECTED_AUTHENTICATION_PATH`
-[[S12](../SOURCES.md)]. The second is not a convenience: it is what stops a TLS stack asking the
+The token sets `CKF_PROTECTED_AUTHENTICATION_PATH` [[S12](../SOURCES.md)] and **does not set
+`CKF_LOGIN_REQUIRED`**. The first is not a convenience: it is what stops a TLS stack asking the
 user for a PIN it must never receive — WebKitGTK has a whole authentication scheme for exactly
 that request [[S23](../SOURCES.md)]. With
-it, GnuTLS and NSS call `C_Login(CKU_USER, NULL, 0)`, the module answers `CKR_OK` without doing
+it, GnuTLS and OpenSC call `C_Login(CKU_USER, NULL, 0)`, the module answers `CKR_OK` without doing
 anything, and the portal's backend collects the PIN in its own window at the first `Sign`. That is
 [SPIKES.md](../SPIKES.md) S2's "lazy login", now answered against a module rather than in theory.
 Any PIN bytes an application does pass are ignored and never forwarded; there is nothing on this
 side of the boundary for them to unlock.
+
+**`CKF_LOGIN_REQUIRED` was set until 2026-09-06 and removing it is the second half of the NSS
+fix.** It was a claim the module could not back: `C_Login` sets a flag nothing reads, and every
+object and every operation is available without one, because the authentication that matters is the
+card's and happens in the backend. NSS is the consumer that takes the claim literally.
+`PK11_Authenticate()` does nothing at all when the token does not set the flag, and Firefox's
+`FindClientCertificatesWithPrivateKeys()` calls it on every slot that is not "friendly" **before**
+`PK11_ListCertsInSlot()` — a module loaded through the "Security Devices → Load" dialog is never
+friendly, because "friendly" comes from a `Flags=friendly` in the NSS spec string that the dialog
+does not write [[S59](../SOURCES.md)]. So the login came first, and NSS ran the application's
+password callback to get it; a protected authentication path changes what that callback is expected
+to *return*, not whether it is called. Firefox's callback dispatches `PK11_CheckUserPassword()` to a
+background task and then puts up a **modal alert with an OK button** — "Please authenticate to the
+security device" — and waits for the background task only after the alert is dismissed. The
+module's `C_Login` had already answered `CKR_OK`; the dialog was waiting for a person, and while it
+was up Firefox's main thread had not begun the certificate search, so the portal frontend saw no
+request at all. One dialog before the chooser, saying nothing, for a login that does nothing.
+
+Dropping the flag costs nothing measurable: `tools/module-smoke.sh` passes unchanged — GnuTLS's
+`pkcs11_login()` returns early with "no login required" and the TLS 1.3 handshake still completes,
+and `pkcs11-tool --login` still logs in and still asks for no PIN, because that is
+`CKF_PROTECTED_AUTHENTICATION_PATH` and not this flag. `C_Login` and `C_Logout` keep working for
+consumers that call them regardless, and `C_GetSessionInfo` keeps reporting
+`CKS_RO_USER_FUNCTIONS` once one has. What is gone is only NSS's reason to demand a login before it
+will look at the token.
 
 ### The rule that must not be broken
 
@@ -275,17 +300,31 @@ challenge, for a certificate nothing had asked for.
 | a non-empty `CKA_ID` | a consumer that has one got it from us | yes |
 | `CKA_CLASS == CKO_PRIVATE_KEY`, alone or with `CKA_SIGN`/`CKA_DECRYPT` | nothing on a server's chain is a private key | yes |
 | `CKA_CLASS` alone (`CKO_CERTIFICATE`, `CKO_PUBLIC_KEY`), or an empty template | "list what is on this token" | only with the opt-in below |
-| `CKA_ISSUER`, `CKA_SUBJECT`, `CKA_SERIAL_NUMBER`, `CKA_TRUSTED`, `CKA_CERTIFICATE_CATEGORY`, `CKA_TOKEN`, a `CKA_LABEL` that is not ours, `CKO_DATA`, a malformed `CKA_CLASS` | somebody else's certificate, or nothing this token has | **never** |
+| `CKA_ISSUER`, `CKA_SUBJECT`, `CKA_SERIAL_NUMBER`, `CKA_TRUSTED`, `CKA_CERTIFICATE_CATEGORY`, `CKA_TOKEN == CK_FALSE`, a `CKA_LABEL` that is not ours, `CKO_DATA`, a malformed `CKA_CLASS` | somebody else's certificate, or nothing this token has | **never** |
+
+`CKA_TOKEN == CK_TRUE` is not in the table at all: it is **passed over**, exactly as `CKA_SIGN` and
+`CKA_DECRYPT` are, and the rows are decided on what is left. It says the object is persistent, which
+all three of this token's objects are, and it names nothing. Counting it was the whole of the
+2026-09-06 NSS defect: NSS attaches it to every search it makes — `[CKA_TOKEN, CKA_CLASS]` for
+`PK11_ListCertsInSlot()`, `[CKA_CLASS, CKA_TOKEN]` for `PK11_ListPrivKeysInSlot()` — so **both** of
+those landed on the last row. The private-key search never reached the third row, and the
+certificate search was never classified as enumeration, which left the opt-in below with nothing to
+switch: Firefox saw an empty token *with* `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` set.
+`CKA_TOKEN == CK_FALSE` asks for session objects, which this token never has, and stays on the
+refusing side.
 
 A search on the last row answers zero objects while there is no grant, and never asks for one. Once
 a grant exists, ordinary attribute matching applies and every one of these sees the three objects
 like any other search: the gate decides when a **window** may open, not what a token holds.
 
 `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` moves the fourth row onto the acquiring side, and only the
-fourth row. NSS asks for `CKO_CERTIFICATE` with nothing else and has no way to name an object, so
-an NSS experiment needs it; nothing else does, and a process that sets it is asking for choosers it
-would not otherwise get. It is documented as an experiment because that is what it is — S1's NSS
-half is still open.
+fourth row. NSS's `PK11_ListCertsInSlot()` is "every certificate on this token" and has no way to
+name an object, so an NSS consumer needs it; nothing else does, and a process that sets it is asking
+for choosers it would not otherwise get. **NSS's other two lookups do not need it** — the
+private-key search names a credential by class, and `token:nickname`, which is how NSS names an
+object on a token, arrives as a `CKA_LABEL` search — but Firefox's client-authentication path starts
+from the certificate list, so for Firefox the opt-in is required. `tools/nss-smoke.sh` phase 2
+asserts both sides of the switch.
 
 The cost is that a consumer which enumerates and then imports by URI sees an empty token on the
 first pass. That is the right trade: the enumeration is not what the user was asked about, and the
@@ -311,8 +350,14 @@ unaffected by what is shipped; `portal-stack.sh --live` writes the real per-user
   chooser and PIN prompt, headless, with the card's common name in the server's log. The mechanism
   the handshake actually used is `RSA_PSS`, because TLS 1.3 asks for it — `module-smoke.sh`'s
   `pkcs11-tool` phase only ever exercised v1.5, and TLS 1.3 requires PSS for an RSA key
-  [[S25](../SOURCES.md)]. NSS and the OpenSSL 3 provider are not answered and remain S1's open
-  half.
+  [[S25](../SOURCES.md)]. **NSS is answered as of 2026-09-06** by `tools/nss-smoke.sh`: the module
+  loaded the way Firefox loads it (`modutil -add -libfile`), `certutil -K` finding the private key,
+  `certutil -L` listing it as a user certificate, and `tstclnt` completing a TLS 1.3 client-auth
+  handshake with the card's common name in the server's log — headless, and again under
+  AddressSanitizer. It cost two module fixes, both above: `CKA_TOKEN` and `CKF_LOGIN_REQUIRED`.
+  **Firefox itself is still unrun** — see [TESTING.md](../TESTING.md) §2.6 for what it should now
+  do and what remains unknown about it — and the OpenSSL 3 provider is untouched, so that much of
+  S1 is still open.
 - **The token's names are a contract with another repository.**
   `src/module/portal-token.h` is the same file as `xdg-desktop-portal-webauth`'s
   `backend/src/tls/portal-token.h` — **byte for byte, licence line included**, since that project

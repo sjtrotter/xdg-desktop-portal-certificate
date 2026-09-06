@@ -167,10 +167,10 @@ defers to it; where one of them disagrees, this is right and it is a bug. Last c
 | Brokered `Sign` — `RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA`, lazy login | **Implemented** | verified against SoftHSM and, once, against a PIV card |
 | Brokered decryption — `RSA_OAEP` and nothing else | **Not on the interface** | the broker implements it, with one indistinguishable error per failure and 32 attempts per grant, and nothing can ask for it: the first proposal has no `Decrypt` method and `GetCapabilities` does not advertise `decrypt` |
 | Token insertion and removal watching, `SessionInvalidated` | **Implemented** | polled and debounced. Never exercised with a card physically leaving a reader |
-| The client-side PKCS#11 module | **Implemented** | one token, one credential per process. `tools/module-smoke.sh` drives `p11tool`, `pkcs11-tool --sign` and a real mutual-TLS handshake through it |
+| The client-side PKCS#11 module | **Implemented** | one token, one credential per process. `tools/module-smoke.sh` drives `p11tool`, `pkcs11-tool --sign` and a real mutual-TLS handshake through it; `tools/nss-smoke.sh` does the same with NSS's own tools |
 | The private-bus stack, the headless UI runs, the joint run with the web-auth portal | **Implemented** | `tools/dev-stack.sh`, `tools/ui-smoke.sh`, and the sibling repository's `tools/portal-stack.sh` |
 | Hardware | **Partial** | **one PIV card, one reader, one middleware, once** — [TESTING.md](docs/TESTING.md) tiers 3.1–3.4, 2026-09-04. The rest of tier 3 is unrun: one PIN per grant, wrong PIN and `FINAL_TRY`, removal during an operation, a PIN-pad reader, a second card |
-| Consumers of the module | **Partial** | GnuTLS through p11-kit, and WebKitGTK's network process, both proven headless. **NSS is untested** (Firefox, Thunderbird, LibreOffice) and so is the OpenSSL 3 provider |
+| Consumers of the module | **Partial** | GnuTLS through p11-kit, WebKitGTK's network process, and **NSS** — `tools/nss-smoke.sh`, `certutil` and a `tstclnt` client-auth handshake, all proven headless. **Firefox itself is untested** as a program, and so is the OpenSSL 3 provider |
 | One grant across an application's processes | **Not implemented** | a grant belongs to the D-Bus peer that acquired it, so one WebKitGTK handshake loads the module in two processes and raises **two choosers**. The process-tree delegation that fixed it came out of the proposal and is archived on `experimental/certificate-webauthentication+delegation`. [0011](docs/decisions/0011-client-side-pkcs11-module.md) |
 | Chain building | **Partial** | `chain_status` is always `leaf_only`, and says so |
 | Flatpak | **Partial** | the portal bus name is already allowed, which is the transport half. Installing the module inside a runtime, its ABI and a browser's inner sandbox are **not** proven |
@@ -317,9 +317,10 @@ Environment, for a consumer that knows more than PKCS#11 lets it say:
 `PKCS11_PORTAL_CERTIFICATE_PURPOSE` (`client_auth` by default),
 `PKCS11_PORTAL_CERTIFICATE_REASON`, `PKCS11_PORTAL_CERTIFICATE_KEY_ALGORITHMS`,
 `PKCS11_PORTAL_CERTIFICATE_DISABLE=1`, and
-`PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` to let a class-only enumeration acquire a credential (for
-NSS experiments; documented as an experiment in
-[ADR 0011](docs/decisions/0011-client-side-pkcs11-module.md)).
+`PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` to let a class-only enumeration acquire a credential —
+which is what NSS's "every certificate on this token" lookup is, and therefore what Firefox's
+client-authentication path needs; documented as an experiment in
+[ADR 0011](docs/decisions/0011-client-side-pkcs11-module.md).
 
 [`tools/module-smoke.sh`](tools/module-smoke.sh) runs the whole thing — `p11tool`, `pkcs11-tool
 --sign` verified with `openssl`, and a real mutual-TLS handshake — under Xvfb with xdotool
@@ -327,6 +328,14 @@ answering the chooser. A **real** consumer has since been driven through it end 
 `xdg-desktop-portal-webauth`'s `tools/portal-stack.sh` runs both portals on one private bus, and a
 WebKitGTK sign-in completes with the private key on the token
 ([docs/TESTING.md](docs/TESTING.md) §2.55).
+
+[`tools/nss-smoke.sh`](tools/nss-smoke.sh) is the same idea for **NSS**, the library Firefox,
+Thunderbird, LibreOffice and Evolution reach a card through: the module registered with `modutil`
+the way Firefox's "Load" registers it, `certutil -K` finding the private key, `certutil -L` listing
+the certificate as a user certificate, and `tstclnt` completing a TLS 1.3 client-auth handshake
+([docs/TESTING.md](docs/TESTING.md) §2.56). Getting there cost two module fixes on 2026-09-06 —
+`CKA_TOKEN` and `CKF_LOGIN_REQUIRED` — both described in §2.6, which is also what to expect from
+Firefox itself.
 
 **One handshake resolves the URI in two processes** — the application's own process builds the
 `GTlsCertificate`, WebKit's network process uses the key — and that draws **two choosers** three
@@ -482,7 +491,7 @@ data/         the impl interface XML (verbatim copies of the branch's), certific
               the D-Bus service file
 tests/        the unit tests, their fixture certificates, and the SoftHSM device test
 tools/        dev-stack.sh, certificate-e2e.py, softhsm-fixture.sh, ui-smoke.sh,
-              module-smoke.sh, trigger-certificate.sh
+              module-smoke.sh, nss-smoke.sh, trigger-certificate.sh
 docs/         architecture, both interfaces, security, testing, spikes, roadmap,
               upstreaming, sources, decisions
 ```

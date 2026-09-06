@@ -488,10 +488,127 @@ Three things that run established, and none of them was predictable from the cod
   named `xdg-desktop-portal*`, which includes `xdg-desktop-portal-webauth` — a *consumer*, not the
   portal. It is now two exact names.
 
-### 2.6 The check that has not been run: Firefox
+### 2.56 NSS itself, headless — `tools/nss-smoke.sh`
 
-Not yet done, and it is the next thing worth doing, because NSS is the other half of
-[SPIKES.md](SPIKES.md) S1.
+`tools/module-smoke.sh` drives the module with GnuTLS and with OpenSC's `pkcs11-tool`.
+`tools/nss-smoke.sh` drives it with **NSS**, which is the library Firefox, Thunderbird, LibreOffice
+and Evolution all reach a card through [[S54](SOURCES.md)] — the half of
+[SPIKES.md](SPIKES.md) S1 that was open until 2026-09-06. Same private-bus stack as §2.5:
+frontend, backend, SoftHSM fixture, Xvfb, xdotool, and nothing in it speaks D-Bus. The module is
+loaded **the way Firefox loads it** — `modutil -add -libfile` against the built `.so`, not through
+p11-kit's proxy — because "Security Devices → Load" wants a path.
+
+```console
+$ ninja -C build
+$ tools/softhsm-fixture.sh
+$ tools/nss-smoke.sh
+$ tools/nss-smoke.sh --phase 1        # just the private-key path
+$ tools/nss-smoke.sh --phase 3        # just the handshake
+```
+
+It wants `nss-tools`: `certutil` and `modutil` from `$PATH`, and `tstclnt`, which Fedora puts in
+`/usr/lib64/nss/unsupported-tools`. Nothing has to be installed system wide — `dnf download
+nss-tools`, `rpm2cpio … | cpio -idmu` into a scratch directory, then `NSS_BIN=<that>/usr/bin`.
+
+Four phases:
+
+0. **The token is visible and nothing about listing the database asks for a credential.**
+   `modutil -list portal` must name `Portal Certificate`, and `certutil -L` over the whole database
+   must leave the `grant-created` count where it was.
+1. **`certutil -K -h "Portal Certificate"` — the private key, and NO password callback.** NSS asks
+   for private keys with `[CKA_CLASS = CKO_PRIVATE_KEY, CKA_TOKEN]`, which names a credential on its
+   own, so this phase needs no enumeration opt-in: one chooser, one key, `rsa … Portal Certificate`.
+   The second half of the assertion is the one that matters: **certutil's output must not contain
+   `Error opening input terminal for read`.** That string is NSS running the application's password
+   callback, and it is the same event that in Firefox is a modal alert somebody has to dismiss. It
+   appears if and only if the token claims `CKF_LOGIN_REQUIRED`; see §2.6 and
+   [[S59](SOURCES.md)].
+2. **`certutil -L -h "Portal Certificate"` — the certificate list needs the opt-in.** Run twice.
+   Without `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` it lists nothing and raises no chooser; with it,
+   one chooser and one line, `Portal Certificate:Portal Certificate … u,u,u`. The `u` is NSS
+   calling it a **user** certificate, which means NSS matched the certificate to the private key on
+   the same token.
+3. **`tstclnt -n "Portal Certificate:Portal Certificate"` — a real TLS client-auth handshake, NSS
+   end to end**, against the same python `ssl` server §2.5 phase 3 uses. `token:nickname` is how NSS
+   names an object on a token and it reaches the module as a `CKA_LABEL` search, so this phase needs
+   no opt-in either.
+
+Expect, on a pass:
+
+```
+=== 0  the token is visible, and listing the database asks for nothing ===
+grants before=0 after=0
+nss-smoke: the token is there and neither listing acquired a credential
+
+=== 1  certutil -K: the private key, and NO password callback ===
+< 0> rsa      6f5e40f180d8d48da9f587e6273bd8b87bb51327   Portal Certificate
+grants before=0 after=1
+nss-smoke: one chooser, one key, and no login was asked for
+
+=== 2  certutil -L: the certificate list needs the enumeration opt-in ===
+grants before=1 without=1 with=2
+Portal Certificate:Portal Certificate                        u,u,u
+nss-smoke: no chooser without the opt-in; with it, one user certificate
+
+=== 3  tstclnt: a real TLS client-auth handshake, NSS end to end ===
+client certificate: {'organizationName': 'Example Org', 'commonName': 'Portal Test User (RSA)'}
+protocol: TLSv1.3 cipher: TLS_AES_256_GCM_SHA384
+PASS Portal Test User (RSA)
+nss-smoke: PASS
+```
+
+**Every NSS tool here gets `</dev/null`, and that is not tidiness.** `modutil` asks "Type
+`q <enter>` to abort, or `<enter>` to continue" whenever p11-kit is configured on the machine and
+`-force` does not silence *that* prompt; `certutil`'s password callback reads the terminal. Both
+block for ever on a pipe nobody writes to, which is how the first run of this script appeared to
+hang in `modutil -add`. `tstclnt` needs `-Q`: without it, it spins on a closed stdin after the
+handshake has already succeeded — the first run of this script wrote a 4.4 GB log that way and
+filled `$TMPDIR`.
+
+Under a sanitizer, all three NSS tools load the module with a plain `dlopen()`, so unlike
+`module-smoke.sh` phase 2 there is nothing here the sanitizer runtime refuses:
+
+```console
+$ meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
+$ ninja -C build-asan
+$ LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0     MODULE_SO=$PWD/build-asan/src/module/libpkcs11-portal-certificate.so     tools/nss-smoke.sh --phase "1 2 3"
+```
+
+### 2.6 Firefox: what NSS actually does, and what to expect
+
+Two module defects were found here on 2026-09-06, both by driving NSS headlessly with §2.56 and by
+reading NSS's and Firefox's own source [[S59](SOURCES.md)]. The live report they explain: the
+module was loaded into a fresh profile with `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`, a site that
+wants a client certificate was visited, Firefox put up **"Protected Authentication — Please
+authenticate to the security device (Portal Certificate)"** and it never went away; the frontend
+log showed no `CreateSession` and no `AcquireCredential`, and the backend showed no chooser.
+
+- **The dialog was not waiting for anything.** Firefox's password callback for a
+  protected-authentication-path token dispatches `PK11_CheckUserPassword()` to a background task
+  and then calls `prompt->Alert()` — a modal alert with an OK button — and only waits for the
+  background task **after** `Alert()` returns. The module's `C_Login` had already answered `CKR_OK`
+  in microseconds. The alert sits there until a person clicks OK, and while it is up Firefox's main
+  thread is inside `Alert()`'s nested event loop, so the certificate search — and therefore every
+  D-Bus call the module would have made — had not started. That is why the frontend saw nothing.
+- **Why Firefox logged in before searching at all**: `FindClientCertificatesWithPrivateKeys()`
+  calls `PK11_Authenticate()` on every slot that is not "friendly" *before*
+  `PK11_ListCertsInSlot()`, and a module loaded through the "Load" dialog is never friendly.
+  `PK11_Authenticate()` does nothing at all unless the token sets `CKF_LOGIN_REQUIRED`. **The token
+  no longer sets it** (`src/module/module.c`, `C_GetTokenInfo`): nothing in the module is gated on a
+  login, so claiming one bought a dialog and nothing else. `CKF_PROTECTED_AUTHENTICATION_PATH`
+  stays, for the consumers that log in regardless — GnuTLS and `pkcs11-tool` both do — so that none
+  of them asks the user for a PIN.
+- **And even after clicking OK, the token would have looked empty.** NSS attaches
+  `CKA_TOKEN = CK_TRUE` to every search it makes: `[CKA_TOKEN, CKA_CLASS]` to list certificates,
+  `[CKA_CLASS, CKA_TOKEN]` to list private keys. `portal_template_intent()` counted that as a
+  distinguishing attribute, so **both** landed on the "never acquire" row — the private-key search
+  never reached the `CKO_PRIVATE_KEY` rule, and the certificate search was not classified as
+  enumeration, which left `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` with nothing to switch.
+  `CKA_TOKEN = CK_TRUE` says the object is persistent, which all three of this token's objects are,
+  and it names nothing; it is now passed over exactly as `CKA_SIGN` and `CKA_DECRYPT` are.
+  `CKA_TOKEN = CK_FALSE` asks for session objects and stays on the refusing side.
+
+To run it:
 
 1. Install the module and its `.module` file, or point `XDG_CONFIG_HOME` at a directory holding
    one, as `tools/module-smoke.sh` does.
@@ -500,9 +617,11 @@ Not yet done, and it is the next thing worth doing, because NSS is the other hal
    path.)
 
    **Start Firefox with `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`,** or it will see an empty token.
-   NSS searches by `CKA_CLASS` alone and has no way to name an object, and a class-only search does
-   not acquire a credential by default — see §2.5 phase 0. That variable exists for this
-   experiment; whether NSS is usable *with* it is exactly what this check is for.
+   `PK11_ListCertsInSlot()` is "every certificate on this token" and NSS has no way to name an
+   object there, so it is a class-only enumeration and does not acquire a credential by default —
+   see §2.5 phase 0. The variable exists for this. The private key and a `token:nickname` lookup do
+   not need it; the certificate list does, and Firefox's client-auth path starts from the
+   certificate list.
 
    On a system whose Firefox and NSS build **do** go through p11-kit's proxy module, the
    recommended way to try this is to add `firefox` to the `enable-in:` line of the installed
@@ -513,14 +632,23 @@ Not yet done, and it is the next thing worth doing, because NSS is the other hal
    one module, and p11-kit only consults `enable-in` when both are present.
 3. Start the portal stack with a card or the SoftHSM fixture, and visit a site that asks for a
    client certificate.
-4. **Expect the portal's chooser**, drawn by this backend, at the moment Firefox looks for a
-   certificate — followed by Firefox's own certificate dialog offering exactly the one that was
-   granted, and a PIN prompt from the backend rather than from Firefox.
+4. **Expect three dialogs and no fourth**, in this order:
+   1. **this backend's chooser**, at the moment Firefox looks for a certificate, because that is
+      `C_FindObjectsInit`;
+   2. **Firefox's own certificate picker**, offering exactly the one that was granted — Firefox
+      always draws it, and it is not something the module can suppress;
+   3. **this backend's PIN prompt**, at the first `Sign`, not a PIN field from Firefox.
 
-What to write down: whether NSS calls `C_Login` and what it does with `CKR_OK`, whether it respects
-`CKF_PROTECTED_AUTHENTICATION_PATH` and so asks for no PIN of its own, whether it re-enumerates
-often enough to provoke a second chooser, and whether it copes with a token whose object set
-changes when the grant expires.
+   **No "Protected Authentication" alert.** One appearing means the token is claiming
+   `CKF_LOGIN_REQUIRED` again.
+
+Still to write down, because §2.56 cannot answer it: how often Firefox re-enumerates within one
+session and whether that provokes a second chooser (each `C_Initialize` in a new process is a grant
+of its own — §2.55's count of two is the precedent), and whether it copes with a token whose object
+set changes when the grant expires. Known caveat: NSS's search for a certificate by
+`[CKA_ISSUER, CKA_SERIAL_NUMBER]` answers nothing against this token even with a live grant, which
+`certutil -L` survives; nothing on Firefox's client-auth path depends on it, and it has not been
+chased.
 
 ---
 ## 3. A real PIV card. Tiers 3.1–3.4 have been run, once.

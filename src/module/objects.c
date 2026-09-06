@@ -588,10 +588,21 @@ CK_RV portal_object_get_attributes(const PortalObject* object, CK_ATTRIBUTE_PTR 
  * ordinary matching applies and these searches see the three objects like any
  * other.
  *
+ * CKA_TOKEN == CK_TRUE IS NOT A DISTINGUISHING ATTRIBUTE. It says the object is
+ * persistent, which every object this module has is, and it names no object at
+ * all. NSS attaches it to every search it makes -- [CKA_TOKEN, CKA_CLASS] to
+ * list certificates, [CKA_CLASS, CKA_TOKEN] to list private keys -- so counting
+ * it as a distinguishing attribute made both of those "somebody else's object",
+ * answered zero for a token that had the credential, and left
+ * PKCS11_PORTAL_CERTIFICATE_ENUMERATE with nothing to switch. It is passed over
+ * here for the same reason CKA_SIGN and CKA_DECRYPT are. CKA_TOKEN == CK_FALSE
+ * asks for session objects, which this token never has, and stays on the
+ * refusing side.
+ *
  * PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1 puts class-only enumeration back on the
- * acquiring side. NSS asks for CKO_CERTIFICATE with nothing else and has no way
- * to name an object; that is an experiment, not a supported configuration, and
- * a process that sets it is asking for a chooser it did not otherwise get. */
+ * acquiring side. NSS asks for CKO_CERTIFICATE and nothing that names an
+ * object; that is an experiment, not a supported configuration, and a process
+ * that sets it is asking for a chooser it did not otherwise get. */
 static gboolean template_names_our_label(const CK_ATTRIBUTE* attribute)
 {
 	gsize length = strlen(PKCS11_PORTAL_OBJECT_LABEL);
@@ -599,6 +610,18 @@ static gboolean template_names_our_label(const CK_ATTRIBUTE* attribute)
 	return attribute->pValue != NULL && attribute->ulValueLen != CK_UNAVAILABLE_INFORMATION &&
 	       (gsize) attribute->ulValueLen == length &&
 	       memcmp(attribute->pValue, PKCS11_PORTAL_OBJECT_LABEL, length) == 0;
+}
+
+static gboolean template_says_token_object(const CK_ATTRIBUTE* attribute)
+{
+	CK_BBOOL value;
+
+	if (attribute->pValue == NULL || attribute->ulValueLen != sizeof(value))
+		return FALSE;
+
+	memcpy(&value, attribute->pValue, sizeof(value));
+
+	return value == CK_TRUE;
 }
 
 PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG count)
@@ -609,6 +632,7 @@ PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG cou
 	gboolean label_is_ours = FALSE;
 	gboolean have_identifier = FALSE;
 	gboolean key_shaped = TRUE;
+	CK_ULONG distinguishing = 0;
 
 	if (count == 0)
 		return PORTAL_TEMPLATE_ENUMERATES;
@@ -617,6 +641,11 @@ PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG cou
 
 	for (CK_ULONG i = 0; i < count; i++)
 	{
+		if (templ[i].type == CKA_TOKEN && template_says_token_object(&templ[i]))
+			continue;
+
+		distinguishing++;
+
 		switch (templ[i].type)
 		{
 			case CKA_CLASS:
@@ -660,7 +689,10 @@ PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG cou
 	if (have_class && object_class == CKO_PRIVATE_KEY && key_shaped)
 		return PORTAL_TEMPLATE_NAMES_CREDENTIAL;
 
-	if (count == 1 && have_class &&
+	if (distinguishing == 0)
+		return PORTAL_TEMPLATE_ENUMERATES;
+
+	if (distinguishing == 1 && have_class &&
 	    (object_class == CKO_CERTIFICATE || object_class == CKO_PUBLIC_KEY))
 		return PORTAL_TEMPLATE_ENUMERATES;
 

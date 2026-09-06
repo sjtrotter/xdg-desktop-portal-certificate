@@ -522,9 +522,26 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO* info)
 
 	/* The PIN is the portal's business and is collected in the backend's own
 	 * window, which is exactly what a protected authentication path means to a
-	 * consumer: do not ask for one, and do not offer a field. */
-	info->flags = CKF_TOKEN_INITIALIZED | CKF_LOGIN_REQUIRED |
-	              CKF_PROTECTED_AUTHENTICATION_PATH | CKF_USER_PIN_INITIALIZED;
+	 * consumer: do not ask for one, and do not offer a field.
+	 *
+	 * CKF_LOGIN_REQUIRED IS NOT SET, and that is a 2026-09 correction rather
+	 * than an omission. Nothing in this module is gated on a login: C_Login
+	 * sets a flag nothing reads, and every object and every operation is
+	 * available without one, because the authentication that matters happens in
+	 * the backend's own window at the first Sign. Claiming a login is required
+	 * made NSS authenticate BEFORE it would list anything -- Firefox's
+	 * FindClientCertificatesWithPrivateKeys() calls PK11_Authenticate() on
+	 * every slot that is not "friendly" before PK11_ListCertsInSlot() -- and
+	 * NSS's password callback in Firefox puts up a modal alert for a protected
+	 * authentication path that the person has to dismiss by hand. One dialog
+	 * before the chooser, saying nothing, for a login that does nothing.
+	 * docs/SOURCES.md S59; docs/TESTING.md 2.6.
+	 *
+	 * CKF_PROTECTED_AUTHENTICATION_PATH STAYS. A consumer that logs in anyway
+	 * -- GnuTLS and pkcs11-tool both do, whatever this flag says -- must not
+	 * ask the user for a PIN to pass down here. */
+	info->flags = CKF_TOKEN_INITIALIZED | CKF_PROTECTED_AUTHENTICATION_PATH |
+	              CKF_USER_PIN_INITIALIZED;
 
 	info->ulMaxSessionCount = CK_UNAVAILABLE_INFORMATION;
 	info->ulSessionCount = CK_UNAVAILABLE_INFORMATION;

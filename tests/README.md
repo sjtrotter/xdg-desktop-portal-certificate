@@ -21,6 +21,8 @@ and outside `meson test`, because they need a bus and a display:
 |---|---|
 | `../tools/dev-stack.sh` | a real frontend and a real backend on a private bus, and the end-to-end client against them |
 | `../tools/ui-smoke.sh` | the same **with the windows**, in a headless X server, driven by `xdotool`. The only automated test that opens the chooser and the PIN prompt. `--pin-prompt=system` runs the whole stack through the system-prompt path instead, with `certificate-test-prompter` owning the prompter name on the private bus |
+| `../tools/module-smoke.sh` | the client-side PKCS#11 module, driven by consumers that were never told about this project: `p11tool`, `pkcs11-tool --sign` verified with `openssl`, and a GnuTLS mutual-TLS handshake. Phase 0 is the proof that a search naming no object raises no chooser |
+| `../tools/nss-smoke.sh` | the same module driven by **NSS**, loaded with `modutil` the way Firefox loads it: `certutil -K` for the private key **and no password callback**, `certutil -L` for the certificate list on both sides of the enumeration opt-in, and a `tstclnt` client-auth handshake. Needs `nss-tools`, including `tstclnt` from its `unsupported-tools` directory |
 
 `../docs/TESTING.md` has the commands, including the ones that need a card and the sanitized build
 (`meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false`). The cancellation suite

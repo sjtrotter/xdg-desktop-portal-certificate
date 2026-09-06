@@ -20,7 +20,14 @@ synthetic grant-bound slots"); the only thing it got wrong was which process the
   glib-networking — against a server that required and verified the client certificate;
 - the same, with the module built under AddressSanitizer, clean.
 
-**What is still unrun** is the rest of S1 (NSS, the OpenSSL 3 provider, fuzzing, concurrency) and
+**NSS was added on 2026-09-06** — `tools/nss-smoke.sh`, the module loaded as Firefox loads it, a
+private key found, a certificate listed as a user certificate, and a TLS 1.3 client-auth handshake
+through `tstclnt`, clean under AddressSanitizer as well. It cost two module fixes, both in
+[0011](decisions/0011-client-side-pkcs11-module.md): `CKA_TOKEN` had to stop counting as a
+distinguishing attribute, and the token had to stop claiming `CKF_LOGIN_REQUIRED`.
+
+**What is still unrun** is the rest of S1 (Firefox itself — see [TESTING.md](TESTING.md) §2.6 — the
+OpenSSL 3 provider, fuzzing, concurrency) and
 all of S3's browser-process questions: WebKitGTK itself has not been driven, only the API it uses.
 
 The rest of this document is unchanged except where marked, because a spike's questions outlive the
@@ -65,7 +72,7 @@ the product, it does not get a test suite, and it does not get merged.
 
 | | Question | Decides |
 |---|---|---|
-| **S1** | Can a broker-controlled synthetic PKCS#11 module actually be built and consumed? | Whether the compatibility path exists at all. **GnuTLS: yes. NSS and the OpenSSL provider: unrun** |
+| **S1** | Can a broker-controlled synthetic PKCS#11 module actually be built and consumed? | Whether the compatibility path exists at all. **GnuTLS: yes. NSS: yes, since 2026-09-06. Firefox itself and the OpenSSL provider: unrun** |
 | **S2** | Who prompts for the PIN, and when, once a module is involved? | The login model. **Answered: `CKF_PROTECTED_AUTHENTICATION_PATH`, and no stack tried to synthesise a PIN** |
 | **S3** | Can WebKitGTK complete a client-certificate handshake through it? | Whether the first consumer can use this project. **The GLib constructor WebKit uses: yes. WebKit itself: unrun** |
 | **S4** | What happens with removal, reinsertion, and several readers? | Whether the lifetime model is right, and how much of it is card-specific |
@@ -144,7 +151,10 @@ is no RPC transport, no `P11_KIT_SERVER_ADDRESS`, no fd and no relay. Of the res
   and reaches the card only through the portal;
 - **step 3 — done.** A GnuTLS mutual-TLS client handshake completed against a server that required
   and verified the client certificate. `tools/module-smoke.sh` phase 3;
-- **step 4 — NSS and the OpenSSL 3 provider are unrun.** This is the largest open piece of S1;
+- **step 4 — NSS is done, 2026-09-06** (`tools/nss-smoke.sh`: `modutil`-registered, a private key,
+  a user certificate, a `tstclnt` client-auth handshake); **the OpenSSL 3 provider is unrun**, and
+  so is Firefox as a program rather than NSS as a library. That is now the largest open piece
+  of S1;
 - **step 5 — by construction rather than by test.** Every entry point in the hostile-client list
   answers `CKR_FUNCTION_NOT_SUPPORTED`, SO login answers `CKR_USER_TYPE_INVALID`, `CKF_RW_SESSION`
   answers `CKR_TOKEN_WRITE_PROTECTED`, a fabricated or stale handle answers

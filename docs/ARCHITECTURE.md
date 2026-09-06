@@ -443,10 +443,15 @@ own process**. It is not part of the backend and links none of it.
 - **The chooser appears at `C_FindObjectsInit`**, the first moment the module knows the
   application wants a credential. A search for a class this token does not have — a trust
   lookup, a data object — never provokes one, and a refusal is remembered for ten seconds so
-  that an application searching in a loop does not prompt in a loop.
+  that an application searching in a loop does not prompt in a loop. `CKA_TOKEN == CK_TRUE` is
+  passed over when that is decided: it says the object is persistent, which all three of them are,
+  and NSS attaches it to every search it makes.
 - **`CKF_PROTECTED_AUTHENTICATION_PATH` is set**, so no TLS stack asks the user for a PIN.
   `C_Login(CKU_USER, …)` returns `CKR_OK` without doing anything and any PIN bytes passed
   are ignored; the backend collects the real PIN in its own window at the first `Sign`.
+  **`CKF_LOGIN_REQUIRED` is not set**, because nothing in the module is gated on a login and NSS
+  takes the claim literally: it authenticates before it will list anything on the token, and in
+  Firefox that is a modal alert somebody has to dismiss before the chooser can appear.
 - **`CKA_LABEL` is a constant**, not the certificate's subject CN, because GnuTLS's
   single-object import — the one behind `g_tls_certificate_new_from_pkcs11_uris()` — refuses a
   URI that names no object [[S17](SOURCES.md)], and an application cannot know a common name
