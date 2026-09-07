@@ -101,9 +101,10 @@ changed names here.
   actual subject — that the *namespace* stays project-controlled regardless of what the `<Name>`
   slot says — is unchanged by this rename.
 - The sibling `xdg-desktop-portal-webauth` repository (renamed from `entra-token-helper` on
-  2026-09-06) follows this rename in lockstep in its own
-  cross-repository references — `client_cert_portal.h`, its own ADR 0007 and ADR 0008, its README —
-  as a parallel change in that repository, not something this ADR needs to detail further.
+  2026-09-06; its client component was split back out into its own repository, `entra-token-helper`,
+  on 2026-09-07, and this repository now holds only the backend) follows this rename in lockstep in
+  its own cross-repository references — `client_cert_portal.h`, its own ADR 0007 and ADR 0008, its
+  README — as a parallel change in that repository, not something this ADR needs to detail further.
 - **`Certificate` is still an incubation name.** [0003](0003-own-namespace-before-freedesktop.md)'s
   "order of conversations" still applies: whether `Certificate` is also the name an upstream
   maintainer accepts, or whether certificate-backed signing instead becomes a credential type under

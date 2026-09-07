@@ -10,7 +10,9 @@ nobody has had to implement against, which is how APIs acquire features no user 
 one thing every user needs.
 
 The available candidate is the sibling repository, `xdg-desktop-portal-webauth` (renamed from
-`entra-token-helper` on 2026-09-06): an out-of-tree backend for
+`entra-token-helper` on 2026-09-06, then split again on 2026-09-07 when its client component moved
+back out into its own repository, also named `entra-token-helper`; this repository now holds only
+the backend): an out-of-tree backend for
 `org.freedesktop.impl.portal.experimental.WebAuthentication`. Its frontend, like this project's,
 is the xdg-desktop-portal branch `experimental/certificate-webauthentication`. It is the
 **backend** that performs one interactive web authentication transaction in a WebKitGTK window it

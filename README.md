@@ -192,6 +192,10 @@ org.freedesktop.impl.portal.experimental.Certificate=certificate
 - <https://github.com/sjtrotter/xdg-desktop-portal-webauth>. The sibling backend for the
   WebAuthentication portal, and the first consumer of this one. `src/module/portal-token.h` is
   shared with it verbatim, because a PKCS#11 URI is all that crosses between the two.
+- <https://github.com/sjtrotter/entra-token-helper>. The Microsoft Entra ID client, split out of
+  the `xdg-desktop-portal-webauth` repository into its own repository on 2026-09-07. It is a
+  consumer of both portals: it drives the WebAuthentication portal for the interactive sign-in,
+  which in turn drives this Certificate portal for the client-certificate challenge.
 - <https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate-webauthentication>
   The frontend fork branch that defines both public interfaces. 10 commits on upstream `86bd3e2`,
   tip `1aaffaf`; the Certificate portal is commit `a4c1f62`. Its `tests/test_certificate.py` is 26
