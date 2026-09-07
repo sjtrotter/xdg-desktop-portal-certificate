@@ -101,6 +101,10 @@ struct _PinPrompt
 	CertificatePinRefreshFunc refresh;
 	CertificatePinAbandonFunc abandon;
 	gpointer login_data;
+	/* Released when the prompt is freed, which is after the last callback that
+	 * can read login_data has run -- @abandon included. NULL when the caller
+	 * owns login_data itself. */
+	GDestroyNotify login_data_free;
 	GCancellable* cancellable;
 	gulong cancel_id;
 	CertificatePinDone done;

@@ -162,6 +162,21 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
                            GCancellable* cancellable, CertificatePinDone done,
                            gpointer user_data);
 
+/** The same, with @login_data OWNED BY THE PROMPT.
+ *
+ *  @login_data_free is called exactly once, after every callback that can read
+ *  @login_data has run -- @done and, when it comes, the @abandon that FOLLOWS
+ *  @done. It exists because that order cannot be seen from outside: @abandon is
+ *  conditional, so a caller that releases its login data in @done releases it
+ *  under a callback that may still be coming, and the payload of the two is one
+ *  object. */
+void certificate_pin_login_full(CertificateToken* token, const char* parent_window,
+                                const char* caller_display, const char* purpose_display,
+                                CertificatePinLoginFunc login, CertificatePinRefreshFunc refresh,
+                                CertificatePinAbandonFunc abandon, gpointer login_data,
+                                GDestroyNotify login_data_free, GCancellable* cancellable,
+                                CertificatePinDone done, gpointer user_data);
+
 /** Which implementation asks for the PIN.
  *
  *  AUTO means the system prompter when org.gnome.keyring.SystemPrompter has an

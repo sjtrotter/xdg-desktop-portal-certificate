@@ -795,6 +795,156 @@ static void test_one_waiter_cancels_alone(void)
 	g_object_unref(session);
 }
 
+/* ------------------------ the abandon path, through the broker's own callbacks */
+
+/* ONE OBJECT, TWO CALLBACKS. The two tests above hold ui/pin.c to its contract
+ * with probes of their own; this one runs the broker's real login interaction
+ * -- do_login(), on_pin_done(), do_abandon() -- so that the object the prompt
+ * hands to both of them is the one broker/operations.c allocates. on_pin_done()
+ * used to free it and do_abandon() then read it, on the one path whose whole
+ * job is to close a token session nobody asked to have opened.
+ *
+ * THE LOGIN IS HELD WHERE SoftHSM IS FAST: do_login() takes the session's
+ * device lock before it reaches C_Login, so a test holding that lock keeps the
+ * login in flight for as long as it needs to. The cancel goes to the session's
+ * login cancellable -- the one waiter_cancelled_idle() cancels when the last
+ * waiter leaves -- because that idle takes the same device lock and so cannot
+ * run while this test is holding it.
+ *
+ * RUN IT UNDER ASAN, or failing that with MALLOC_PERTURB_ set: a freed
+ * three-pointer block that nothing has reused still reads like itself. */
+static void test_broker_cancelled_login_is_abandoned(void)
+{
+	g_autofree char* directory = fixture_directory();
+	g_autofree char* module = NULL;
+	g_autoptr(CertificateTokens) tokens = NULL;
+	g_autoptr(GPtrArray) candidates = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GCancellable) prompt_cancellable = NULL;
+	g_autoptr(GVariant) parameters = NULL;
+	g_autoptr(GBytes) data = NULL;
+	CertificateImplSession* session = NULL;
+	CertificateCandidate* candidate = NULL;
+	GtkWidget* entry = NULL;
+	SignProbe probe = { 0 };
+	const char* modules[2] = { NULL, NULL };
+	guint8 digest[32];
+	gint64 deadline;
+
+	if (!gtk_init_check())
+	{
+		g_test_skip("no display: the PIN window cannot be opened");
+		return;
+	}
+
+	certificate_ui_set_has_display(TRUE);
+
+	if (directory == NULL)
+	{
+		g_test_skip("no SoftHSM fixture; run tools/softhsm-fixture.sh");
+		return;
+	}
+
+	{
+		g_autofree char* module_path = g_build_filename(directory, "module-path", NULL);
+		g_autofree char* config = g_build_filename(directory, "softhsm2.conf", NULL);
+
+		if (!g_file_get_contents(module_path, &module, NULL, NULL))
+		{
+			g_test_skip("the SoftHSM fixture has no module-path; rebuild it");
+			return;
+		}
+
+		g_setenv("SOFTHSM2_CONF", config, TRUE);
+	}
+
+	modules[0] = module;
+	tokens = certificate_tokens_new(modules, &error);
+	g_assert_no_error(error);
+
+	candidates = certificate_tokens_enumerate(tokens, NULL, &error);
+	g_assert_no_error(error);
+
+	for (guint i = 0; i < candidates->len; i++)
+	{
+		CertificateCandidate* item = g_ptr_array_index(candidates, i);
+
+		if (g_strcmp0(item->key_type, "RSA") == 0)
+			candidate = item;
+	}
+
+	if (candidate == NULL)
+	{
+		g_test_skip("the fixture has no RSA key");
+		return;
+	}
+
+	session = certificate_impl_session_new("/org/freedesktop/portal/desktop/session/t/abandon",
+	                                       "org.example.App");
+	certificate_impl_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
+	                               FALSE, 300);
+
+	memset(digest, 0x5a, sizeof(digest));
+	data = g_bytes_new(digest, sizeof(digest));
+	/* g_variant_parse() already returns a FULL reference. */
+	parameters = g_variant_parse(G_VARIANT_TYPE_VARDICT, "{'hash': <'SHA256'>}", NULL, NULL,
+	                             NULL);
+
+	/* NOT logged in: this is the lazy login, with the real window in front of
+	 * it and the real interaction behind it. */
+	certificate_broker_perform(tokens, session, FALSE, "RSA_PKCS1_V1_5", parameters, data, NULL,
+	                           "Test application", NULL, on_operation_done, &probe);
+
+	deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
+	while (!pin_window_is_up() && g_get_monotonic_time() < deadline)
+		g_main_context_iteration(NULL, FALSE);
+
+	g_assert_true(pin_window_is_up());
+
+	/* From here the login cannot get past the device lock, so it stays in
+	 * flight until this test lets it go. */
+	g_mutex_lock(&session->device_lock);
+	g_assert_nonnull(session->login_cancellable);
+	prompt_cancellable = g_object_ref(session->login_cancellable);
+
+	entry = find_pin_entry();
+	g_assert_nonnull(entry);
+	gtk_editable_set_text(GTK_EDITABLE(entry), FIXTURE_PIN);
+	g_signal_emit_by_name(entry, "activate");
+
+	/* The PIN is with the card, as far as anything here can tell, and the
+	 * request is cancelled. */
+	g_cancellable_cancel(prompt_cancellable);
+	iterate_for(200);
+
+	/* Nothing may have been answered: the worker is still inside the login. */
+	g_assert_cmpuint(probe.calls, ==, 0);
+
+	/* And now the card says yes, too late. */
+	g_mutex_unlock(&session->device_lock);
+
+	deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
+	while (probe.calls == 0 && g_get_monotonic_time() < deadline)
+		g_main_context_iteration(NULL, FALSE);
+
+	iterate_for(300);
+
+	/* ONE ANSWER, AND IT IS THE CANCEL. */
+	g_assert_cmpuint(probe.calls, ==, 1);
+	g_assert_true(probe.cancelled);
+	g_assert_false(pin_window_is_up());
+
+	/* AND THE LOGIN THAT LANDED ANYWAY IS UNDONE, on a worker: the token
+	 * session is closed, so the next Sign asks for the PIN again instead of
+	 * signing for a request the user refused. */
+	certificate_impl_session_drain_releases(2000);
+	g_assert_false(session->device.logged_in);
+
+	certificate_impl_session_close(session);
+	certificate_impl_session_drain_releases(2000);
+	g_object_unref(session);
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -806,6 +956,8 @@ int main(int argc, char** argv)
 	g_test_add_func("/cancel/successful-login-is-not-abandoned",
 	                test_successful_login_is_not_abandoned);
 	g_test_add_func("/cancel/one-waiter-cancels-alone", test_one_waiter_cancels_alone);
+	g_test_add_func("/cancel/broker-cancelled-login-is-abandoned",
+	                test_broker_cancelled_login_is_abandoned);
 
 	return g_test_run();
 }

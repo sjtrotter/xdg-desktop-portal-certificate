@@ -294,6 +294,13 @@ static void pin_prompt_free(PinPrompt* prompt)
 	g_free(prompt->caller_display);
 	g_free(prompt->purpose_display);
 	g_clear_object(&prompt->cancellable);
+
+	/* LAST, because it is what tells the caller nothing will read login_data
+	 * again: the done callback has run, and so has the abandon callback that
+	 * follows it on a cancelled login that succeeded anyway. */
+	if (prompt->login_data_free != NULL)
+		prompt->login_data_free(prompt->login_data);
+
 	g_free(prompt);
 }
 
@@ -753,12 +760,12 @@ static void pin_prompt_start(PinPrompt* prompt)
 	prompt->impl->start(prompt);
 }
 
-void certificate_pin_login(CertificateToken* token, const char* parent_window,
-                           const char* caller_display, const char* purpose_display,
-                           CertificatePinLoginFunc login, CertificatePinRefreshFunc refresh,
-                           CertificatePinAbandonFunc abandon, gpointer login_data,
-                           GCancellable* cancellable, CertificatePinDone done,
-                           gpointer user_data)
+void certificate_pin_login_full(CertificateToken* token, const char* parent_window,
+                                const char* caller_display, const char* purpose_display,
+                                CertificatePinLoginFunc login, CertificatePinRefreshFunc refresh,
+                                CertificatePinAbandonFunc abandon, gpointer login_data,
+                                GDestroyNotify login_data_free, GCancellable* cancellable,
+                                CertificatePinDone done, gpointer user_data)
 {
 	PinPrompt* prompt = NULL;
 	const PinPromptImpl* impl = pin_impl();
@@ -772,12 +779,20 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
 	if (impl->needs_display && !certificate_ui_has_display())
 	{
 		done(CERTIFICATE_PIN_NO_DISPLAY, user_data);
+
+		if (login_data_free != NULL)
+			login_data_free(login_data);
+
 		return;
 	}
 
 	if (token->pin_locked)
 	{
 		done(CERTIFICATE_PIN_LOCKED, user_data);
+
+		if (login_data_free != NULL)
+			login_data_free(login_data);
+
 		return;
 	}
 
@@ -793,6 +808,7 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
 	prompt->refresh = refresh;
 	prompt->abandon = abandon;
 	prompt->login_data = login_data;
+	prompt->login_data_free = login_data_free;
 	prompt->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
 	prompt->done = done;
 	prompt->user_data = user_data;
@@ -800,8 +816,10 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
 
 	if (prompt->buffer_opaque == NULL)
 	{
-		pin_prompt_unref(prompt);
+		/* The answer first, so that login_data_free -- which pin_prompt_free()
+		 * calls -- is last here too. */
 		done(CERTIFICATE_PIN_DEVICE_ERROR, user_data);
+		pin_prompt_unref(prompt);
 		return;
 	}
 
@@ -816,4 +834,15 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
 	}
 
 	pin_prompt_start(prompt);
+}
+
+void certificate_pin_login(CertificateToken* token, const char* parent_window,
+                           const char* caller_display, const char* purpose_display,
+                           CertificatePinLoginFunc login, CertificatePinRefreshFunc refresh,
+                           CertificatePinAbandonFunc abandon, gpointer login_data,
+                           GCancellable* cancellable, CertificatePinDone done,
+                           gpointer user_data)
+{
+	certificate_pin_login_full(token, parent_window, caller_display, purpose_display, login,
+	                           refresh, abandon, login_data, NULL, cancellable, done, user_data);
 }

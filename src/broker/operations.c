@@ -170,6 +170,15 @@ static gboolean ensure_session_locked(Operation* operation, GError** error)
  * any single caller. */
 typedef struct
 {
+	/* TWO OWNERS, AND THEY FINISH IN EITHER ORDER. on_pin_done() answers the
+	 * waiters and lets go; do_abandon() runs AFTER it, on the one path that
+	 * undoes a login nobody asked for. on_pin_done() used to free the
+	 * interaction outright, and do_abandon() then read it.
+	 *
+	 * ATOMIC, for the same reason the Operation's count is: the prompt drops
+	 * its reference from wherever the last callback that could read this ran. */
+	gint refs;
+
 	CertificateTokens* tokens;
 	CertificateImplSession* session; /* a reference */
 
@@ -180,8 +189,22 @@ typedef struct
 	gboolean performed_login;
 } LoginInteraction;
 
-static void login_interaction_free(LoginInteraction* interaction)
+static LoginInteraction* login_interaction_ref(LoginInteraction* interaction)
 {
+	g_atomic_int_inc(&interaction->refs);
+	return interaction;
+}
+
+static void login_interaction_unref(gpointer data)
+{
+	LoginInteraction* interaction = data;
+
+	if (interaction == NULL)
+		return;
+
+	if (!g_atomic_int_dec_and_test(&interaction->refs))
+		return;
+
 	g_clear_object(&interaction->session);
 	g_free(interaction);
 }
@@ -499,7 +522,7 @@ static void on_pin_done(CertificatePinOutcome outcome, gpointer user_data)
 
 	/* The array's free function drops the reference each waiter was added with;
 	 * an operation whose task chain is still running keeps its own. */
-	login_interaction_free(interaction);
+	login_interaction_unref(interaction);
 }
 
 /* One waiter, cancelled on its own. It leaves the queue and is answered here
@@ -637,6 +660,7 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 			 * waiting behind. */
 			session->login_cancellable = g_cancellable_new();
 			interaction = g_new0(LoginInteraction, 1);
+			interaction->refs = 1;
 			interaction->tokens = operation->tokens;
 			interaction->session = g_object_ref(session);
 			prompt_cancellable = g_object_ref(session->login_cancellable);
@@ -659,10 +683,15 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 	if (wait_for_login)
 		return;
 
-	certificate_pin_login(session->candidate->token, operation->parent_window,
-	                      operation->caller_display, operation->purpose_display, do_login,
-	                      do_refresh_flags, do_abandon, interaction, prompt_cancellable,
-	                      on_pin_done, interaction);
+	/* ONE OBJECT, TWO REFERENCES: the prompt's, which it releases once neither
+	 * do_login() nor do_abandon() can run again, and on_pin_done()'s own, which
+	 * it drops when it has answered the waiters. Either order is safe, and the
+	 * interaction is freed after the last of them. */
+	certificate_pin_login_full(session->candidate->token, operation->parent_window,
+	                           operation->caller_display, operation->purpose_display, do_login,
+	                           do_refresh_flags, do_abandon, interaction,
+	                           login_interaction_unref, prompt_cancellable, on_pin_done,
+	                           login_interaction_ref(interaction));
 }
 
 void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSession* session,
