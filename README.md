@@ -5,8 +5,9 @@ An xdg-desktop-portal **backend** for the experimental
 module** for applications that cannot call D-Bus. The backend discovers PKCS#11 tokens, draws the
 certificate chooser and the PIN prompt, and performs private-key operations when
 xdg-desktop-portal asks it to. The PIN never reaches the application, the private key never leaves
-the card, and the application never holds a handle on the hardware token. The public portal interface applications call is
-defined by a branch of xdg-desktop-portal itself, not by this repository.
+the card, and the application never holds a handle on the hardware token. The public portal
+interface applications call is defined by a branch of xdg-desktop-portal itself, not by this
+repository.
 
 ## Status
 
