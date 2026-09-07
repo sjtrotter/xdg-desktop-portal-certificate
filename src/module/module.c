@@ -32,6 +32,10 @@
 typedef struct
 {
 	CK_SESSION_HANDLE handle;
+	/* WHICH open this is, and not which handle: C_Initialize restarts the
+	 * handles at 1, so a handle taken before a wait can name somebody else's
+	 * session afterwards. The serial never restarts. */
+	guint serial;
 	CK_FLAGS flags;
 
 	gboolean find_active;
@@ -54,7 +58,19 @@ typedef struct
 } PortalSession;
 
 static GMutex module_lock;
+/* Signalled when an acquire that ran with module_lock released has finished,
+ * and when finalization begins. */
+static GCond module_acquire_cond;
+static gboolean module_acquiring;
 static gboolean module_initialized;
+/* WHICH C_Initialize this is. A search that waited for someone else's chooser
+ * wakes into whatever the module has become meanwhile, which may be a different
+ * initialization altogether. */
+static guint module_lifecycle;
+/* Set before C_Finalize releases the lock to wait. Waiters give up on it and
+ * nothing new starts. */
+static gboolean module_finalizing;
+static guint module_session_serial;
 static PortalClient* module_client;
 static PortalGrant* module_grant;
 static PortalObjects* module_objects;
@@ -142,6 +158,26 @@ static PortalSession* session_lookup(CK_SESSION_HANDLE handle)
 	return g_hash_table_lookup(module_sessions, GUINT_TO_POINTER(handle));
 }
 
+/** The session @handle named when @lifecycle and @serial were taken, or NULL if
+ *  it is no longer that session: the module was finalized, reinitialized, or
+ *  the session was closed and its handle handed out again. Every wait in this
+ *  file is followed by one of these, because the lock is not held across one
+ *  and a handle on its own says nothing afterwards. */
+static PortalSession* session_revalidate(CK_SESSION_HANDLE handle, guint lifecycle,
+                                         guint serial)
+{
+	PortalSession* session;
+
+	if (module_finalizing || !module_initialized || module_lifecycle != lifecycle)
+		return NULL;
+
+	session = session_lookup(handle);
+	if (session == NULL || session->serial != serial)
+		return NULL;
+
+	return session;
+}
+
 /* ------------------------------------------------------------- grant state */
 
 static void drop_objects(void)
@@ -182,11 +218,36 @@ static gboolean grant_still_good(void)
 }
 
 /** Acquire a credential if this search could use one. Returns FALSE when there
- *  is nothing to search, which is a zero-object answer and never an error. */
-static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count)
+ *  is nothing to search, which is a zero-object answer and never an error.
+ *  @handle, @lifecycle and @serial are the caller's session as it was before
+ *  any waiting started.
+ *
+ *  CALLED WITH module_lock HELD, AND RELEASES IT ACROSS THE ACQUIRE ITSELF. The
+ *  chooser is on screen for as long as the person takes -- up to the request
+ *  timeout, five minutes -- and every other entry point in this module takes
+ *  that lock, so holding it here wedges the whole of a multithreaded consumer's
+ *  crypto stack. Nothing read before the acquire may be believed after it:
+ *  another thread can have dropped the objects or finalized the module
+ *  meanwhile, and the caller's own PKCS#11 session can have been closed. */
+static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_HANDLE handle,
+                             guint lifecycle, guint serial)
 {
 	g_autoptr(GError) error = NULL;
+	PortalClient* client;
+	PortalGrant* grant;
 	guint fingerprint;
+
+	/* ONE ACQUIRE AT A TIME. Two threads searching is one person, one chooser
+	 * and one grant; the second waits and then finds the first one's. */
+	while (module_acquiring && !module_finalizing)
+		g_cond_wait(&module_acquire_cond, &module_lock);
+
+	/* THE WAIT IS WHERE THE MODULE CHANGES UNDERNEATH THIS CALL. A search that
+	 * queued behind someone else's chooser must not open a second one for a
+	 * session that has been closed, or for a module that has been finalized and
+	 * initialized again since -- which hands the same handles out afresh. */
+	if (module_acquiring || session_revalidate(handle, lifecycle, serial) == NULL)
+		return FALSE;
 
 	if (grant_still_good())
 		return TRUE;
@@ -211,8 +272,19 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count)
 			module_refusal_time = 0;
 	}
 
-	module_grant = portal_client_acquire(module_client, &error);
-	if (module_grant == NULL)
+	/* Pinned for the unlocked stretch: C_Finalize waits for module_acquiring
+	 * before it frees the client, so this pointer stays good. */
+	client = module_client;
+	module_acquiring = TRUE;
+	g_mutex_unlock(&module_lock);
+
+	grant = portal_client_acquire(client, &error);
+
+	g_mutex_lock(&module_lock);
+	module_acquiring = FALSE;
+	g_cond_broadcast(&module_acquire_cond);
+
+	if (grant == NULL)
 	{
 		if (g_error_matches(error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_CANCELLED))
 		{
@@ -223,6 +295,27 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count)
 		g_debug("no credential: %s", error != NULL ? error->message : "unavailable");
 		return FALSE;
 	}
+
+	/* Finalized while the chooser was up, or the session that asked is gone.
+	 * There is nowhere to put the grant and nobody to use it, so it goes back
+	 * rather than being leaked to the card. */
+	if (module_client != client || session_revalidate(handle, lifecycle, serial) == NULL)
+	{
+		portal_client_release(client, grant);
+		portal_grant_free(grant);
+		return FALSE;
+	}
+
+	/* Someone published one while the lock was down. Ours is a second grant on
+	 * a module that holds one; the first one wins. */
+	if (module_grant != NULL)
+	{
+		portal_client_release(client, grant);
+		portal_grant_free(grant);
+		return grant_still_good();
+	}
+
+	module_grant = grant;
 
 	module_objects = portal_objects_new(module_grant, ++module_generation, &error);
 	if (module_objects == NULL)
@@ -295,6 +388,8 @@ CK_RV C_Initialize(void* init_args)
 
 	module_sessions = g_hash_table_new_full(NULL, NULL, NULL, session_free);
 	module_next_session = 1;
+	module_lifecycle++;
+	module_finalizing = FALSE;
 	module_logged_in = FALSE;
 	module_refusal_time = 0;
 
@@ -327,6 +422,24 @@ CK_RV C_Finalize(void* reserved)
 		return CKR_CRYPTOKI_NOT_INITIALIZED;
 	}
 
+	/* SAID BEFORE THE LOCK IS EVER RELEASED BELOW, so that a search waiting for
+	 * someone else's chooser gives up instead of waking into a module that is
+	 * being taken apart -- or into the next initialization. */
+	module_finalizing = TRUE;
+	g_cond_broadcast(&module_acquire_cond);
+
+	/* A chooser may be on screen with module_lock released, and the thread
+	 * waiting on it owns the client. Abandoning the request makes that thread
+	 * return now; waiting out the request timeout instead would be a
+	 * five-minute exit. */
+	if (module_acquiring)
+	{
+		portal_client_cancel(module_client);
+
+		while (module_acquiring)
+			g_cond_wait(&module_acquire_cond, &module_lock);
+	}
+
 	release_grant();
 
 	g_clear_pointer(&module_sessions, g_hash_table_unref);
@@ -334,7 +447,9 @@ CK_RV C_Finalize(void* reserved)
 	g_clear_pointer(&module_client, portal_client_free);
 
 	module_logged_in = FALSE;
+	module_finalizing = FALSE;
 	g_atomic_int_set(&module_initialized, FALSE);
+	g_cond_broadcast(&module_acquire_cond);
 	g_mutex_unlock(&module_lock);
 
 	return CKR_OK;
@@ -668,6 +783,12 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags, void* application, CK_NO
 
 	g_mutex_lock(&module_lock);
 
+	if (module_finalizing)
+	{
+		g_mutex_unlock(&module_lock);
+		return CKR_CRYPTOKI_NOT_INITIALIZED;
+	}
+
 	if (!portal_client_available(module_client))
 	{
 		g_mutex_unlock(&module_lock);
@@ -676,6 +797,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags, void* application, CK_NO
 
 	session = g_new0(PortalSession, 1);
 	session->handle = module_next_session++;
+	session->serial = ++module_session_serial;
 	session->flags = flags;
 	g_hash_table_insert(module_sessions, GUINT_TO_POINTER(session->handle), session);
 	*session_handle = session->handle;
@@ -809,6 +931,9 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session_handle, CK_ATTRIBUTE* templ,
                         unsigned long count)
 {
 	PortalSession* session;
+	gboolean acquired;
+	guint lifecycle;
+	guint serial;
 
 	MODULE_CHECK();
 
@@ -816,6 +941,12 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session_handle, CK_ATTRIBUTE* templ,
 		return CKR_ARGUMENTS_BAD;
 
 	g_mutex_lock(&module_lock);
+
+	if (module_finalizing)
+	{
+		g_mutex_unlock(&module_lock);
+		return CKR_CRYPTOKI_NOT_INITIALIZED;
+	}
 
 	session = session_lookup(session_handle);
 	if (session == NULL)
@@ -830,9 +961,29 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session_handle, CK_ATTRIBUTE* templ,
 		return CKR_OPERATION_ACTIVE;
 	}
 
+	lifecycle = module_lifecycle;
+	serial = session->serial;
+
 	/* THE CHOOSER APPEARS HERE. A search that could be answered by a credential
-	 * is the first moment the module knows the application wants one. */
-	if (ensure_grant(templ, count))
+	 * is the first moment the module knows the application wants one. The lock
+	 * is down for the whole of it, so everything above is checked again -- and
+	 * by identity, not by handle. */
+	acquired = ensure_grant(templ, count, session_handle, lifecycle, serial);
+
+	session = session_revalidate(session_handle, lifecycle, serial);
+	if (session == NULL)
+	{
+		g_mutex_unlock(&module_lock);
+		return CKR_SESSION_HANDLE_INVALID;
+	}
+
+	if (session->find_active)
+	{
+		g_mutex_unlock(&module_lock);
+		return CKR_OPERATION_ACTIVE;
+	}
+
+	if (acquired)
 		session->find_results = portal_objects_find(module_objects, templ, count);
 	else
 		session->find_results = g_array_new(FALSE, FALSE, sizeof(CK_OBJECT_HANDLE));
@@ -1005,6 +1156,12 @@ static CK_RV sign_setup(PortalSession* session, CK_MECHANISM* mechanism)
 		if (mgf_hash == NULL || strcmp(mgf_hash, hash) != 0)
 			return CKR_MECHANISM_PARAM_INVALID;
 
+		/* sLen is a CK_ULONG and the interface carries a uint32. A value that
+		 * does not survive the narrowing is refused, because truncating it
+		 * would sign with a salt length nobody asked for. */
+		if (parameters->sLen != (CK_ULONG) (guint32) parameters->sLen)
+			return CKR_MECHANISM_PARAM_INVALID;
+
 		session->sign_hash = hash;
 		session->sign_mgf = portal_mgf_name(parameters->mgf);
 		session->sign_have_salt = TRUE;
@@ -1047,7 +1204,10 @@ static CK_RV sign_feed(PortalSession* session, const unsigned char* data, unsign
 		return CKR_OK;
 	}
 
-	if (session->sign_buffer->len + size > PRE_HASHED_LIMIT)
+	/* Subtraction, because `size` is the caller's own unsigned long and
+	 * len + size wraps to a small number for the values near its maximum. */
+	if (session->sign_buffer->len > PRE_HASHED_LIMIT ||
+	    size > PRE_HASHED_LIMIT - session->sign_buffer->len)
 		return CKR_DATA_LEN_RANGE;
 
 	g_byte_array_append(session->sign_buffer, data, (guint) size);

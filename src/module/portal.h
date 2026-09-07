@@ -37,6 +37,15 @@ PortalClient* portal_client_new(void);
 
 void portal_client_free(PortalClient* client);
 
+/** Abandon every request that is still waiting: each caller is answered
+ *  PKCS11_PORTAL_ERROR_CANCELLED and each request is Closed at the portal, and
+ *  no further request is started on this client.
+ *
+ *  C_Finalize needs this. A blocking acquire holds the client while the chooser
+ *  is on screen, so the client cannot be freed until that caller returns, and
+ *  waiting out the request timeout would mean a five-minute exit. */
+void portal_client_cancel(PortalClient* client);
+
 /** Whether the interface answered. FALSE means no portal, no certificate
  *  backend, or the experimental gate is off -- indistinguishable by design. */
 gboolean portal_client_available(PortalClient* client);

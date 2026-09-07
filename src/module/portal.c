@@ -16,6 +16,12 @@
 #define CAPABILITIES_TIMEOUT_MS 5000
 #define DEFAULT_REQUEST_TIMEOUT_MS 300000
 
+/* How long portal_client_free() waits for outstanding method replies before it
+ * cancels them, and again before it gives up on them. Two seconds is what the
+ * backend gives its own workers at shutdown, for the same reason: the thing
+ * being waited for is a message, not a person. */
+#define DRAIN_GRACE_MS 2000
+
 struct _PortalClient
 {
 	GDBusConnection* connection;
@@ -28,6 +34,18 @@ struct _PortalClient
 
 	int request_timeout_ms;
 	gint counter;
+
+	/* Requests that have started and not yet completed, and the flag that
+	 * refuses new ones. Both are touched on the client's thread only, like
+	 * PortalRequest.completed and for the same reason. */
+	GSList* live;
+	gboolean cancelled;
+
+	/* Method calls whose callback has not run yet, and the teardown that waits
+	 * for them. Client's thread only, again. */
+	guint calls;
+	gboolean draining;
+	GCancellable* call_cancellable;
 
 	/* Written by the signal handler on the client's own thread, read by
 	 * PKCS#11 callers. Its own lock, never the module's. */
@@ -46,12 +64,19 @@ typedef struct
 	PortalClient* client;
 	const char* method;
 	GVariant* parameters;
-	const char* request_path;
+	/* Owned, because the method call's callback can outlive the caller that
+	 * supplied the path, and closing a timed-out request needs it. */
+	char* request_path;
+	char* returned_path;
+	char* closed_path;
 
 	GMutex lock;
 	GCond cond;
 	gboolean done;
 	gboolean completed;
+	gboolean responded;
+	gboolean sent;
+	gboolean method_failed;
 
 	guint32 response;
 	GVariant* results;
@@ -77,6 +102,9 @@ static void request_unref(gpointer data)
 
 	g_clear_pointer(&request->results, g_variant_unref);
 	g_clear_error(&request->error);
+	g_free(request->request_path);
+	g_free(request->returned_path);
+	g_free(request->closed_path);
 	g_cond_clear(&request->cond);
 	g_mutex_clear(&request->lock);
 	g_free(request);
@@ -152,12 +180,54 @@ gboolean portal_client_grant_gone(PortalClient* client, const PortalGrant* grant
 
 /* ------------------------------------------------------------- the requests */
 
+/* Close(), sent with no reply expected because nothing here reads one -- and
+ * because a pending reply is dispatched on the client's own context, which
+ * C_Finalize stops: a Close that waited for an answer would be a Close that was
+ * still outstanding when the process finished with the module. */
+static void send_close(PortalClient* client, const char* path, const char* interface)
+{
+	g_autoptr(GDBusMessage) message =
+	    g_dbus_message_new_method_call(PKCS11_PORTAL_BUS_NAME, path, interface, "Close");
+
+	g_dbus_message_set_flags(message, G_DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED);
+	g_dbus_connection_send_message(client->connection, message,
+	                               G_DBUS_SEND_MESSAGE_FLAGS_NONE, NULL, NULL);
+}
+
+/* Request.Close on the portal's request object.
+ *
+ * A REQUEST THAT ENDS WITHOUT A RESPONSE IS STILL RUNNING AT THE PORTAL. The
+ * timeout only stops this side waiting; the chooser or the PIN window it put up
+ * stays on screen, and the grant it would produce is one nobody is waiting for.
+ * The Response signal is the portal's own end of the request, so a request that
+ * received one is already closed and is not closed again. */
+static void request_close_at_portal(PortalRequest* request, const char* path)
+{
+	if (path == NULL || g_strcmp0(path, request->closed_path) == 0)
+		return;
+
+	g_free(request->closed_path);
+	request->closed_path = g_strdup(path);
+
+	send_close(request->client, path, PKCS11_PORTAL_REQUEST_INTERFACE);
+}
+
 /* Runs on the client's thread only, so `completed` needs no lock of its own. */
 static void request_complete(PortalRequest* request)
 {
 	if (request->completed)
 		return;
 	request->completed = TRUE;
+	request->client->live = g_slist_remove(request->client->live, request);
+
+	if (request->sent && !request->responded && !request->method_failed)
+	{
+		/* The predicted path until the method has returned one: the portal
+		 * exports the request object before it answers the call. */
+		request_close_at_portal(request, request->returned_path != NULL
+		                                     ? request->returned_path
+		                                     : request->request_path);
+	}
 
 	if (request->timeout_id != 0)
 	{
@@ -192,6 +262,7 @@ static void on_response(GDBusConnection* connection, const char* sender, const c
 		return;
 
 	g_variant_get(parameters, "(u@a{sv})", &request->response, &request->results);
+	request->responded = TRUE;
 	request_complete(request);
 }
 
@@ -219,34 +290,63 @@ static gboolean on_request_timeout(gpointer data)
 	return G_SOURCE_REMOVE;
 }
 
+/* The last outstanding callback stops the loop, so that a client being freed
+ * does not drop the context a reply still in flight has to land on. */
+static void call_finished(PortalClient* client)
+{
+	client->calls--;
+
+	if (!client->draining || client->calls > 0)
+		return;
+
+	/* A Close this callback has just sent is still in the output queue. */
+	g_dbus_connection_flush_sync(client->connection, NULL, NULL);
+	g_main_loop_quit(client->loop);
+}
+
 static void on_method_returned(GObject* source, GAsyncResult* result, gpointer user_data)
 {
 	PortalRequest* request = user_data;
+	PortalClient* client = request->client;
 	g_autoptr(GVariant) reply = NULL;
 	g_autoptr(GError) error = NULL;
 	const char* returned = NULL;
 
 	reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
 
+	if (reply != NULL)
+		g_variant_get(reply, "(&o)", &returned);
+
 	if (request->completed)
 	{
-		request_unref(request);
-		return;
+		/* THE REPLY LOST THE RACE with the timeout or with C_Finalize, and it
+		 * names a request object at a path this side has never seen. Nothing
+		 * else will ever close it, which is why the client is kept alive until
+		 * this callback has run. */
+		if (returned != NULL && !request->responded)
+			request_close_at_portal(request, returned);
 	}
-
-	if (reply == NULL)
+	else if (reply == NULL)
 	{
+		/* The portal refused the call, so it has no request object at either
+		 * path and there is nothing to close. A call THIS SIDE cancelled is
+		 * different: the portal may have exported one before the cancellation
+		 * reached it, so that one is still closed at the predicted path. */
+		request->method_failed = !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
 		request->error = g_steal_pointer(&error);
 		request_complete(request);
-		request_unref(request);
-		return;
+	}
+	else
+	{
+		g_free(request->returned_path);
+		request->returned_path = g_strdup(returned);
+
+		if (g_strcmp0(returned, request->request_path) != 0)
+			subscribe_response(request, returned);
 	}
 
-	g_variant_get(reply, "(&o)", &returned);
-	if (g_strcmp0(returned, request->request_path) != 0)
-		subscribe_response(request, returned);
-
 	request_unref(request);
+	call_finished(client);
 }
 
 static gboolean request_start(gpointer data)
@@ -254,12 +354,27 @@ static gboolean request_start(gpointer data)
 	PortalRequest* request = data;
 	GSource* source = NULL;
 
+	if (request->client->cancelled)
+	{
+		g_variant_unref(g_variant_ref_sink(request->parameters));
+		request->parameters = NULL;
+		g_set_error(&request->error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_CANCELLED,
+		            "%s was abandoned", request->method);
+		request_complete(request);
+		return G_SOURCE_REMOVE;
+	}
+
+	request->client->live = g_slist_prepend(request->client->live, request);
+	request->sent = TRUE;
+
 	subscribe_response(request, request->request_path);
 
+	request->client->calls++;
 	g_dbus_connection_call(request->client->connection, PKCS11_PORTAL_BUS_NAME,
 	                       PKCS11_PORTAL_OBJECT_PATH, PKCS11_PORTAL_INTERFACE, request->method,
 	                       request->parameters, G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE,
-	                       METHOD_TIMEOUT_MS, NULL, on_method_returned, request_ref(request));
+	                       METHOD_TIMEOUT_MS, request->client->call_cancellable,
+	                       on_method_returned, request_ref(request));
 
 	source = g_timeout_source_new(request->client->request_timeout_ms);
 	g_source_set_callback(source, on_request_timeout, request_ref(request), request_unref);
@@ -267,6 +382,38 @@ static gboolean request_start(gpointer data)
 	g_source_unref(source);
 
 	return G_SOURCE_REMOVE;
+}
+
+/* Runs on the client's thread, so it can complete requests the same way the
+ * response and the timeout do. */
+static gboolean cancel_requests(gpointer data)
+{
+	PortalClient* client = data;
+
+	client->cancelled = TRUE;
+
+	while (client->live != NULL)
+	{
+		PortalRequest* request = client->live->data;
+
+		if (request->error == NULL)
+			g_set_error(&request->error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_CANCELLED,
+			            "%s was abandoned", request->method);
+
+		/* Drops it from the list, Closes it at the portal and wakes its
+		 * caller, which may free it as soon as the lock inside is released. */
+		request_complete(request);
+	}
+
+	return G_SOURCE_REMOVE;
+}
+
+void portal_client_cancel(PortalClient* client)
+{
+	if (client == NULL || client->thread == NULL)
+		return;
+
+	schedule(client, cancel_requests, client);
 }
 
 static char* request_token(PortalClient* client, const char* prefix)
@@ -307,7 +454,7 @@ static GVariant* portal_request(PortalClient* client, const char* method, GVaria
 	request->client = client;
 	request->method = method;
 	request->parameters = parameters;
-	request->request_path = request_path;
+	request->request_path = g_strdup(request_path);
 	g_mutex_init(&request->lock);
 	g_cond_init(&request->cond);
 
@@ -544,6 +691,7 @@ PortalClient* portal_client_new(void)
 
 	client->context = g_main_context_new();
 	client->loop = g_main_loop_new(client->context, FALSE);
+	client->call_cancellable = g_cancellable_new();
 	client->thread = g_thread_new("portal-certificate", worker_thread, client);
 
 	schedule(client, subscribe_invalidated, client);
@@ -553,9 +701,51 @@ PortalClient* portal_client_new(void)
 	return client;
 }
 
-static gboolean quit_loop(gpointer data)
+static gboolean drain_expired(gpointer data)
 {
-	g_main_loop_quit(data);
+	PortalClient* client = data;
+
+	if (!g_cancellable_is_cancelled(client->call_cancellable))
+	{
+		/* The portal has not answered. Cancelling fails the calls now instead
+		 * of at METHOD_TIMEOUT_MS, and their callbacks end the loop. */
+		g_cancellable_cancel(client->call_cancellable);
+		return G_SOURCE_CONTINUE;
+	}
+
+	g_debug("a portal reply never arrived; the client is torn down without it");
+	g_main_loop_quit(client->loop);
+
+	return G_SOURCE_REMOVE;
+}
+
+/* THE LOOP STOPS WHEN THE LAST METHOD CALL HAS LANDED, not when the caller asks
+ * for the client to be freed. A reply still in flight names a request object at
+ * the portal -- at a path this side may never have seen, since the portal
+ * chooses it -- and dropping the context here would leave that one open with
+ * nothing left to Close it. The wait is bounded by DRAIN_GRACE_MS twice over.
+ *
+ * The thread is joined rather than detached: a PKCS#11 module can be dlclose()d
+ * the moment C_Finalize returns, and a thread of ours still running then would
+ * be running code that is no longer mapped. */
+static gboolean begin_drain(gpointer data)
+{
+	PortalClient* client = data;
+	GSource* source = NULL;
+
+	client->cancelled = TRUE;
+	client->draining = TRUE;
+
+	if (client->calls == 0)
+	{
+		g_main_loop_quit(client->loop);
+		return G_SOURCE_REMOVE;
+	}
+
+	source = g_timeout_source_new(DRAIN_GRACE_MS);
+	g_source_set_callback(source, drain_expired, client, NULL);
+	g_source_attach(source, client->context);
+	g_source_unref(source);
 
 	return G_SOURCE_REMOVE;
 }
@@ -571,12 +761,17 @@ void portal_client_free(PortalClient* client)
 			g_dbus_connection_signal_unsubscribe(client->connection,
 			                                     client->invalidated_subscription);
 
-		schedule(client, quit_loop, client->loop);
+		/* The last Close may still be queued, and this is the last chance it
+		 * has to reach the bus. */
+		g_dbus_connection_flush_sync(client->connection, NULL, NULL);
+
+		schedule(client, begin_drain, client);
 		g_thread_join(client->thread);
 	}
 
 	g_clear_pointer(&client->loop, g_main_loop_unref);
 	g_clear_pointer(&client->context, g_main_context_unref);
+	g_clear_object(&client->call_cancellable);
 	g_clear_object(&client->connection);
 	g_clear_pointer(&client->mechanisms, g_strfreev);
 	g_clear_pointer(&client->invalidated, g_hash_table_unref);
@@ -604,9 +799,7 @@ static void close_session(PortalClient* client, const char* session)
 	if (session == NULL)
 		return;
 
-	g_dbus_connection_call(client->connection, PKCS11_PORTAL_BUS_NAME, session,
-	                       "org.freedesktop.portal.Session", "Close", NULL, NULL,
-	                       G_DBUS_CALL_FLAGS_NONE, METHOD_TIMEOUT_MS, NULL, NULL, NULL);
+	send_close(client, session, "org.freedesktop.portal.Session");
 }
 
 static char* create_session(PortalClient* client, GError** error)
