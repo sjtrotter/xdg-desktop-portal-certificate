@@ -4,11 +4,10 @@ Status: EXPERIMENTAL. **Nothing has been proposed to anyone.** No issue has been
 pull request exists, no maintainer has been contacted. The branch this document is
 about is pushed to the author's fork.
 
-What changed since the previous version of this document is that "the frontend, if
-accepted, would move into xdg-desktop-portal" stopped being a hypothesis with a mapping
-table attached. The frontend **is** in xdg-desktop-portal now, on a branch, in the
-`experimental` namespace upstream set aside for portals in exactly this state. See
-[decisions/0010-backend-only-frontend-lives-upstream.md](decisions/0010-backend-only-frontend-lives-upstream.md).
+The frontend is in xdg-desktop-portal now, on a branch, in the `experimental` namespace
+upstream set aside for portals in exactly this state; why, and on what evidence, is
+[0010](decisions/0010-backend-only-frontend-lives-upstream.md). This document is what remains
+between that branch and a pull request.
 
 ## Where the frontend is
 
@@ -62,15 +61,10 @@ upstream/main..HEAD` passes, `black --check` passes.
 ## Why `experimental` is not a claim of acceptance
 
 [PR #1889](https://github.com/flatpak/xdg-desktop-portal/pull/1889) ("Introduce
-Credentials portal (experimental)") is where the mechanism was settled. Sebastian Wick,
-2026-01-28, verbatim:
-
-> As for the interface name, let's call it something like
-> `org.freedesktop.portal.experimental.Credentials`. It should also not be exposed by
-> default and have a environment variable to turn it on (e.g.
-> `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=credentials`).
-
-and Isaiah Inuwa, minutes later:
+Credentials portal (experimental)") is where the mechanism was settled; Sebastian Wick's
+instruction on it, and what standing it does and does not carry, is quoted in
+[0010](decisions/0010-backend-only-frontend-lives-upstream.md). Isaiah Inuwa, on the same
+thread, 2026-01-28:
 
 > I noticed the other portals have singular names: should we do that here too?
 > `org.freedesktop.portal.experimental.Credential`

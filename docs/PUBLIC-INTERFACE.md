@@ -136,10 +136,10 @@ polish. See [ARCHITECTURE.md](ARCHITECTURE.md) and [SECURITY.md](SECURITY.md).
 ## What is not on the interface, and why
 
 `OpenPkcs11Endpoint` — the experimental PKCS#11 compatibility endpoint the earlier sketch
-specified here — **is not in the branch at all**, on either the public or the impl side. An
-fd-returning method needs its own review, and a python-dbusmock backend cannot hand back a
-usable endpoint fd, so a first version carrying it would have shipped untested. It is a
-follow-up, to land with the facade rules in [SECURITY.md](SECURITY.md).
+specified here — **is not in the branch at all**, on either the public or the impl side; why
+it was left out is [ARCHITECTURE.md](ARCHITECTURE.md#the-endpoint-that-is-not-there), and what
+serves those consumers instead is
+[0011](decisions/0011-client-side-pkcs11-module.md).
 
 `context` — the "requested destination host" hint — is not there either. The only
 caller-supplied text on the interface is `reason`.

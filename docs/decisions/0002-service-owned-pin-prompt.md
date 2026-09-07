@@ -13,10 +13,9 @@ Status: accepted (for the sketch)
 
 ## Context
 
-The PIN prompt is the moment a person authorises a hardware token to act as them. On Linux it is
-drawn by whichever application happens to need it, which means it looks different every time, is
-drawn by the party asking for the authorisation, and is therefore trivially imitable. A user cannot
-learn to trust a window that never looks the same twice.
+The PIN prompt is the moment a person authorises a hardware token to act as them, and today it is
+drawn by the party asking for the authorisation (see [README.md](../../README.md)). The consequence
+this ADR turns on is that a user cannot learn to trust a window that never looks the same twice.
 
 Three precedents matter.
 

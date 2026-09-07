@@ -3,10 +3,8 @@
 Status: EXPERIMENTAL. **S1 and S3 have answers now, and they are not the answers these pages
 expected.** Both were written about a facade served over a socket from a helper process beside this
 backend, reached through an `OpenPkcs11Endpoint` that was never added to either interface. What was
-built instead is a PKCS#11 module that runs in the APPLICATION's process and forwards to the public
-portal interface over D-Bus — [0011](decisions/0011-client-side-pkcs11-module.md). S3's own list of
-workarounds had already named the shape ("one permanently registered broker module ... exposing
-synthetic grant-bound slots"); the only thing it got wrong was which process the module runs in.
+built instead runs in the APPLICATION's process:
+[0011](decisions/0011-client-side-pkcs11-module.md) is the decision and the argument for it.
 
 **What has actually run**, on 2026-09-04, against the SoftHSM fixture on a private bus under Xvfb
 (`tools/module-smoke.sh`):

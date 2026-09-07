@@ -5,16 +5,10 @@ The interface is a proposed, unmerged branch of xdg-desktop-portal, and
 [SPIKES.md](SPIKES.md) may still invalidate parts of this design.
 
 **Two processes, plumbed exactly like xdg-desktop-portal — because one of them *is*
-xdg-desktop-portal.** A *frontend* owns the public bus name, establishes who is calling,
-applies policy and permissions, and owns the request and session lifecycle. A *backend*
-draws the windows, holds the PKCS#11 session, and performs the cryptography. The
-application talks only to the frontend and never learns the backend's name.
-
-This repository is **the backend**. The frontend is a branch of xdg-desktop-portal:
-`experimental/certificate-webauthentication`, 10 commits on upstream `86bd3e2`, with
-`a4c1f62` defining the two interfaces and implementing the portal. Why it lives there rather than here is
-[0010](decisions/0010-backend-only-frontend-lives-upstream.md); the split itself is
-[0008](decisions/0008-build-to-the-upstream-shape.md), which 0010 preserves.
+xdg-desktop-portal.** What each side is for, and which branch the frontend is, is
+[README.md](../README.md); this document is the division of labour between them. Why the frontend
+lives upstream rather than here is [0010](decisions/0010-backend-only-frontend-lives-upstream.md);
+the split itself is [0008](decisions/0008-build-to-the-upstream-shape.md), which 0010 preserves.
 
 **The core contract is unchanged by the split**: credential selection plus brokered
 operations. The application never receives the key and never receives the PIN.

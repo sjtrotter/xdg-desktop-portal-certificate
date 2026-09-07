@@ -1,15 +1,8 @@
 # Roadmap
 
-Status: EXPERIMENTAL. **The backend is built.** The chooser, the PIN prompt, token discovery,
-certificate filtering and brokered `Sign` exist, build clean, and have been driven end to
-end through the real frontend against a software token and real hardware. Decryption code exists
-in the broker and the client module, but `Decrypt` is not on either interface and is unreachable.
-One PIV card, one reader, has been through
-[TESTING.md](TESTING.md) tiers 3.1–3.4, a live Entra ID sign-in, and a Firefox sign-in. The rest of
-tier 3 is unrun, the facade is not being built, and some spikes are still unrun.
-
-Read the table under "Where the code actually is" before the effort figures: the figures were
-written when none of this existed and have not been re-derived.
+Status: EXPERIMENTAL. **The backend is built.** What works, what is partial and what is not started
+is the table in [README.md](../README.md#status); read it before the effort figures below, because
+the figures were written when none of this existed and have not been re-derived.
 
 **What has changed since this document was last honest about its own scope:** the frontend is no
 longer this project's to build. It is an xdg-desktop-portal branch
@@ -22,10 +15,10 @@ about where the saving landed without pretending the rest of the numbers got any
 
 ## Where the code actually is
 
-**In one table, in [README.md](../README.md#current-capabilities)**, and nowhere else. This
-document used to keep a second one; two lists of what works is how a project ends up claiming both
-that hardware is untested and that a card passed. The README's table is the authority and this
-paragraph is the pointer to it.
+**In one table, in [README.md](../README.md#status)**, and nowhere else. This document used to keep
+a second one; two lists of what works is how a project ends up claiming both that hardware is
+untested and that a card passed. The README's table is the authority and this paragraph is the
+pointer to it.
 
 What that table means for the plan below: the brokered path is built and works, which was never
 the doubtful half. S1 and S3 — can a consumer that speaks only PKCS#11 use this, and can a browser
@@ -173,17 +166,12 @@ project, not a phase-2 deliverable.
 **In that order, and note that step 7 has already been done in the wrong order.** The frontend
 exists, as an unproposed branch. That is the sanctioned way to write an experimental portal
 ([UPSTREAMING.md](UPSTREAMING.md)) but it is not a substitute for opening the conversation, and it
-must not be presented as one. The [linux-credentials / credentialsd](https://github.com/linux-credentials/credentialsd)
-project is already proposing `org.freedesktop.portal.Credentials` for FIDO2 and passkeys. The
+must not be presented as one. Who to talk to, and why, is
+[0003](decisions/0003-own-namespace-before-freedesktop.md) under "The order of conversations". The
 question to ask them, before freezing any name or D-Bus signature, is: **does certificate-backed
-signing belong as a credential type under that proposal**, sharing its request, identity and consent
-machinery, while remaining independently deployable?
-
-The expectation should be that maintainers prefer a coherent credential-use model over a portal
-named after a physical device; that `ClientCertificate` or `CryptographicCredential` is a better
-conceptual boundary than `Certificate`, because the backing key might be a TPM, a software token, a
-phone or a remote HSM; and that "return a PKCS#11 module" will not be accepted as the generic
-credential abstraction. The name in this repository is expected to change.
+signing belong as a credential type under the credentials portal proposal**, sharing its request,
+identity and consent machinery, while remaining independently deployable? The name in this
+repository is expected to change.
 
 Only then, the acceptance path:
 

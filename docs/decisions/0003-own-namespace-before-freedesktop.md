@@ -42,15 +42,12 @@ xdg-desktop-portal's
 namespace belongs to xdg-desktop-portal. Squatting it means either the eventual real interface
 collides with a prototype, or the prototype's mistakes become the standard by accident.
 
-There was also a second problem: this interface's first name, chosen for the sketch's original
-smart-card-only incarnation, named the hardware rather than the capability, and a portal named
-after a physical device is exactly the pattern that ages badly once the same broker turns out to
-mediate keys on a TPM or a software token just as well. [0009](0009-name-it-certificate.md)
-resolved that specific problem by renaming to a capability-scoped interface name. What is
-unresolved, and is this ADR's actual subject, is the *namespace*: whichever name we pick stays
-project-controlled until an upstream maintainer accepts it, because that acceptance isn't ours to
-claim in advance. The credentials/FIDO2 maintainers are, separately, unlikely to want one portal
-per device type at all — see "The order of conversations" below.
+A second problem, the interface's first name being derived from the hardware rather than the
+capability, was resolved separately by [0009](0009-name-it-certificate.md). What is unresolved, and
+is this ADR's actual subject, is the *namespace*: whichever name we pick stays project-controlled
+until an upstream maintainer accepts it, because that acceptance isn't ours to claim in advance.
+The credentials/FIDO2 maintainers are, separately, unlikely to want one portal per device type at
+all — see "The order of conversations" below.
 
 ## Decision
 

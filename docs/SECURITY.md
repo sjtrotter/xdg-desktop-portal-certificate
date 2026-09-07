@@ -9,17 +9,12 @@ The rules in the body of this document are unchanged: they are what the design i
 The checklist immediately below is what the code in this repository does today, so that a reader
 can tell a promise from a fact without reading the source.
 
-**Two processes, two repositories.** A *frontend* establishes who is calling and applies policy; a
-*backend* draws the windows and holds the token. Every rule below says which one it binds, because
-after [0008](decisions/0008-build-to-the-upstream-shape.md) "the service" is not one thing — and
-since [0010](decisions/0010-backend-only-frontend-lives-upstream.md) the two things are not even in
-the same project. **The frontend is xdg-desktop-portal**, branch
-`experimental/certificate-webauthentication`; frontend-side rules below are recorded as *provided
-by xdg-desktop-portal*, and are stated here because a backend's obligations only make sense
-alongside them, not because this repository implements them. Backend rules are this repository's
-and are the ones to hold it to. The division is
-[ARCHITECTURE.md](ARCHITECTURE.md#who-does-what); the private interface between them, and how it is
-kept private, is [IMPL-INTERFACE.md](IMPL-INTERFACE.md).
+**Two processes, two repositories** ([README.md](../README.md)); the division of labour is
+[ARCHITECTURE.md](ARCHITECTURE.md#who-does-what) and the interface between them is
+[IMPL-INTERFACE.md](IMPL-INTERFACE.md). Every rule below says which side it binds. Frontend-side
+rules are recorded as *provided by xdg-desktop-portal* and are stated here only because a backend's
+obligations make no sense without them; backend rules are this repository's, and are the ones to
+hold it to.
 
 **The public interface is gated.** `org.freedesktop.portal.experimental.Certificate` is not
 exported unless the portal was started with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`.
@@ -540,12 +535,10 @@ length confusion in the SubjectPublicKeyInfo split, a read past the end of a `GB
 in the `C_GetAttributeValue` protocol. The asset at risk belongs to the browser or the mail client,
 not to this project, which is exactly why it has to be written down here.
 
-**4. Lifecycle in somebody else's process.** `C_Initialize` may be called after `fork()`,
-`C_Finalize` may be called while another thread is inside a call, and the library may be
-`dlclose()`d. The module **claims no fork safety**, and the claim is honest rather than a defence:
-a consumer that forks after initialising gets a worker thread that does not exist in the child,
-which is a hang rather than a compromise, but it is this module's defect and the portal boundary
-does not absorb it. Unload and re-initialise are covered by `test-module`; fork is not.
+**4. Lifecycle in somebody else's process.** The module **claims no fork safety**; what that costs
+and why the claim is honest rather than a defence is
+[0011](decisions/0011-client-side-pkcs11-module.md). Unload and re-initialise are covered by
+`test-module`; fork is not.
 
 **What answers this, and what does not.** `tests/fuzz-der.c` drives the TLV reader, the DigestInfo
 parser, `portal_objects_new()` on arbitrary certificate DER, and the attribute protocol with
@@ -650,29 +643,15 @@ A grant's lifetime is fixed at acquisition and there is no renewal: the frontend
 
 ### What was implemented and then removed: delegation down the process tree
 
-`AcquireCredential` grew a `delegate_to_children` (`b`) option, and a grant whose holder passed it
-answered a later `AcquireCredential` **from a descendant of the holder's process** without asking
-the user again. This backend's part was `delegated: true` alongside `preselect_certificate`: bind
-that certificate and show no window. It was the only relaxation of "a grant needs a window"
-anywhere in this interface, and it is gone from the proposal. Two reasons, either of which is
-enough:
-
-- **it could never fire for a Flatpak caller.** `XdpAppInfo`'s pidfd for a Flatpak app is the
-  *bwrap instance's* and is identical for every process in that instance, so two peers inside one
-  sandbox are never in a descendant relationship. The branch's tests passed only because the
-  synthetic Flatpak app-info used by tests had been changed to carry the caller's own pidfd.
-- **ancestry alone crosses application boundaries.** A host process holding a delegable grant that
-  runs `flatpak run com.other.App` produces a descendant, and that unrelated application would have
-  received a derived credential with no prompt.
-
-The pidfd argument for the walk was also wrong: a pidfd holds the `struct pid`, not the numeric
-pid's reservation, so "neither end can have been recycled" did not follow.
-
-It is archived on the frontend's `experimental/certificate-webauthentication+delegation` branch.
-The cost is the two choosers one WebKitGTK handshake raises, three seconds apart, asking the
-identical question. The replacement worth designing is a grant that belongs to the **app-info
-identity** rather than to the D-Bus peer: inside a Flatpak every process shares that identity, so
-the helper process would get the grant with no new mechanism and no process-tree walk at all.
+`AcquireCredential` grew a `delegate_to_children` (`b`) option, and this backend's part was
+`delegated: true` alongside `preselect_certificate`: bind that certificate and show no window. It
+was the only relaxation of "a grant needs a window" anywhere in this interface, and it is gone from
+the proposal. The three reasons are set out in
+[0011](decisions/0011-client-side-pkcs11-module.md), which also names the replacement worth
+designing: a grant belonging to the **app-info identity** rather than to the D-Bus peer. The
+security-relevant summary is that no path in the shipped interface produces a credential without a
+window, and that the code implementing that relaxation is archived on the frontend's delegation
+branch rather than in the proposal.
 
 ### What a facade would still force
 
