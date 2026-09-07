@@ -655,6 +655,70 @@ set changes when the grant expires. Known caveat: NSS's search for a certificate
 `certutil -L` survives; nothing on Firefox's client-auth path depends on it, and it has not been
 chased.
 
+### 2.7 Firefox as a Flatpak: the sandbox case
+
+Recipe written 2026-09-07; **not yet run**. This section is updated with the result.
+
+The Flathub Firefox ships with `sockets=pcsc` and `devices=all`
+(`flatpak info --show-permissions org.mozilla.firefox`), so as installed it can reach `pcscd`
+directly, the same as a host Firefox. The point of this run is to take both away and show the
+card is still reachable, through the module, D-Bus and this backend, with no device permission
+at all. The portal bus name `org.freedesktop.portal.Desktop` is reachable from every Flatpak
+by default, which is the whole argument for a portal.
+
+What was checked before writing the recipe, on 2026-09-07: the host-built module needs
+glibc 2.14 and links only libraries the `org.freedesktop.Platform//25.08` runtime ships (GLib,
+GIO, GnuTLS, p11-kit and their dependencies), and it `dlopen`s inside the sandbox; `gdbus`
+inside the sandbox sees the experimental Certificate interface on the portal bus when the branch
+frontend is live; `flatpak run --nosocket=pcsc --nodevice=all` removes `/run/pcscd` from the
+sandbox.
+
+To run it:
+
+1. In one terminal, the live stack, which replaces the session's portal with the branch build,
+   routes the Certificate interface to this backend and prints the backend's decision lines:
+
+   ```console
+   $ tools/dev-stack.sh --live --keep --pin-prompt=system
+   ```
+
+2. In another:
+
+   ```console
+   $ flatpak install flathub org.mozilla.firefox      # once
+   $ tools/firefox-flatpak.sh --fresh
+   ```
+
+   The script copies the built module into `~/.var/app/org.mozilla.firefox/data/`, which is
+   `$XDG_DATA_HOME` inside the sandbox, creates a throwaway profile beside it, verifies from
+   inside the sandbox that `/run/pcscd` is gone and the portal bus is visible, and starts Firefox
+   with `--nosocket=pcsc --nodevice=all` and `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`.
+   `--check` stops after the verification; `--keep-pcsc` is the control run with the sandbox as
+   shipped; `--url` opens a site.
+
+3. In Firefox, once per profile: Settings, Privacy & Security, Security Devices, Load, with the
+   path the script printed. Firefox loads the `.so` by path and reads no p11-kit configuration,
+   so the `.module` file's `enable-in` list plays no part here.
+
+4. Visit a site that asks for a client certificate.
+
+Expect the three dialogs of §2.6 in the same order: this backend's chooser, Firefox's own
+picker, the shell's PIN prompt. The proof that the sandbox case held is two log lines:
+
+- on the dev-stack terminal, the backend's decision line
+  `... app_id=org.mozilla.firefox identity=sandboxed purpose=client_auth granted=yes`, which
+  says the frontend identified the caller from its sandbox and this backend named it in the
+  chooser;
+- in `$DEVDIR/frontend.log`, the `CreateSession` and `AcquireCredential` from that app id.
+
+A `Protected Authentication` alert, an empty certificate list, or a chooser naming an
+unidentified caller are the failure signatures; §2.6 explains the first two.
+
+Open before the run: whether Firefox's Flatpak build resolves `dlopen` of a module outside
+`/app` and `/usr` (the runtime's loader has no reason to refuse a path under `$XDG_DATA_HOME`,
+and Python's `ctypes` inside the same sandbox loads it), and whether the runtime's GnuTLS and
+p11-kit versions change anything the host run did not show.
+
 ---
 ## 3. A real PIV card. Tiers 3.1–3.4 have been run, once.
 

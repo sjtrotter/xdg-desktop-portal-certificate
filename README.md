@@ -44,7 +44,8 @@ FreeRDP/FreeRDP#13328.
 | The synthetic PKCS#11 facade (`OpenPkcs11Endpoint`) | Not implemented | on neither interface; [0011](docs/decisions/0011-client-side-pkcs11-module.md) replaced it |
 | Two concurrent grants in one process, rate limiting, fork safety in the module | Not implemented | `module.c` claims none |
 | Attesting what a signature is *for* | Not implemented | `purpose` constrains selection and consent language and proves nothing about use |
-| Flatpak, KDE, translation, packaging | Not implemented | installing the module inside a runtime, its ABI, and a browser's inner sandbox are all unproven |
+| A Flatpak consumer | Recipe written, not yet run | `tools/firefox-flatpak.sh`: Firefox from Flathub with its pcsc socket and device access removed, reaching the card only through the portal; [docs/TESTING.md](docs/TESTING.md) §2.7 |
+| KDE, translation, packaging | Not implemented | installing the module inside a runtime, its ABI, and a browser's inner sandbox are all unproven |
 | Independent security review, a second maintainer, a second card stack | Not done | |
 
 **The hardware evidence is one card.** One PIV card, one reader, OpenSC, GNOME 50 on Wayland.
@@ -192,7 +193,7 @@ uses a fixture token from [`tools/softhsm-fixture.sh`](tools/softhsm-fixture.sh)
 
 Other scripts: [`tools/ui-smoke.sh`](tools/ui-smoke.sh) drives the chooser and the PIN prompt under
 Xvfb; [`tools/module-smoke.sh`](tools/module-smoke.sh) and
-[`tools/nss-smoke.sh`](tools/nss-smoke.sh) drive the PKCS#11 module through GnuTLS and through NSS;
+[`tools/nss-smoke.sh`](tools/nss-smoke.sh) drive the PKCS#11 module through GnuTLS and through NSS; [`tools/firefox-flatpak.sh`](tools/firefox-flatpak.sh) runs the Flathub Firefox against the live stack with no pcsc socket;
 [`tools/trigger-certificate.sh`](tools/trigger-certificate.sh) pokes one method at a time with
 `gdbus`. [docs/TESTING.md](docs/TESTING.md) has the exact commands.
 
