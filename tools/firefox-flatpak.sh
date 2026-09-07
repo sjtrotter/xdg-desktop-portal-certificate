@@ -65,6 +65,18 @@ command -v flatpak >/dev/null || die "flatpak not found"
 flatpak info "$APP" >/dev/null 2>&1 || die "$APP is not installed: flatpak install flathub $APP"
 [ -f "$MODULE" ] || die "no module at $MODULE; build the repository first or set MODULE"
 
+# The Flatpak exports org.mozilla.firefox.desktop and the user export directory
+# precedes /usr/share in XDG_DATA_DIRS. Fedora's RPM Firefox ships the same id,
+# so installing the Flatpak silently repoints the dock icon and the default
+# browser at the Flatpak and its empty profile. A copy of the RPM launcher in
+# XDG_DATA_HOME outranks both; this run never goes through the launcher anyway.
+if [ -f /usr/share/applications/$APP.desktop ] && [ ! -f "$HOME/.local/share/applications/$APP.desktop" ]; then
+	mkdir -p "$HOME/.local/share/applications"
+	cp /usr/share/applications/$APP.desktop "$HOME/.local/share/applications/$APP.desktop"
+	update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+	echo "${0##*/}: kept the host Firefox launcher ahead of the Flatpak's ($HOME/.local/share/applications/$APP.desktop)"
+fi
+
 # The session's portal must be the branch build with the gate on, and this
 # backend must be behind it. gdbus is used from the host: the interface list is
 # the same one the sandbox sees.

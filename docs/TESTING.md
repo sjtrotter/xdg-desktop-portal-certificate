@@ -680,6 +680,13 @@ identity level was `sandboxed`, which the mock-backed pytest suite had only ever
 fixture. Firefox in one process raised one chooser, where a WebKitGTK handshake raises two.
 Firefox's own picker appeared between the chooser and the PIN, as on the host (§2.6).
 
+Installing the Flatpak has a side effect on Fedora: its exported `org.mozilla.firefox.desktop`
+shadows the RPM Firefox's launcher of the same id, so the dock icon and the default browser
+start the Flatpak and its empty profile. The host profile under `~/.config/mozilla/firefox` is
+untouched. The script copies the RPM launcher into `~/.local/share/applications/`, which
+outranks the Flatpak export; `flatpak uninstall --user org.mozilla.firefox` is the other way
+out.
+
 Two runs before it failed at discovery with `tokens=0`: the card was not in the reader. The
 backend's own `--list-tokens` and `opensc-tool -l` say the same thing in that state, so check
 those first.
