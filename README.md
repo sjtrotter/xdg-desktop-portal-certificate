@@ -44,7 +44,7 @@ FreeRDP/FreeRDP#13328.
 | The synthetic PKCS#11 facade (`OpenPkcs11Endpoint`) | Not implemented | on neither interface; [0011](docs/decisions/0011-client-side-pkcs11-module.md) replaced it |
 | Two concurrent grants in one process, rate limiting, fork safety in the module | Not implemented | `module.c` claims none |
 | Attesting what a signature is *for* | Not implemented | `purpose` constrains selection and consent language and proves nothing about use |
-| A Flatpak consumer | Recipe written, not yet run | `tools/firefox-flatpak.sh`: Firefox from Flathub with its pcsc socket and device access removed, reaching the card only through the portal; [docs/TESTING.md](docs/TESTING.md) §2.7 |
+| A Flatpak consumer | Proven 2026-09-07 | Firefox from Flathub with its pcsc socket and device access removed: one chooser naming `org.mozilla.firefox` as a sandboxed caller, one PIN, an RSA-PSS signature from the card; `tools/firefox-flatpak.sh`, [docs/TESTING.md](docs/TESTING.md) §2.7 |
 | KDE, translation, packaging | Not implemented | installing the module inside a runtime, its ABI, and a browser's inner sandbox are all unproven |
 | Independent security review, a second maintainer, a second card stack | Not done | |
 
@@ -58,6 +58,8 @@ FreeRDP/FreeRDP#13328.
   Later the same day the full chain reached an Azure Virtual Desktop session.
 - **2026-09-06**. Firefox, fresh profile, module loaded from Security Devices with
   `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`, signed in to a site requiring a client certificate.
+- **2026-09-07**. The same, from the Flathub Firefox with `--nosocket=pcsc --nodevice=all`: the
+  sandbox reached the card only through the portal, and the chooser named the sandboxed app.
 
 Unrun: TESTING 3.5 (one PIN per grant), 3.6 (wrong PIN and `FINAL_TRY`), card removal during an
 operation, a PIN-pad reader, a second card, a Flatpak runtime, KDE, and the OpenSSL 3 provider.

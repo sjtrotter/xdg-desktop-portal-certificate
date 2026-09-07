@@ -657,7 +657,33 @@ chased.
 
 ### 2.7 Firefox as a Flatpak: the sandbox case
 
-Recipe written 2026-09-07; **not yet run**. This section is updated with the result.
+**Run 2026-09-07, PASS.** Firefox 155.0.1 from Flathub on `org.freedesktop.Platform//25.08`,
+started with `--nosocket=pcsc --nodevice=all`, module loaded from the app's data directory,
+real PIV card, GNOME 50 on Wayland, `--pin-prompt=system`. The backend's log, times as printed:
+
+```
+15:20:31  request-received    app_id=org.mozilla.firefox identity=(none)     purpose=create_session granted=yes
+15:20:31  discovery-started   app_id=org.mozilla.firefox identity=sandboxed  purpose=client_auth
+15:20:31  discovery-result    tokens=1 candidates=4
+15:20:31  chooser-shown       app_id=org.mozilla.firefox identity=sandboxed  purpose=client_auth
+15:20:45  grant-created       app_id=org.mozilla.firefox identity=sandboxed  purpose=client_auth granted=yes
+15:20:51  request-received    mechanism=RSA_PSS
+15:20:51  pin-prompted        detail=on-screen
+15:20:55  login-ok            detail=pin-accepted
+15:20:56  operation-completed mechanism=RSA_PSS
+15:21:13  grant-invalidated   detail=closed-by-portal
+```
+
+One chooser, one PIN, one signature, and the site accepted the certificate. The frontend
+derived `org.mozilla.firefox` from the sandbox and this backend named it in the chooser; the
+identity level was `sandboxed`, which the mock-backed pytest suite had only ever exercised with a
+fixture. Firefox in one process raised one chooser, where a WebKitGTK handshake raises two.
+Firefox's own picker appeared between the chooser and the PIN, as on the host (§2.6).
+
+Two runs before it failed at discovery with `tokens=0`: the card was not in the reader. The
+backend's own `--list-tokens` and `opensc-tool -l` say the same thing in that state, so check
+those first.
+
 
 The Flathub Firefox ships with `sockets=pcsc` and `devices=all`
 (`flatpak info --show-permissions org.mozilla.firefox`), so as installed it can reach `pcscd`
