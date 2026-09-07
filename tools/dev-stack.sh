@@ -30,6 +30,7 @@
 #     tools/dev-stack.sh --softhsm                # against a SoftHSM fixture token
 #     tools/dev-stack.sh --pin-prompt=gtk         # this backend draws the PIN window
 #     tools/dev-stack.sh --live --pin-prompt=system   # the shell draws it
+#     tools/dev-stack.sh --live --keep --no-e2e       # stack only, no self-test
 #
 #   WHERE THE PIN IS TYPED. --pin-prompt is passed straight to the backend, and
 #   a PRIVATE run defaults it to gtk rather than leaving it at the backend's

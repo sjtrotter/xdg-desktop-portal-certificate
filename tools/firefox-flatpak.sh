@@ -11,7 +11,10 @@
 #
 # Needs the live stack first, in another terminal:
 #
-#     tools/dev-stack.sh --live --keep --pin-prompt=system
+#     tools/dev-stack.sh --live --keep --no-e2e --pin-prompt=system
+#
+# --no-e2e skips the stack's own self-test, which with a card present is a
+# chooser and a PIN prompt before Firefox has started.
 #
 # Then:
 #
@@ -68,7 +71,7 @@ flatpak info "$APP" >/dev/null 2>&1 || die "$APP is not installed: flatpak insta
 if ! gdbus introspect --session --dest org.freedesktop.portal.Desktop \
 	--object-path /org/freedesktop/portal/desktop 2>/dev/null |
 	grep -q "org.freedesktop.portal.experimental.Certificate"; then
-	die "the session's xdg-desktop-portal does not export the Certificate interface; run tools/dev-stack.sh --live --keep --pin-prompt=system first"
+	die "the session's xdg-desktop-portal does not export the Certificate interface; run tools/dev-stack.sh --live --keep --no-e2e --pin-prompt=system first"
 fi
 if ! busctl --user list 2>/dev/null | grep -q "org.freedesktop.impl.portal.desktop.certificate"; then
 	echo "${0##*/}: warning: no backend owns org.freedesktop.impl.portal.desktop.certificate; is dev-stack --live up?" >&2

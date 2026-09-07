@@ -705,8 +705,12 @@ To run it:
    routes the Certificate interface to this backend and prints the backend's decision lines:
 
    ```console
-   $ tools/dev-stack.sh --live --keep --pin-prompt=system
+   $ tools/dev-stack.sh --live --keep --no-e2e --pin-prompt=system
    ```
+
+   Without `--no-e2e` the stack runs `tools/certificate-e2e.py` once before it hands over, which
+   with a card present is a chooser, a PIN prompt and a signature of its own; a run driven by
+   hand does not want that.
 
 2. In another:
 
