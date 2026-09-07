@@ -230,12 +230,38 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	g_object_unref(session);
 }
 
+/* THE GRANT'S CLOCK IS THE MONOTONIC ONE, like the frontend's. expires_at is
+ * only ever compared against another reading of the same clock, and it used to
+ * be taken from g_get_real_time(): a wall-clock step -- an NTP correction, a
+ * user setting the date -- moved a live grant's expiry by the step, in either
+ * direction. Needs no card: the grant is bookkeeping. */
+static void test_grant_expiry_is_monotonic(void)
+{
+	g_autoptr(CertificateCandidate) candidate =
+	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
+	CertificateImplSession* session = certificate_impl_session_new(
+	    "/org/freedesktop/portal/desktop/session/t/expiry", "org.example.App");
+	gint64 monotonic;
+
+	certificate_impl_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
+	                               FALSE, 300);
+
+	monotonic = g_get_monotonic_time() / G_USEC_PER_SEC;
+	g_assert_cmpint(session->expires_at, >=, monotonic + 299);
+	g_assert_cmpint(session->expires_at, <=, monotonic + 300);
+	g_assert_false(certificate_impl_session_is_expired(session));
+
+	certificate_impl_session_close(session);
+	g_object_unref(session);
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
 
 	g_test_add_func("/regrant/signs-with-the-new-certificate",
 	                test_regrant_signs_with_the_new_certificate);
+	g_test_add_func("/regrant/expiry-is-monotonic", test_grant_expiry_is_monotonic);
 
 	return g_test_run();
 }

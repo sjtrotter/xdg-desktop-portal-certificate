@@ -35,6 +35,9 @@ core_test_cases = {
   'filter': 'test-filter.c',
   'mechanism': 'test-mechanism.c',
   'redact': 'test-redact.c',
+  # The lengths that come from outside: an attribute length a module reports,
+  # and a PSS salt length a caller asks for.
+  'discovery-limits': 'test-discovery-limits.c',
   # Skips itself when tools/softhsm-fixture.sh has not been run. It is the only
   # automated coverage C_Sign can have; the card path is the author's, in
   # docs/TESTING.md.
@@ -101,6 +104,25 @@ exe = executable(
 )
 
 test('module', exe, protocol: 'tap', env: test_env)
+
+# THE SAME MODULE WITH A PORTAL IN FRONT OF IT. It links the SHARED OBJECT that
+# gets installed and reaches it the way p11-kit does, through
+# C_GetFunctionList, so the version script is part of what is tested. The portal
+# is a real D-Bus service on a GTestDBus bus, because what these three cases are
+# about is what the module does while a request is outstanding: the global lock
+# it must not hold across the chooser, and the Request it must Close when it
+# stops waiting.
+exe = executable(
+  'test-module-portal',
+  ['test-module-portal.c'],
+  link_with: pkcs11_portal_module,
+  dependencies: module_deps,
+  include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+  c_args: test_args,
+  install: false,
+)
+
+test('module-portal', exe, protocol: 'tap', env: test_env, timeout: 120)
 
 # THE HOSTILE-INPUT SURFACE OF THAT SAME MODULE, in one entry point: the DER
 # reader, the DigestInfo parser, portal_objects_new() on an arbitrary

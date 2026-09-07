@@ -236,10 +236,49 @@ static char* display_name(gnutls_x509_crt_t crt, gboolean issuer)
 	return g_strdup(issuer ? "Unnamed issuer" : "Unnamed certificate");
 }
 
-static char** parse_eku(gnutls_x509_crt_t crt)
+typedef enum
+{
+	EXTENSION_ABSENT,
+	EXTENSION_PRESENT,
+	EXTENSION_UNREADABLE
+} ExtensionState;
+
+/* Whether the certificate CARRIES the extension, which is not a question the
+ * per-purpose accessor can answer: gnutls_x509_crt_get_key_purpose_oid()
+ * reports GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE at index 0 both for a
+ * certificate with no extension and for one holding an empty SEQUENCE, and
+ * those two mean opposite things. */
+static ExtensionState extension_state(gnutls_x509_crt_t crt, const char* oid)
+{
+	gnutls_datum_t value = { NULL, 0 };
+	unsigned int critical = 0;
+	int rc;
+
+	rc = gnutls_x509_crt_get_extension_by_oid2(crt, oid, 0, &value, &critical);
+	if (rc == GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE)
+		return EXTENSION_ABSENT;
+	if (rc < 0)
+		return EXTENSION_UNREADABLE;
+
+	gnutls_free(value.data);
+	return EXTENSION_PRESENT;
+}
+
+/* FALSE means the extension is there and could not be read. It is not the same
+ * as "no extension" and must not be reported as one: filter.c reads a NULL
+ * @out as "unrestricted", so a decode error -- a bad tag, an OID the parser
+ * refuses -- would turn a restricted certificate into one good for every
+ * purpose. The caller fails the parse, which takes the certificate out of the
+ * candidate list entirely. An OID too long for the buffer below cannot be read
+ * as an absent extension either: it is a negative return like any other. */
+static gboolean parse_eku(gnutls_x509_crt_t crt, char*** out)
 {
 	g_autoptr(GStrvBuilder) builder = g_strv_builder_new();
+	ExtensionState state = extension_state(crt, GNUTLS_X509EXT_OID_EXTENDED_KEY_USAGE);
 	gboolean any = FALSE;
+
+	if (state == EXTENSION_UNREADABLE)
+		return FALSE;
 
 	for (unsigned i = 0;; i++)
 	{
@@ -252,29 +291,42 @@ static char** parse_eku(gnutls_x509_crt_t crt)
 		if (rc == GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE)
 			break;
 		if (rc < 0)
-			break;
+			return FALSE;
 
 		any = TRUE;
 		g_strv_builder_add(builder, buffer);
 	}
 
 	/* NULL means "this certificate has no extended key usage extension", which
-	 * is a different fact from "it has one and it is empty". The purpose rules
-	 * in tokens/filter.c turn on exactly that difference. */
-	if (!any)
-		return NULL;
+	 * is a different fact from "it has one and it is empty": absent is
+	 * unrestricted, empty is restricted to nothing. The purpose rules in
+	 * tokens/filter.c turn on exactly that difference, and an empty SEQUENCE
+	 * reaches them as an EMPTY STRV rather than as NULL. */
+	if (!any && state == EXTENSION_ABSENT)
+	{
+		*out = NULL;
+		return TRUE;
+	}
 
-	return g_strv_builder_end(builder);
+	*out = g_strv_builder_end(builder);
+	return TRUE;
 }
 
-static char** parse_key_usage(gnutls_x509_crt_t crt)
+static gboolean parse_key_usage(gnutls_x509_crt_t crt, char*** out)
 {
 	g_autoptr(GStrvBuilder) builder = g_strv_builder_new();
 	unsigned int usage = 0;
 	unsigned int critical = 0;
+	int rc;
 
-	if (gnutls_x509_crt_get_key_usage(crt, &usage, &critical) < 0)
-		return NULL;
+	rc = gnutls_x509_crt_get_key_usage(crt, &usage, &critical);
+	if (rc == GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE)
+	{
+		*out = NULL;
+		return TRUE;
+	}
+	if (rc < 0)
+		return FALSE;
 
 	/* The names are the ones the public interface's certificate_filter uses. */
 	if (usage & GNUTLS_KEY_DIGITAL_SIGNATURE)
@@ -292,7 +344,8 @@ static char** parse_key_usage(gnutls_x509_crt_t crt)
 	if (usage & GNUTLS_KEY_CRL_SIGN)
 		g_strv_builder_add(builder, "crl_sign");
 
-	return g_strv_builder_end(builder);
+	*out = g_strv_builder_end(builder);
+	return TRUE;
 }
 
 static gboolean certificate_parse_der(const guint8* der, gsize length,
@@ -326,8 +379,16 @@ static gboolean certificate_parse_der(const guint8* der, gsize length,
 	out->subject_dn = dn_full(crt, FALSE);
 	out->not_before = (gint64) gnutls_x509_crt_get_activation_time(crt);
 	out->not_after = (gint64) gnutls_x509_crt_get_expiration_time(crt);
-	out->eku_oids = parse_eku(crt);
-	out->key_usage = parse_key_usage(crt);
+
+	/* An extension that will not decode makes the certificate ineligible for
+	 * every purpose, not unrestricted. */
+	if (!parse_eku(crt, &out->eku_oids) || !parse_key_usage(crt, &out->key_usage))
+	{
+		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
+		                    "The key usage extensions could not be decoded");
+		gnutls_x509_crt_deinit(crt);
+		return FALSE;
+	}
 
 	if (gnutls_x509_crt_get_raw_issuer_dn(crt, &issuer) >= 0)
 	{

@@ -39,7 +39,8 @@
  *
  *  ERROR TEXT FROM LIBRARIES IS TRUNCATED BEFORE ANY EMBEDDED URI. p11-kit, OpenSC and
  *  GnuTLS all put PKCS#11 URIs in error strings, and a URI may carry a pin-value
- *  attribute. Truncating at the first "pkcs11:" is cheap and correct; passing library
+ *  attribute. Truncating at the earliest of "pkcs11:", "pin-value" and "pin-source", then
+ *  capping and escaping what is left, is cheap and correct; passing library
  *  error text through unmodified is how a PIN reaches a journal.
  *
  *  The default level records DECISIONS, not data: which caller, which honesty level,

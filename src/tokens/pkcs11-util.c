@@ -10,6 +10,10 @@
 
 #include "../redact.h"
 
+/* The largest attribute this backend will allocate for. A certificate is a few
+ * kilobytes, a CKA_ID a few bytes; the length is a number the module chooses. */
+#define CERTIFICATE_PKCS11_ATTRIBUTE_MAX (64 * 1024)
+
 G_DEFINE_QUARK(certificate-pkcs11-error, certificate_pkcs11_error)
 
 CertificatePkcs11ErrorCode certificate_pkcs11_error_code(CK_RV rv)
@@ -80,18 +84,29 @@ GByteArray* certificate_pkcs11_get_attribute(CK_FUNCTION_LIST* module, CK_SESSIO
 {
 	CK_ATTRIBUTE attribute = { type, NULL, 0 };
 	GByteArray* value = NULL;
+	CK_ULONG allocated;
 	CK_RV rv;
 
 	rv = module->C_GetAttributeValue(session, object, &attribute, 1);
 	if (rv != CKR_OK || attribute.ulValueLen == (CK_ULONG) -1 || attribute.ulValueLen == 0)
 		return NULL;
 
-	value = g_byte_array_sized_new(attribute.ulValueLen);
-	g_byte_array_set_size(value, attribute.ulValueLen);
+	/* THE LENGTH COMES OFF THE CARD. A module that reports a gigabyte for
+	 * CKA_ID gets an allocation of a gigabyte, and a hostile or broken one can
+	 * report it on every object. Nothing this backend reads -- a certificate, a
+	 * key id, a label -- is anywhere near the cap. */
+	if (attribute.ulValueLen > CERTIFICATE_PKCS11_ATTRIBUTE_MAX)
+		return NULL;
+
+	allocated = attribute.ulValueLen;
+	value = g_byte_array_sized_new(allocated);
+	g_byte_array_set_size(value, allocated);
 	attribute.pValue = value->data;
 
 	rv = module->C_GetAttributeValue(session, object, &attribute, 1);
-	if (rv != CKR_OK)
+	/* The second call may report a different length. Growing here would hand
+	 * back a buffer whose tail the module never wrote. */
+	if (rv != CKR_OK || attribute.ulValueLen > allocated)
 	{
 		g_byte_array_unref(value);
 		return NULL;

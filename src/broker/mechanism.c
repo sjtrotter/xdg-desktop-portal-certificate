@@ -490,12 +490,12 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		/* RFC 8017 9.1.1 step 3: emLen >= hLen + sLen + 2, with
 		 * emLen = ceil((modBits - 1) / 8). The frontend cannot check this: it
 		 * does not know the modulus size. */
-		/* gsize on BOTH sides. entry->length + salt_length + 2 in the operands'
-		 * own types wraps on a 32-bit build for salt_length near G_MAXUINT32,
-		 * and a wrapped sum passes the check and sends sLen = 0xFFFFFFFF into
-		 * the module. */
+		/* guint64 ON BOTH SIDES, not gsize: gsize is 32 bits on a 32-bit build,
+		 * so entry->length + salt_length + 2 wraps there for salt_length near
+		 * G_MAXUINT32, and a wrapped sum passes the check and sends
+		 * sLen = 0xFFFFFFFF into the module. */
 		em_length = (key_size - 1 + 7) / 8;
-		if (em_length < (gsize) entry->length + (gsize) salt_length + 2)
+		if ((guint64) em_length < (guint64) entry->length + (guint64) salt_length + 2)
 		{
 			g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
 			            "A salt of %u bytes does not fit in a %u-bit RSA-PSS signature over %s",

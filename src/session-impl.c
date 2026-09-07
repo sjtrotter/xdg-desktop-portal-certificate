@@ -206,7 +206,10 @@ void certificate_impl_session_grant(CertificateImplSession* session,
 	g_mutex_unlock(&session->device_lock);
 
 	session->lifetime = lifetime;
-	session->expires_at = (g_get_real_time() / G_USEC_PER_SEC) + lifetime;
+	/* THE MONOTONIC CLOCK, like the frontend's own expiry. expires_at is only
+	 * ever compared against another reading of the same clock, and a wall clock
+	 * a user or NTP can step would shorten or extend a grant by the step. */
+	session->expires_at = (g_get_monotonic_time() / G_USEC_PER_SEC) + lifetime;
 	session->granted = TRUE;
 
 	if (session->expiry_source != 0)
@@ -224,7 +227,7 @@ gboolean certificate_impl_session_is_expired(CertificateImplSession* session)
 	if (!session->granted)
 		return FALSE;
 
-	return session->expires_at <= (g_get_real_time() / G_USEC_PER_SEC);
+	return session->expires_at <= (g_get_monotonic_time() / G_USEC_PER_SEC);
 }
 
 void certificate_impl_session_release_device(CertificateImplSession* session)

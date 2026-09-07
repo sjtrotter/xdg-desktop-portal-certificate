@@ -26,6 +26,11 @@ static void test_error_text_is_truncated_before_a_uri(void)
 		{ "pkcs11:token=Foo;pin-value=1234", "(redacted)" },
 		{ "the module said pin-value=1234", "the module said (redacted)" },
 		{ "reading pin-source=/tmp/x failed", "reading (redacted)" },
+		/* THE EARLIEST MARKER, not the first one looked for. Searching for
+		 * "pkcs11:" first cut here and kept the PIN that came before it. */
+		{ "pin-value=1234 while opening pkcs11:token=Foo", "(redacted)" },
+		{ "loading pin-value=1234 from pkcs11:token=Foo", "loading (redacted)" },
+		{ "at pin-source=/tmp/x for pkcs11:token=Foo", "at (redacted)" },
 		{ "CKR_PIN_INCORRECT", "CKR_PIN_INCORRECT" },
 		{ NULL, "(no message)" },
 	};
@@ -188,12 +193,38 @@ static void test_display_text_falls_back(void)
 	g_assert_null(strchr(flattened, '\n'));
 }
 
+/* Library error text is external text: it reaches a journal line and a D-Bus
+ * error_message, so it is capped and its control characters are escaped like
+ * every other field. A module that puts a newline in a message must not be able
+ * to forge a second journal entry. */
+static void test_error_text_is_capped_and_escaped(void)
+{
+	g_autofree char* forged = certificate_redact_error_text("module said\nMESSAGE: forged");
+	g_autofree char* long_input = g_strnfill(1000, 'x');
+	g_autofree char* capped = certificate_redact_error_text(long_input);
+	g_autofree char* both = NULL;
+	g_autofree char* prefix = g_strnfill(1000, 'y');
+	g_autofree char* with_uri = g_strconcat(prefix, " pkcs11:token=Foo;pin-value=1234", NULL);
+
+	g_assert_null(strchr(forged, '\n'));
+	g_assert_nonnull(strstr(forged, "\\x0a"));
+
+	/* The field cap plus its ellipsis, and nothing near the input's length. */
+	g_assert_cmpuint(strlen(capped), <=, 131);
+
+	both = certificate_redact_error_text(with_uri);
+	g_assert_cmpuint(strlen(both), <=, 141);
+	g_assert_null(strstr(both, "pin-value"));
+	g_assert_nonnull(strstr(both, "(redacted)"));
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
 
 	g_test_add_func("/redact/error-text-truncated", test_error_text_is_truncated_before_a_uri);
 	g_test_add_func("/redact/no-pin-attribute-survives", test_no_pin_attribute_survives);
+	g_test_add_func("/redact/error-text-capped", test_error_text_is_capped_and_escaped);
 	g_test_add_func("/redact/serials", test_serials_are_reduced_to_four_characters);
 	g_test_add_func("/redact/untrusted-text-flattened", test_untrusted_text_is_flattened);
 	g_test_add_func("/redact/untrusted-text-capped", test_untrusted_text_is_capped);

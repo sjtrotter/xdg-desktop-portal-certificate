@@ -11,6 +11,8 @@
  */
 
 #include <glib.h>
+#include <gnutls/x509.h>
+#include <string.h>
 
 #include "fixture-util.h"
 #include "module/constants.h"
@@ -496,6 +498,192 @@ static void test_portal_module_is_refused(void)
 	g_assert_error(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED);
 }
 
+/* Where the extension's value begins, given the DER of its OID. Aborts if the
+ * shape is not the one the fixtures have: a short-form OCTET STRING, with or
+ * without the critical BOOLEAN in front of it. */
+static gsize extension_value_offset(const GByteArray* der, const guint8* oid, gsize oid_length)
+{
+	for (gsize i = 0; i + oid_length + 4 < der->len; i++)
+	{
+		gsize at = i + oid_length;
+
+		if (memcmp(der->data + i, oid, oid_length) != 0)
+			continue;
+
+		if (der->data[at] == 0x01) /* critical BOOLEAN */
+			at += 3;
+
+		g_assert_cmpuint(der->data[at], ==, 0x04);      /* extnValue */
+		g_assert_cmpuint(der->data[at + 1], <, 0x80);   /* short form length */
+		return at + 2;
+	}
+
+	g_assert_not_reached();
+}
+
+/* The fixture's own bytes with one extension's value made undecodable. certtool
+ * will not issue such a certificate; a card can hold one, and so can anything
+ * that hands this backend a DER. */
+static GByteArray* der_with_broken_extension(const GByteArray* der, const guint8* oid,
+                                             gsize oid_length)
+{
+	GByteArray* copy = g_byte_array_sized_new(der->len);
+	gsize at;
+
+	g_byte_array_append(copy, der->data, der->len);
+	at = extension_value_offset(copy, oid, oid_length);
+
+	/* The wrong tag where the value's own SEQUENCE or BIT STRING belongs. */
+	copy->data[at] = 0x2a;
+	return copy;
+}
+
+/* THE FOUR STATES OF AN EXTENSION, and the one that used to be read as another.
+ * A decode error -- a bad tag, an OID longer than the buffer -- yielded NULL,
+ * which tokens/filter.c reads as "no extension, unrestricted": a certificate
+ * whose EKU could not be read became a certificate good for every purpose. It
+ * is now excluded at discovery instead. */
+static void test_undecodable_extension_is_not_unrestricted(void)
+{
+	static const guint8 eku_oid[] = { 0x06, 0x03, 0x55, 0x1d, 0x25 };
+	static const guint8 key_usage_oid[] = { 0x06, 0x03, 0x55, 0x1d, 0x0f };
+	const guint8* oids[] = { eku_oid, key_usage_oid };
+	g_autoptr(CertificateCandidate) absent =
+	    certificate_test_candidate("no-eku-rsa.pem", TRUE, FALSE);
+	g_autoptr(CertificateCandidate) matching =
+	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
+	g_autoptr(CertificateCandidate) other =
+	    certificate_test_candidate("server-auth-only.pem", TRUE, FALSE);
+
+	/* Absent: X.509 says the key is unrestricted. */
+	g_assert_null(absent->eku_oids);
+	g_assert_true(certificate_purpose_matches(absent, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+	                                          CERTIFICATE_OPERATION_SIGN));
+
+	/* Present and matching, and present and naming something else. */
+	g_assert_nonnull(matching->eku_oids);
+	g_assert_true(certificate_purpose_matches(matching, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+	                                          CERTIFICATE_OPERATION_SIGN));
+	g_assert_nonnull(other->eku_oids);
+	g_assert_false(certificate_purpose_matches(other, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+	                                           CERTIFICATE_OPERATION_SIGN));
+
+	/* Malformed: not a candidate at all, for either extension. */
+	for (gsize i = 0; i < G_N_ELEMENTS(oids); i++)
+	{
+		g_autoptr(GByteArray) broken =
+		    der_with_broken_extension(other->der, oids[i], sizeof(eku_oid));
+		g_autoptr(GError) error = NULL;
+		CertificateCandidate* candidate =
+		    certificate_candidate_new_from_der(broken->data, broken->len, &error);
+
+		g_assert_null(candidate);
+		g_assert_error(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED);
+	}
+}
+
+/* The fixture re-issued with a different extended key usage value. The
+ * signature no longer matches the TBS after this, which nothing here checks and
+ * a card would not check either: what is under test is the decoder. */
+static GByteArray* der_with_eku_value(const GByteArray* der, const guint8* value, gsize length)
+{
+	gnutls_x509_crt_t crt = NULL;
+	gnutls_datum_t input = { der->data, der->len };
+	gnutls_datum_t out = { NULL, 0 };
+	GByteArray* copy = NULL;
+
+	g_assert_cmpint(gnutls_x509_crt_init(&crt), ==, 0);
+	g_assert_cmpint(gnutls_x509_crt_import(crt, &input, GNUTLS_X509_FMT_DER), ==, 0);
+	g_assert_cmpint(gnutls_x509_crt_set_extension_by_oid(crt, "2.5.29.37", value, length, 0), ==,
+	                0);
+	g_assert_cmpint(gnutls_x509_crt_export2(crt, GNUTLS_X509_FMT_DER, &out), ==, 0);
+
+	copy = g_byte_array_sized_new(out.size);
+	g_byte_array_append(copy, out.data, out.size);
+
+	gnutls_free(out.data);
+	gnutls_x509_crt_deinit(crt);
+	return copy;
+}
+
+/* AN EMPTY EKU IS NOT AN ABSENT ONE. GnuTLS answers
+ * GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE at index 0 for both a certificate with
+ * no extension and one holding an empty SEQUENCE, and reading the second as the
+ * first made a certificate that names NO purpose good for EVERY purpose. */
+static void test_empty_eku_is_restricted_to_nothing(void)
+{
+	static const guint8 empty_sequence[] = { 0x30, 0x00 };
+	g_autoptr(CertificateCandidate) source =
+	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
+	g_autoptr(GByteArray) der =
+	    der_with_eku_value(source->der, empty_sequence, sizeof(empty_sequence));
+	g_autoptr(GError) error = NULL;
+	g_autoptr(CertificateCandidate) candidate =
+	    certificate_candidate_new_from_der(der->data, der->len, &error);
+
+	g_assert_no_error(error);
+	g_assert_nonnull(candidate);
+	candidate->can_sign = TRUE;
+
+	/* Present, and naming nothing: an empty strv, not NULL. */
+	g_assert_nonnull(candidate->eku_oids);
+	g_assert_null(candidate->eku_oids[0]);
+
+	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+	                                           CERTIFICATE_OPERATION_SIGN));
+	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SIGNING,
+	                                           CERTIFICATE_OPERATION_SIGN));
+	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_EMAIL,
+	                                           CERTIFICATE_OPERATION_SIGN |
+	                                               CERTIFICATE_OPERATION_DECRYPT));
+
+	/* SSH is exempt by construction, as it is for every other restricted
+	 * certificate here: it uses the raw key and never reads the extensions. */
+	g_assert_true(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SSH,
+	                                          CERTIFICATE_OPERATION_SIGN));
+}
+
+/* AN OID TOO LONG FOR THE 128-BYTE BUFFER must not read as an absent extension
+ * either. GnuTLS may refuse it or hand back a truncated string; what must not
+ * happen is "unrestricted". */
+static void test_oversized_eku_oid_is_not_unrestricted(void)
+{
+	guint8 value[132];
+	g_autoptr(CertificateCandidate) source =
+	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
+	g_autoptr(GByteArray) der = NULL;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(CertificateCandidate) candidate = NULL;
+
+	/* SEQUENCE (129 bytes) { OID (127 bytes: 1.3 then 126 arcs of 1) }, whose
+	 * dotted form is 255 characters. */
+	value[0] = 0x30;
+	value[1] = 0x81;
+	value[2] = 129;
+	value[3] = 0x06;
+	value[4] = 127;
+	value[5] = 0x2b;
+	for (gsize i = 6; i < sizeof(value); i++)
+		value[i] = 0x01;
+
+	der = der_with_eku_value(source->der, value, sizeof(value));
+	candidate = certificate_candidate_new_from_der(der->data, der->len, &error);
+
+	/* Refused outright is a correct answer. */
+	if (candidate == NULL)
+	{
+		g_assert_error(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED);
+		return;
+	}
+
+	candidate->can_sign = TRUE;
+	g_assert_nonnull(candidate->eku_oids);
+	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+	                                           CERTIFICATE_OPERATION_SIGN));
+	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SIGNING,
+	                                           CERTIFICATE_OPERATION_SIGN));
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -522,6 +710,9 @@ int main(int argc, char** argv)
 	g_test_add_func("/filter/parse-rejects-malformed", test_filter_parse_rejects_malformed);
 	g_test_add_func("/filter/parse-accepts-wellformed", test_filter_parse_accepts_wellformed);
 	g_test_add_func("/filter/parse-absent", test_filter_parse_absent);
+	g_test_add_func("/filter/undecodable-extension", test_undecodable_extension_is_not_unrestricted);
+	g_test_add_func("/filter/empty-eku", test_empty_eku_is_restricted_to_nothing);
+	g_test_add_func("/filter/oversized-eku-oid", test_oversized_eku_oid_is_not_unrestricted);
 	g_test_add_func("/discovery/portal-module-is-refused", test_portal_module_is_refused);
 
 	return g_test_run();

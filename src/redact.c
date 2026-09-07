@@ -106,29 +106,42 @@ void certificate_log_debug(const char* reason_code, const char* detail_code)
 
 char* certificate_redact_error_text(const char* text)
 {
-	const char* uri = NULL;
+	static const char* const markers[] = { "pkcs11:", "pin-value", "pin-source" };
+	const char* cut = NULL;
+	g_autofree char* prefix = NULL;
+	g_autofree char* safe = NULL;
 
 	if (text == NULL)
 		return g_strdup("(no message)");
 
 	/* p11-kit, OpenSC and GnuTLS all put PKCS#11 URIs into error strings, and a
-	 * URI may carry a pin-value attribute. Truncating at the first "pkcs11:" is
-	 * cheap and correct; passing library error text through unmodified is how a
-	 * PIN reaches a journal. Both cases are covered: the scheme in a URI, and
-	 * the bare attribute name in case some library prints it on its own. */
-	uri = strstr(text, "pkcs11:");
-	if (uri == NULL)
-		uri = strstr(text, "pin-value");
-	if (uri == NULL)
-		uri = strstr(text, "pin-source");
+	 * URI may carry a pin-value attribute. Truncating is cheap and correct;
+	 * passing library error text through unmodified is how a PIN reaches a
+	 * journal. Both cases are covered: the scheme in a URI, and the bare
+	 * attribute name in case some library prints it on its own.
+	 *
+	 * THE EARLIEST OF THE THREE, not the first one looked for: "pin-value=1234
+	 * for pkcs11:..." searched for the scheme first and kept the PIN. */
+	for (gsize i = 0; i < G_N_ELEMENTS(markers); i++)
+	{
+		const char* hit = strstr(text, markers[i]);
 
-	if (uri == NULL)
-		return g_strdup(text);
+		if (hit != NULL && (cut == NULL || hit < cut))
+			cut = hit;
+	}
 
-	if (uri == text)
+	/* Library text is external text: it is capped and its control characters
+	 * are escaped like every other field, because this string reaches a log
+	 * line and a D-Bus error_message. */
+	if (cut == NULL)
+		return field(text);
+
+	if (cut == text)
 		return g_strdup("(redacted)");
 
-	return g_strdup_printf("%.*s(redacted)", (int) (uri - text), text);
+	prefix = g_strndup(text, (gsize) (cut - text));
+	safe = field(prefix);
+	return g_strdup_printf("%s(redacted)", safe);
 }
 
 char* certificate_redact_serial(const char* serial)
