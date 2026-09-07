@@ -4,20 +4,21 @@ An xdg-desktop-portal **backend** for the experimental
 `org.freedesktop.impl.portal.experimental.Certificate` interface, plus a **client-side PKCS#11
 module** for applications that cannot call D-Bus. The backend discovers PKCS#11 tokens, draws the
 certificate chooser and the PIN prompt, and performs private-key operations when
-xdg-desktop-portal asks it to. The PIN never crosses D-Bus, the private key never leaves the card,
-and the application never holds a PKCS#11 handle. The public portal interface applications call is
+xdg-desktop-portal asks it to. The PIN never reaches the application, the private key never leaves
+the card, and the application never holds a handle on the hardware token. The public portal interface applications call is
 defined by a branch of xdg-desktop-portal itself, not by this repository.
 
 ## Status
 
-Experimental. Nothing here has been proposed upstream: no issue, no pull request, no maintainer
-contact about it.
+Experimental. Nothing here has been proposed upstream: no issue and no pull request. The author
+posted two comments announcing the work on 2026-09-05, on flatpak/xdg-desktop-portal#662 and
+FreeRDP/FreeRDP#13328.
 
 | | State | |
 |---|---|---|
 | Token discovery, X.509 parsing, purpose rules, `certificate_filter` | Implemented | unit-tested against fixture certificates; `--list-tokens` prints what it found |
 | Chooser and PIN prompt | Implemented | own GTK window, or the desktop shell's system prompter with gcr-4 (`--pin-prompt=auto\|gtk\|system`) |
-| Brokered `Sign`: `RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA` | Implemented | verified against SoftHSM and against a PIV card |
+| Brokered `Sign`: `RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA` | Implemented | all three verified against SoftHSM; `RSA_PKCS1_V1_5` and `RSA_PSS` also against a PIV card |
 | Token insertion and removal watching, `SessionInvalidated` | Implemented | polled and debounced; never exercised with a card physically leaving a reader |
 | Client-side PKCS#11 module | Implemented | one token, one credential per process; driven by GnuTLS, NSS and WebKitGTK |
 | Test suites | Implemented | 13 meson suites with gcr-4, 12 without; an ASan/UBSan build and a DER corpus replay |
@@ -125,7 +126,7 @@ key), `requested_lifetime` (clamped), `interaction_mode`, `reason`.
 `org.freedesktop.impl.portal.desktop.certificate`. Described in
 [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md), declared in
 [`data/org.freedesktop.impl.portal.experimental.Certificate.xml`](data/org.freedesktop.impl.portal.experimental.Certificate.xml),
-which is a verbatim copy of the branch's file and must track it. **Applications do not call this.**
+which is a copy of the branch's file with a provenance comment added, and must track it. **Applications do not call this.**
 
 | | |
 |---|---|
@@ -160,13 +161,14 @@ case nothing else is loaded.
 The end-to-end stack needs the frontend branch:
 
 ```console
-$ XDP_BUILD=/path/to/xdg-desktop-portal/build tools/dev-stack.sh -- --expect-no-certificate
+$ XDP_BUILD=/path/to/xdg-desktop-portal/build tools/dev-stack.sh --softhsm
 ```
 
 starts `xdg-permission-store`, this backend and a development frontend inside `dbus-run-session`
 with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`, then runs
 [`tools/certificate-e2e.py`](tools/certificate-e2e.py) against the public interface and verifies
-the signature it gets back. `--live` does the same on the real session bus, which is what a run
+the signature it gets back. With no token at all, `-- --expect-no-certificate` asserts the clean
+refusal instead. `--live` does the same on the real session bus, which is what a run
 with a real card needs; `--keep` leaves the stack up; `--softhsm` points the backend at a fixture
 token from [`tools/softhsm-fixture.sh`](tools/softhsm-fixture.sh).
 
@@ -200,8 +202,8 @@ org.freedesktop.impl.portal.experimental.Certificate=certificate
 ## Known problems and open questions
 
 - **One WebKitGTK handshake raises two choosers.** The UI process builds the `GTlsCertificate` and
-  the network process uses the key, so each acquires its own grant. Firefox adds its own picker on
-  top, for three dialogs. One chooser was only ever achieved on the archived `+delegation` branch,
+  the network process uses the key, so each acquires its own grant. With Firefox the user sees the
+  portal chooser, Firefox's own certificate picker and the PIN prompt: three dialogs. One chooser was only ever achieved on the archived `+delegation` branch,
   and process-tree delegation cannot work for a Flatpak caller, whose app-info pidfd is the sandbox
   instance's rather than the calling process's. Not fixable inside the module.
 - **A search that names no object does not raise a chooser**, so a class-only enumeration, which
@@ -211,14 +213,14 @@ org.freedesktop.impl.portal.experimental.Certificate=certificate
   answering them with a window put a chooser in front of a user who had only opened a page.
 - **Decryption is written and unreachable.** `RSA_OAEP` code exists in the broker and in the
   module; neither interface has a `Decrypt` method and `GetCapabilities` does not advertise one.
-  It is either removed or proposed; it should not stay as it is.
+  It should be removed, or added to a future interface proposal; it should not stay as it is.
 - **`chain_status` is always `leaf_only`.** No chain is built.
 - **The module offers no slot when there is no portal or the experimental gate is off**, and
   `C_Initialize` still succeeds. It must not be enabled inside xdg-desktop-portal or inside this
   backend; it refuses to run there three ways, and neither is on the shipped allowlist.
 - **`--pin-prompt=system` moves where the PIN is typed, not whether this process holds one.**
   `C_Login` takes a PIN, so it still arrives here, into the same locked, wiped, non-dumpable page.
-- **Nothing has been reviewed by anyone else**, and there is no second card stack, no second
+- **No independent security review has been done**, and there is no second card stack, no second
   maintainer, and no packaging.
 
 ## Documents
@@ -243,8 +245,8 @@ LGPL-2.1-or-later, matching `xdg-desktop-portal`, `xdg-desktop-portal-gtk` and
 `xdg-desktop-portal-gnome`, so code can move into any of them without a relicensing step; the
 reasoning is in [0004](docs/decisions/0004-license.md). The one piece of derived code is
 `src/ui/external-window.c`, adapted from libgxdp (also LGPL-2.1-or-later) with its attribution
-kept. No code was copied from Remmina's RDP plugin. Consumers only speak D-Bus and PKCS#11, so the
-licence places no constraint on them.
+kept. No code was copied from Remmina's RDP plugin. Consumers that only speak D-Bus are unconstrained by the licence;
+those that load the PKCS#11 module load an LGPL library.
 
 ## AI assistance
 
