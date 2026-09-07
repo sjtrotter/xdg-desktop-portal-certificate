@@ -235,12 +235,16 @@ static void invalidate_foreign_sessions(CertificateImpl* impl, const char* owner
 		/* Windows first: the transaction answers with owner_gone, and only then
 		 * does the session it names go away. */
 		cancel_transactions(impl, session, "owner_gone");
-		/* owner_gone, not silence. The connection that created this grant no
-		 * longer owns the portal name, and whoever owns it now is listening:
-		 * a successor frontend that is told a session it does not know has
-		 * ended learns nothing it can misuse, and one that IS somehow still
-		 * tracking it learns the truth. */
-		certificate_impl_session_invalidate(session, "owner_gone");
+		/* SILENCE, not owner_gone: that word is not in the impl XML's
+		 * SessionInvalidated vocabulary (token_removed, policy, backend_gone,
+		 * error), and the successor holding the name has no record of a
+		 * session it never created -- test_replaced_frontend_is_refused
+		 * gets no_such_session back from it. A signal naming a session the
+		 * frontend does not know is dropped per the interface anyway, so
+		 * sending one would only be a word invented for a listener that
+		 * cannot act on it. Closing without emitting still releases the
+		 * card and drops the grant from this table. */
+		certificate_impl_session_close(session);
 		certificate_impl_session_unexport(session);
 		g_hash_table_remove(impl->sessions, session->id);
 	}
@@ -1481,10 +1485,12 @@ void certificate_impl_shutdown(CertificateImpl* impl)
 		return;
 
 	/* Tell the frontend the truth on the way out rather than letting every
-	 * caller discover it at its next Sign. */
+	 * caller discover it at its next Sign. backend_gone is the impl XML's own
+	 * word for exactly this, so there is no need for a spelling of this
+	 * backend's invention. */
 	g_hash_table_iter_init(&iter, impl->sessions);
 	while (g_hash_table_iter_next(&iter, NULL, &value))
-		certificate_impl_session_invalidate(CERTIFICATE_IMPL_SESSION(value), "service_shutdown");
+		certificate_impl_session_invalidate(CERTIFICATE_IMPL_SESSION(value), "backend_gone");
 
 	close_and_forget_all(impl, NULL);
 

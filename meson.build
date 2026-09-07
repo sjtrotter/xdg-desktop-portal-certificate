@@ -13,7 +13,8 @@
 # There is no frontend here. The portal frontend -- app id derivation, option
 # validation, policy, the grant registry, the permission store, Request and
 # Session lifecycle, backend selection -- is a branch of xdg-desktop-portal
-# itself: experimental/certificate-webauthentication, commits 3f46e3c..661e441.
+# itself: experimental/certificate-webauthentication, 10 commits on upstream
+# 86bd3e2; a4c1f62 defines the interface.
 # See docs/decisions/0010-backend-only-frontend-lives-upstream.md and
 # docs/UPSTREAMING.md.
 #
@@ -176,7 +177,7 @@ summary(
 summary(
   {
     'chooser and PIN prompt': true,
-    'brokered Sign / Decrypt': true,
+    'brokered Sign': true,
     'PKCS#11 compatibility facade': false,
     'client-side PKCS#11 module': true,
     'frontend branch merged upstream': false,

@@ -84,7 +84,7 @@ makes it safe.
   agree on wording and behaviour, or the consistency argument collapses.
 - **Accessibility is an acceptance criterion**, not polish: these controls carry the security
   decision, and a dialog a screen-reader user cannot navigate cannot carry informed consent.
-- **Users will see two windows** in the `webauth-service` case: the web view's security chrome and
+- **Users will see two windows** in the `xdg-desktop-portal-webauth` case: the web view's security chrome and
   this service's chooser. Two independent statements of the same true thing is acceptable. Two
   windows asking for a PIN would not be.
 - **We cannot promise forgetting.** Some tokens and middleware cache authentication internally.

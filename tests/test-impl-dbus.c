@@ -565,7 +565,9 @@ static void on_session_invalidated_signal(GDBusConnection* connection, const cha
  * forwards it verbatim into GrantInvalidated, so an invented value reaches
  * applications with a documented list that says it cannot happen. Shutting the
  * backend down is the one reason a test can produce without hardware, and the
- * spelling used to be "backend_shutdown", which is in neither vocabulary. */
+ * impl XML's own word for it is "backend_gone" -- this used to be spelled
+ * "service_shutdown", and before that "backend_shutdown", neither of which is
+ * in the vocabulary. */
 static void test_shutdown_reason_is_in_the_vocabulary(Fixture* fixture, gconstpointer user_data)
 {
 	InvalidationWatch watch = { NULL, 0 };
@@ -585,7 +587,7 @@ static void test_shutdown_reason_is_in_the_vocabulary(Fixture* fixture, gconstpo
 
 	g_dbus_connection_signal_unsubscribe(fixture->frontend, id);
 
-	g_assert_cmpstr(watch.reason, ==, "service_shutdown");
+	g_assert_cmpstr(watch.reason, ==, "backend_gone");
 	g_free(watch.reason);
 }
 

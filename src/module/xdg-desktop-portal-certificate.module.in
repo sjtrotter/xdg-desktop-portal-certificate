@@ -23,8 +23,9 @@
 #                               handshake and resolves the URI a second time
 #
 # For Firefox or Thunderbird, uncomment the line below. NSS reaches PKCS#11 its
-# own way and this path has not been tested; expect a second, browser-owned
-# certificate dialog on top of the portal's chooser.
+# own way; tested with certutil/tstclnt and with Firefox, 2026-09-06. Firefox
+# needs PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1 set in its environment. Expect a
+# second, browser-owned certificate dialog on top of the portal's chooser.
 #
 #     enable-in: firefox, thunderbird
 #

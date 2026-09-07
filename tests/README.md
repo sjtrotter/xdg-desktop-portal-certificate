@@ -11,9 +11,15 @@
 | `broker-device` | `C_OpenSession`, `C_Login`, `C_Sign` and a verification of the signature against the certificate the token returned, for RSA PKCS#1 v1.5, RSA-PSS and ECDSA; an **RSA-OAEP round trip** against a ciphertext `openssl pkeyutl` produced; a ciphertext of the wrong length refused before the card is asked; the wrong PIN reported as `PIN_INCORRECT`; discovery without logging in | a SoftHSM fixture, or it **skips itself**; `openssl(1)` for the OAEP half |
 | `broker-decrypt` | the two properties that make `Decrypt` safe to offer: two different internal failures reported to the caller in identical words, and the per-grant decryption budget spent by attempts rather than successes | a SoftHSM fixture, or it **skips itself** |
 | `broker-regrant` | a second `AcquireCredential` on a live session, all the way through the broker: the operation between the two grants is refused rather than signed with the old grant's key, the login does not carry over, and the signature afterwards **verifies against the new certificate** | a SoftHSM fixture with both an RSA and an EC key, or it **skips itself** |
-| `impl-dbus` | the D-Bus boundary on a private `GTestDBus`: a stranger calling every method **including `Request.Close()` and `Session.Close()`**, a session used with the wrong `app_id`, an identity level trying to rise, a session path reused after close, sixteen malformed option sets, `Decrypt` taking `RSA_OAEP` only, the token-presence vardict carrying exactly two keys, the shutdown reason being one the interface names, the D-Bus type of every key in the results vardict, a frontend **replaced while its call is already in the backend's queue** (the race is reproduced, not waited for), and the frontend vanishing while a call is in flight | nothing |
+| `impl-dbus` | the D-Bus boundary on a private `GTestDBus`: a stranger calling every method **including `Request.Close()` and `Session.Close()`**, a session used with the wrong `app_id`, an identity level trying to rise, a session path reused after close, sixteen malformed option sets, that `Decrypt` is not advertised on the interface, the token-presence vardict carrying exactly two keys, the shutdown reason being one the interface names, the D-Bus type of every key in the results vardict, a frontend **replaced while its call is already in the backend's queue** (the race is reproduced, not waited for), and the frontend vanishing while a call is in flight | nothing |
 | `pin-system` | the OTHER PIN prompt: the whole prompt state machine driven against gcr's own system prompter, stood up on a private `GTestDBus` bus by `pin-prompter.c` so that nothing reaches the operator's shell. `--pin-prompt=auto` resolving to `system` because the name is on the bus; the application, purpose, token and reader reaching the prompt; **no "remember" choice, ever**; a wrong PIN coming back as a warning on the prompt that is already up rather than a second prompt; the three-attempt cap; cancel from the prompter and `Request.Close()` from outside; the `FINAL_TRY` second confirmation **and that refusing it leaves the card unasked**; the token's flags in the warning **with no number in it**; the login timeout and the abandon that follows it; a protected-authentication-path token asking for nothing at all. It is the only place any of those rules is checked without a person at a keyboard | nothing; skipped entirely in a build without gcr-4 |
 | `cancellation` | cancelling while `C_Login` is in flight — the answer must wait for the worker, arrive once, and find the PIN buffer intact — cancelling before the window is up, cancelling **while the device call is in progress**, a cancelled login that succeeded anyway being logged out again (and a normal one not being), and one of two callers behind a shared PIN window cancelling **on its own** while the window stays up for the other. **Run it under ASan**; see `../docs/TESTING.md` | a display for four of the six, a SoftHSM fixture for two |
+| `module` | the client-side PKCS#11 module's rules with no bus at all: the DigestInfo parser, the definite-length DER reader, the mechanism map, the three objects a grant becomes, the attribute-sensitivity and size-query protocols, and that the module follows the portal's advertised mechanism list rather than a hardcoded one | nothing |
+| `fuzz-der` | a corpus replay of the DER reader and DigestInfo parser over `fixtures/fuzz-corpus`, always built so a sanitized run covers it on every machine | nothing |
+| `tools-lib` | the two `tools/lib.sh` helpers that decide something dangerous: the effective per-interface `portals.conf` resolution, and the scratch-directory checks that refuse a forged marker, a symlink, a wrong mode, or a directory this project did not make | nothing |
+
+Decryption code exists in the broker (`broker-decrypt`) and in the client module, but `Decrypt` is
+not on either interface and this code is unreachable.
 
 and outside `meson test`, because they need a bus and a display:
 
@@ -42,10 +48,10 @@ marked "not written" are the ones that matter next.
 
 **Half of tier 1 already exists, in the frontend's repository.** The xdg-desktop-portal branch
 `experimental/certificate-webauthentication` ships `tests/templates/certificate.py` (a
-python-dbusmock backend) and `tests/test_certificate.py` (40 passing cases, each run once as
-`AppInfoHost` and once as `AppInfoFlatpak`), covering the happy path, cancellation from both
-directions, five invalid-option cases, backend over-claiming being clamped, and the experimental
-gate. Everything below that says "the frontend against a fake backend" is that suite. What is left
+python-dbusmock backend) and `tests/test_certificate.py` (26 test functions, 49 parametrised
+cases, each run once as `AppInfoHost` and once as `AppInfoFlatpak` for 98 runs), covering the
+happy path, cancellation from both directions, 11 + 10 invalid-option cases, backend
+over-claiming being clamped, and the experimental gate. Everything below that says "the frontend against a fake backend" is that suite. What is left
 for this repository is the other direction — **this backend against a fake frontend** — plus
 everything that needs a card.
 
@@ -63,8 +69,8 @@ argument lives in it.
 - **The frontend against a fake backend.** *Upstream's, and largely written* — see above. It now
   covers the `SessionInvalidated` → `GrantInvalidated` conversion, including that the signal
   reaches the session's owner and a second connection watching the same signal does not.
-- **This backend against a fake frontend.** *Still not written as a suite*, and it is now the most
-  valuable missing piece: that a sender which does not own `org.freedesktop.portal.Desktop` is
+- **This backend against a fake frontend.** *Written, as `impl-dbus` on a private `GTestDBus`*:
+  that a sender which does not own `org.freedesktop.portal.Desktop` is
   refused; that the `app_id` and `app_identity_level` the backend was given are the ones it
   renders, with no display name invented from anything the caller supplied; that the
   caller-supplied `reason` never reaches the trusted identity position. The **sanitising** half of
@@ -116,8 +122,9 @@ Not CI. These need real cards, real readers, and a card the author is willing to
 publication gates in [../docs/ROADMAP.md](../docs/ROADMAP.md) and the spikes in
 [../docs/SPIKES.md](../docs/SPIKES.md):
 
-- one real GnuTLS mutual-TLS handshake through brokered `Sign`;
-- one real WebKitGTK client-certificate handshake (joint with `xdg-desktop-portal-webauth`);
+- one real GnuTLS mutual-TLS handshake through brokered `Sign` — **done**, 2026-09-04;
+- one real WebKitGTK client-certificate handshake (joint with `xdg-desktop-portal-webauth`) —
+  **done**, 2026-09-04/05, including a live Entra ID sign-in;
 - wrong PIN, and the final retry, with the count only shown when the token reports it;
 - a protected-authentication-path reader, with no PIN field drawn;
 - card removal during signing, between `C_SignInit` and `C_Sign`, and during the PIN prompt;
@@ -127,7 +134,7 @@ publication gates in [../docs/ROADMAP.md](../docs/ROADMAP.md) and the spikes in
 
 Tier 1's fake backend and fake frontend are the two most valuable pieces of test infrastructure in
 the project. The fake backend exists, upstream, in `tests/templates/certificate.py`; the fake
-frontend still does not exist and is the next thing to write here. Everything about the split that could be wrong
+frontend exists here, as `impl-dbus` on a private `GTestDBus`. Everything about the split that could be wrong
 is cheap to test with them and expensive to discover with a card in a reader.
 
 **A test that has only been run against a software token has not been run.** The Remmina work this

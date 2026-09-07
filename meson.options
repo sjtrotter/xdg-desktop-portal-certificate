@@ -19,5 +19,5 @@ option(
   'p11_module_configs',
   type: 'string',
   value: '',
-  description: 'Where to install portal-certificate.module. Empty means ${datadir}/p11-kit/modules.',
+  description: 'Where to install xdg-desktop-portal-certificate.module. Empty means ${datadir}/p11-kit/modules.',
 )

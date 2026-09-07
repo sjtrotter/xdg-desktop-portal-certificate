@@ -583,7 +583,7 @@ int main(int argc, char** argv)
 	}
 
 	/* A display is not required to START: GetCapabilities has to answer on a
-	 * headless machine, and the honest answer there is has_display = false plus
+	 * headless machine, and the answer there is has_display = false plus
 	 * a clean refusal of anything that would need a window. gtk_init() would
 	 * abort instead, so the check is the _check() form. */
 	if (gtk_init_check())

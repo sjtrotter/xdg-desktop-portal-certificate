@@ -100,7 +100,8 @@ changed names here.
 - [0003](0003-own-namespace-before-freedesktop.md)'s prediction is resolved, not superseded: its
   actual subject — that the *namespace* stays project-controlled regardless of what the `<Name>`
   slot says — is unchanged by this rename.
-- The sibling `entra-token-helper` repository follows this rename in lockstep in its own
+- The sibling `xdg-desktop-portal-webauth` repository (renamed from `entra-token-helper` on
+  2026-09-06) follows this rename in lockstep in its own
   cross-repository references — `client_cert_portal.h`, its own ADR 0007 and ADR 0008, its README —
   as a parallel change in that repository, not something this ADR needs to detail further.
 - **`Certificate` is still an incubation name.** [0003](0003-own-namespace-before-freedesktop.md)'s

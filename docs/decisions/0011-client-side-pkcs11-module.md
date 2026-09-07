@@ -355,9 +355,8 @@ unaffected by what is shipped; `portal-stack.sh --live` writes the real per-user
   `certutil -L` listing it as a user certificate, and `tstclnt` completing a TLS 1.3 client-auth
   handshake with the card's common name in the server's log — headless, and again under
   AddressSanitizer. It cost two module fixes, both above: `CKA_TOKEN` and `CKF_LOGIN_REQUIRED`.
-  **Firefox itself is still unrun** — see [TESTING.md](../TESTING.md) §2.6 for what it should now
-  do and what remains unknown about it — and the OpenSSL 3 provider is untouched, so that much of
-  S1 is still open.
+  **Firefox itself was confirmed on 2026-09-06** — see [TESTING.md](../TESTING.md) §2.6 — and the
+  OpenSSL 3 provider is still untouched, so that much of S1 is still open.
 - **The token's names are a contract with another repository.**
   `src/module/portal-token.h` is the same file as `xdg-desktop-portal-webauth`'s
   `backend/src/tls/portal-token.h` — **byte for byte, licence line included**, since that project

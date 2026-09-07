@@ -1,8 +1,8 @@
 # Upstreaming: the frontend is already upstream-shaped, and what is left
 
 Status: EXPERIMENTAL. **Nothing has been proposed to anyone.** No issue has been opened, no
-pull request exists, no maintainer has been contacted, and the branch this document is
-about is local-only — nothing was forked and nothing was pushed.
+pull request exists, no maintainer has been contacted. The branch this document is
+about is pushed to the author's fork.
 
 What changed since the previous version of this document is that "the frontend, if
 accepted, would move into xdg-desktop-portal" stopped being a hypothesis with a mapping
@@ -56,7 +56,7 @@ backend follows the interface, not the archive.
 
 Test results: `meson test --suite integration --suite unit` green except the pre-existing
 `usb` failure (`umockdev-run` is not installed here), `tests/test_certificate.py` 98
-passed, `tests/test_webauthentication.py` 69 passed, `gitlint --commits
+passed, `tests/test_webauthentication.py` 70 passed, `gitlint --commits
 upstream/main..HEAD` passes, `black --check` passes.
 
 ## Why `experimental` is not a claim of acceptance
@@ -143,7 +143,7 @@ The three "open items" the previous version of this document listed have all mov
 
 1. **Open the "new portals" discussion upstream first.** xdg-desktop-portal directs
    requests for new portals to an issue in `flatpak/xdg-desktop-portal`, with the question
-   "what protected host resource is being mediated?" answered first. The honest answer
+   "what protected host resource is being mediated?" answered first. The answer
    here: **use of a hardware-backed private key, and the trusted consent and PIN UI around
    it**, replacing a blanket `--socket=pcsc` grant with a scoped, revocable, attributable
    one. No such issue has been opened. What exists is two comments the author posted on
@@ -162,7 +162,7 @@ The three "open items" the previous version of this document listed have all mov
 3. ~~**Fix the commit trailer.**~~ **Done.** The branch's commits carried
    `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`, which
    `.gitlint.conf/co-authored-by-coding-agent.py` exists precisely to reject in favour of
-   `Assisted-by: AGENT_NAME:MODEL_VERSION`. All eighteen now carry
+   `Assisted-by: AGENT_NAME:MODEL_VERSION`. All ten now carry
    `Assisted-by: Claude:claude-fable-5-1`.
 4. **`OpenPkcs11Endpoint` as a follow-up**, with the facade rules from
    [SECURITY.md](SECURITY.md), a review of the fd hand-off, and something better than
@@ -175,9 +175,8 @@ The three "open items" the previous version of this document listed have all mov
    barely moved. The branch has now driven one PIV card in one reader, on 2026-09-04, through
    this repository's backend ([TESTING.md](TESTING.md) tiers 3.2–3.4; 3.1 needs no
    frontend) — one card, one reader,
-   and not a hardware claim. It has never been run against a **web engine**, and apart from that
-   one run the python-dbusmock templates are the only implementations that have ever answered
-   these interfaces.
+   and not a hardware claim. It has since been run against WebKitGTK (2026-09-04/05, including a
+   live Entra ID sign-in) and against Firefox (2026-09-06).
 
 ## Prior art and related discussion
 

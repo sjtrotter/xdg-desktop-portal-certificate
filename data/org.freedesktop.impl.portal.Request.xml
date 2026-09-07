@@ -7,7 +7,7 @@
       data/org.freedesktop.impl.portal.Request.xml
 
   in xdg-desktop-portal itself (branch experimental/certificate-webauthentication,
-  commit 703fb22; the file is unchanged from upstream main). It is the shared
+  the file is unchanged from upstream main 86bd3e2). It is the shared
   backend-side Request interface every portal backend exports, and it is
   reproduced here only because no released xdg-desktop-portal installs the impl
   interface XML where an out-of-tree backend can codegen from it. See

@@ -100,7 +100,7 @@ void certificate_impl_session_forget(CertificateImplSession* session);
 GVariant* certificate_impl_acquire_results(CertificateCandidate* candidate, gboolean may_sign);
 
 /** Shut down: close every token session, and emit SessionInvalidated with
- *  "service_shutdown" for each one so the frontend can tell its callers the
+ *  "backend_gone" for each one so the frontend can tell its callers the
  *  truth rather than letting them discover it at the next Sign. */
 void certificate_impl_shutdown(CertificateImpl* impl);
 

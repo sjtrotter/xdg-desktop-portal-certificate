@@ -99,7 +99,7 @@ one more reason [0007](0007-brokered-operations-are-the-core.md) makes brokered 
 - **A rename is expected**, not merely possible, and every consumer must be prepared for it. The
   version suffix means the change can be made without breaking a running system.
 - Early adopters get an unstable interface, clearly labelled — which is honest, and which is why
-  `webauth-service` keeps an internal adapter around its use of this one.
+  `xdg-desktop-portal-webauth` keeps an internal adapter around its use of this one.
 - The freedesktop conversation, when it happens, is about a design with an implementation and
   consumers behind it rather than a name.
 - The repository directory was called `smartcard-portal` at first; the GitHub repository was

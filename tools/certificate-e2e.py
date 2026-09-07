@@ -289,8 +289,7 @@ def create_session(portal):
     # The results carry the handle; the path computed above is only what the
     # session_handle_token predicts it will be, and it is compared rather than
     # substituted. The frontend used to answer with an "s" here and the two
-    # readings had to be reconciled; the fix is xdg-desktop-portal 77b37ab
-    # "certificate: Return session_handle as the object path it is typed as".
+    # readings had to be reconciled; the fix is folded into xdg-desktop-portal a4c1f62.
     handle = results.get("session_handle")
     if handle is None:
         die(EXIT_UNAVAILABLE, "CreateSession returned no session_handle")

@@ -98,7 +98,7 @@ implementation and a weaker per-operation story.
   token session, and **relayed** by the frontend, which checks the grant and the caller and keeps
   no copy.
 - **Build the signing API into the first security model.** Add the module bridge when a demonstrated
-  consumer requires it, which for phase 2 means `webauth-service` and only if
+  consumer requires it, which for phase 2 means `xdg-desktop-portal-webauth` and only if
   [SPIKES.md](../SPIKES.md) S3 passes.
 
 ## Consequences

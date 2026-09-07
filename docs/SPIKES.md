@@ -26,9 +26,10 @@ through `tstclnt`, clean under AddressSanitizer as well. It cost two module fixe
 [0011](decisions/0011-client-side-pkcs11-module.md): `CKA_TOKEN` had to stop counting as a
 distinguishing attribute, and the token had to stop claiming `CKF_LOGIN_REQUIRED`.
 
-**What is still unrun** is the rest of S1 (Firefox itself — see [TESTING.md](TESTING.md) §2.6 — the
-OpenSSL 3 provider, fuzzing, concurrency) and
-all of S3's browser-process questions: WebKitGTK itself has not been driven, only the API it uses.
+**WebKitGTK itself was driven on 2026-09-04/05**, through `xdg-desktop-portal-webauth`'s
+`tools/portal-stack.sh`, including a live Entra ID sign-in on 2026-09-05 (TESTING.md §2.55).
+**Firefox itself was confirmed on 2026-09-06** (TESTING.md §2.6). **What is still unrun** is the
+OpenSSL 3 provider, fuzzing and concurrency.
 
 The rest of this document is unchanged except where marked, because a spike's questions outlive the
 answer to one of them.
@@ -72,17 +73,17 @@ the product, it does not get a test suite, and it does not get merged.
 
 | | Question | Decides |
 |---|---|---|
-| **S1** | Can a broker-controlled synthetic PKCS#11 module actually be built and consumed? | Whether the compatibility path exists at all. **GnuTLS: yes. NSS: yes, since 2026-09-06. Firefox itself and the OpenSSL provider: unrun** |
+| **S1** | Can a broker-controlled synthetic PKCS#11 module actually be built and consumed? | Whether the compatibility path exists at all. **GnuTLS: yes. NSS: yes, since 2026-09-06. Firefox: yes, since 2026-09-06. The OpenSSL provider: unrun** |
 | **S2** | Who prompts for the PIN, and when, once a module is involved? | The login model. **Answered: `CKF_PROTECTED_AUTHENTICATION_PATH`, and no stack tried to synthesise a PIN** |
-| **S3** | Can WebKitGTK complete a client-certificate handshake through it? | Whether the first consumer can use this project. **The GLib constructor WebKit uses: yes. WebKit itself: unrun** |
+| **S3** | Can WebKitGTK complete a client-certificate handshake through it? | Whether the first consumer can use this project. **The GLib constructor WebKit uses: yes. WebKit itself: yes, since 2026-09-04/05** |
 | **S4** | What happens with removal, reinsertion, and several readers? | Whether the lifetime model is right, and how much of it is card-specific |
 | **S5** | Does the frontend/backend split survive contact with fd passing, prompts and a dying backend? | Mostly answered by the branch's pytest suite; the fd half is blocked on there being an fd |
 
 **S3 was the one that decided whether this project is worth publishing**, and its central question —
 can a real TLS stack complete a client-certificate handshake against a synthetic token this project
 serves — is answered yes. What remains of it is a browser rather than a design risk.
-`xdg-desktop-portal-webauth` should still keep its in-process adapter until WebKitGTK itself has
-been driven.
+WebKitGTK itself has since been driven, on 2026-09-04/05; `xdg-desktop-portal-webauth` has no
+in-process certificate adapter and its only client-certificate path is this backend's module.
 
 ---
 
@@ -152,8 +153,8 @@ is no RPC transport, no `P11_KIT_SERVER_ADDRESS`, no fd and no relay. Of the res
 - **step 3 — done.** A GnuTLS mutual-TLS client handshake completed against a server that required
   and verified the client certificate. `tools/module-smoke.sh` phase 3;
 - **step 4 — NSS is done, 2026-09-06** (`tools/nss-smoke.sh`: `modutil`-registered, a private key,
-  a user certificate, a `tstclnt` client-auth handshake); **the OpenSSL 3 provider is unrun**, and
-  so is Firefox as a program rather than NSS as a library. That is now the largest open piece
+  a user certificate, a `tstclnt` client-auth handshake); **Firefox itself is done, 2026-09-06**
+  (TESTING.md §2.6); **the OpenSSL 3 provider is unrun**. That is now the largest open piece
   of S1;
 - **step 5 — by construction rather than by test.** Every entry point in the hostile-client list
   answers `CKR_FUNCTION_NOT_SUPPORTED`, SO login answers `CKR_USER_TYPE_INVALID`, `CKF_RW_SESSION`
@@ -201,7 +202,7 @@ design property and being a wish.
    tell incorrect from blocked from device error, and that no automatic retry can spend an attempt.
    Publication gate. Use a card you are willing to block.
 6. Confirm `C_Logout` at grant end, and **measure** whether the card or middleware still permits a
-   signature afterwards — the honest answer for [SECURITY.md](SECURITY.md).
+   signature afterwards — the answer for [SECURITY.md](SECURITY.md).
 
 **Pass** = lazy login works across at least GnuTLS, with documented behaviour for NSS and OpenSSL.
 **Fail** = the consumer must supply a PIN, which means the design's central claim is false and the
@@ -268,8 +269,11 @@ mutual-TLS handshake; the module is found through an ephemeral p11-kit configura
 opened by anyone, because there is no endpoint: the module is in the process that needs it, and any
 process that loads p11-kit loads it, whenever it starts.
 
-**Steps 2, 5, 6, 7 and 9 are unrun**, and WebKitGTK itself has not been started. What has been
-proved is that the API WebKit reaches works; what has not is WebKit's process model around it.
+**Steps 2, 5, 6, 7 and 9 were scoped for an fd-returning endpoint** and do not apply to the
+module design that was built instead; they remain unrun. **WebKitGTK itself has been driven, on
+2026-09-04/05**, meeting this spike's Pass criterion. What has been proved is that the API WebKit
+reaches works end to end through a real chooser and PIN prompt; card removal mid-handshake,
+concurrent grants and the distro matrix are still open.
 Two findings that a browser will meet immediately:
 
 - **the URI must name an object.** GnuTLS's single-object import refuses
@@ -323,7 +327,8 @@ anything is built on it.
 ## S5 — The frontend/backend boundary
 
 **Largely answered, by the branch's own tests — which are still this author's.** The frontend is
-an xdg-desktop-portal branch with a python-dbusmock backend and 40 passing pytest cases, which
+an xdg-desktop-portal branch with a python-dbusmock backend and 49 passing pytest cases (98 runs
+across the host and Flatpak fixture), which
 cover steps 2, 4 and part of 6
 below against a mock. What is left is the fd relay (blocked: no `OpenPkcs11Endpoint`), and running
 the same cases against a backend that talks to real hardware rather than a mock. The steps are kept

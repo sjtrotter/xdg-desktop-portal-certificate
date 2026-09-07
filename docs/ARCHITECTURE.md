@@ -1,7 +1,8 @@
 # Architecture
 
-Status: EXPERIMENTAL design sketch. None of this is implemented, and
-[SPIKES.md](SPIKES.md) may invalidate parts of it.
+Status: EXPERIMENTAL. The backend and the client-side module described below are implemented.
+The interface is a proposed, unmerged branch of xdg-desktop-portal, and
+[SPIKES.md](SPIKES.md) may still invalidate parts of this design.
 
 **Two processes, plumbed exactly like xdg-desktop-portal — because one of them *is*
 xdg-desktop-portal.** A *frontend* owns the public bus name, establishes who is calling,
@@ -10,9 +11,8 @@ draws the windows, holds the PKCS#11 session, and performs the cryptography. The
 application talks only to the frontend and never learns the backend's name.
 
 This repository is **the backend**. The frontend is a branch of xdg-desktop-portal:
-`experimental/certificate-webauthentication`, commits `3f46e3c..661e441`, with
-`703fb22 certificate: Add an experimental Certificate portal` defining the two interfaces
-and implementing the portal. Why it lives there rather than here is
+`experimental/certificate-webauthentication`, 10 commits on upstream `86bd3e2`, with
+`a4c1f62` defining the two interfaces and implementing the portal. Why it lives there rather than here is
 [0010](decisions/0010-backend-only-frontend-lives-upstream.md); the split itself is
 [0008](decisions/0008-build-to-the-upstream-shape.md), which 0010 preserves.
 
@@ -38,7 +38,7 @@ upstream: the left-hand column now describes code that exists, in
 | **Caller identity** | `xdp_invocation_get_app_info()`; derives `app_identity_level` (`sandboxed` / `host` / `unidentified`) once and forwards it | Never derives anything. Receives `app_id` and `app_identity_level` as **arguments** |
 | **Bus name applications use** | `org.freedesktop.portal.Desktop` — the only one | `org.freedesktop.impl.portal.desktop.certificate` — not for applications |
 | **Object path** | `/org/freedesktop/portal/desktop` | the same path, on its own bus name |
-| **Policy** | `xdp_filter_options()` with per-key validators: `purpose` ∈ `client_auth\|signing\|email\|ssh` (required), `interaction_mode` ∈ `required\|allowed\|forbidden`, `mechanism` ∈ `RSA_PKCS1_V1_5\|RSA_PSS\|ECDSA`, `reason` ≤ 256 chars, `data`/`ciphertext` ≤ 1 MiB. Unknown keys dropped, not forwarded | Enforces what it is told, plus its own hard limits. Never widens |
+| **Policy** | `xdp_filter_options()` with per-key validators: `purpose` ∈ `client_auth\|signing\|email\|ssh` (required), `interaction_mode` ∈ `required\|allowed\|forbidden`, `mechanism` ∈ `RSA_PKCS1_V1_5\|RSA_PSS\|ECDSA`, `reason` ≤ 256 chars, `data` ≤ 1 MiB. Unknown keys dropped, not forwarded | Enforces what it is told, plus its own hard limits. Never widens |
 | **Grant lifetime** | `requested_lifetime` clamped to 3600 s, default 300, forwarded as `lifetime` — a decision, not a request | Obeys it. Cannot expire or renew a grant |
 | **Results clamping** | Intersects the backend's `supported_mechanisms` and `permitted_operations` with its own lists, in its own order, before the app sees them *and* before recording them on the grant | Reports what it can do; over-claiming gets clamped, not believed |
 | **Permissions** | None: there is no selection memory on the interface | Never touches the permission store |
@@ -171,7 +171,7 @@ This project is a **third** layer, above both:
 └──────────────┘        └──────────────┘        │  portal          │        └───────────────┘
                                                 └──────────────────┘
                                                   exposes ONE CERTIFICATE
-                                                  and Sign / Decrypt on its key
+                                                  and Sign on its key
 ```
 
 The unit is neither the token nor the module: it is **one certificate and its key**, with the
@@ -318,7 +318,7 @@ cannot be talked into naming the wrong application by the application:
    design has for the third;
 3. **the purpose, in the service's own words** — "sign in to a website", "sign a document" — never
    the caller's;
-4. **the operation class** being granted: authenticate, sign, or decrypt;
+4. **the operation class** being granted: authenticate, or sign;
 5. **the certificate**: subject identity, issuer, validity, and a fingerprint or short stable
    identifier behind a details view;
 6. **the token and reader** name;
@@ -389,9 +389,10 @@ The core. Holds the underlying PKCS#11 session and performs operations on the ap
     or unattended signing needs separately configured policy, never a checkbox.
   - `email` — a session grant is defensible for sending or reading mail; bulk behaviour must be
     explicit.
-  - `decrypt` — per-operation, or a tightly bounded session, because decryption exposes confidential
-    data rather than producing an authentication artefact.
   - `ssh` — its own purpose and its own policy. It is not "signing with extra steps".
+
+  Decryption code exists in the broker and in the client module, but `Decrypt` is not on either
+  interface and this code is unreachable.
 - **A PIN prompt is not consent.** Consent is the chooser and the per-operation policy above.
   A cached token login must never silently authorise a different application or a different purpose.
 - **Mechanism allow-list with parameter validation.** The frontend's list is exactly
@@ -487,12 +488,10 @@ this backend cannot expire or renew one, and a backend that dies takes every gra
 announced to applications as `GrantInvalidated` with reason `backend_gone` rather than left
 for the caller to discover at the next `Sign`.
 
-The `GrantInvalidated` reasons the frontend can emit are fixed by the public XML:
-`released`, `expired`, `token_removed`, `owner_gone`, `policy`, `service_shutdown`,
-`backend_gone`, `error`. The impl XML now carries that same list, because the frontend
-forwards `SessionInvalidated`'s reason verbatim. The four this backend can *cause* are
-`token_removed`, `expired`, `owner_gone` and `service_shutdown`; anything else is a
-programming error and is sent as `error`.
+The `GrantInvalidated` reasons are fixed by the public XML: `expired`, `token_removed`,
+`policy`, `backend_gone`, `error`. This backend emits `token_removed`, `backend_gone` and `error`,
+and `expired` once as a backstop when the frontend missed its own deadline; `policy` is legal but
+nothing emits it yet.
 
 **Card removal** invalidates every session, cancels any in-flight operation, and emits
 `SessionInvalidated`. Reinsertion requires explicit reselection even when the label and slot number

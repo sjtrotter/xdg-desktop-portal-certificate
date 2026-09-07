@@ -1,8 +1,8 @@
 # Contributing
 
-**This is an experimental design sketch, and it is a backend.** There is no implementation, and
-[docs/ROADMAP.md](docs/ROADMAP.md) phase 0 is a time-boxed feasibility spike that may end the
-project rather than start it. The most useful contribution today is not code.
+**This is an experimental backend for a proposed portal interface.** The backend, the client
+module, and 13 meson test suites exist and pass. The interface is not upstream, and the frontend
+branch that defines it is not merged. The most useful contribution today is still not code.
 
 **The interface is not changed here.** It is defined by the xdg-desktop-portal branch
 `experimental/certificate-webauthentication`, and `data/org.freedesktop.impl.portal.experimental.Certificate.xml`
@@ -24,9 +24,9 @@ Specifically valuable:
 - **Anything about PKCS#11 semantics** we have got wrong — login state, session scope, handle
   lifetime, mechanism parameters, v3 interface tables.
 - **Hardware results.** Which cards, which readers, which middleware, what breaks. One PIV card in
-  one reader has been through [docs/TESTING.md](docs/TESTING.md) tiers 3.1–3.4, once; that is a
-  first run, not a result. The spikes in [docs/SPIKES.md](docs/SPIKES.md) are all questions about
-  real hardware and none has been run.
+  one reader has been through [docs/TESTING.md](docs/TESTING.md) tiers 3.1–3.4; that is one card,
+  one reader, one middleware. [docs/SPIKES.md](docs/SPIKES.md) records S1, S2, S3 and S5 answered;
+  the rest are still open.
 - **Consumer perspectives.** If you maintain something that would use this — a browser, a mail
   client, a VPN client, an SSH agent — the most useful thing you can say is whether brokered `Sign`
   is integrable in your codebase, or whether only a PKCS#11 module would work. That answer decides
@@ -51,18 +51,17 @@ Specifically valuable:
 - **No design may store, log, or transport a PIN.** There is no "remember PIN" and there will not
   be one.
 
-## Code, when there is any
+## Code
 
 - C11, GLib, meson. Warnings are on; keep them clean.
-- `SPDX-License-Identifier: LGPL-2.1-or-later` and `SPDX-FileCopyrightText` in every file. See
+- `SPDX-License-Identifier: LGPL-2.1-or-later` and `SPDX-FileCopyrightText` in every source, test,
+  tool and build file. See
   [docs/decisions/0004-license.md](docs/decisions/0004-license.md) for why.
 - Logging goes through `src/redact.h`, which accepts only the fields it may emit. Do not add a
   `printf`-shaped logging call; a filter that must recognise a secret has already been handed one.
-- The synthetic PKCS#11 facade (`src/export/facade.h`) is hostile-input code and is currently
-  unreachable — the interface has no method that returns an endpoint. Every entry point is refused
-  or constrained by default; there is no allow-by-default path, and a change to it needs a test that
-  a hostile client cannot do the thing. Making it reachable means adding `OpenPkcs11Endpoint` to the
-  frontend branch first.
+- The synthetic PKCS#11 facade (`src/export/facade.h`) is not being built. It was a server design,
+  superseded by the client-side module in `src/module/`; see
+  [docs/decisions/0011](docs/decisions/0011-client-side-pkcs11-module.md).
 
 ## Which repository does a change belong in
 

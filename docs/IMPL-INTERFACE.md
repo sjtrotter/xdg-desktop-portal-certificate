@@ -15,7 +15,7 @@ selected — here, `xdg-desktop-portal-certificate` on bus name
 is a **verbatim copy**, apart from a header comment saying so, of
 
 ```
-xdg-desktop-portal, branch experimental/certificate-webauthentication, commit 7635aa8
+xdg-desktop-portal, branch experimental/certificate-webauthentication, commit a4c1f62
 data/org.freedesktop.impl.portal.experimental.Certificate.xml
 ```
 
@@ -223,17 +223,21 @@ holding when the backend's name loses its owner.
 `src/session-impl.c`, checked in `certificate_impl_session_invalidate()`, because a typo in a
 string literal is otherwise a word applications receive as though it were part of the contract.
 
-What this backend actually emits, and when:
+The public XML fixes the vocabulary at five: `expired`, `token_removed`, `policy`,
+`backend_gone`, `error`. This backend emits `token_removed`, `backend_gone` and `error`, and
+`expired` once as a backstop when the frontend missed its own deadline; `policy` is legal but
+nothing emits it yet:
 
 | Reason | When |
 |---|---|
 | `token_removed` | the card leaves the reader, or a different card takes its place, or a login fails because the token is gone |
-| `expired` | the grant's lifetime ran out. **Announcing it is the frontend's**, which emits `GrantInvalidated(expired)` and closes the session at the lifetime; this backend enforces the deadline too, because the check here is what stops this process sitting on a logged-in card session after the authorisation for it has run out, and its own teardown runs `CERTIFICATE_EXPIRY_GRACE_SECONDS` later so it is the backstop rather than a second announcement |
-| `owner_gone` | `org.freedesktop.portal.Desktop` changed hands and the grant belonged to the previous owner. A grant belongs to the frontend connection that created it; a replacement portal must not inherit a logged-in card session it never asked for |
-| `service_shutdown` | this backend is exiting. It was spelled `backend_shutdown`, which is in neither vocabulary |
+| `policy` | not this backend's to emit in the ordinary case — it is a frontend decision — but a legal wire value |
+| `backend_gone` | this backend is exiting, or its connection loses ownership of `org.freedesktop.portal.Desktop` |
+| `error` | a programming error: a value outside this vocabulary is never put on the bus, and this is sent instead |
 
-The other four are not this backend's to emit. `released` and `policy` are frontend decisions,
-`backend_gone` is what the frontend says *about* this process, and `error` is the fallback above.
+`expired` is the frontend's own: it announces the grant's lifetime running out and closes the
+session at the deadline. This backend enforces the same deadline as a backstop, sending `expired`
+itself only if the frontend missed its own, `CERTIFICATE_EXPIRY_GRACE_SECONDS` later.
 `device_error` is gone from the interface and was never emitted anyway — a device that fails
 mid-operation fails that operation and keeps the grant, because the card may still be there.
 
@@ -261,8 +265,8 @@ at all**, so an email client asking for `email` in order to decrypt an incoming 
 never be offered it — even though decryption is exactly the operation it would need. Belgian and
 Estonian eID cards are laid out the same way as PIV here.
 
-**The rule now**, settled on the frontend branch's public XML first
-(`7635aa8 certificate: Let email cover a decryption-only certificate`) and implemented here:
+**The rule now**, implemented here even though commit `7635aa8` is on no branch and this
+behaviour is not in the proposed interface (whose `operation_policy` permits only `sign`):
 
 - a certificate matches `email` when its extended key usage permits `emailProtection` — or it
   carries no extended key usage extension at all — **and** its key usage permits either
@@ -404,7 +408,7 @@ and a caller that asked for the signature slot and got the authentication one ha
 
 ## Why an application cannot call this
 
-This is the question a reviewer asks first, and the honest answer has three parts.
+This is the question a reviewer asks first, and the answer has three parts.
 
 **1. The mechanism upstream actually relies on.** The impl bus names are not something an
 application has any reason to hold, they are not proxied into sandboxes by the portal machinery,
@@ -475,7 +479,7 @@ inspect who is asking. So the two halves are separate flags — `--allow-replace
 replaceable, `--replace` to ask to replace — and **the installed `.service` file passes neither**.
 An upgrade is therefore a restart: stop the old process and let D-Bus activation start the new one.
 `tools/dev-stack.sh --live` passes both, which is a development loop and not a deployment recipe.
-[TESTING.md](TESTING.md) §3.5 has the commands.
+[TESTING.md](TESTING.md) §3.8 has the commands.
 
 ## What the backend must never do
 

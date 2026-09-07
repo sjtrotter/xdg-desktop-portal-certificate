@@ -17,7 +17,7 @@ $ ninja -C build
 $ meson test -C build
 ```
 
-Twelve suites:
+Thirteen suites with gcr-4, twelve without:
 
 | Suite | Needs | What it covers |
 |---|---|---|
@@ -28,7 +28,8 @@ Twelve suites:
 | `broker-device` | a SoftHSM fixture, and `openssl(1)` for the OAEP half | `C_Login`, `C_Sign`, signature verification, an **RSA-OAEP round trip** against a ciphertext `openssl pkeyutl` produced, and that opening the device for a **different** candidate throws away the previous grant's login and key handle. **Skips itself** without one; see tier 2 |
 | `broker-decrypt` | a SoftHSM fixture | the two properties that would make decryption safe to offer: **one indistinguishable error** for every failure, and the **per-grant budget**. Nothing on the interface can ask for it today. **Skips itself** without a fixture |
 | `broker-regrant` | a SoftHSM fixture with both an RSA and an EC key | a second `AcquireCredential` on a live impl session, end to end: the signature after the re-grant **verifies against the new certificate**, and the operation in between is refused rather than signed with the old grant's key. The frontend refuses a second acquisition on one session, so this is the backend not relying on it. **Skips itself** without a fixture |
-| `filter` (second half) | nothing | also: that the backend **refuses to load the portal's own client-side module**, by p11-kit name and by an explicit `--module` path. Loading it would make the backend enumerate a token whose enumeration calls the backend |
+| `filter` (cont.) | nothing | also: that the backend **refuses to load the portal's own client-side module**, by p11-kit name and by an explicit `--module` path. Loading it would make the backend enumerate a token whose enumeration calls the backend |
+| `fuzz-der` | nothing | a corpus replay of the DER reader and DigestInfo parser over `tests/fixtures/fuzz-corpus`, always built so a sanitized `meson test` covers it on every machine |
 | `tools-lib` | nothing | the two helpers in `tools/lib.sh` that decide something dangerous: that the generated `portals.conf` is the **effective** per-interface resolution of the machine's whole configuration chain rather than a copy of the first file (a user `Screenshot=none` survives an `/etc` file that names a backend for it), that our `Certificate` line replaces any existing one, that a private run switches the `Secret` backend off and a `--live` one does not, and that the fixture checks refuse a forged marker, a symlinked path, an ancestor that is not ours, a mode that is not 0700, and a directory this project did not make |
 | `pin-system` | nothing (it stands up its own `GTestDBus`, and gcr's own system prompter or a hand-written hostile one on it) | the OTHER PIN prompt, end to end and with nobody typing: that `--pin-prompt=auto` picks the system prompter when the name is on the bus, that the application, purpose, token and reader reach the prompt, that no "remember" choice is ever offered, that a wrong PIN comes back as a **warning on the prompt that is already up** rather than a second prompt, that an **empty answer never reaches `C_Login`**, the three-attempt cap, cancel from the prompter, `Request.Close()` closing it, a **Cancel in the shell after the PIN was submitted** answering `cancelled` and abandoning the login that succeeds anyway, the prompter **vanishing** during the open, during a password round and during a confirmation round, a **close racing a transport error** (gcr completing one round twice), the `FINAL_TRY` second confirmation **and that refusing it leaves the card unasked — on a protected authentication path too**, the token flags reaching the warning without a number, the login timeout, and a protected-authentication-path token asking for nothing. Built only when the build found gcr-4 |
 | `module` | nothing | the **client-side PKCS#11 module**'s rules with no bus at all: the DigestInfo parser (every accepted spelling, and the refusals — a wrong digest length, a trailing byte, a truncated structure, and the TLS 1.0/1.1 MD5‖SHA-1 concatenation), the definite-length DER reader (a non-minimal long form, an indefinite length, an overrun, a high tag), the mechanism map and the fact that it follows the portal's advertised list rather than a hardcoded one, the three objects a grant becomes, that the private key's `CKA_VALUE` and RSA factors answer `CKR_ATTRIBUTE_SENSITIVE` while `CKA_ID` in the same template is still answered, `C_GetAttributeValue`'s size-query and buffer-too-small protocol, template matching including a `CKA_ID` that does not match, that a search for a class this token does not have never provokes a chooser, that the refusal fingerprint ignores `CKA_CLASS` so a certificate search and a key search count as one, and that the URIs in `portal-token.h` still name what the module presents |
@@ -86,7 +87,7 @@ halves are checked by configuring without it:
 ```console
 $ meson setup build-nogcr -Dgcr=disabled && ninja -C build-nogcr
 $ ./build-nogcr/src/xdg-desktop-portal-certificate --help | grep pin-prompt   # nothing
-$ meson test -C build-nogcr                                                   # ten suites
+$ meson test -C build-nogcr                                                   # twelve suites
 ```
 
 An option that names a prompt the binary cannot draw would be an option that fails at the worst
@@ -122,7 +123,7 @@ The frontend binary's `RUNPATH` already names the prefix it was built in, so it 
 `.xdp-env` at all — until that prefix is deleted. If the prefix was under `/tmp`, copy the one
 library that is not packaged (`libdex-1.so.1`) somewhere that survives a reboot and point
 `LD_LIBRARY_PATH` at it: `LD_LIBRARY_PATH` wins over `RUNPATH`. Rebuilding libdex from scratch is
-`FreeRDP-plan/XDP-BRANCH.md` section 4.
+out of scope here.
 
 `tools/dev-stack.sh` checks with `ldd` and says so if the frontend cannot resolve its libraries.
 
@@ -193,8 +194,8 @@ $ meson test -C build broker-device --verbose
 
 `broker-device` opens a session on the fixture token, logs in, signs with RSA PKCS#1 v1.5 over
 SHA-256 and SHA-384, with RSA-PSS and with ECDSA, and **verifies each signature against the
-certificate the token handed back** — not against the key the fixture script generated. It asserts
-that **every** spelling of a decryption request is refused. It checks that a wrong PIN comes back as
+certificate the token handed back** — not against the key the fixture script generated. It also runs
+an **RSA-OAEP decryption round trip** against a ciphertext GnuTLS produced. It checks that a wrong PIN comes back as
 `PIN_INCORRECT` and not as a generic failure, and that discovery sees both certificates without
 logging in.
 
@@ -875,7 +876,7 @@ None of these is on the critical path, and each is a separate run.
 $ tools/dev-stack.sh --live -- --purpose client_auth
 ```
 
-Three things changed in the November 2026 fix pass that this section depends on:
+Three things changed in the 2026-09-04 fix pass that this section depends on:
 
 - **Cancelling during the PIN prompt does not free what `C_Login` is reading.** The prompt
   disappears at once, the answer is given when the worker returns, and the buffer the card is

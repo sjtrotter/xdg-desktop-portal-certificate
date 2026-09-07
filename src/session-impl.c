@@ -325,17 +325,22 @@ void certificate_impl_session_close(CertificateImplSession* session)
 /* THE VOCABULARY IS THE INTERFACE'S, and it is closed. The frontend forwards
  * @reason verbatim into GrantInvalidated, so a value invented here goes
  * straight to applications, which have no way to learn what it means and a
- * documented list that says it cannot happen. The impl XML names these nine.
+ * documented list that says it cannot happen.
  *
- * Not all nine are this backend's to emit -- `released` and `policy` are
- * decisions the frontend makes, `backend_gone` is what the frontend says
- * ABOUT this process, and `parent_released` is what it says about a grant it
- * derived from another one -- but the list is the interface's rather than this
- * file's, so it is written down whole and the assertion catches a typo in any
- * of them. */
+ * data/org.freedesktop.impl.portal.experimental.Certificate.xml is the
+ * authority: SessionInvalidated forwards `token_removed`, `policy`,
+ * `backend_gone` or `error`. `policy` is not this backend's to emit -- it is
+ * a decision the frontend makes -- but it stays in the table because it is
+ * still a legal wire value and the assertion below is a typo guard, not a
+ * record of what this file currently sends.
+ *
+ * `expired` is the frontend's own per the impl XML, which says a backend need
+ * not send it. This one does, once: on_lifetime_expired() above is the
+ * backstop for a frontend that missed its own deadline, and it fires only
+ * CERTIFICATE_EXPIRY_GRACE_SECONDS after that deadline, so the ordinary case
+ * is still the frontend announcing it first. */
 static const char* const certificate_session_reasons[] = {
-	"released", "expired",          "token_removed", "owner_gone",     "parent_released",
-	"policy",   "service_shutdown", "backend_gone",  "error",
+	"expired", "token_removed", "policy", "backend_gone", "error",
 };
 
 static const char* checked_reason(const char* reason)

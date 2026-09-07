@@ -96,7 +96,7 @@ explicit about, because "GPL service" makes people nervous:
 - No consumer includes a header from this repository, links a library from it, or ships any of its
   code. A proprietary, Apache-2.0, MPL or BSD application can use this service exactly as freely as
   a GPL one.
-- The sibling `webauth-service` sketch is GPL-2.0-or-later for the same Remmina-derived reason,
+- The sibling `xdg-desktop-portal-webauth` sketch is GPL-2.0-or-later for the same Remmina-derived reason,
   and it too is reached only over D-Bus.
 
 **What it does cost:**

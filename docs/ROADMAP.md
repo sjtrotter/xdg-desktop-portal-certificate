@@ -1,12 +1,12 @@
 # Roadmap
 
 Status: EXPERIMENTAL. **The backend is built.** The chooser, the PIN prompt, token discovery,
-certificate filtering and brokered `Sign`/`Decrypt` exist, build clean, and have been driven end to
-end through the real frontend against a software token. The thing the whole list below was gated
-on has now happened once: **one PIV card, in one reader, on 2026-09-04**, through
-[TESTING.md](TESTING.md) tiers 3.1–3.4. One card is a first run and not a claim about hardware;
-the rest of tier 3 is unrun, the facade is still not reachable, and the spikes that decide whether
-it can exist are still unrun.
+certificate filtering and brokered `Sign` exist, build clean, and have been driven end to
+end through the real frontend against a software token and real hardware. Decryption code exists
+in the broker and the client module, but `Decrypt` is not on either interface and is unreachable.
+One PIV card, one reader, has been through
+[TESTING.md](TESTING.md) tiers 3.1–3.4, a live Entra ID sign-in, and a Firefox sign-in. The rest of
+tier 3 is unrun, the facade is not being built, and some spikes are still unrun.
 
 Read the table under "Where the code actually is" before the effort figures: the figures were
 written when none of this existed and have not been re-derived.
@@ -30,7 +30,8 @@ paragraph is the pointer to it.
 What that table means for the plan below: the brokered path is built and works, which was never
 the doubtful half. S1 and S3 — can a consumer that speaks only PKCS#11 use this, and can a browser
 — are answered for GnuTLS and WebKitGTK by the client-side module
-([0011](decisions/0011-client-side-pkcs11-module.md)) and unanswered for NSS. What is left is
+([0011](decisions/0011-client-side-pkcs11-module.md)) and, since 2026-09-06, for NSS
+(SPIKES.md S2, TESTING.md §2.56). What is left is
 hardware breadth, the two-chooser problem, and an owner who is not the author.
 
 ## Effort figures and their assumptions
@@ -52,10 +53,10 @@ their caveats:
   is plumbing xdg-desktop-portal already has" is no longer written twice
   ([0010](decisions/0010-backend-only-frontend-lives-upstream.md)). What remains of that line is
   keeping this backend's impl XML in step with the branch, which is not measured in weeks;
-- the frontend's own hardware-independent testing is done and green (106 pytest cases for this
-  portal against a python-dbusmock backend — 53 test functions, each run against a host and a
-  Flatpak caller identity), which removes some of phase 0 item 10 below but none of the hardware
-  items.
+- the frontend's own hardware-independent testing is done and green (49 parametrised cases across
+  26 test functions for this portal, against a python-dbusmock backend, each run against a host and
+  a Flatpak caller identity — 98 runs total), which removes some of phase 0 item 10 below but none
+  of the hardware items.
 
 | | |
 |---|---|
@@ -79,8 +80,8 @@ each in its own tree, each needing its own maintainers to agree.
 Not a build. A disposable experiment that answers [SPIKES.md](SPIKES.md) S1, S2 and S3 and either
 justifies the rest of this document or ends it. The code is thrown away.
 
-While it runs, `xdg-desktop-portal-webauth` keeps its **in-process certificate handling behind an
-internal adapter**, so that it can use either this backend or its own implementation. Nothing
+While it runs, `xdg-desktop-portal-webauth` has no in-process certificate chooser or PIN prompt of
+its own; its only client-certificate path is this backend's `portal` provider. Nothing
 depends on this project until the spike passes.
 
 **Gate: the D-Bus API is not stabilised, and this repository is not published as anyone's
@@ -189,12 +190,12 @@ Only then, the acceptance path:
 1. A working implementation with published introspection XML — done in phases 1–2.
 2. Documented threat model, consent policy, caller identity model, scoping guarantees, and UI
    security chrome — this repository's `docs/`, once they describe something real.
-3. **Two consumers**, one of them unrelated to `webauth-service`. One consumer is a private tool
+3. **Two consumers**, one of them unrelated to `xdg-desktop-portal-webauth`. One consumer is a private tool
    with extra governance obligations.
 4. Tested on GNOME **and** KDE/Wayland, including parenting and activation.
 5. A design discussion opened in `flatpak/xdg-desktop-portal`, where the project directs requests for
    new portals — with the answer to "what protected host resource is being mediated?" written down
-   first. The honest answer here: **use of a hardware-backed private key, and the trusted consent and
+   first. The answer: **use of a hardware-backed private key, and the trusted consent and
    PIN UI around it**, replacing a blanket `--socket=pcsc` grant with a scoped, revocable,
    attributable one.
 6. Agreement on the public interface and on what the frontend enforces.
@@ -232,4 +233,4 @@ was understood.
 
 | | |
 |---|---|
-| **~~A decryption-only certificate matches no purpose~~** | **Settled.** `email` now matches a certificate whose extended key usage permits `emailProtection` (or carries none) and whose key usage permits `digitalSignature` **or** `keyEncipherment`, and the half it matched decides which operations it can serve. A decrypt-only certificate — a PIV "key management" certificate — is offered for `email` only when the request's `operation_policy` permits `decrypt`, and its grant then permits `decrypt` alone. The purpose vocabulary stayed at four; the sign/decrypt split lives in `operation_policy`, where the application already states it. Decided on the frontend branch first (`7635aa8`), then implemented here. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md#email-is-the-one-purpose-that-does-not-end-in-a-signature). |
+| **~~A decryption-only certificate matches no purpose~~** | **Settled.** `email` now matches a certificate whose extended key usage permits `emailProtection` (or carries none) and whose key usage permits `digitalSignature` **or** `keyEncipherment`, and the half it matched decides which operations it can serve. A decrypt-only certificate — a PIV "key management" certificate — is offered for `email` only when the request's `operation_policy` permits `decrypt`, and its grant then permits `decrypt` alone. The purpose vocabulary stayed at four. Commit `7635aa8`, which would have added a sign/decrypt split to `operation_policy`, is on no branch: this behaviour is backend-only and is not in the proposed interface, whose `operation_policy` permits only `sign`. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md#email-is-the-one-purpose-that-does-not-end-in-a-signature). |

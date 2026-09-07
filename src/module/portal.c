@@ -636,7 +636,7 @@ static char* create_session(PortalClient* client, GError** error)
 		return NULL;
 
 	/* `o`, as the XML types it. The frontend used to send `s` here; the fix
-	 * is xdg-desktop-portal 77b37ab "certificate: Return session_handle as
+	 * is xdg-desktop-portal a4c1f62 "certificate: Return session_handle as
 	 * the object path it is typed as". */
 	if (!g_variant_lookup(results, "session_handle", "o", &session))
 	{

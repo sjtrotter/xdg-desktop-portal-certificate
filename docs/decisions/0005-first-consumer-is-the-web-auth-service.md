@@ -9,9 +9,8 @@ A service like this needs a consumer before it needs a specification. Without on
 nobody has had to implement against, which is how APIs acquire features no user needs and miss the
 one thing every user needs.
 
-The available candidate is the sibling design sketch in the author's `entra-token-helper`
-repository, which since [0010](0010-backend-only-frontend-lives-upstream.md) is
-`xdg-desktop-portal-webauth`: an out-of-tree backend for
+The available candidate is the sibling repository, `xdg-desktop-portal-webauth` (renamed from
+`entra-token-helper` on 2026-09-06): an out-of-tree backend for
 `org.freedesktop.impl.portal.experimental.WebAuthentication`. Its frontend, like this project's,
 is the xdg-desktop-portal branch `experimental/certificate-webauthentication`. It is the
 **backend** that performs one interactive web authentication transaction in a WebKitGTK window it
@@ -44,10 +43,10 @@ the grant — that is, closes the `Session` that is the grant — on every exit 
 > interface at all — it was deliberately deferred as a follow-up, so brokered `Sign` is currently
 > the only path, and the consumer has no endpoint to fall back to.
 
-**It keeps its in-process certificate handling behind an internal adapter until
-[SPIKES.md](../SPIKES.md) S3 passes.** Neither project may become a hard dependency of the other
-before there has been one real WebKitGTK client-certificate handshake through this service. Until
-then this repository is an experiment, not a dependency.
+**It has no in-process certificate handling of its own; its only client-certificate path is
+this backend's module.** [SPIKES.md](../SPIKES.md) S3 passed on 2026-09-04: one real WebKitGTK
+client-certificate handshake through this service. Neither project is yet anyone's hard
+dependency.
 
 ## What this consumer proves, and what it does not
 
