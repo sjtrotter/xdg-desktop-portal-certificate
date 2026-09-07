@@ -62,7 +62,7 @@ FreeRDP/FreeRDP#13328.
   sandbox reached the card only through the portal, and the chooser named the sandboxed app.
 
 Unrun: TESTING 3.5 (one PIN per grant), 3.6 (wrong PIN and `FINAL_TRY`), card removal during an
-operation, a PIN-pad reader, a second card, a Flatpak runtime, KDE, and the OpenSSL 3 provider.
+operation, a PIN-pad reader, a second card, KDE, and the OpenSSL 3 provider.
 
 ## How it works
 
