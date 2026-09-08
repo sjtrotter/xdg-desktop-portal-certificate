@@ -122,6 +122,61 @@ static void iterate_for(guint milliseconds)
 	g_main_loop_run(loop);
 }
 
+/* AN EMPTY RETURN IS A RETRY, ON EVERY ACCESSIBILITY BACKEND. The retry path
+ * announces its status; GTK 4.22's stub accessibility context, which is what
+ * GTK_A11Y=test and a session without an accessibility bus produce, has no
+ * announce implementation and used to be called through a NULL vfunc. Runs
+ * first so that GTK is initialised without an accessibility bus. */
+static void test_empty_return_is_a_retry(void)
+{
+	LoginProbe probe = { 0 };
+	g_autoptr(GCancellable) cancellable = g_cancellable_new();
+
+	g_setenv("GTK_A11Y", "test", TRUE);
+	if (!gtk_init_check())
+	{
+		g_test_skip("no display: the PIN window cannot be opened");
+		return;
+	}
+
+	certificate_ui_set_has_display(TRUE);
+
+	g_mutex_init(&probe.lock);
+	g_cond_init(&probe.cond);
+	probe.token = make_token();
+
+	certificate_pin_login(probe.token, NULL, "Test application", "prove who you are", probe_login,
+	                      NULL, NULL, &probe, cancellable, probe_done, &probe);
+
+	{
+		GtkWidget* entry = find_pin_entry();
+
+		g_assert_nonnull(entry);
+		gtk_editable_set_text(GTK_EDITABLE(entry), "");
+		g_signal_emit_by_name(entry, "activate");
+	}
+	iterate_for(300);
+
+	/* Nothing was submitted, nothing was answered, the window is still up. */
+	g_mutex_lock(&probe.lock);
+	g_assert_false(probe.login_entered);
+	g_assert_cmpuint(probe.done_calls, ==, 0);
+	g_mutex_unlock(&probe.lock);
+	g_assert_true(pin_window_is_up());
+
+	g_cancellable_cancel(cancellable);
+	iterate_for(300);
+
+	g_mutex_lock(&probe.lock);
+	g_assert_cmpuint(probe.done_calls, ==, 1);
+	g_assert_cmpint(probe.outcome, ==, CERTIFICATE_PIN_CANCELLED);
+	g_mutex_unlock(&probe.lock);
+
+	certificate_token_unref(probe.token);
+	g_mutex_clear(&probe.lock);
+	g_cond_clear(&probe.cond);
+}
+
 static void test_cancel_during_login(void)
 {
 	LoginProbe probe = { 0 };
@@ -949,6 +1004,7 @@ int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
 
+	g_test_add_func("/cancel/empty-return-is-a-retry", test_empty_return_is_a_retry);
 	g_test_add_func("/cancel/during-login", test_cancel_during_login);
 	g_test_add_func("/cancel/before-prompt", test_cancel_before_prompt);
 	g_test_add_func("/cancel/during-sign", test_cancel_during_sign);

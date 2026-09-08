@@ -41,6 +41,25 @@ static GtkPinPrompt* gtk_pin(PinPrompt* prompt)
 	return prompt->impl_data;
 }
 
+/* GTK 4.22's stub accessibility context -- what GTK_A11Y=none and a session
+ * with no accessibility bus produce (GTK_A11Y=test names it), which is every
+ * dbus-run-session stack --
+ * has no announce implementation, and gtk_accessible_announce() calls through
+ * the NULL vfunc. Only the AT-SPI context can carry an announcement, so only
+ * that one is asked. */
+static gboolean announcement_reaches_anyone(GtkAccessible* accessible)
+{
+	GtkATContext* context = gtk_accessible_get_at_context(accessible);
+	gboolean live = FALSE;
+
+	if (context == NULL)
+		return FALSE;
+
+	live = g_strcmp0(G_OBJECT_TYPE_NAME(context), "GtkAtSpiContext") == 0;
+	g_object_unref(context);
+	return live;
+}
+
 static void set_status(PinPrompt* prompt, const char* text, gboolean is_error)
 {
 	GtkPinPrompt* ui = gtk_pin(prompt);
@@ -56,7 +75,7 @@ static void set_status(PinPrompt* prompt, const char* text, gboolean is_error)
 		gtk_widget_add_css_class(ui->status, "error");
 		/* The failure state IS announced: a screen-reader user must learn that
 		 * an attempt was spent. The PIN itself never enters this tree. */
-		if (ui->window != NULL)
+		if (ui->window != NULL && announcement_reaches_anyone(GTK_ACCESSIBLE(ui->window)))
 			gtk_accessible_announce(GTK_ACCESSIBLE(ui->window), text,
 			                        GTK_ACCESSIBLE_ANNOUNCEMENT_PRIORITY_HIGH);
 	}
