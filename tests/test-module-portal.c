@@ -44,7 +44,7 @@
 
 static const char introspection[] =
     "<node>"
-    "  <interface name='org.freedesktop.portal.experimental.Certificate'>"
+    "  <interface name='org.freedesktop.portal.Certificate.X1'>"
     "    <method name='GetCapabilities'>"
     "      <arg type='a{sv}' name='options' direction='in'/>"
     "      <arg type='a{sv}' name='capabilities' direction='out'/>"
@@ -400,8 +400,8 @@ static gpointer fake_thread(gpointer data)
 	    NULL, NULL, &error);
 	g_assert_no_error(error);
 
-	fake.certificate_id =
-	    export_object(PKCS11_PORTAL_OBJECT_PATH, PKCS11_PORTAL_INTERFACE, &certificate_vtable);
+	fake.certificate_id = export_object(PKCS11_PORTAL_EXPERIMENTAL_OBJECT_PATH,
+	                                    PKCS11_PORTAL_INTERFACE, &certificate_vtable);
 
 	fake.owner_id = g_bus_own_name_on_connection(fake.connection, PKCS11_PORTAL_BUS_NAME,
 	                                             G_BUS_NAME_OWNER_FLAGS_NONE, on_name_acquired,

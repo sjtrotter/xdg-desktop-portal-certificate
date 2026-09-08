@@ -15,35 +15,38 @@ between that branch and a pull request.
 repository   a local checkout of xdg-desktop-portal
 remote       upstream → https://github.com/flatpak/xdg-desktop-portal.git
              origin   → https://github.com/sjtrotter/xdg-desktop-portal.git
-branch       experimental/certificate-webauthentication
-base         upstream/main = 86bd3e2  po: Update Russian translation
-commits      22818e6  xdp: Add a gate for experimental portals              series 1
-             faf82d4  request-dex: Let a portal close an impl request     ┐
-             a6b06d4  web-authentication: Add an experimental             │
-                      WebAuthentication portal                            │ series 2
-             ad72af8  doc: List the experimental portals in the           │
-                      interface reference                                 │
-             d21a4dc  tests: Add WebAuthentication portal tests           ┘
-             0bff521  session-dex: Add xdp_session_dex_close()            ┐
-             1385b47  session-dex: Fix the wrapped session store          │
-             2ab8cca  request-dex: Let a portal see that a request was    │ series 3
+branch       experimental/integration
+base         local main = c95490a (upstream/main 86bd3e2 plus one settings build fix)
+commits      b269c19  doc: Document experimental portals                  ┐
+             0138498  xdp: Add support to export experimental portals     │ series 1
+             c3c4f7e  doc: Render experimental interface titles           ┘
+             51b2d78  session-dex: Add xdp_session_dex_close()            ┐
+             3784cfc  session-dex: Fix the wrapped session store          │
+             47fdbee  request-dex: Let a portal see that a request was    │ series 2
                       closed                                              │
-             a4c1f62  certificate: Add an experimental Certificate portal │ ← this one
-             1aaffaf  tests: Add Certificate portal tests                 ┘
+             fb80027  certificate: Add an experimental Certificate portal │ ← this one
+             066c0b0  tests: Add Certificate portal tests                 ┘
+             0770c26  request-dex: Let a portal close an impl request     ┐
+             357e4d7  web-authentication: Add an experimental             │ series 3
+                      WebAuthentication portal                            │
+             2201f41  tests: Add WebAuthentication portal tests           ┘
 ```
 
-**Three series, proposed in that order**, because they are three separate questions: a
-gate for experimental portals at all, then the smaller interface, then the one this
-repository implements. The gate is 40 lines and needs the maintainers' answer
-independently of whether they like either interface.
+**Three series, proposed in that order**, because they are three separate questions: the
+convention for experimental portals at all, then the one this repository implements, then
+the smaller interface. Series 1 follows
+[PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129), which settled the
+convention: an `.X#` major-version suffix on the interface name and export on
+`/org/freedesktop/portal/desktop/experimental`, with no environment variable and no gate —
+an experimental portal appears exactly when a backend for it is configured.
 
-`a4c1f62` is the commit this repository tracks. Series 3 carries three small changes to
-shared frontend code, each landing with its first user: `0bff521` adds an
+`fb80027` is the commit this repository tracks. Series 2 carries three small changes to
+shared frontend code, each landing with its first user: `51b2d78` adds an
 `xdp_session_dex_close()` that upstream was missing and that a session-shaped portal cannot
-do without; `1385b47` fixes `xdp_session_dex_store_new_wrapped()`, which has never worked —
+do without; `3784cfc` fixes `xdp_session_dex_store_new_wrapped()`, which has never worked —
 it read the address of the session field rather than the field, so the store aborted in a
 cast — and which the Certificate portal is the first thing to use, keeping a grant on the
-session object rather than in a table keyed by its object path; `2ab8cca` adds the accessor
+session object rather than in a table keyed by its object path; `47fdbee` adds the accessor
 that lets a portal decline to commit state for a request the application has closed.
 
 **What came out of the branch before it was shown to anyone**, after two independent
@@ -69,16 +72,19 @@ thread, 2026-01-28:
 > I noticed the other portals have singular names: should we do that here too?
 > `org.freedesktop.portal.experimental.Credential`
 
-So: singular name, `experimental` infix, not exported by default, turned on by an
-environment variable holding portal names. That is what an unfinished portal looks like
-upstream, and it is what the branch implements. It carries no more standing than the old
+So: a singular name, and not exported by default. The *shape* of "not exported by
+default" has since been settled differently — [PR
+#2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129) replaced the
+`experimental` infix and the `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` variable with an
+`.X#` major-version suffix and a separate object path, and made "a backend is configured"
+the only condition for export. That is what an unfinished portal looks like upstream now,
+and it is what the branch implements. It carries no more standing than the old
 `io.github.sjtrotter.*` names did — it just carries it in the place where the people whose
 opinion matters can see it.
 
-The impl-side name follows: `org.freedesktop.impl.portal.experimental.Certificate`, which
-is what `swick/wip/credentials-portal` does for its own portal, and which keeps the
+The impl-side name follows: `org.freedesktop.impl.portal.Certificate.X1`, which keeps the
 frontend and backend generated symbols in step so the whole experimental surface can be
-deleted with the namespace if it is dropped.
+deleted with the suffix if it is dropped.
 
 ## What this repository is now
 
@@ -93,7 +99,7 @@ An out-of-tree backend, in the shape `xdg-desktop-portal-termfilechooser` and
 | `src/redact.h` | logging rules — was `shared/`, when there were two sides here to share between |
 | `data/certificate.portal.in` | `DBusName`, `Interfaces`, `UseIn`; installed into `$datadir/xdg-desktop-portal/portals` |
 | `data/org.freedesktop.impl.portal.desktop.certificate.service.in` | D-Bus activation |
-| `data/org.freedesktop.impl.portal.experimental.Certificate.xml` | a **verbatim tracking copy** of the branch's file; deleted the day the branch lands and the file ships in xdg-desktop-portal's interfaces directory |
+| `data/org.freedesktop.impl.portal.Certificate.X1.xml` | a **verbatim tracking copy** of the branch's file; deleted the day the branch lands and the file ships in xdg-desktop-portal's interfaces directory |
 | `tools/` | `trigger-certificate.sh`, `dev-stack.sh` |
 
 What is *gone*, and was deleted rather than moved: `frontend/src/request.h`, `session.h`,

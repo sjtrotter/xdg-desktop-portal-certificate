@@ -33,7 +33,7 @@ install time, and forwards every operation to the PUBLIC portal interface over D
 `src/module/` → `libpkcs11-portal-certificate.so`, plus `xdg-desktop-portal-certificate.module` in p11-kit's
 module directory. It presents one slot, one token (`Portal Certificate`), and — once the user has
 chosen one — one certificate, its public key and its private key. `C_Sign` becomes
-`org.freedesktop.portal.experimental.Certificate.Sign`. `C_Decrypt` becomes `Decrypt`.
+`org.freedesktop.portal.Certificate.X1.Sign`. `C_Decrypt` becomes `Decrypt`.
 
 ### Why this is not the facade under a different name
 

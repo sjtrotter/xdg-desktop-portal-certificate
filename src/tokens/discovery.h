@@ -173,7 +173,7 @@ CertificateTokens* certificate_tokens_new(const char* const* module_paths, GErro
  *  module.
  *
  *  THIS BACKEND MUST NEVER LOAD IT. That module forwards every call to
- *  org.freedesktop.portal.experimental.Certificate, which the frontend serves
+ *  org.freedesktop.portal.Certificate.X1, which the frontend serves
  *  by calling this backend: loading it here would make the backend enumerate a
  *  token whose enumeration is a call back into the backend. p11-kit's
  *  `enable-in` is a convenience and pkcs11.conf(5) says it is not a security

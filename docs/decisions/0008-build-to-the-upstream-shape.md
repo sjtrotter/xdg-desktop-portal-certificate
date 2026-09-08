@@ -6,7 +6,7 @@ Status: accepted (for the sketch), overriding the review advice recorded below; 
 
 > **Amendment (0010).** The split argued for here is preserved exactly; what changed is
 > that the frontend half is no longer in this repository. It is a branch of
-> xdg-desktop-portal (`experimental/certificate-webauthentication`), which is how upstream
+> xdg-desktop-portal (`experimental/integration`), which is how upstream
 > asks new portals to be developed, so `frontend/` was deleted and this repository is now
 > an out-of-tree backend only.
 

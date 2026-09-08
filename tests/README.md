@@ -47,11 +47,11 @@ The rest of this file is the plan the tests were written against, kept because t
 marked "not written" are the ones that matter next.
 
 **Half of tier 1 already exists, in the frontend's repository.** The xdg-desktop-portal branch
-`experimental/certificate-webauthentication` ships `tests/templates/certificate.py` (a
+`experimental/integration` ships `tests/templates/certificate.py` (a
 python-dbusmock backend) and `tests/test_certificate.py` (26 test functions, 49 parametrised
 cases, each run once as `AppInfoHost` and once as `AppInfoFlatpak` for 98 runs), covering the
 happy path, cancellation from both directions, 11 + 10 invalid-option cases, backend
-over-claiming being clamped, and the experimental gate. Everything below that says "the frontend against a fake backend" is that suite. What is left
+over-claiming being clamped. Everything below that says "the frontend against a fake backend" is that suite. What is left
 for this repository is the other direction — **this backend against a fake frontend** — plus
 everything that needs a card.
 
@@ -78,7 +78,7 @@ argument lives in it.
   the window.
 - **Backend discovery**, from this side: that the installed `.portal` file names the interface the
   installed binary actually implements, and that `tools/dev-stack.sh` gets from a cold private bus
-  to "Providing portal org.freedesktop.portal.experimental.Certificate". *Done, by
+  to "Providing portal org.freedesktop.portal.Certificate.X1". *Done, by
   `tools/dev-stack.sh` itself, though nothing asserts on the log line yet.* `portals.conf`
   precedence is upstream's to test.
 - **Filter logic** (`src/tokens/filter.h`) against fixture certificates: EKU, key usage, issuer DN

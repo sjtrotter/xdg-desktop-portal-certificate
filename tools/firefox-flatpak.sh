@@ -77,12 +77,12 @@ if [ -f /usr/share/applications/$APP.desktop ] && [ ! -f "$HOME/.local/share/app
 	echo "${0##*/}: kept the host Firefox launcher ahead of the Flatpak's ($HOME/.local/share/applications/$APP.desktop)"
 fi
 
-# The session's portal must be the branch build with the gate on, and this
-# backend must be behind it. gdbus is used from the host: the interface list is
-# the same one the sandbox sees.
+# The session's portal must be the branch build with this backend configured
+# behind it. gdbus is used from the host: the interface list is the same one the
+# sandbox sees.
 if ! gdbus introspect --session --dest org.freedesktop.portal.Desktop \
-	--object-path /org/freedesktop/portal/desktop 2>/dev/null |
-	grep -q "org.freedesktop.portal.experimental.Certificate"; then
+	--object-path /org/freedesktop/portal/desktop/experimental 2>/dev/null |
+	grep -q "org.freedesktop.portal.Certificate.X1"; then
 	die "the session's xdg-desktop-portal does not export the Certificate interface; run tools/dev-stack.sh --live --keep --no-e2e --pin-prompt=system first"
 fi
 if ! busctl --user list 2>/dev/null | grep -q "org.freedesktop.impl.portal.desktop.certificate"; then
@@ -102,8 +102,9 @@ else
 	echo "${0##*/}: pcsc socket: closed in the sandbox"
 fi
 flatpak run "${RUN_ARGS[@]}" --command=gdbus "$APP" introspect --session \
-	--dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop 2>/dev/null |
-	grep -q "org.freedesktop.portal.experimental.Certificate" ||
+	--dest org.freedesktop.portal.Desktop \
+	--object-path /org/freedesktop/portal/desktop/experimental 2>/dev/null |
+	grep -q "org.freedesktop.portal.Certificate.X1" ||
 	die "the sandbox cannot see the Certificate interface on the portal bus"
 echo "${0##*/}: portal bus: Certificate interface visible from the sandbox"
 

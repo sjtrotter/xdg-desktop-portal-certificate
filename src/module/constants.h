@@ -48,7 +48,11 @@
  * it and never speaks to any impl interface. */
 #define PKCS11_PORTAL_BUS_NAME "org.freedesktop.portal.Desktop"
 #define PKCS11_PORTAL_OBJECT_PATH "/org/freedesktop/portal/desktop"
-#define PKCS11_PORTAL_INTERFACE "org.freedesktop.portal.experimental.Certificate"
+/* Experimental interfaces are exported one level below the desktop path; the
+ * Request and Session objects they hand out stay on the path above. See
+ * doc/experimental-portals.rst in xdg-desktop-portal. */
+#define PKCS11_PORTAL_EXPERIMENTAL_OBJECT_PATH PKCS11_PORTAL_OBJECT_PATH "/experimental"
+#define PKCS11_PORTAL_INTERFACE "org.freedesktop.portal.Certificate.X1"
 #define PKCS11_PORTAL_REQUEST_INTERFACE "org.freedesktop.portal.Request"
 
 #define PKCS11_PORTAL_ENV_PURPOSE "PKCS11_PORTAL_CERTIFICATE_PURPOSE"

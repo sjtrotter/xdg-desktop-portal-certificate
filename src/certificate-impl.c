@@ -28,7 +28,7 @@ static void on_session_invalidated(CertificateImplSession* session, const char* 
 struct CertificateImpl
 {
 	GDBusConnection* connection;
-	XdpImplExperimentalCertificate* skeleton;
+	XdpImplCertificateX1* skeleton;
 	CertificateTokens* tokens;
 
 	/* The unique name that currently owns org.freedesktop.portal.Desktop. NULL
@@ -388,7 +388,7 @@ static gboolean vardict_keys_known(GVariant* dict, const char* const* known)
 typedef struct
 {
 	CertificateImpl* impl;
-	XdpImplExperimentalCertificate* object;
+	XdpImplCertificateX1* object;
 	GDBusMethodInvocation* invocation; /* borrowed until completed */
 	CertificateImplRequest* request;
 	CertificateImplSession* session; /* a reference of our own */
@@ -506,15 +506,15 @@ static void transaction_respond(Transaction* transaction, TransactionKind kind, 
 	switch (kind)
 	{
 		case TRANSACTION_CREATE_SESSION:
-			xdp_impl_experimental_certificate_complete_create_session(
+			xdp_impl_certificate_x1_complete_create_session(
 			    transaction->object, transaction->invocation, response, owned);
 			break;
 		case TRANSACTION_ACQUIRE:
-			xdp_impl_experimental_certificate_complete_acquire_credential(
+			xdp_impl_certificate_x1_complete_acquire_credential(
 			    transaction->object, transaction->invocation, response, owned);
 			break;
 		default:
-			xdp_impl_experimental_certificate_complete_sign(
+			xdp_impl_certificate_x1_complete_sign(
 			    transaction->object, transaction->invocation, response, owned);
 			break;
 	}
@@ -543,23 +543,23 @@ static GVariant* error_results(const char* code)
 }
 
 /* Answer a method that has no transaction yet. */
-static void answer_early(XdpImplExperimentalCertificate* object,
+static void answer_early(XdpImplCertificateX1* object,
                          GDBusMethodInvocation* invocation, TransactionKind kind,
                          guint32 response, GVariant* results)
 {
 	switch (kind)
 	{
 		case TRANSACTION_CREATE_SESSION:
-			xdp_impl_experimental_certificate_complete_create_session(object, invocation,
-			                                                          response, results);
+			xdp_impl_certificate_x1_complete_create_session(object, invocation,
+			                                                response, results);
 			return;
 		case TRANSACTION_ACQUIRE:
-			xdp_impl_experimental_certificate_complete_acquire_credential(object, invocation,
-			                                                              response, results);
+			xdp_impl_certificate_x1_complete_acquire_credential(object, invocation,
+			                                                    response, results);
 			return;
 		default:
-			xdp_impl_experimental_certificate_complete_sign(object, invocation, response,
-			                                               results);
+			xdp_impl_certificate_x1_complete_sign(object, invocation, response,
+			                                     results);
 			return;
 	}
 }
@@ -617,7 +617,7 @@ static CertificateImplSession* lookup_session(CertificateImpl* impl, const char*
 
 /* ------------------------------------------------------------ CreateSession */
 
-static gboolean handle_create_session(XdpImplExperimentalCertificate* object,
+static gboolean handle_create_session(XdpImplCertificateX1* object,
                                       GDBusMethodInvocation* invocation, const char* arg_handle,
                                       const char* arg_session_handle, const char* arg_app_id,
                                       GVariant* arg_options, gpointer user_data)
@@ -638,7 +638,7 @@ static gboolean handle_create_session(XdpImplExperimentalCertificate* object,
 	{
 		/* A live session at this path already. Refusing is right; refusing a
 		 * CLOSED one was not -- see below. */
-		xdp_impl_experimental_certificate_complete_create_session(
+		xdp_impl_certificate_x1_complete_create_session(
 		    object, invocation, CERTIFICATE_RESPONSE_OTHER, error_results("invalid_request"));
 		return TRUE;
 	}
@@ -667,7 +667,7 @@ static gboolean handle_create_session(XdpImplExperimentalCertificate* object,
 		if (!certificate_impl_request_export(request, impl->connection, &error))
 		{
 			g_warning("Could not export the request object: %s", error->message);
-			xdp_impl_experimental_certificate_complete_create_session(
+			xdp_impl_certificate_x1_complete_create_session(
 			    object, invocation, CERTIFICATE_RESPONSE_OTHER, error_results("invalid_request"));
 			return TRUE;
 		}
@@ -685,7 +685,7 @@ static gboolean handle_create_session(XdpImplExperimentalCertificate* object,
 		 * with nobody able to end it. */
 		g_warning("Could not export the session object: %s", error->message);
 		g_object_unref(session);
-		xdp_impl_experimental_certificate_complete_create_session(
+		xdp_impl_certificate_x1_complete_create_session(
 		    object, invocation, CERTIFICATE_RESPONSE_OTHER, error_results("invalid_request"));
 		return TRUE;
 	}
@@ -695,7 +695,7 @@ static gboolean handle_create_session(XdpImplExperimentalCertificate* object,
 	/* The session's own signal, forwarded to the interface's. */
 	g_signal_connect(session, "invalidated", G_CALLBACK(on_session_invalidated), impl);
 
-	xdp_impl_experimental_certificate_complete_create_session(
+	xdp_impl_certificate_x1_complete_create_session(
 	    object, invocation, CERTIFICATE_RESPONSE_SUCCESS, empty_results());
 
 	return TRUE;
@@ -1019,7 +1019,7 @@ static gboolean parse_acquire_options(Transaction* transaction, GVariant* option
 	return TRUE;
 }
 
-static gboolean handle_acquire_credential(XdpImplExperimentalCertificate* object,
+static gboolean handle_acquire_credential(XdpImplCertificateX1* object,
                                           GDBusMethodInvocation* invocation,
                                           const char* arg_handle, const char* arg_session_handle,
                                           const char* arg_app_id, const char* arg_parent_window,
@@ -1188,7 +1188,7 @@ static void on_operation_done(GBytes* result, const GError* error, gpointer user
 }
 
 static gboolean handle_key_operation(CertificateImpl* impl,
-                                     XdpImplExperimentalCertificate* object,
+                                     XdpImplCertificateX1* object,
                                      GDBusMethodInvocation* invocation, const char* arg_handle,
                                      const char* arg_session_handle, const char* arg_app_id,
                                      const char* arg_parent_window, GVariant* arg_options)
@@ -1277,7 +1277,7 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	return TRUE;
 }
 
-static gboolean handle_sign(XdpImplExperimentalCertificate* object,
+static gboolean handle_sign(XdpImplCertificateX1* object,
                             GDBusMethodInvocation* invocation, const char* arg_handle,
                             const char* arg_session_handle, const char* arg_app_id,
                             const char* arg_parent_window, GVariant* arg_options,
@@ -1347,7 +1347,7 @@ static void on_capabilities(GObject* source, GAsyncResult* result, gpointer user
 	                                                    g_variant_builder_end(&builder)));
 }
 
-static gboolean handle_get_capabilities(XdpImplExperimentalCertificate* object,
+static gboolean handle_get_capabilities(XdpImplCertificateX1* object,
                                         GDBusMethodInvocation* invocation, const char* arg_app_id,
                                         GVariant* arg_options, gpointer user_data)
 {
@@ -1426,8 +1426,8 @@ static void on_session_invalidated(CertificateImplSession* session, const char* 
 {
 	CertificateImpl* impl = user_data;
 
-	xdp_impl_experimental_certificate_emit_session_invalidated(impl->skeleton, session->id,
-	                                                           reason);
+	xdp_impl_certificate_x1_emit_session_invalidated(impl->skeleton, session->id,
+	                                                 reason);
 }
 
 CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTokens* tokens,
@@ -1439,11 +1439,11 @@ CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTo
 	impl->tokens = tokens;
 	impl->sessions = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
 	impl->transactions = g_ptr_array_new();
-	impl->skeleton = XDP_IMPL_EXPERIMENTAL_CERTIFICATE(
-	    xdp_impl_experimental_certificate_skeleton_new());
+	impl->skeleton = XDP_IMPL_CERTIFICATE_X1(
+	    xdp_impl_certificate_x1_skeleton_new());
 
-	xdp_impl_experimental_certificate_set_version(impl->skeleton,
-	                                              CERTIFICATE_IMPL_INTERFACE_VERSION);
+	xdp_impl_certificate_x1_set_version(impl->skeleton,
+	                                    CERTIFICATE_IMPL_INTERFACE_VERSION);
 
 	g_signal_connect(impl->skeleton, "handle-create-session", G_CALLBACK(handle_create_session),
 	                 impl);

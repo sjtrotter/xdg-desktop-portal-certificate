@@ -156,7 +156,6 @@ export GTK_A11Y=none
 export SOFTHSM2_CONF="$SOFTHSM_DIR/softhsm2.conf"
 export XDG_DESKTOP_PORTAL_DIR="$DEVDIR"
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-dev}"
-export XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate
 export XDG_CONFIG_HOME="$CONFDIR"
 
 # The RSA fixture, so that phase 2 can name one mechanism instead of guessing

@@ -1,9 +1,9 @@
-# The implementation interface — `org.freedesktop.impl.portal.experimental.Certificate`
+# The implementation interface — `org.freedesktop.impl.portal.Certificate.X1`
 
 Status: EXPERIMENTAL, and **more** unstable than the public interface, deliberately. Upstream
 treats the `org.freedesktop.impl.portal.*` interfaces as an internal contract between a frontend
 and the backends of the same release, versioned but not promised to applications. This one is the
-same, with less of a track record and an `experimental` infix that says so on the wire.
+same, with less of a track record and an `.X1` major-version suffix that says so on the wire.
 
 **This interface is not for applications.** It is what xdg-desktop-portal calls on a backend it
 selected — here, `xdg-desktop-portal-certificate` on bus name
@@ -11,12 +11,12 @@ selected — here, `xdg-desktop-portal-certificate` on bus name
 
 ## The XML this repository ships is a copy, and it must track its source
 
-[`../data/org.freedesktop.impl.portal.experimental.Certificate.xml`](../data/org.freedesktop.impl.portal.experimental.Certificate.xml)
+[`../data/org.freedesktop.impl.portal.Certificate.X1.xml`](../data/org.freedesktop.impl.portal.Certificate.X1.xml)
 is a **verbatim copy**, apart from a header comment saying so, of
 
 ```
-xdg-desktop-portal, branch experimental/certificate-webauthentication, commit a4c1f62
-data/org.freedesktop.impl.portal.experimental.Certificate.xml
+xdg-desktop-portal, branch experimental/integration, commit fb80027
+data/org.freedesktop.impl.portal.Certificate.X1.xml
 ```
 
 The interface belongs to the frontend. This repository does not get to change it, and a

@@ -171,13 +171,13 @@ void certificate_impl_session_close(CertificateImplSession* session);
 /** The hardware went away, the lifetime ran out, or the frontend that owned the
  *  grant is gone. Emits the "invalidated" signal with @reason and closes the
  *  session; certificate-impl.c turns that into
- *  org.freedesktop.impl.portal.experimental.Certificate.SessionInvalidated,
+ *  org.freedesktop.impl.portal.Certificate.X1.SessionInvalidated,
  *  which the frontend turns into GrantInvalidated. The backend does not decide
  *  that a grant is over for any reason that is not physical or temporal.
  *
  *  @reason MUST BE ONE THIS BACKEND MAY LEGITIMATELY SEND: expired,
  *  token_removed, policy, backend_gone, error -- see
- *  data/org.freedesktop.impl.portal.experimental.Certificate.xml.
+ *  data/org.freedesktop.impl.portal.Certificate.X1.xml.
  *  The frontend forwards it verbatim to applications, so an invented value is
  *  a word nobody can act on delivered as though it were part of the contract.
  *  Anything else is g_critical()ed and sent as "error". */

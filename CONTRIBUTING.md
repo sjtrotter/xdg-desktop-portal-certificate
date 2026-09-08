@@ -5,7 +5,7 @@ module, and 13 meson test suites exist and pass. The interface is not upstream, 
 branch that defines it is not merged. The most useful contribution today is still not code.
 
 **The interface is not changed here.** It is defined by the xdg-desktop-portal branch
-`experimental/certificate-webauthentication`, and `data/org.freedesktop.impl.portal.experimental.Certificate.xml`
+`experimental/integration`, and `data/org.freedesktop.impl.portal.Certificate.X1.xml`
 is a verbatim copy of the branch's file. A change to the interface is a change to that branch,
 followed by re-copying the file; a hand-edit here produces a backend that no longer implements what
 it claims. See [docs/decisions/0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md).
@@ -74,7 +74,7 @@ XML. The **frontend** is a branch of xdg-desktop-portal
 Before writing anything, decide which project it goes in, and check it against
 [the responsibility table](docs/ARCHITECTURE.md#who-does-what):
 
-- **Frontend** (xdg-desktop-portal, branch `experimental/certificate-webauthentication`,
+- **Frontend** (xdg-desktop-portal, branch `experimental/integration`,
   `desktop-portal/certificate.c`): who is calling, what they are allowed to ask for, what is
   remembered, how long a grant lives, which backend is used, the interface XML.
 - **Backend** (here, `src/`): what the user sees, what the card does. It never derives an app id,
@@ -88,7 +88,7 @@ Three rules that are easy to break by accident:
   argument on the impl interface — that is, a change to the branch — not a lookup in the backend.
 - **Do not add a way for an application to reach the impl interface.** Not a convenience method, not
   a debug flag, not a "direct mode". See [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md).
-- **Do not edit `data/org.freedesktop.impl.portal.experimental.Certificate.xml`.** It is a tracking
+- **Do not edit `data/org.freedesktop.impl.portal.Certificate.X1.xml`.** It is a tracking
   copy.
 
 ## Running the tests

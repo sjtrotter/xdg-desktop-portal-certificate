@@ -12,13 +12,13 @@
  *  Types shared by every part of the backend.
  *
  *  The interface this backend implements is defined by the xdg-desktop-portal
- *  branch experimental/certificate-webauthentication; the copy of the XML in
+ *  branch experimental/integration; the copy of the XML in
  *  data/ tracks that branch verbatim. See docs/IMPL-INTERFACE.md.
  */
 
 #define CERTIFICATE_IMPL_BUS_NAME "org.freedesktop.impl.portal.desktop.certificate"
 #define CERTIFICATE_IMPL_OBJECT_PATH "/org/freedesktop/portal/desktop"
-#define CERTIFICATE_IMPL_INTERFACE "org.freedesktop.impl.portal.experimental.Certificate"
+#define CERTIFICATE_IMPL_INTERFACE "org.freedesktop.impl.portal.Certificate.X1"
 #define CERTIFICATE_IMPL_INTERFACE_VERSION 1u
 
 /** The only bus name whose owner may call this backend. */

@@ -127,7 +127,6 @@ export XDG_DESKTOP_PORTAL_DIR="$DEVDIR"
 # The session's own desktop, not "dev": the portals.conf in $DEVDIR is a copy of
 # the machine's, so the backends it names are the ones this desktop uses.
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-dev}"
-export XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate
 
 MODULE="$(cat "$SOFTHSM_DIR/module-path")"
 

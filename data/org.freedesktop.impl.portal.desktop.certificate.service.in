@@ -9,7 +9,7 @@
 # org.freedesktop.impl.portal.desktop.<backend>.
 #
 # xdg-desktop-portal activates this name when portals.conf (or UseIn) selects
-# certificate.portal for org.freedesktop.impl.portal.experimental.Certificate.
+# certificate.portal for org.freedesktop.impl.portal.Certificate.X1.
 # APPLICATIONS HAVE NO REASON TO HOLD THIS NAME and are not expected to reach
 # it; see docs/IMPL-INTERFACE.md, "Why an application cannot call this".
 #

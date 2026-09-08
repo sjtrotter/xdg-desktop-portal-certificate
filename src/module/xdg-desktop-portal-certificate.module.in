@@ -5,8 +5,9 @@
 # user chose in the portal's chooser, and forwards signing to the portal. It
 # holds no key, no PIN and no card.
 #
-# NOT CRITICAL. A machine with no Certificate portal, or with the experimental
-# gate off, must still load every other module: this one then offers no slot.
+# NOT CRITICAL. A machine with no Certificate portal, or with no certificate
+# backend behind it, must still load every other module: this one then offers no
+# slot.
 #
 # OPT IN BY NAME. A credential search through this module can raise a chooser,
 # and a program that enumerates PKCS#11 objects at start-up did not ask a user

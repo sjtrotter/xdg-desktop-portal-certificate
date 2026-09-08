@@ -4,13 +4,13 @@
 # ONE gdbus-codegen run over all three impl interfaces, with the common prefix
 # stripped, so the generated symbols read the way upstream's do:
 #
-#   org.freedesktop.impl.portal.experimental.Certificate -> XdpImplExperimentalCertificate
-#   org.freedesktop.impl.portal.Request                  -> XdpImplRequest
-#   org.freedesktop.impl.portal.Session                  -> XdpImplSession
+#   org.freedesktop.impl.portal.Certificate.X1 -> XdpImplCertificateX1
+#   org.freedesktop.impl.portal.Request        -> XdpImplRequest
+#   org.freedesktop.impl.portal.Session        -> XdpImplSession
 impl_dbus_sources = gnome.gdbus_codegen(
   'xdp-impl-dbus',
   sources: [
-    '../data/org.freedesktop.impl.portal.experimental.Certificate.xml',
+    '../data/org.freedesktop.impl.portal.Certificate.X1.xml',
     '../data/org.freedesktop.impl.portal.Request.xml',
     '../data/org.freedesktop.impl.portal.Session.xml',
   ],

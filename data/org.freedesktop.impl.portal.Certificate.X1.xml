@@ -8,11 +8,11 @@
 
   Apart from this comment block, this file is copied byte for byte from
 
-      data/org.freedesktop.impl.portal.experimental.Certificate.xml
+      data/org.freedesktop.impl.portal.Certificate.X1.xml
 
-  on the xdg-desktop-portal branch experimental/certificate-webauthentication,
-  at commit a4c1f62 "certificate: Add an experimental Certificate portal".
-  (The branch is rebased on upstream, so that id moves.)
+  on the xdg-desktop-portal branch experimental/integration, at commit fb80027
+  "certificate: Add an experimental Certificate portal". (The branch is rebased
+  on upstream, so that id moves.)
 
   IT MUST TRACK THAT FILE. The interface is defined by the portal frontend, not
   by this backend; a divergence here is a backend that no longer implements the
@@ -28,7 +28,7 @@
 
 <node name="/" xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
   <!--
-      org.freedesktop.impl.portal.experimental.Certificate:
+      org.freedesktop.impl.portal.Certificate.X1:
       @short_description: Backend for the portal for certificates on security tokens
 
       This backend interface drives the certificate chooser, the consent
@@ -43,9 +43,9 @@
       be trusted.
 
       This is an **experimental** interface and can change or get removed
-      without a version bump.
+      without a version bump. See :doc:`experimental-portals`.
   -->
-  <interface name="org.freedesktop.impl.portal.experimental.Certificate">
+  <interface name="org.freedesktop.impl.portal.Certificate.X1">
     <!--
         CreateSession:
         @handle: Object path for the :ref:`org.freedesktop.impl.portal.Request` object representing this call
@@ -88,7 +88,7 @@
           ``operation_policy`` (``a{sv}``), ``interaction_mode`` (``s``),
           ``activation_token`` (``s``) and ``reason`` (``s``)
 
-          As on :ref:`org.freedesktop.portal.experimental.Certificate.AcquireCredential`.
+          As on :ref:`org.freedesktop.portal.Certificate.X1.AcquireCredential`.
           The frontend has validated them: every key, at the top level and
           inside the two nested vardicts, is one this interface defines, and
           every value drawn from a vocabulary - ``purpose``,
@@ -251,7 +251,7 @@
         Emitted when the backend can no longer honour a grant.
 
         The frontend turns this into
-        :ref:`org.freedesktop.portal.experimental.Certificate::GrantInvalidated`,
+        :ref:`org.freedesktop.portal.Certificate.X1::GrantInvalidated`,
         emitted to the connection that owns the session, and closes the
         session. @reason is forwarded verbatim, so the vocabulary here is the
         public one: ``token_removed``, ``policy``, ``backend_gone`` or

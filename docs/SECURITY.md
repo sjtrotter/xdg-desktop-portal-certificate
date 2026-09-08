@@ -16,10 +16,12 @@ rules are recorded as *provided by xdg-desktop-portal* and are stated here only 
 obligations make no sense without them; backend rules are this repository's, and are the ones to
 hold it to.
 
-**The public interface is gated.** `org.freedesktop.portal.experimental.Certificate` is not
-exported unless the portal was started with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`.
-With the gate off, no application can reach any of this and this backend is never activated. That
-is a property of the frontend and this repository cannot change it in either direction.
+**The public interface appears only with a backend behind it.**
+`org.freedesktop.portal.Certificate.X1` is exported on
+`/org/freedesktop/portal/desktop/experimental`, and only once a backend has been configured for
+`org.freedesktop.impl.portal.Certificate.X1`. With none configured, no application can reach any of
+this and this backend is never activated. That is a property of the frontend and this repository
+cannot change it in either direction.
 
 ## What is implemented, and what is not
 
@@ -502,7 +504,7 @@ public.
 **It grants no capability the D-Bus interface does not.** A compromised application holding this
 module can call `Sign` — as itself, under a grant the user consented to, for as long as the grant
 lives. It could already do exactly that by calling
-`org.freedesktop.portal.experimental.Certificate` directly, which needs no module and no
+`org.freedesktop.portal.Certificate.X1` directly, which needs no module and no
 configuration. Every refusal the module makes is made again by the portal on the other side of the
 bus. **It is not a trust boundary for the portal's assets**, and hardening aimed at those belongs
 in `desktop-portal/certificate.c` and `src/broker/`.

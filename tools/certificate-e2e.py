@@ -6,9 +6,9 @@
 # end, the way an application would, and check that what comes back verifies.
 #
 # THIS TALKS TO THE FRONTEND, NEVER TO THIS REPOSITORY'S BACKEND. Everything
-# below goes to org.freedesktop.portal.experimental.Certificate on
-# org.freedesktop.portal.Desktop at /org/freedesktop/portal/desktop. An
-# application would do exactly this, and it is the only way to exercise the
+# below goes to org.freedesktop.portal.Certificate.X1 on
+# org.freedesktop.portal.Desktop at /org/freedesktop/portal/desktop/experimental.
+# An application would do exactly this, and it is the only way to exercise the
 # backend the way it is meant to be exercised: through the frontend's app id
 # derivation, option validation, lifetime ceiling, grant table and results
 # clamping.
@@ -16,13 +16,12 @@
 #     CreateSession -> AcquireCredential -> Sign -> verify the signature with
 #     the certificate that came back
 #
-# The interface only exists if the running xdg-desktop-portal was started with
-#     XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate
-# (or "all"). With the gate off, this says so and exits 40 rather than dumping a
-# D-Bus traceback: that is the gate working, not a bug.
+# The interface only exists if the running xdg-desktop-portal has a certificate
+# backend configured. With none configured, this says so and exits 40 rather
+# than dumping a D-Bus traceback: that is the frontend working, not a bug.
 #
 # Exit codes match the backend's:
-#     0  PASS                  40 unavailable (no portal, gate off, no token)
+#     0  PASS                  40 unavailable (no portal, no backend, no token)
 #     1  FAIL (a check failed)  2 cancelled or refused by the user
 #    64  usage                 70 internal error
 #
@@ -47,7 +46,10 @@ from gi.repository import GLib, Gio  # noqa: E402
 
 BUS_NAME = "org.freedesktop.portal.Desktop"
 OBJECT_PATH = "/org/freedesktop/portal/desktop"
-IFACE = "org.freedesktop.portal.experimental.Certificate"
+# Experimental interfaces are exported one level down; the Request and Session
+# objects they hand out stay on the path above.
+EXPERIMENTAL_OBJECT_PATH = OBJECT_PATH + "/experimental"
+IFACE = "org.freedesktop.portal.Certificate.X1"
 REQUEST_IFACE = "org.freedesktop.portal.Request"
 
 EXIT_PASS = 0
@@ -84,7 +86,7 @@ class Portal:
     def call(self, method, parameters, reply_type):
         return self.bus.call_sync(
             BUS_NAME,
-            OBJECT_PATH,
+            EXPERIMENTAL_OBJECT_PATH,
             IFACE,
             method,
             parameters,
@@ -218,12 +220,12 @@ def die(status, message):
     sys.exit(status)
 
 
-def check_gate(portal):
+def check_exported(portal):
     """Is the experimental interface exported at all?"""
     try:
         portal.bus.call_sync(
             BUS_NAME,
-            OBJECT_PATH,
+            EXPERIMENTAL_OBJECT_PATH,
             "org.freedesktop.DBus.Properties",
             "Get",
             GLib.Variant("(ss)", (IFACE, "version")),
@@ -242,12 +244,13 @@ def check_gate(portal):
             )
         die(
             EXIT_UNAVAILABLE,
-            f"{IFACE} is not exported.\n"
-            "The portal must be started with "
-            "XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate (or 'all'), and "
-            "it must be the branch experimental/certificate-webauthentication.\n"
-            "With the gate off the interface is absent from introspection; that "
-            "is the gate working, not a bug.\n"
+            f"{IFACE} is not exported on {EXPERIMENTAL_OBJECT_PATH}.\n"
+            "The portal must be the branch experimental/integration, and a "
+            "certificate backend must be configured for "
+            "org.freedesktop.impl.portal.Certificate.X1: the frontend exports "
+            "the interface only when it found one.\n"
+            "With no backend configured the interface is absent from "
+            "introspection; that is the frontend working, not a bug.\n"
             f"D-Bus said: {error.message}",
         )
 
@@ -515,7 +518,7 @@ def main(argv):
     except GLib.Error as error:
         die(EXIT_UNAVAILABLE, f"no session bus: {error.message}")
 
-    check_gate(portal)
+    check_exported(portal)
 
     capabilities = show_capabilities(portal)
     if args.capabilities:

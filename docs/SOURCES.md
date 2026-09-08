@@ -266,6 +266,11 @@ pull request. It is **not** in `main` — a checkout of `main` at `86bd3e26` con
 `experimental` namespace and no such environment variable. The gate and the
 `org.freedesktop.portal.experimental.*` XML exist only on that PR's branch, where the flag value
 implemented is `credential`, singular.
+**Superseded as to spelling:**
+[PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129) settled the convention
+differently — an `.X#` major-version suffix on the interface name, export on
+`/org/freedesktop/portal/desktop/experimental`, and no environment variable at all. This entry is
+kept as the record of where the question was first put.
 
 **[S28] xdg-desktop-portal#662, "PKCS#11 portal", is the prior discussion.**
 [flatpak/xdg-desktop-portal#662](https://github.com/flatpak/xdg-desktop-portal/issues/662),

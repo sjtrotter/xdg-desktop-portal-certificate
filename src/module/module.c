@@ -563,8 +563,8 @@ CK_RV C_GetSlotList(unsigned char token_present, CK_SLOT_ID* slot_list, unsigned
 	present = portal_client_available(module_client);
 	g_mutex_unlock(&module_lock);
 
-	/* No portal, no certificate backend, or the experimental gate is off. The
-	 * module still loaded and still initialised: an application that loads every
+	/* No portal, or no certificate backend configured behind it. The module
+	 * still loaded and still initialised: an application that loads every
 	 * configured module must not break because one of them has nothing to say. */
 	if (!present)
 	{

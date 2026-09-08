@@ -99,7 +99,7 @@ dependency, until all of the following exist.**
    included.
 10. **The frontend/backend boundary** ([SPIKES.md](SPIKES.md) S5). Three of its four questions are
     already answered by the branch's pytest suite against a mock backend — `Close()` reaching the
-    impl Request, a backend that over-claims being clamped, and the experimental gate — so what is
+    impl Request and a backend that over-claims being clamped — so what is
     left is the fd relay (which needs a method that does not exist) and the same tests against a
     backend that talks to real hardware.
 

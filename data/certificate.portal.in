@@ -15,14 +15,13 @@
 # according to portals.conf:
 #   https://flatpak.github.io/xdg-desktop-portal/docs/portals.conf.html
 #
-# The interface named below is EXPERIMENTAL and is gated in the frontend: a
-# stock xdg-desktop-portal has never heard of it, will not match this file
-# against anything, and will simply not use this backend. The frontend that does
-# know it exports the public side only when
-# XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL contains "certificate". Installing this
-# file into the real directory is therefore inert on a machine without that
-# frontend, which is why it is safe -- and why it is the only place it can go if
-# the frontend is ever to find it.
+# The interface named below is EXPERIMENTAL: a stock xdg-desktop-portal has
+# never heard of it, will not match this file against anything, and will simply
+# not use this backend. The frontend that does know it exports the public side
+# on /org/freedesktop/portal/desktop/experimental, and only once this file has
+# selected a backend for it. Installing this file into the real directory is
+# therefore inert on a machine without that frontend, which is why it is safe --
+# and why it is the only place it can go if the frontend is ever to find it.
 #
 # UseIn is the legacy mechanism and upstream deprecates it in favour of
 # portals.conf. It is kept here for the same reason upstream keeps it: a system
@@ -30,5 +29,5 @@
 
 [portal]
 DBusName=org.freedesktop.impl.portal.desktop.certificate
-Interfaces=org.freedesktop.impl.portal.experimental.Certificate;
+Interfaces=org.freedesktop.impl.portal.Certificate.X1;
 UseIn=gnome

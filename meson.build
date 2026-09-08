@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
 
 # xdg-desktop-portal-certificate: an out-of-tree BACKEND for the experimental
-# org.freedesktop.impl.portal.experimental.Certificate portal interface.
+# org.freedesktop.impl.portal.Certificate.X1 portal interface.
 #
 # ONE BINARY, because there is one process:
 #
@@ -13,8 +13,8 @@
 # There is no frontend here. The portal frontend -- app id derivation, option
 # validation, policy, the grant registry, the permission store, Request and
 # Session lifecycle, backend selection -- is a branch of xdg-desktop-portal
-# itself: experimental/certificate-webauthentication, 10 commits on upstream
-# 86bd3e2; a4c1f62 defines the interface.
+# itself: experimental/integration, 11 commits on upstream
+# c95490a; fb80027 defines the interface.
 # See docs/decisions/0010-backend-only-frontend-lives-upstream.md and
 # docs/UPSTREAMING.md.
 #
@@ -158,12 +158,12 @@ summary(
 summary(
   {
     'backend bus name': 'org.freedesktop.impl.portal.desktop.certificate',
-    'impl interface': 'org.freedesktop.impl.portal.experimental.Certificate',
+    'impl interface': 'org.freedesktop.impl.portal.Certificate.X1',
     'object path': '/org/freedesktop/portal/desktop',
     'portal file': portal_dir / 'certificate.portal',
-    'frontend': 'xdg-desktop-portal, branch experimental/certificate-webauthentication',
-    'public interface (frontend)': 'org.freedesktop.portal.experimental.Certificate',
-    'frontend gate': 'XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate',
+    'frontend': 'xdg-desktop-portal, branch experimental/integration',
+    'public interface (frontend)': 'org.freedesktop.portal.Certificate.X1',
+    'public object path (frontend)': '/org/freedesktop/portal/desktop/experimental',
     'core contract': 'credential selection + brokered Sign',
     'PKCS#11 facade': 'deferred; OpenPkcs11Endpoint is not in the branch interface',
     'client-side PKCS#11 module': p11_module_path / 'libpkcs11-portal-certificate.so',

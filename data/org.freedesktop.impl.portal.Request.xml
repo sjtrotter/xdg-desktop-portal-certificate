@@ -6,7 +6,7 @@
 
       data/org.freedesktop.impl.portal.Request.xml
 
-  in xdg-desktop-portal itself (branch experimental/certificate-webauthentication,
+  in xdg-desktop-portal itself (branch experimental/integration,
   the file is unchanged from upstream main 86bd3e2). It is the shared
   backend-side Request interface every portal backend exports, and it is
   reproduced here only because no released xdg-desktop-portal installs the impl

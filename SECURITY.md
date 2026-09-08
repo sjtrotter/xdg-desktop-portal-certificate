@@ -14,7 +14,7 @@ reader, on 2026-09-04, through [docs/TESTING.md](docs/TESTING.md) tiers 3.1–3.
 run rather than a hardware claim, and the rest of tier 3 is unrun.
 
 **There are two processes, and only one of them is in this repository.** The frontend is
-xdg-desktop-portal — specifically the branch `experimental/certificate-webauthentication` — and it
+xdg-desktop-portal — specifically the branch `experimental/integration` — and it
 establishes who is calling and applies policy. This repository is the backend: it draws the chooser
 and the PIN prompt and holds the token. Applications talk only to xdg-desktop-portal, and the app
 id this backend displays is one it was *given* rather than one it guessed, which is the point of
@@ -23,10 +23,11 @@ between them is kept private, including what that does *not* protect against, an
 [docs/decisions/0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md) for why the
 frontend is not here.
 
-**The interface is experimental and gated.** The public side is not exported at all unless
-xdg-desktop-portal is started with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`. Installing
-this backend on a machine whose portal does not know the interface adds no attack surface: the
-`.portal` file names an interface nothing matches, and this process is never activated.
+**The interface is experimental.** The public side is exported on
+`/org/freedesktop/portal/desktop/experimental`, and only once a certificate backend has been
+configured for it. Installing this backend on a machine whose portal does not know the interface
+adds no attack surface: the `.portal` file names an interface nothing matches, and this process is
+never activated.
 
 **The boundary this intends to provide is narrower than it sounds.** For **sandboxed** applications
 it can be a strong boundary. For ordinary **host** applications it is a useful identity-and-consent

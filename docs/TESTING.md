@@ -109,7 +109,7 @@ says why it is the whole set rather than just ours.
 ### What it needs first
 
 The frontend is a **local branch of xdg-desktop-portal**,
-`experimental/certificate-webauthentication`, and it has a hard dependency on libdex which Fedora
+`experimental/integration`, and it has a hard dependency on libdex which Fedora
 does not install by default. If it was built against a scratch prefix, put the environment for it
 in `.xdp-env` in this repository — the file is gitignored, and both `tools/dev-stack.sh` and
 `tools/ui-smoke.sh` source it:
@@ -136,9 +136,9 @@ $ tools/dev-stack.sh -- --expect-no-certificate
 **What to look for in the output**, in order:
 
 ```
-XDP: Found 'certificate' in configuration for org.freedesktop.impl.portal.experimental.Certificate
-XDP: Using certificate.portal for org.freedesktop.impl.portal.experimental.Certificate (interface specific config)
-XDP: Providing portal org.freedesktop.portal.experimental.Certificate
+XDP: Found 'certificate' in configuration for org.freedesktop.impl.portal.Certificate.X1
+XDP: Using certificate.portal for org.freedesktop.impl.portal.Certificate.X1 (interface specific config)
+XDP: Providing portal org.freedesktop.portal.Certificate.X1
 XDP: org.freedesktop.portal.Desktop acquired
 ```
 
@@ -433,8 +433,8 @@ which the sanitizer runtime refuses. That is a property of `pkcs11-tool`, not of
 
 The sibling repository does. `xdg-desktop-portal-webauth`'s `tools/portal-stack.sh` stands up
 **both portals on one private bus inside one headless X server** — this backend against the SoftHSM
-fixture, that backend as a WebKitGTK web view, the development frontend with
-`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate,web-authentication`, a p11-kit module directory
+fixture, that backend as a WebKitGTK web view, the development frontend with a `portals.conf`
+routing both experimental interfaces to those two backends, a p11-kit module directory
 naming the module built here, and a TLS server that demands a client certificate and trusts only
 the fixture card's own certificate.
 
@@ -1074,7 +1074,7 @@ backend's. That is a consequence of the split, and the session handle is what jo
 
 | Symptom | Where to look |
 |---|---|
-| `org.freedesktop.portal.experimental.Certificate is not exported` | the frontend was started without `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`, or it is not the branch |
+| `org.freedesktop.portal.Certificate.X1 is not exported` | no backend is configured for `org.freedesktop.impl.portal.Certificate.X1`, so the frontend never exported it; or the portal is not the branch build. Introspect `/org/freedesktop/portal/desktop/experimental`, not `/org/freedesktop/portal/desktop` |
 | the frontend logs nothing about `certificate` | no `.portal` file matched: check `XDG_DESKTOP_PORTAL_DIR` and `portals.conf` |
 | `Backend call failed: ... disconnected from message bus without replying` | **this backend crashed** — and there will be no core dump, because `main()` sets `PR_SET_DUMPABLE(0)` and `RLIMIT_CORE 0` so that a crash between typing a PIN and wiping it cannot write one to disk. Re-run it with `--debug-allow-core` to get a dump and to be able to attach `gdb`; never put that flag in an installed service file |
 | `Gdk-WARNING: Failed to read portal settings ... Unable to open /proc/<pid>/root` | expected, and the same hardening: a non-dumpable process's `/proc` entries are root-owned, so the settings portal cannot identify this one. It is the mechanism that blocks a same-uid `ptrace` attach. The colour scheme is **not** lost with it: `src/main.c` reads `org.gnome.desktop.interface color-scheme` from GSettings and feeds libadwaita directly, because measuring showed the fallbacks did not recover it |

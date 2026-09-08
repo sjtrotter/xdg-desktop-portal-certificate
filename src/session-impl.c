@@ -330,7 +330,7 @@ void certificate_impl_session_close(CertificateImplSession* session)
  * straight to applications, which have no way to learn what it means and a
  * documented list that says it cannot happen.
  *
- * data/org.freedesktop.impl.portal.experimental.Certificate.xml is the
+ * data/org.freedesktop.impl.portal.Certificate.X1.xml is the
  * authority: SessionInvalidated forwards `token_removed`, `policy`,
  * `backend_gone` or `error`. `policy` is not this backend's to emit -- it is
  * a decision the frontend makes -- but it stays in the table because it is

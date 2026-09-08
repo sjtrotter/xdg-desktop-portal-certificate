@@ -12,7 +12,7 @@
 #include "grant.h"
 
 /** @file
- *  The module's client of org.freedesktop.portal.experimental.Certificate.
+ *  The module's client of org.freedesktop.portal.Certificate.X1.
  *
  *  A PKCS#11 call arrives on whatever thread the application felt like, and the
  *  portal answers Request-shaped calls with a signal. So the client owns a
@@ -46,8 +46,8 @@ void portal_client_free(PortalClient* client);
  *  waiting out the request timeout would mean a five-minute exit. */
 void portal_client_cancel(PortalClient* client);
 
-/** Whether the interface answered. FALSE means no portal, no certificate
- *  backend, or the experimental gate is off -- indistinguishable by design. */
+/** Whether the interface answered. FALSE means no portal, or no certificate
+ *  backend configured behind it -- indistinguishable by design. */
 gboolean portal_client_available(PortalClient* client);
 
 /** The portal's mechanism names, from GetCapabilities. */

@@ -15,12 +15,12 @@
 
 /** @file
  *  This backend's implementation of
- *  org.freedesktop.impl.portal.experimental.Certificate.
+ *  org.freedesktop.impl.portal.Certificate.X1.
  *
  *  One file per portal, exactly as xdg-desktop-portal-gtk does it
  *  (src/filechooser.c, src/account.c, ...) and as every out-of-tree backend
  *  does. The interface it implements is defined by the xdg-desktop-portal
- *  branch experimental/certificate-webauthentication, and the copy of the XML in
+ *  branch experimental/integration, and the copy of the XML in
  *  data/ tracks that branch verbatim; see docs/IMPL-INTERFACE.md.
  *
  *  WHAT THE BACKEND OWNS: the UI and the device. The chooser (ui/chooser.h), the

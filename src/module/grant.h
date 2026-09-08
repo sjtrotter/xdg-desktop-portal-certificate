@@ -33,8 +33,8 @@ typedef enum
 	PKCS11_PORTAL_ERROR_FAILED,
 	/** The user cancelled, or policy refused. Not retried immediately. */
 	PKCS11_PORTAL_ERROR_CANCELLED,
-	/** No portal, or the experimental gate is off. Never an error to report to
-	 *  an application: it means this token is not present. */
+	/** No portal, or no certificate backend configured behind it. Never an
+	 *  error to report to an application: it means this token is not present. */
 	PKCS11_PORTAL_ERROR_UNAVAILABLE,
 	/** The grant went away: expiry, token removal, a dead backend. */
 	PKCS11_PORTAL_ERROR_INVALIDATED,

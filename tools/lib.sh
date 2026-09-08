@@ -461,7 +461,7 @@ xdp_write_portal_dir() {
 	# Named explicitly rather than through default=, so that the frontend's log
 	# line names the interface this backend implements.
 	xdp_conf_set "$dir/portals.conf" \
-		org.freedesktop.impl.portal.experimental.Certificate 'certificate;'
+		org.freedesktop.impl.portal.Certificate.X1 'certificate;'
 
 	# ON A PRIVATE BUS, NOTHING OWNS org.freedesktop.secrets. The frontend
 	# builds its Secret proxy at start-up and D-Bus activation on a bus with no

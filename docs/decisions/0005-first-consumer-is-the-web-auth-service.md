@@ -82,8 +82,8 @@ user has the information. That is a mitigation, not a solution while the two por
 processes.
 
 **The resolution is a shared frontend, and there now is one.** A single process hosting both
-`org.freedesktop.portal.experimental.Certificate` and
-`org.freedesktop.portal.experimental.WebAuthentication` already holds the app id it derived for the
+`org.freedesktop.portal.Certificate.X1` and
+`org.freedesktop.portal.WebAuthentication.X1` already holds the app id it derived for the
 web authentication request before it ever calls into the certificate side, so it can pass that
 *original* `app_id` through in-process instead of as the untrusted `reason` text a cross-process
 call is limited to. **That only holds because the two portals run in one trusted process.** Across

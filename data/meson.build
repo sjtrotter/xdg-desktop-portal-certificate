@@ -9,7 +9,7 @@
 # they come from the day the branch lands. See docs/IMPL-INTERFACE.md.
 install_data(
   [
-    'org.freedesktop.impl.portal.experimental.Certificate.xml',
+    'org.freedesktop.impl.portal.Certificate.X1.xml',
     'org.freedesktop.impl.portal.Request.xml',
     'org.freedesktop.impl.portal.Session.xml',
   ],

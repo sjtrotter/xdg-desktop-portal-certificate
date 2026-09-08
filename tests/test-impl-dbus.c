@@ -34,7 +34,7 @@
 
 #define FRONTEND_NAME "org.freedesktop.portal.Desktop"
 #define IMPL_PATH "/org/freedesktop/portal/desktop"
-#define IMPL_INTERFACE "org.freedesktop.impl.portal.experimental.Certificate"
+#define IMPL_INTERFACE "org.freedesktop.impl.portal.Certificate.X1"
 
 #define SESSION_PATH "/org/freedesktop/portal/desktop/session/test/one"
 #define REQUEST_PATH "/org/freedesktop/portal/desktop/request/test/one"

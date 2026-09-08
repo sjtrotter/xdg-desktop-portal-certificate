@@ -4,6 +4,15 @@ Date: 2026-09-04
 Status: accepted (for the sketch); supersedes the *packaging* half of
 [0008](0008-build-to-the-upstream-shape.md) and retires the incubating frontend
 
+> **Amendment (2026-09-07).** The route below stands; the spelling of the convention has
+> moved on. [PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129) settled how
+> an experimental portal is named and exposed, replacing the `experimental` infix and the
+> `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` variable that PR #1889 proposed with an `.X#`
+> major-version suffix on the interface, export on
+> `/org/freedesktop/portal/desktop/experimental`, and no gate at all: the interface appears
+> whenever a backend for it is configured. The Context below records the evidence as it
+> stood in January 2026 and is left as written; the Decision and Consequences are updated.
+
 ## Context
 
 [0008](0008-build-to-the-upstream-shape.md) decided to build a portal frontend and a
@@ -46,19 +55,19 @@ made this repository claim a public bus name that no application had any reason 
 repository is an out-of-tree backend and nothing else.**
 
 - The frontend is `xdg-desktop-portal`, branch
-  `experimental/certificate-webauthentication`, with
+  `experimental/integration`, with
   `certificate: Add an experimental Certificate portal` as the commit that matters
   here. (The ids this ADR first named, `3f46e3c..661e441` and `703fb22`, are pre-rebase;
   the branch is rebased on upstream, so the README carries the current range.) It
   defines both
-  `org.freedesktop.portal.experimental.Certificate` (public) and
-  `org.freedesktop.impl.portal.experimental.Certificate` (impl), implements the
-  `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` gate, and ships a python-dbusmock backend and
-  a pytest suite for both.
+  `org.freedesktop.portal.Certificate.X1` (public, on
+  `/org/freedesktop/portal/desktop/experimental`) and
+  `org.freedesktop.impl.portal.Certificate.X1` (impl, on the standard backend path), and
+  ships a python-dbusmock backend and a pytest suite for both.
 - This repository builds **one binary**, `xdg-desktop-portal-certificate`, owning
   `org.freedesktop.impl.portal.desktop.certificate` and exporting
   `/org/freedesktop/portal/desktop`.
-- `data/org.freedesktop.impl.portal.experimental.Certificate.xml` is a **verbatim copy**
+- `data/org.freedesktop.impl.portal.Certificate.X1.xml` is a **verbatim copy**
   of the branch's file and must track it. The interface is not this repository's to
   change.
 - `data/certificate.portal` installs into the **real**
@@ -87,12 +96,11 @@ README does not mention it and relies on the deprecated `UseIn` key, while the w
 used fork does tell the user to write the `portals.conf` line.
 
 The honest caveat, kept rather than dropped: **the interface named in that file is
-experimental and gated upstream.** A stock xdg-desktop-portal has never heard of
-`org.freedesktop.impl.portal.experimental.Certificate`, will not match this file against
-any interface it knows, and will ignore it. A frontend that does know it still exports
-nothing unless it was started with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`.
-Installing the file is therefore inert on a machine without the branch — which is what
-makes it safe, and is not the same claim as "this is a supported portal".
+experimental upstream.** A stock xdg-desktop-portal has never heard of
+`org.freedesktop.impl.portal.Certificate.X1`, will not match this file against
+any interface it knows, and will ignore it. Installing the file is therefore inert on a
+machine without the branch — which is what makes it safe, and is not the same claim as
+"this is a supported portal".
 
 ## Consequences
 
@@ -107,9 +115,8 @@ makes it safe, and is not the same claim as "this is a supported portal".
   such there in one line rather than rewritten away. There is no incubating frontend to
   give a bus name to.
 - **[0003](0003-own-namespace-before-freedesktop.md) is amended, not overturned.** The
-  impl interface name is now dictated by the frontend branch, and
-  `org.freedesktop.impl.portal.experimental.*` is the namespace upstream set aside for
-  unfinished portals. Using it is not a claim of acceptance. The backend bus name follows
+  impl interface name is now dictated by the frontend branch, and the `.X#` suffix is the
+  convention upstream set aside for unfinished portals. Using it is not a claim of acceptance. The backend bus name follows
   the ordinary out-of-tree backend convention, `org.freedesktop.impl.portal.desktop.<backend>`.
 - **The interface changed shape in the move, and the branch won every disagreement.**
   `CreateSession` is a `Request` on the public side rather than a method returning a
@@ -139,7 +146,7 @@ makes it safe, and is not the same claim as "this is a supported portal".
 - **The spikes get cheaper.** [SPIKES.md](../SPIKES.md) S5 asked whether the
   frontend/backend boundary survives contact with a running system. Half of it is now
   answered by the branch's `tests/test_certificate.py`, which covers cancellation across
-  two hops, a backend that over-claims being clamped, and the experimental gate.
+  two hops and a backend that over-claims being clamped.
 - **The branch is ours until it is accepted.** Moving the frontend into xdg-desktop-portal's
   tree buys review in the right place and reuse of `Request`, `Session` and app-id
   derivation. It does **not** transfer maintenance: an unmerged branch is this author's to

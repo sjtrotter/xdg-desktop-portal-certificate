@@ -4,7 +4,7 @@
 #
 # dev-stack.sh -- run the experimental Certificate portal end to end: a
 # development xdg-desktop-portal frontend from the branch
-# experimental/certificate-webauthentication, this repository's backend, and
+# experimental/integration, this repository's backend, and
 # then tools/certificate-e2e.py against the PUBLIC interface.
 #
 # Two modes.
@@ -51,7 +51,7 @@
 # WHAT IT NEEDS
 #
 #   $XDP_BUILD   a built xdg-desktop-portal from the branch
-#                experimental/certificate-webauthentication. Default:
+#                experimental/integration. Default:
 #                ../xdg-desktop-portal/build relative to this repository. It
 #                must contain desktop-portal/xdg-desktop-portal and
 #                document-portal/xdg-permission-store.
@@ -68,7 +68,7 @@
 #   1. writes a throwaway $XDG_DESKTOP_PORTAL_DIR holding A SYMLINK TO EVERY
 #      .portal FILE ON THE MACHINE, this repository's certificate.portal, and a
 #      COPY of the machine's effective portals.conf with one line added routing
-#      org.freedesktop.impl.portal.experimental.Certificate to this backend.
+#      org.freedesktop.impl.portal.Certificate.X1 to this backend.
 #
 #      All of it, and not just ours, because setting XDG_DESKTOP_PORTAL_DIR
 #      makes the frontend ignore every other .portal and portals.conf directory
@@ -83,8 +83,9 @@
 #      used.
 #   3. starts this repository's backend, so that its stderr is visible rather
 #      than being swallowed by D-Bus activation.
-#   4. starts the frontend with
-#      XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate.
+#   4. starts the frontend. The experimental Certificate interface appears on
+#      /org/freedesktop/portal/desktop/experimental because step 1 configured a
+#      backend for it; nothing else is needed to expose it.
 #   5. runs tools/certificate-e2e.py with whatever came after `--`.
 
 set -u
@@ -213,7 +214,6 @@ softhsm_env() {
 
 start_stack() {
 	export XDG_DESKTOP_PORTAL_DIR="$DEVDIR"
-	export XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate
 
 	if [ "$MODE" = private ]; then
 		# THE SESSION'S OWN DESKTOP, not "dev". The portals.conf in $DEVDIR is a
@@ -267,9 +267,9 @@ check_frontend_log() {
 	local configured="no" provided="no" i
 
 	for i in $(seq 1 20); do
-		grep -q "in configuration for org.freedesktop.impl.portal.experimental.Certificate" \
+		grep -q "in configuration for org.freedesktop.impl.portal.Certificate.X1" \
 			"$FRONTEND_LOG" 2>/dev/null && configured="yes"
-		grep -q "Providing portal org.freedesktop.portal.experimental.Certificate" \
+		grep -q "Providing portal org.freedesktop.portal.Certificate.X1" \
 			"$FRONTEND_LOG" 2>/dev/null && provided="yes"
 		[ "$configured" = yes ] && [ "$provided" = yes ] && break
 		sleep 0.25

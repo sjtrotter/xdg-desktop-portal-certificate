@@ -14,7 +14,7 @@ the application, and the sandbox hole closes: the application talks to
 ## What this repository is
 
 An xdg-desktop-portal **backend** for the experimental
-`org.freedesktop.impl.portal.experimental.Certificate` interface, plus a **client-side PKCS#11
+`org.freedesktop.impl.portal.Certificate.X1` interface, plus a **client-side PKCS#11
 module** for applications that cannot call D-Bus. Two interfaces are in play throughout: the
 **public interface** is what applications call on xdg-desktop-portal, and the **impl interface** is
 what xdg-desktop-portal calls on a backend such as this one. The backend discovers PKCS#11 tokens,
@@ -67,19 +67,18 @@ operation, a PIN-pad reader, a second card, KDE, and the OpenSSL 3 provider.
 ## How it works
 
 ```
-  application ──── org.freedesktop.portal.experimental.Certificate ────┐
-                   on org.freedesktop.portal.Desktop                   │
-                                                                       ▼
+  application ──────── org.freedesktop.portal.Certificate.X1 ──────────┐
+                   on org.freedesktop.portal.Desktop, at                │
+                   /org/freedesktop/portal/desktop/experimental         ▼
                                                    ┌───────────────────────────────────┐
                                                    │ FRONTEND  xdg-desktop-portal      │
-                                                   │ branch experimental/              │
-                                                   │   certificate-webauthentication   │
+                                                   │ branch experimental/integration   │
                                                    │ app id · policy · permissions ·   │
                                                    │ grants, expiry, clamping ·        │
                                                    │ request and session lifecycle     │
                                                    └───────────────────┬───────────────┘
                                                                        │
-                    org.freedesktop.impl.portal.experimental.Certificate│ app_id is an
+                    org.freedesktop.impl.portal.Certificate.X1          │ app_id is an
                     on org.freedesktop.impl.portal.desktop.certificate  │ ARGUMENT here
                                                                        ▼
                                                    ┌───────────────────────────────────┐
@@ -128,8 +127,9 @@ boundary; the portal is. [0011](docs/decisions/0011-client-side-pkcs11-module.md
 
 ## Interface at a glance
 
-**Public**, `org.freedesktop.portal.experimental.Certificate` on
-`org.freedesktop.portal.Desktop`. Defined by the frontend branch, not here; summarised in
+**Public**, `org.freedesktop.portal.Certificate.X1` on `org.freedesktop.portal.Desktop`, at
+`/org/freedesktop/portal/desktop/experimental`. Defined by the frontend branch, not here;
+summarised in
 [docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md).
 
 | | |
@@ -146,10 +146,10 @@ boundary; the portal is. [0011](docs/decisions/0011-client-side-pkcs11-module.md
 `operation_policy` (`sign` is the only key), `requested_lifetime` (clamped), `interaction_mode` and
 `reason`.
 
-**Impl**, frontend to backend, `org.freedesktop.impl.portal.experimental.Certificate` on
-`org.freedesktop.impl.portal.desktop.certificate`. Described in
-[docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md), declared in
-[`data/org.freedesktop.impl.portal.experimental.Certificate.xml`](data/org.freedesktop.impl.portal.experimental.Certificate.xml),
+**Impl**, frontend to backend, `org.freedesktop.impl.portal.Certificate.X1` on
+`org.freedesktop.impl.portal.desktop.certificate`, at `/org/freedesktop/portal/desktop`. Described
+in [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md), declared in
+[`data/org.freedesktop.impl.portal.Certificate.X1.xml`](data/org.freedesktop.impl.portal.Certificate.X1.xml),
 a copy of the branch's file with a provenance comment added, which must track it.
 **Applications do not call this.**
 
@@ -188,7 +188,7 @@ $ XDP_BUILD=/path/to/xdg-desktop-portal/build tools/dev-stack.sh --softhsm
 ```
 
 starts `xdg-permission-store`, this backend and a development frontend inside `dbus-run-session`
-with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate`, then runs
+with a `portals.conf` routing the interface to this backend, then runs
 [`tools/certificate-e2e.py`](tools/certificate-e2e.py) against the public interface and verifies the
 signature. `--live` does the same on the real session bus, which is what a card needs; `--softhsm`
 uses a fixture token from [`tools/softhsm-fixture.sh`](tools/softhsm-fixture.sh).
@@ -203,7 +203,7 @@ To select this backend explicitly, put in `portals.conf`:
 
 ```ini
 [preferred]
-org.freedesktop.impl.portal.experimental.Certificate=certificate
+org.freedesktop.impl.portal.Certificate.X1=certificate
 ```
 
 ## Related repositories
@@ -215,7 +215,7 @@ org.freedesktop.impl.portal.experimental.Certificate=certificate
   the `xdg-desktop-portal-webauth` repository on 2026-09-07. It drives the WebAuthentication portal
   for an interactive sign-in, which in turn drives this Certificate portal for the
   client-certificate challenge.
-- <https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate-webauthentication>
+- <https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration>
   The frontend fork branch that defines both public interfaces. 10 commits on upstream `86bd3e2`,
   tip `1aaffaf`; the Certificate portal is commit `a4c1f62`. `tests/test_certificate.py` is 26 test
   functions, 49 parametrised cases, 98 runs across the host and Flatpak fixtures, all green against
@@ -238,7 +238,7 @@ org.freedesktop.impl.portal.experimental.Certificate=certificate
   `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`. Issuer, subject, serial and trust-category searches
   answer nothing while there is no grant: GnuTLS sends them at every handshake, and answering them
   with a window put a chooser in front of a user who had only opened a page.
-- **The module offers no slot when there is no portal or the experimental gate is off**, and
+- **The module offers no slot when there is no portal or no certificate backend behind it**, and
   `C_Initialize` still succeeds. It must not be loaded inside xdg-desktop-portal or inside this
   backend; it refuses to run there three ways, and neither is on the shipped allowlist.
 - **`--pin-prompt=system` moves where the PIN is typed, not whether this process holds one.**

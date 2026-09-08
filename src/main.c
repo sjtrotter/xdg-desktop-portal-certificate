@@ -7,7 +7,7 @@
  *
  * The D-Bus activated per-user service that owns
  * org.freedesktop.impl.portal.desktop.certificate and implements
- * org.freedesktop.impl.portal.experimental.Certificate at
+ * org.freedesktop.impl.portal.Certificate.X1 at
  * /org/freedesktop/portal/desktop -- the object path every portal backend
  * exports on. It is laid out like every other out-of-tree backend
  * (xdg-desktop-portal-gtk, xdg-desktop-portal-termfilechooser): src/ holds one
@@ -20,10 +20,10 @@
  * docs/IMPL-INTERFACE.md.
  *
  * THE FRONTEND IS NOT IN THIS REPOSITORY. It is a branch of xdg-desktop-portal
- * itself, experimental/certificate-webauthentication, which exports
- * org.freedesktop.portal.experimental.Certificate only when
- * XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL contains "certificate". See
- * docs/decisions/0010-backend-only-frontend-lives-upstream.md.
+ * itself, experimental/integration, which exports
+ * org.freedesktop.portal.Certificate.X1 at
+ * /org/freedesktop/portal/desktop/experimental whenever a backend for it is
+ * configured. See docs/decisions/0010-backend-only-frontend-lives-upstream.md.
  *
  * The main() shape -- gtk_init plus a plain GMainLoop rather than GtkApplication,
  * g_bus_own_name with REPLACE under --replace, and quitting on name-lost -- is
@@ -125,12 +125,12 @@ static const char* description =
     "\n"
     "ENABLING THE FRONTEND\n"
     "  The public interface\n"
-    "    org.freedesktop.portal.experimental.Certificate\n"
+    "    org.freedesktop.portal.Certificate.X1\n"
     "  lives in xdg-desktop-portal itself, on the branch\n"
-    "    experimental/certificate-webauthentication\n"
-    "  and is EXPERIMENTAL: it is not exported unless the portal is started with\n"
-    "    XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=certificate\n"
-    "  (\"all\" and a comma separated list also work). With the gate off, the\n"
+    "    experimental/integration\n"
+    "  and is EXPERIMENTAL: it is exported on\n"
+    "    /org/freedesktop/portal/desktop/experimental\n"
+    "  whenever a backend for it is configured. With no backend configured the\n"
     "  interface is absent from introspection and this backend is never called.\n"
     "  tools/dev-stack.sh wires a development frontend, this backend and an\n"
     "  end-to-end client together on a private bus; docs/TESTING.md has the\n"
