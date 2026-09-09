@@ -147,7 +147,8 @@ summarised in
 `reason`.
 
 **Impl**, frontend to backend, `org.freedesktop.impl.portal.Certificate.X1` on
-`org.freedesktop.impl.portal.desktop.certificate`, at `/org/freedesktop/portal/desktop`. Described
+`org.freedesktop.impl.portal.desktop.certificate`, at
+`/org/freedesktop/portal/desktop/experimental`. Described
 in [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md), declared in
 [`data/org.freedesktop.impl.portal.Certificate.X1.xml`](data/org.freedesktop.impl.portal.Certificate.X1.xml),
 a copy of the branch's file with a provenance comment added, which must track it.

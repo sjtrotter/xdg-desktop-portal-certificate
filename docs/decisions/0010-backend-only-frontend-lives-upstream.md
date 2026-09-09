@@ -13,6 +13,11 @@ Status: accepted (for the sketch); supersedes the *packaging* half of
 > whenever a backend for it is configured. The Context below records the evidence as it
 > stood in January 2026 and is left as written; the Decision and Consequences are updated.
 
+> **Amendment (2026-09-09).** The 2026-09-07 rebuild put the *frontend* on
+> `/org/freedesktop/portal/desktop/experimental` but left this backend on the standard path,
+> against the convention's own sentence that "the backend object path should be the same".
+> Backend, frontend proxy, mock template and tests now all use the experimental path.
+
 ## Context
 
 [0008](0008-build-to-the-upstream-shape.md) decided to build a portal frontend and a
@@ -66,7 +71,8 @@ repository is an out-of-tree backend and nothing else.**
   ships a python-dbusmock backend and a pytest suite for both.
 - This repository builds **one binary**, `xdg-desktop-portal-certificate`, owning
   `org.freedesktop.impl.portal.desktop.certificate` and exporting
-  `/org/freedesktop/portal/desktop`.
+  `/org/freedesktop/portal/desktop/experimental` (until 2026-09-09 the standard path; see the
+  second amendment above).
 - `data/org.freedesktop.impl.portal.Certificate.X1.xml` is a **verbatim copy**
   of the branch's file and must track it. The interface is not this repository's to
   change.

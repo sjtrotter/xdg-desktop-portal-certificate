@@ -210,7 +210,8 @@ not re-described here; read `desktop-portal/certificate.c` on the branch.
 ### The impl skeleton — [`../src/certificate-impl.h`](../src/certificate-impl.h), [`request-impl.h`](../src/request-impl.h), [`session-impl.h`](../src/session-impl.h)
 
 Owns `org.freedesktop.impl.portal.desktop.certificate` on the session bus and exports
-`/org/freedesktop/portal/desktop` [[S35](SOURCES.md)]. One file per portal interface, exactly as
+`/org/freedesktop/portal/desktop/experimental` [[S35](SOURCES.md)]: the path a stable backend
+uses, with the `/experimental` segment the convention adds for an experimental interface. One file per portal interface, exactly as
 xdg-desktop-portal-gtk does it. The impl `Request` has `Close()` and no `Response` signal:
 the result of an impl call is the method's own return value, and exactly one object — the
 frontend's `Request` — is responsible for the at-most-one-terminal-response rule.

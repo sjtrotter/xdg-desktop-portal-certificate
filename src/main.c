@@ -8,8 +8,9 @@
  * The D-Bus activated per-user service that owns
  * org.freedesktop.impl.portal.desktop.certificate and implements
  * org.freedesktop.impl.portal.Certificate.X1 at
- * /org/freedesktop/portal/desktop -- the object path every portal backend
- * exports on. It is laid out like every other out-of-tree backend
+ * /org/freedesktop/portal/desktop/experimental -- the object path the
+ * experimental-portal convention assigns to a backend of an experimental
+ * interface (doc/experimental-portals.rst in xdg-desktop-portal). It is laid out like every other out-of-tree backend
  * (xdg-desktop-portal-gtk, xdg-desktop-portal-termfilechooser): src/ holds one
  * file per portal interface implemented, data/ holds the .portal file, the
  * D-Bus service file and the interface XML.

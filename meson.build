@@ -159,7 +159,7 @@ summary(
   {
     'backend bus name': 'org.freedesktop.impl.portal.desktop.certificate',
     'impl interface': 'org.freedesktop.impl.portal.Certificate.X1',
-    'object path': '/org/freedesktop/portal/desktop',
+    'object path': '/org/freedesktop/portal/desktop/experimental',
     'portal file': portal_dir / 'certificate.portal',
     'frontend': 'xdg-desktop-portal, branch experimental/integration',
     'public interface (frontend)': 'org.freedesktop.portal.Certificate.X1',

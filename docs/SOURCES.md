@@ -351,7 +351,10 @@ portals appear under the bus name `org.freedesktop.portal.Desktop` and the objec
 prose documentation; it is the code convention —
 [`xdg-desktop-portal-gtk`, `src/utils.h`](https://github.com/flatpak/xdg-desktop-portal-gtk/blob/main/src/utils.h)
 defines `DESKTOP_PORTAL_OBJECT_PATH "/org/freedesktop/portal/desktop"` and every backend
-interface is exported there.
+interface is exported there. For an *experimental* interface the convention in
+[PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129) (`doc/experimental-portals.rst`)
+moves both sides one level down: the frontend must export on
+`/org/freedesktop/portal/desktop/experimental` and "the backend object path should be the same".
 
 **[S36] xdg-desktop-portal, -gtk and -gnome are LGPL-2.1-or-later.**
 [xdg-desktop-portal `LICENSES/LGPL-2.1-or-later.txt`](https://github.com/flatpak/xdg-desktop-portal/tree/main/LICENSES)

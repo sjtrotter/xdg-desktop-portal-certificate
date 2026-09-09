@@ -7,7 +7,9 @@ same, with less of a track record and an `.X1` major-version suffix that says so
 
 **This interface is not for applications.** It is what xdg-desktop-portal calls on a backend it
 selected — here, `xdg-desktop-portal-certificate` on bus name
-`org.freedesktop.impl.portal.desktop.certificate`, object path `/org/freedesktop/portal/desktop`.
+`org.freedesktop.impl.portal.desktop.certificate`, object path
+`/org/freedesktop/portal/desktop/experimental` — the experimental-portal convention puts a
+backend of an experimental interface on the same path as its frontend.
 
 ## The XML this repository ships is a copy, and it must track its source
 
