@@ -217,10 +217,10 @@ org.freedesktop.impl.portal.Certificate.X1=certificate
   for an interactive sign-in, which in turn drives this Certificate portal for the
   client-certificate challenge.
 - <https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration>
-  The frontend fork branch that defines both public interfaces. 10 commits on upstream `86bd3e2`,
-  tip `1aaffaf`; the Certificate portal is commit `a4c1f62`. `tests/test_certificate.py` is 26 test
-  functions, 49 parametrised cases, 98 runs across the host and Flatpak fixtures, all green against
-  a python-dbusmock backend. Pushed to that fork and proposed to nobody.
+  The frontend fork branch that defines both public interfaces. 11 commits on upstream `c95490a`,
+  tip `2201f41`; the Certificate portal is commit `fb80027`. `tests/test_certificate.py` is 24 test
+  functions, parametrised across the host and Flatpak fixtures and run against a python-dbusmock
+  backend. Pushed to that fork and proposed to nobody.
 - <https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate-webauthentication+delegation>
   The **archived delegation branch**: an earlier version of the frontend that derived a grant for a
   caller's descendant processes, so that one application raised one chooser. Tip `209f9ff`. Referred
