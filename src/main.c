@@ -5,33 +5,9 @@
  *
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
- * The D-Bus activated per-user service that owns
- * org.freedesktop.impl.portal.desktop.certificate and implements
- * org.freedesktop.impl.portal.experimental.Certificate1 at
- * /org/freedesktop/portal/desktop.
- * The layout follows other out-of-tree backends
- * (xdg-desktop-portal-gtk, xdg-desktop-portal-termfilechooser): src/ holds one
- * file per portal interface implemented, data/ holds the .portal file, the
- * D-Bus service file and the interface XML.
- *
- * IT IS NOT FOR APPLICATIONS. Only xdg-desktop-portal calls it, the app id
- * arrives as an ARGUMENT rather than being derived from the peer, and calls from
- * anything that does not own org.freedesktop.portal.Desktop are refused. See
- * docs/IMPL-INTERFACE.md.
- *
- * THE FRONTEND IS NOT IN THIS REPOSITORY. It is a branch of xdg-desktop-portal
- * itself, experimental/integration, which exports
- * org.freedesktop.portal.experimental.Certificate1 at
- * /org/freedesktop/portal/desktop with a configured backend.
- * The frontend needs XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1.
- *
  * The main() shape -- gtk_init plus a plain GMainLoop rather than GtkApplication,
  * g_bus_own_name with REPLACE under --replace, and quitting on name-lost -- is
  * xdg-desktop-portal-gtk's, LGPL-2.1-or-later, Copyright (C) 2016 Red Hat, Inc.
- * ALLOW_REPLACEMENT is where this backend deliberately differs from it: it is a
- * separate --allow-replacement flag that nothing installed passes, so an
- * upgrade is a restart rather than a --replace. See harden() and the comment
- * over g_bus_own_name_on_connection() below.
  */
 
 #include <locale.h>
@@ -74,27 +50,25 @@ static const GOptionEntry entries[] = {
 	  "Take the bus name from a running instance that permitted it", NULL },
 	{ "allow-replacement", 0, 0, G_OPTION_ARG_NONE, &opt_allow_replacement,
 	  "Let a later instance take the bus name from this one", NULL },
-	{ "verbose", 'v', 0, G_OPTION_ARG_NONE, &opt_verbose, "Log decisions and breadcrumbs on stderr",
+	{ "verbose", 'v', 0, G_OPTION_ARG_NONE, &opt_verbose, "Log decisions and debug events to stderr",
 	  NULL },
 	{ "module", 'm', 0, G_OPTION_ARG_FILENAME_ARRAY, &opt_modules,
 	  "Use only this PKCS#11 module; repeatable", "PATH" },
 	{ "allow-software-tokens", 0, 0, G_OPTION_ARG_NONE, &opt_allow_software_tokens,
 	  "Also offer tokens whose slot does not set CKF_HW_SLOT", NULL },
 	{ "login-timeout", 0, 0, G_OPTION_ARG_INT, &opt_login_timeout,
-	  "Give up on a C_Login that has not returned after N seconds (0 disables)", "N" },
+	  "Hide the PIN prompt after N seconds of C_Login (default 60; 0 disables)", "N" },
 	{ "list-tokens", 0, 0, G_OPTION_ARG_NONE, &opt_list_tokens,
 	  "List the security tokens visible to this user and exit", NULL },
 	{ "no-activate", 0, 0, G_OPTION_ARG_NONE, &opt_no_activate,
 	  "Do not request the bus name; start, check the modules, and exit", NULL },
 	{ "debug-allow-core", 0, 0, G_OPTION_ARG_NONE, &opt_allow_core,
-	  "DEVELOPMENT ONLY: leave core dumps and ptrace attach enabled", NULL },
+	  "Leave core dumps and ptrace attach enabled for debugging", NULL },
 	{ "version", 0, 0, G_OPTION_ARG_NONE, &opt_version, "Print the version and exit", NULL },
 	{ NULL, 0, 0, 0, NULL, NULL, NULL },
 };
 
 #if HAVE_GCR
-/* ONLY WHEN THE BUILD HAS GCR. An option that names a prompt this binary cannot
- * draw would be an option that fails at the worst moment. */
 static const GOptionEntry gcr_entries[] = {
 	{ "pin-prompt", 0, 0, G_OPTION_ARG_STRING, &opt_pin_prompt,
 	  "Where the PIN is typed: auto (default), gtk, or system", "WHICH" },
@@ -103,100 +77,30 @@ static const GOptionEntry gcr_entries[] = {
 #endif
 
 static const char* description =
-    "WHAT THIS IS\n"
-    "  An out-of-tree BACKEND of xdg-desktop-portal. It draws the certificate\n"
-    "  chooser and the PIN prompt, discovers PKCS#11 tokens, and performs private\n"
-    "  key operations on behalf of the portal. It is not a portal frontend, it\n"
-    "  owns no public interface, and no application talks to it.\n"
+    "Certificate backend for xdg-desktop-portal, started through D-Bus activation.\n"
+    "Bus name: " CERTIFICATE_IMPL_BUS_NAME "\n"
+    "Object path: " CERTIFICATE_IMPL_OBJECT_PATH "\n"
+    "Interface: " CERTIFICATE_IMPL_INTERFACE "\n"
+    "Only the owner of org.freedesktop.portal.Desktop may call this backend.\n"
     "\n"
-    "  Normally started by D-Bus activation when xdg-desktop-portal selects this\n"
-    "  backend, not from a shell. It owns\n"
-    "    " CERTIFICATE_IMPL_BUS_NAME "\n"
-    "  on the session bus, exporting\n"
-    "    " CERTIFICATE_IMPL_OBJECT_PATH "\n"
-    "  and implementing\n"
-    "    " CERTIFICATE_IMPL_INTERFACE "\n"
-    "  as declared in data/certificate.portal.\n"
+    "The frontend requires branch experimental/integration, a configured backend\n"
+    "and XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1 in its environment.\n"
+    "It establishes caller identity; this backend draws consent and PIN dialogs\n"
+    "and performs private-key operations on the token.\n"
     "\n"
-    "  ONLY xdg-desktop-portal CALLS THIS. The app id is an argument supplied by\n"
-    "  the portal; a caller that reached this bus name directly would be naming\n"
-    "  itself. Calls from any sender that does not own\n"
-    "  org.freedesktop.portal.Desktop are refused with AccessDenied.\n"
+    "Hardware slots are offered by default. --allow-software-tokens includes\n"
+    "software tokens; --module also overrides this filter for selected modules.\n"
+    "Hardware flags are module claims. --list-tokens includes skip reasons.\n"
     "\n"
-    "ENABLING THE FRONTEND\n"
-    "  The public interface\n"
-    "    org.freedesktop.portal.experimental.Certificate1\n"
-    "  lives in xdg-desktop-portal itself, on the branch\n"
-    "    experimental/integration\n"
-    "  and is EXPERIMENTAL: it is exported on\n"
-    "    /org/freedesktop/portal/desktop\n"
-    "  with a configured backend and this variable in the frontend environment:\n"
-    "    XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1\n"
-    "  tools/dev-stack.sh wires a development frontend, this backend and an\n"
-    "  end-to-end client together on a private bus; docs/TESTING.md has the\n"
-    "  commands for a run against a real card.\n"
-    "\n"
-    "WHAT IT DOES\n"
-    "  The portal calls AcquireCredential(handle, session_handle, app_id,\n"
-    "  parent_window, options). THIS SERVICE enumerates the tokens, filters the\n"
-    "  certificates, and shows a chooser naming the application the portal\n"
-    "  identified, HOW WELL it identified it (app_identity_level), the purpose in\n"
-    "  this service's own words, and the candidate certificates. It returns what\n"
-    "  was chosen. The portal then calls Sign; this service prompts for the PIN in\n"
-    "  its own window, logs into its OWN PKCS#11 session, and signs.\n"
-    "\n"
-    "  The PIN never leaves this process. The private key never leaves the token.\n"
-    "\n"
-    "WHICH TOKENS ARE OFFERED\n"
-    "  By default only tokens in a slot the module reports as HARDWARE\n"
-    "  (CKF_HW_SLOT). p11-kit on an ordinary desktop also presents software key\n"
-    "  stores as tokens -- the GNOME keyring's module is the usual one -- and a\n"
-    "  window headed \"security token\" that offers keys from the user's home\n"
-    "  directory says something untrue about where the key is.\n"
-    "  --allow-software-tokens turns the default off; a module named with\n"
-    "  --module is exempt already, because naming it is the same act.\n"
-    "  --list-tokens says which tokens were skipped and why.\n"
-    "  CKF_HW_SLOT is a claim by a module already loaded here, so this is a\n"
-    "  default and NOT a security boundary.\n"
-    "\n"
-    "EXIT CODES\n"
-    "   0 clean shutdown        40 unavailable (no bus, no p11-kit, no module)\n"
-    "  64 usage                 70 internal error\n"
-    "\n"
-    "STATUS\n"
-    "  EXPERIMENTAL. The interface it implements is a branch nobody has merged.\n"
-    "  The PKCS#11 compatibility endpoint is NOT part of it: OpenPkcs11Endpoint\n"
-    "  was deliberately left out of the frontend branch, because an fd-returning\n"
-    "  method needs its own review.";
+    "Exit codes: 0 clean shutdown, 40 unavailable, 64 usage, 70 internal error.\n"
+    "See docs/TESTING.md for development setup and hardware checks.";
 
-/* THREE LINES THAT DECIDE WHERE THE PIN CAN END UP, run before anything else
- * can crash.
- *
- * PR_SET_DUMPABLE(0) stops a core dump being written at all AND makes
- * /proc/self/mem, /proc/self/maps and the rest root-owned, which is what blocks
- * a same-uid ptrace attach on a normal kernel. docs/SECURITY.md is careful to
- * say the split does not defend against a hostile process running as the user;
- * this converts part of that from "open problem" to "partial mitigation", and
- * the document says which part.
- *
- * RLIMIT_CORE 0 is the belt to that braces: dumpability can be re-enabled by a
- * later execve or by a kernel that treats the flag differently, and a zero core
- * limit is checked independently.
- *
- * WHY IT MATTERS HERE MORE THAN ELSEWHERE: between the moment the PIN is
- * copied into the locked page and the moment it is wiped, a SIGSEGV would hand
- * systemd-coredump a file containing it, kept under /var/lib/systemd/coredump
- * for days by default. */
+/* Disable dumps and same-UID ptrace before handling PINs; see docs/SECURITY.md for limits. */
 static void harden(void)
 {
 	struct rlimit no_core = { 0, 0 };
 
-	/* THE ONE WAY OUT, and it is a command-line flag rather than an environment
-	 * variable on purpose: an installed service file's Exec line is fixed, so
-	 * nothing that merely shares the session can turn the hardening off the way
-	 * dbus-update-activation-environment could. It exists because a
-	 * non-dumpable process cannot be attached to by gdb either, and
-	 * docs/TESTING.md has to be able to tell somebody how to debug a crash. */
+	/* Only an explicit command-line debug flag disables hardening; activation environment changes cannot do so. */
 	if (opt_allow_core)
 	{
 		g_message("process-not-hardened detail=debug-allow-core");
@@ -210,32 +114,6 @@ static void harden(void)
 		g_message("process-not-hardened detail=rlimit-core-failed");
 }
 
-/* THE WINDOWS FOLLOW THE SESSION'S LIGHT/DARK SETTING, AND THEY HAVE TO BE TOLD
- * IT DIRECTLY. This is a consequence of harden(), and it was a visible bug: the
- * chooser and the PIN prompt came up light on a dark desktop.
- *
- * WHY. libadwaita takes the colour scheme from the SETTINGS PORTAL. Asking the
- * portal makes it look the caller up by /proc/<pid>, and PR_SET_DUMPABLE(0)
- * makes this process's /proc entries root-owned on purpose, so the portal
- * answers AccessDenied ("Unable to open /proc/<pid>/root") and GDK says so in a
- * warning. libadwaita's remaining fallbacks did not recover the setting here:
- * measured on Fedora 44 with the session set to prefer-dark, this process came
- * up LIGHT with the hardening on and DARK with --debug-allow-core.
- *
- * THE CHOICE, recorded because both options were real:
- *
- *   drop PR_SET_DUMPABLE(0) and rely on RLIMIT_CORE 0, MADV_DONTDUMP and Yama
- *     -- which would trade a same-uid ptrace defence for a theme. Yama's
- *     ptrace_scope is not guaranteed to be set, and the thing a tracer would
- *     read is the page a PIN is in.
- *
- *   read the setting ourselves, which is this. GSettings talks to dconf over
- *     D-Bus and does not look anybody up by pid, so it works in a process the
- *     portal cannot identify.
- *
- * The schema is looked up rather than assumed: org.gnome.desktop.interface is
- * not present on every desktop, and a missing schema aborts in g_settings_new().
- * Where it is absent, libadwaita's own answer stands. */
 static void on_dark_changed(GObject* manager, GParamSpec* spec, gpointer user_data)
 {
 	certificate_log_debug(CERTIFICATE_REASON_COLOUR_SCHEME,
@@ -257,6 +135,7 @@ static void apply_colour_scheme(GSettings* settings, const char* key, gpointer u
 	adw_style_manager_set_color_scheme(adw_style_manager_get_default(), wanted);
 }
 
+/* Dump hardening prevents portal PID lookup, so read the optional desktop color-scheme schema directly. */
 static void follow_colour_scheme(void)
 {
 	GSettingsSchemaSource* source = g_settings_schema_source_get_default();
@@ -265,10 +144,7 @@ static void follow_colour_scheme(void)
 
 	g_signal_connect(manager, "notify::dark", G_CALLBACK(on_dark_changed), NULL);
 
-	/* libadwaita's own override wins, because it exists to be able to. It is
-	 * how tools/ui-smoke.sh checks that a dark scheme actually reaches the
-	 * windows without depending on what the machine running the test has its
-	 * desktop set to. */
+	/* Preserve libadwaita's explicit color-scheme override. */
 	{
 		const char* forced = g_getenv("ADW_DEBUG_COLOR_SCHEME");
 
@@ -285,8 +161,7 @@ static void follow_colour_scheme(void)
 
 	if (schema != NULL && g_settings_schema_has_key(schema, "color-scheme"))
 	{
-		/* Leaked on purpose: it lives for the life of the process and the
-		 * "changed" handler is what keeps the windows following the session. */
+		/* Process-lifetime settings reference keeps the change handler active. */
 		GSettings* settings = g_settings_new("org.gnome.desktop.interface");
 
 		g_signal_connect(settings, "changed::color-scheme", G_CALLBACK(apply_colour_scheme),
@@ -304,7 +179,7 @@ static void follow_colour_scheme(void)
 
 static gboolean on_signal(gpointer user_data)
 {
-	g_debug("terminating on a signal");
+	g_debug("Shutdown signal received");
 	g_main_loop_quit(loop);
 	return G_SOURCE_REMOVE;
 }
@@ -316,7 +191,7 @@ static void on_bus_acquired(GDBusConnection* connection, const char* name, gpoin
 	impl = certificate_impl_new(connection, tokens, &error);
 	if (impl == NULL)
 	{
-		g_warning("Could not export the backend interface: %s", error->message);
+		g_warning("Backend interface export failed: %s", error->message);
 		g_main_loop_quit(loop);
 	}
 }
@@ -328,9 +203,6 @@ static void on_name_acquired(GDBusConnection* connection, const char* name, gpoi
 
 static void on_name_lost(GDBusConnection* connection, const char* name, gpointer user_data)
 {
-	/* Either another instance replaced this one, or the name could not be
-	 * taken. Either way this process is done: a backend that stays running
-	 * without the name is a backend holding a card session nobody can reach. */
 	g_debug("lost %s", name);
 	g_main_loop_quit(loop);
 }
@@ -340,9 +212,6 @@ static int list_tokens(void)
 	g_autoptr(GError) error = NULL;
 	g_autoptr(GPtrArray) present = NULL;
 
-	/* THE LIST THAT REPORTS RATHER THAN FILTERS. An operator working out
-	 * whether this backend can see their card has to be told about a token that
-	 * is present and is not being offered, and why. */
 	present = certificate_tokens_list_all(tokens, &error);
 	if (present == NULL)
 	{
@@ -363,12 +232,7 @@ static int list_tokens(void)
 	{
 		CertificateToken* token = g_ptr_array_index(present, i);
 		g_autofree char* serial = certificate_redact_serial(token->serial);
-		/* SANITISED LIKE EVERY OTHER CARD STRING. This is the one output path
-		 * that used to print them raw, and docs/TESTING.md 3.2 has an operator
-		 * run it against an unknown card as the first thing they do: a label
-		 * carrying a CSI sequence can rewrite the lines above it, and a bidi
-		 * override can make a serial read backwards, in a terminal where the
-		 * operator is deciding whether to trust the card. */
+		/* Token strings are untrusted terminal input and require control-character and bidi sanitization. */
 		g_autofree char* label =
 		    certificate_display_text(token->label, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "(unnamed)");
 		g_autofree char* manufacturer = certificate_display_text(
@@ -392,9 +256,9 @@ static int list_tokens(void)
 		        token->protected_authentication_path ? "on the reader (protected path)"
 		                                             : "on screen");
 		if (token->skip_reason != NULL)
-			g_print("  SKIPPED       %s\n", token->skip_reason);
+			g_print("  skipped       %s\n", token->skip_reason);
 		if (token->pin_locked)
-			g_print("  PIN state     LOCKED\n");
+			g_print("  PIN state     locked\n");
 		else if (token->pin_final_try)
 			g_print("  PIN state     final attempt before locking\n");
 		else if (token->pin_count_low)
@@ -437,10 +301,6 @@ static int list_tokens(void)
 				if (operations == CERTIFICATE_OPERATION_NONE)
 					continue;
 
-				/* A key-management certificate is a real credential for mail
-				 * and no use at all for signing one, and the listing has to
-				 * say which, or a card with one on it reads as a card with a
-				 * certificate that does not work. */
 				if (operations == CERTIFICATE_OPERATION_DECRYPT)
 				{
 					g_autofree char* text = g_strdup_printf("%s (decrypt only)", name);
@@ -497,8 +357,7 @@ int main(int argc, char** argv)
 
 	setlocale(LC_ALL, "");
 
-	/* Avoid pointless and confusing recursion: this process must not route its
-	 * own dialogs through the portal it is a backend of. */
+	/* Backend dialogs must not recurse through the portal. */
 	g_unsetenv("GTK_USE_PORTAL");
 	g_unsetenv("GDK_DEBUG");
 
@@ -518,9 +377,6 @@ int main(int argc, char** argv)
 		return CERTIFICATE_EXIT_USAGE;
 	}
 
-	/* AS EARLY AS THE OPTIONS ALLOW. Everything before this point is
-	 * g_option_context_parse() on a fixed argv, which cannot fault on anything
-	 * a PIN could be next to, because there is no PIN yet. */
 	harden();
 
 	if (opt_version)
@@ -533,11 +389,7 @@ int main(int argc, char** argv)
 
 	certificate_log_set_verbose(opt_verbose);
 
-	/* --verbose PROMISES BREADCRUMBS, so it has to turn the debug level on as
-	 * well: every certificate_log_debug() is a g_debug(), and GLib's default
-	 * writer drops those unless a domain is enabled. Without this the flag
-	 * enabled the calls and then threw away what they printed, which is how the
-	 * colour-scheme line below was invisible in a log that had asked for it. */
+	/* GLib drops g_debug() output unless its domain is enabled. */
 	if (opt_verbose)
 	{
 		const char* domains[] = { "all", NULL };
@@ -549,11 +401,6 @@ int main(int argc, char** argv)
 		g_log_writer_default_set_debug_domains(NULL);
 	}
 
-	/* WHERE THE PIN IS TYPED. The module default is the in-process window; the
-	 * PROGRAM default is auto, which is the system prompter when the session
-	 * has one. Set before anything can prompt, and refused rather than
-	 * defaulted when it is misspelt -- for the same reason a mistyped mechanism
-	 * parameter is an error. */
 	if (!certificate_pin_set_prompt_kind(opt_pin_prompt != NULL ? opt_pin_prompt : "auto",
 	                                     &error))
 	{
@@ -570,8 +417,7 @@ int main(int argc, char** argv)
 
 	certificate_tokens_set_allow_software(tokens, opt_allow_software_tokens);
 
-	/* Negative means "not given", which is how a default of 60 and an explicit
-	 * 0 stay different things. */
+	/* A negative value distinguishes omission from an explicit zero. */
 	if (opt_login_timeout >= 0)
 		certificate_pin_set_login_timeout((guint) opt_login_timeout);
 
@@ -582,10 +428,7 @@ int main(int argc, char** argv)
 		return status;
 	}
 
-	/* A display is not required to START: GetCapabilities has to answer on a
-	 * headless machine, and the answer there is has_display = false plus
-	 * a clean refusal of anything that would need a window. gtk_init() would
-	 * abort instead, so the check is the _check() form. */
+	/* Headless startup must still serve GetCapabilities; gtk_init() would abort. */
 	if (gtk_init_check())
 	{
 		adw_init();
@@ -594,7 +437,6 @@ int main(int argc, char** argv)
 	}
 	else
 	{
-		/* GetCapabilities still answers; anything needing a window is refused. */
 		g_message("no-display detail=window-requests-refused");
 		certificate_ui_set_has_display(FALSE);
 	}
@@ -622,36 +464,7 @@ int main(int argc, char** argv)
 	g_unix_signal_add(SIGINT, on_signal, NULL);
 	g_unix_signal_add(SIGTERM, on_signal, NULL);
 
-	/* REPLACEMENT IS NOT OFFERED TO ANYONE UNLESS IT IS ASKED FOR, AND THE TWO
-	 * HALVES ARE SEPARATE FLAGS.
-	 *
-	 * xdg-desktop-portal-gtk sets ALLOW_REPLACEMENT unconditionally, and for a
-	 * file chooser that is reasonable. Here it means any process running as the
-	 * user can take org.freedesktop.impl.portal.desktop.certificate at will and
-	 * become the thing the portal calls -- receiving AcquireCredential and Sign
-	 * with a real app id and identity level, and drawing the window that asks
-	 * for the PIN. The trusted dialog is the one thing docs/SECURITY.md says
-	 * this repository owns outright.
-	 *
-	 * D-BUS CANNOT AUTHENTICATE A REPLACEMENT. ALLOW_REPLACEMENT is not "let
-	 * the package manager replace me"; it is "let whoever asks next replace
-	 * me", and the bus offers nothing finer -- no uid check, no peer identity,
-	 * nothing the current owner can inspect before yielding. So the choice is
-	 * between a name anybody can take and a name nobody can take, and this
-	 * backend takes the second:
-	 *
-	 *   --allow-replacement   this instance may be replaced. NOT the default,
-	 *                         and NOT in the installed .service file.
-	 *   --replace             this instance asks to replace the current owner,
-	 *                         which works only if that owner allowed it.
-	 *
-	 * WHICH MEANS AN UPGRADE IS A RESTART, not a --replace: the D-Bus activated
-	 * instance permits no replacement, so a new binary takes over by stopping
-	 * the old one (the service manager, or a SIGTERM) and letting activation
-	 * start the new one on the next call. --replace exists for a development
-	 * loop where the running instance was deliberately started with
-	 * --allow-replacement; tools/dev-stack.sh --live does exactly that.
-	 * docs/TESTING.md 3.5 has the recipe. */
+	/* Name replacement permits any requesting peer to take the PIN dialog's service name; see docs/SECURITY.md. */
 	owner_id = g_bus_own_name_on_connection(
 	    connection, CERTIFICATE_IMPL_BUS_NAME,
 	    (opt_allow_replacement ? G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT
@@ -668,8 +481,7 @@ int main(int argc, char** argv)
 
 	certificate_impl_shutdown(impl);
 
-	/* The invalidations emitted above have to reach the bus before the process
-	 * goes away, or the frontend learns about the loss by timing out. */
+	/* Flush invalidations before exiting so the frontend receives them. */
 	g_dbus_connection_flush_sync(connection, NULL, NULL);
 
 	certificate_impl_free(impl);

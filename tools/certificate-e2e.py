@@ -1,34 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
-#
-# certificate-e2e.py -- drive the PUBLIC Certificate portal interface end to
-# end, the way an application would, and check that what comes back verifies.
-#
-# THIS TALKS TO THE FRONTEND, NEVER TO THIS REPOSITORY'S BACKEND. Everything
-# below goes to org.freedesktop.portal.experimental.Certificate1 on
-# org.freedesktop.portal.Desktop at /org/freedesktop/portal/desktop.
-# An application would do exactly this, and it is the only way to exercise the
-# backend the way it is meant to be exercised: through the frontend's app id
-# derivation, option validation, lifetime ceiling, grant table and results
-# clamping.
-#
-#     CreateSession -> AcquireCredential -> Sign -> verify the signature with
-#     the certificate that came back
-#
-# The interface only exists if the running xdg-desktop-portal has a certificate
-# backend configured and Certificate1 listed in XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL.
-# Without either, this says so and exits 40 rather than dumping a D-Bus
-# traceback: that is the frontend working, not a bug.
-#
-# Exit codes match the backend's:
-#     0  PASS                  40 unavailable (no portal, no backend, no token)
-#     1  FAIL (a check failed)  2 cancelled or refused by the user
-#    64  usage                 70 internal error
-#
-# Run it through tools/dev-stack.sh, which puts a development frontend and this
-# repository's backend on a private bus first. docs/TESTING.md has the commands
-# for a run against a real card.
+# Drive the public Certificate1 interface and verify signatures; see docs/TESTING.md for setup and exit codes.
 
 import argparse
 import hashlib
@@ -57,10 +30,7 @@ EXIT_UNAVAILABLE = 40
 EXIT_USAGE = 64
 EXIT_INTERNAL = 70
 
-# The portal names its Request objects after the caller's unique bus name, with
-# the leading ':' dropped and '.' turned into '_'. Knowing the path in advance
-# is what lets this script subscribe BEFORE the call is made; the Response can
-# otherwise arrive before the method has returned.
+# Subscribe at the predicted Request path before calling because Response may precede the method reply.
 def request_path(connection, token):
     sender = connection.get_unique_name()[1:].replace(".", "_")
     return f"{OBJECT_PATH}/request/{sender}/{token}"
@@ -95,9 +65,6 @@ class Portal:
         )
 
     def close_request(self, path):
-        """org.freedesktop.portal.Request.Close on an in-flight request. This is
-        what an application does when the user gives up on it, and the frontend
-        forwards it to the backend's own Request object."""
         try:
             self.bus.call_sync(
                 BUS_NAME,
@@ -111,10 +78,9 @@ class Portal:
                 None,
             )
         except GLib.Error as error:
-            print(f"note: Close said {error.message}", file=sys.stderr)
+            print(f"Request.Close failed: {error.message}", file=sys.stderr)
 
     def request(self, method, build_parameters, prefix, cancel_after=0):
-        """Make a Request call and wait for its single Response signal."""
         handle_token = self.token(prefix)
         path = request_path(self.bus, handle_token)
 
@@ -141,8 +107,7 @@ class Portal:
             reply = self.call(method, build_parameters(handle_token), None)
             returned = reply.unpack()[0]
             if returned != path:
-                # The portal is entitled to choose its own path; follow it
-                # rather than waiting forever on the one we guessed.
+                # The portal may return a different Request path from the prediction.
                 self.bus.signal_unsubscribe(subscription)
                 subscription = self.bus.signal_subscribe(
                     None,
@@ -155,13 +120,7 @@ class Portal:
                     None,
                 )
 
-            # A SOURCE IS REMOVED ONCE, BY WHOEVER STILL HAS IT. A GLib
-            # timeout that has already fired and returned SOURCE_REMOVE is
-            # gone, and asking GLib to remove it again is the warning
-            # "Source ID N was not found when attempting to remove it" --
-            # which is noise in a log that is meant to be read. Each
-            # callback therefore forgets its own id before it does anything
-            # else, and the cleanup below removes only what is still live.
+            # Callbacks clear their source IDs; cleanup removes only live sources.
             live = {"timeout": 0, "cancel": 0, "give_up": 0}
 
             def on_timeout():
@@ -178,12 +137,7 @@ class Portal:
                     print(f"closing {returned} after {cancel_after} ms")
                     self.close_request(returned)
 
-                    # UPSTREAM UNEXPORTS THE FRONTEND REQUEST BEFORE FORWARDING
-                    # Close() to the backend, so no Response signal follows a
-                    # Close: the application asked, so it already knows. The
-                    # grace period below is there to catch a backend that
-                    # answers anyway with a grant, which would mean the window
-                    # was never torn down.
+                    # Frontend Close() unexports before forwarding, so the grace period checks that no late grant arrives.
                     def give_up():
                         live["give_up"] = 0
                         answer["closed"] = True
@@ -219,7 +173,6 @@ def die(status, message):
 
 
 def check_exported(portal):
-    """Is the experimental interface exported at all?"""
     try:
         portal.bus.call_sync(
             BUS_NAME,
@@ -245,7 +198,7 @@ def check_exported(portal):
             f"{IFACE} is not exported on {OBJECT_PATH}.\n"
             "Use frontend branch experimental/integration with a configured certificate backend "
             "and XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1 in its environment.\n"
-            f"D-Bus said: {error.message}",
+            f"D-Bus error: {error.message}",
         )
 
 
@@ -283,10 +236,7 @@ def create_session(portal):
     if response != 0:
         die(EXIT_UNAVAILABLE, f"CreateSession answered {response}")
 
-    # The results carry the handle; the path computed above is only what the
-    # session_handle_token predicts it will be, and it is compared rather than
-    # substituted. The frontend used to answer with an "s" here and the two
-    # readings had to be reconciled; the fix is folded into xdg-desktop-portal a4c1f62.
+    # Compare the returned session handle against the prediction; its wire type is an object path.
     handle = results.get("session_handle")
     if handle is None:
         die(EXIT_UNAVAILABLE, "CreateSession returned no session_handle")
@@ -347,18 +297,15 @@ def sign(portal, session, args, mechanism, digest, hash_name):
 
 
 def release(portal, session):
-    # Session.Close(), which is the whole of releasing a grant: the interface
-    # has no method of its own for it.
     try:
         portal.bus.call_sync(
             BUS_NAME, session, "org.freedesktop.portal.Session", "Close",
             None, None, Gio.DBusCallFlags.NONE, portal.timeout, None,
         )
     except GLib.Error as error:
-        print(f"note: Session.Close said {error.message}", file=sys.stderr)
+        print(f"Session.Close failed: {error.message}", file=sys.stderr)
 
 
-# ----------------------------------------------------------------- verifying
 
 
 def verify_with_cryptography(cert_der, signature, message, mechanism, hash_name, der):
@@ -374,8 +321,7 @@ def verify_with_cryptography(cert_der, signature, message, mechanism, hash_name,
 
     if mechanism == "ECDSA":
         if not der:
-            # PKCS#11 produces the raw r||s pair; X.509 wants an
-            # ECDSA-Sig-Value. See docs/IMPL-INTERFACE.md.
+            # Convert PKCS#11 r||s to DER ECDSA-Sig-Value for verification.
             half = len(signature) // 2
             r = int.from_bytes(signature[:half], "big")
             s = int.from_bytes(signature[half:], "big")
@@ -444,14 +390,13 @@ def verify(cert_der, signature, message, mechanism, hash_name, der):
     try:
         import cryptography  # noqa: F401
     except ImportError:
-        print("note: python-cryptography not importable; falling back to openssl",
+        print("python-cryptography unavailable; using openssl",
               file=sys.stderr)
         return verify_with_openssl(cert_der, signature, message, mechanism, hash_name, der)
 
     return verify_with_cryptography(cert_der, signature, message, mechanism, hash_name, der)
 
 
-# ---------------------------------------------------------------------- main
 
 
 def parse_args(argv):
@@ -476,7 +421,7 @@ def parse_args(argv):
                         choices=["SHA256", "SHA384", "SHA512"])
     parser.add_argument("--mechanism", help="override the mechanism chosen from the key type")
     parser.add_argument("--der", action="store_true",
-                        help="ask for a DER ECDSA-Sig-Value instead of raw r||s")
+                        help="request DER ECDSA-Sig-Value encoding")
     parser.add_argument("--timeout", type=int, default=180000,
                         help="milliseconds to wait for each Response (default 180000)")
     parser.add_argument("--capabilities", action="store_true",
@@ -484,23 +429,13 @@ def parse_args(argv):
     parser.add_argument("--close", action="store_true",
                         help="acquire a grant, release it, and exit without signing")
     parser.add_argument("--cancel-after", type=int, default=0, metavar="MS",
-                        help="call Request.Close() on the AcquireCredential request after this "
-                        "many milliseconds; the chooser must close and the response must be 1 "
-                        "or 2, never a grant")
+                        help="close AcquireCredential after this many milliseconds and check for no grant")
     parser.add_argument("--expect-cancelled", action="store_true",
-                        help="PASS when AcquireCredential comes back cancelled rather than with "
-                        "a grant; use it with --cancel-after")
+                        help="pass if acquisition is cancelled; use with --cancel-after")
     parser.add_argument("--regrant", metavar="KEY_ALGORITHM",
-                        help="after the first signature, call AcquireCredential AGAIN on the "
-                             "same session -- filtered to this key algorithm, so a DIFFERENT "
-                             "certificate is offered -- and check that the next Sign asks for "
-                             "the PIN again and produces a signature that verifies against the "
-                             "NEW certificate. A second AcquireCredential on a live session "
-                             "used to be answered with the new certificate and then signed with "
-                             "the old one's key, silently")
+                        help="acquire on a second session with this key algorithm and verify its signature")
     parser.add_argument("--expect-no-certificate", action="store_true",
-                        help="PASS when AcquireCredential fails cleanly with no token or no "
-                        "matching certificate; this is the no-card plumbing check")
+                        help="pass if acquisition fails without a grant")
     return parser.parse_args(argv)
 
 
@@ -525,10 +460,7 @@ def main(argv):
     response, results = acquire(portal, session, args)
 
     if args.expect_cancelled:
-        # No Response after a Close() is correct: upstream's Request unexports
-        # the frontend object before forwarding Close() to the backend, so the
-        # application that asked is not told again. docs/TESTING.md 3.3 says
-        # which backend log line to look for.
+        # Frontend Close() unexports the Request before forwarding, so no Response follows.
         if response == 0:
             die(EXIT_FAIL, "expected a cancellation, but a grant was issued")
         if response is None:
@@ -538,9 +470,6 @@ def main(argv):
         return EXIT_PASS
 
     if args.expect_no_certificate:
-        # THE NO-CARD PLUMBING CHECK. The point is that the frontend routed to
-        # this backend, the backend answered, and the answer was a clean refusal
-        # rather than a hang or a crash.
         if response == 0:
             die(EXIT_FAIL, "expected no certificate, but a grant was issued")
         print(f"PASS no-certificate: AcquireCredential answered {response}, no grant")
@@ -554,9 +483,7 @@ def main(argv):
     if response != 0:
         die(
             EXIT_UNAVAILABLE,
-            f"AcquireCredential answered {response}. With no card in a reader, or no "
-            "certificate matching the purpose, that is the expected answer; run with "
-            "--expect-no-certificate to assert it.",
+            f"AcquireCredential failed with response {response}; use --expect-no-certificate to check acquisition failure.",
         )
 
     cert_der = bytes(results["certificate_der"])
@@ -630,15 +557,6 @@ def main(argv):
 
 
 def run_regrant(portal, args, first_cert_der):
-    """A SECOND GRANT, on a SECOND SESSION, and then a signature.
-
-    A session acquires once, so a second credential is a second session and a
-    second consent. The failure this exists to catch is silent: the portal
-    answers with certificate B, and the backend -- which had already opened a
-    token session and logged in for certificate A -- signs with A's key and
-    never asks for a PIN. What comes back does not verify against what the
-    caller was handed.
-    """
     session = create_session(portal)
     print(f"\nre-grant  a second session {session}, filtered to {args.regrant}")
 
@@ -653,12 +571,10 @@ def run_regrant(portal, args, first_cert_der):
 
     print(f"re-grant  key {key_type}, {len(cert_der)} certificate bytes")
 
-    # THE CERTIFICATE ITSELF, not certificate_id: that key is the impl
-    # interface's and the frontend does not forward it to applications.
+    # Use the returned certificate; certificate_id is confined to the impl interface.
     if cert_der == first_cert_der:
         die(EXIT_FAIL,
-            "the second grant is the same certificate as the first, so this run proves "
-            "nothing; pick a --regrant key algorithm the first grant did not use")
+            "Second grant returned the first certificate; choose a different --regrant key algorithm")
 
     mechanism = "ECDSA" if key_type == "EC" else "RSA_PKCS1_V1_5"
     if mechanism not in mechanisms:
@@ -679,8 +595,7 @@ def run_regrant(portal, args, first_cert_der):
         verify(cert_der, signature, message, mechanism, args.hash_name, args.der)
     except Exception as error:
         die(EXIT_FAIL,
-            "the signature after the re-grant did not verify against the certificate the "
-            f"portal returned -- which is the whole point of this check: {error}")
+            f"Second signature verification failed against the returned certificate: {error}")
 
     print("re-grant  verified against the new certificate")
     release(portal, session)

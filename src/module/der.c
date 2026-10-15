@@ -18,7 +18,7 @@ gboolean portal_der_read(const guint8* data, gsize size, PortalDerTlv* out)
 	if (data == NULL || size < 2)
 		return FALSE;
 
-	/* One-byte tags only: every structure this module reads uses them. */
+	/* Only one-byte DER tags are supported. */
 	if ((data[0] & 0x1f) == 0x1f)
 		return FALSE;
 

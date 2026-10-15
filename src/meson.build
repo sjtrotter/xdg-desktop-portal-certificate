@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
 
-# ONE gdbus-codegen run over all three impl interfaces, with the common prefix
-# stripped, so the generated symbols read the way upstream's do:
-#
-#   org.freedesktop.impl.portal.experimental.Certificate1 -> XdpImplExperimentalCertificate1
-#   org.freedesktop.impl.portal.Request        -> XdpImplRequest
-#   org.freedesktop.impl.portal.Session        -> XdpImplSession
 impl_dbus_sources = gnome.gdbus_codegen(
   'xdp-impl-dbus',
   sources: [
@@ -18,11 +12,7 @@ impl_dbus_sources = gnome.gdbus_codegen(
   namespace: 'XdpImpl',
 )
 
-# Everything except main.c and src/ui/, including the D-Bus layer and the
-# generated code, so that the unit tests link the same objects the binary uses.
-# Built without gtk4, libadwaita or gcr. certificate-impl.c and
-# broker/operations.c include ui/chooser.h and ui/pin.h; both are plain GLib/GIO
-# and must stay that way.
+# Core headers must remain free of GTK, libadwaita and gcr dependencies for headless tests.
 certificate_core_sources = files(
   'certificate.c',
   'certificate-impl.c',
@@ -44,8 +34,6 @@ certificate_ui_sources = files(
   'ui/external-window.c',
 )
 
-# The second PIN prompt, when the build found gcr-4. ui/pin.c compiles either
-# way: what the option removes is an implementation, not the contract.
 if gcr_dep.found()
   certificate_ui_sources += files('ui/pin-system.c')
 endif
@@ -70,7 +58,6 @@ if gtk_x11_dep.found() and x11_dep.found()
   certificate_ui_deps += [gtk_x11_dep, x11_dep]
 endif
 
-# No window in it, so the unit tests do not need a display to run.
 certificate_core = static_library(
   'certificate-core',
   certificate_core_sources + impl_dbus_sources,
@@ -81,16 +68,12 @@ certificate_core = static_library(
 
 certificate_core_dep = declare_dependency(
   link_with: certificate_core,
-  # The generated header, so that a dependent compiles after codegen has run.
+  # Dependents need the generated header before compiling.
   sources: impl_dbus_sources[1],
   include_directories: [config_inc, include_directories('.')],
   dependencies: certificate_deps,
 )
 
-# The UI half, as a library rather than only as objects inside the binary, so
-# that the integration tests can stand the impl object up on a private bus and
-# drive the real code rather than a copy of it. Every finding in the D-Bus and
-# lifecycle layer of the 2026 review was in code no test linked.
 certificate_service = static_library(
   'certificate-service',
   certificate_ui_sources,
@@ -102,7 +85,7 @@ certificate_service = static_library(
 
 certificate_service_dep = declare_dependency(
   link_with: [certificate_service, certificate_core],
-  # The generated header, so that a dependent compiles after codegen has run.
+  # Dependents need the generated header before compiling.
   sources: impl_dbus_sources[1],
   include_directories: [config_inc, include_directories('.')],
   dependencies: certificate_deps + certificate_ui_deps,

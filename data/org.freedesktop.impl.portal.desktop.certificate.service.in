@@ -1,22 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
-#
-# D-Bus activation for this backend, mirroring xdg-desktop-portal-gtk's
-# org.freedesktop.impl.portal.desktop.gtk.service and
-# xdg-desktop-portal-termfilechooser's
-# org.freedesktop.impl.portal.desktop.termfilechooser.service: one session
-# service per out-of-tree backend, named
-# org.freedesktop.impl.portal.desktop.<backend>.
-#
-# xdg-desktop-portal activates this name when portals.conf (or UseIn) selects
-# certificate.portal for org.freedesktop.impl.portal.experimental.Certificate1.
-# APPLICATIONS HAVE NO REASON TO HOLD THIS NAME and are not expected to reach
-# it; see docs/IMPL-INTERFACE.md, "Why an application cannot call this".
-#
-# EXPERIMENTAL, and the interface it implements is an unmerged branch. On a machine
-# whose xdg-desktop-portal has never heard of that interface this file is inert:
-# nothing matches certificate.portal, so nothing ever activates this name. The
-# frontend that does know it also needs XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1.
+# The frontend activates this service when certificate.portal is selected; see docs/IMPL-INTERFACE.md.
 
 [D-BUS Service]
 Name=org.freedesktop.impl.portal.desktop.certificate

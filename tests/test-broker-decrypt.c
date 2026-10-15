@@ -2,26 +2,6 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * THE TWO PROPERTIES THAT MAKE DECRYPTION SAFE TO OFFER AT ALL, at the layer
- * that provides them: broker/operations.c.
- *
- * ONE ERROR. RSA_OAEP is not a padding oracle the way PKCS#1 v1.5 is, but that
- * is a property of OAEP and not of this code, and it survives only as long as
- * nobody rebuilds the distinction by hand. The module tells this backend
- * whether the encoding was malformed, whether the parameters were wrong for
- * the key, or whether the device faulted; the caller is told "the decryption
- * failed", in the same words, every time. The real reason goes to the journal,
- * where the user can read it and the caller cannot.
- *
- * A BUDGET. Every practical attack on RSA decryption -- padding oracles, fault
- * injection, timing -- is built on making a great many queries against one key,
- * and nothing on either side of the portal boundary counts them. One grant buys
- * CERTIFICATE_MAX_DECRYPTS_PER_GRANT of them and then the user has to be asked
- * again.
- *
- * Needs a SoftHSM fixture; skips itself without one. The card path is the
- * author's, in docs/TESTING.md.
  */
 
 #include <glib.h>
@@ -132,8 +112,7 @@ static void fixture_set_up(Fixture* fixture, gconstpointer user_data)
 	certificate_impl_session_grant(fixture->session, fixture->rsa,
 	                              CERTIFICATE_PURPOSE_CLIENT_AUTH, FALSE, TRUE, 300);
 
-	/* Logged in up front: what is under test is the operation, and a PIN window
-	 * would need a display. */
+	/* Pre-login avoids a PIN window in this operation-only test. */
 	g_assert_true(certificate_device_open(&fixture->session->device, fixture->tokens,
 	                                      fixture->rsa, &error));
 	g_assert_true(
@@ -149,22 +128,16 @@ static void fixture_tear_down(Fixture* fixture, gconstpointer user_data)
 		g_clear_object(&fixture->session);
 	}
 
-	/* THE CLOSE RUNS ON A WORKER. C_Logout and C_CloseSession no longer happen
-	 * on the calling thread, so the module below must not be finalised until
-	 * they have finished -- which is what src/main.c does at shutdown too. */
+	/* Drain asynchronous device closes before finalizing the module. */
 	certificate_impl_session_drain_releases(2000);
 
 	g_clear_pointer(&fixture->candidates, g_ptr_array_unref);
 	g_clear_pointer(&fixture->tokens, certificate_tokens_free);
 }
 
-/* One Decrypt, run to completion. @parameters_text and @ciphertext decide which
- * way it fails. */
 static void decrypt(Fixture* fixture, const char* parameters_text, GBytes* ciphertext,
                     Answer* answer)
 {
-	/* g_variant_parse() already returns a FULL reference; ref_sink()ing it adds
-	 * a second one nothing ever drops. */
 	g_autoptr(GVariant) parameters =
 	    g_variant_parse(G_VARIANT_TYPE_VARDICT, parameters_text, NULL, NULL, NULL);
 	gint64 deadline;
@@ -188,17 +161,11 @@ static GBytes* modulus_length_bytes(Fixture* fixture, guint8 fill)
 	g_autofree guint8* bytes = g_malloc0(length);
 
 	memset(bytes, fill, length);
-	bytes[0] = 0x00; /* below the modulus, so the module gets as far as unpadding */
+	bytes[0] = 0x00; /* A value below the modulus reaches OAEP unpadding. */
 
 	return g_bytes_new(bytes, length);
 }
 
-/* TWO DIFFERENT INTERNAL CAUSES, ONE ANSWER. The first is a ciphertext of the
- * right length that is not a valid OAEP encoding; the second is a set of OAEP
- * parameters this module will not accept for this key. They come back from
- * PKCS#11 as different CKR_ values, and the caller must not be able to tell
- * them apart -- which is exactly the distinction that makes a v1.5 decryption
- * a Bleichenbacher oracle. */
 static void test_every_failure_looks_the_same(Fixture* fixture, gconstpointer user_data)
 {
 	g_autoptr(GBytes) garbage = NULL;
@@ -220,7 +187,6 @@ static void test_every_failure_looks_the_same(Fixture* fixture, gconstpointer us
 	g_assert_cmpuint(first.domain, ==, second.domain);
 	g_assert_cmpint(first.code, ==, second.code);
 
-	/* And it says nothing about what the module said. */
 	g_assert_null(strstr(first.message, "C_Decrypt"));
 	g_assert_null(strstr(first.message, "CKR"));
 
@@ -228,9 +194,6 @@ static void test_every_failure_looks_the_same(Fixture* fixture, gconstpointer us
 	g_free(second.message);
 }
 
-/* THE BUDGET IS SPENT BY ATTEMPTS, NOT BY SUCCESSES. A failed decryption is
- * precisely the query an attacker wants; charging only for successful ones
- * would leave the budget unspent by the traffic it exists to bound. */
 static void test_decrypt_budget(Fixture* fixture, gconstpointer user_data)
 {
 	g_autoptr(GBytes) garbage = NULL;
@@ -248,19 +211,12 @@ static void test_decrypt_budget(Fixture* fixture, gconstpointer user_data)
 		g_assert_cmpuint(fixture->session->decrypt_count, ==, i + 1);
 	}
 
-	/* One past the budget is refused with a DIFFERENT error, and it is
-	 * supposed to be different: this one is not about the ciphertext, and a
-	 * caller has to be able to tell "ask the user again" from "that did not
-	 * decrypt". */
 	decrypt(fixture, "{'hash': <'SHA1'>}", garbage, &answer);
 	g_assert_false(answer.succeeded);
 	g_assert_nonnull(strstr(answer.message, "new grant"));
 
-	/* The card was never asked: the count did not move. */
 	g_assert_cmpuint(fixture->session->decrypt_count, ==, CERTIFICATE_MAX_DECRYPTS_PER_GRANT);
 
-	/* A fresh grant on the same session starts a fresh budget. Re-consenting
-	 * is what buys more, which is the whole design: the user finds out. */
 	certificate_impl_session_grant(fixture->session, fixture->rsa,
 	                              CERTIFICATE_PURPOSE_CLIENT_AUTH, FALSE, TRUE, 300);
 	g_assert_cmpuint(fixture->session->decrypt_count, ==, 0);
@@ -272,8 +228,6 @@ static void test_decrypt_budget(Fixture* fixture, gconstpointer user_data)
 	g_free(answer.message);
 }
 
-/* A grant whose operation_policy did not include decrypt is refused before the
- * mechanism is even parsed, and that refusal is not charged to the budget. */
 static void test_grant_without_decrypt(Fixture* fixture, gconstpointer user_data)
 {
 	g_autoptr(GBytes) garbage = NULL;

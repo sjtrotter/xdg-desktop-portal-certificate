@@ -2,10 +2,6 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * The mechanism mapping and its parameter validation. The frontend cannot do
- * these checks: it does not know the modulus size, so it cannot know that a
- * salt does not fit.
  */
 
 #include <glib.h>
@@ -43,9 +39,6 @@ static void test_rsa_pkcs1_maps_and_wraps(void)
 	memset(digest, 0xab, sizeof(digest));
 	data = g_bytes_new(digest, sizeof(digest));
 
-	/* THE DIGESTINFO IS BUILT HERE. The caller supplies the bare digest and
-	 * never a DigestInfo, which is what makes "data is always the digest" a
-	 * rule rather than a convention. */
 	prepared = certificate_mechanism_prepare(&mechanism, data, &error);
 	g_assert_no_error(error);
 	g_assert_nonnull(prepared);
@@ -58,9 +51,6 @@ static void test_rsa_pkcs1_maps_and_wraps(void)
 	certificate_mechanism_clear(&mechanism);
 }
 
-/* A digest that is not the length the named hash produces is refused. Raw v1.5
- * padding of an arbitrary blob is a much larger thing to consent to than a
- * signature over a digest of known length. */
 static void test_wrong_digest_length_is_refused(void)
 {
 	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
@@ -83,8 +73,6 @@ static void test_wrong_digest_length_is_refused(void)
 	certificate_mechanism_clear(&mechanism);
 }
 
-/* `hash` is REQUIRED. Without it there is no way to know what the bytes are, and
- * guessing from their length is how a SHA-256 digest becomes a SHA3-256 one. */
 static void test_hash_is_required(void)
 {
 	g_autoptr(GVariant) parameters = params("{}");
@@ -142,7 +130,6 @@ static void test_pss_defaults_and_limits(void)
 	g_autoptr(GError) mgf_error = NULL;
 	g_autoptr(GError) salt_error = NULL;
 
-	/* Default salt length is the hash length, and MGF1 over the same hash. */
 	g_assert_true(
 	    certificate_mechanism_parse("RSA_PSS", parameters, "RSA", 2048, FALSE, &mechanism, &error));
 	g_assert_no_error(error);
@@ -153,8 +140,7 @@ static void test_pss_defaults_and_limits(void)
 	g_assert_cmpuint(mechanism.pss.sLen, ==, 32);
 	certificate_mechanism_clear(&mechanism);
 
-	/* RFC 8017 9.1.1 step 3: emLen >= hLen + sLen + 2. A 1024-bit key holds
-	 * 128 bytes; 64 + 200 + 2 does not fit. THE FRONTEND CANNOT CHECK THIS. */
+	/* A 1024-bit key cannot fit a SHA-512 digest plus a 200-byte salt and PSS overhead. */
 	g_assert_false(certificate_mechanism_parse("RSA_PSS", big_salt, "RSA", 1024, FALSE, &mechanism,
 	                                           &too_big));
 	g_assert_error(too_big, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
@@ -164,8 +150,6 @@ static void test_pss_defaults_and_limits(void)
 	g_assert_cmpuint(mechanism.pss.mgf, ==, CKG_MGF1_SHA1);
 	certificate_mechanism_clear(&mechanism);
 
-	/* An MGF this backend does not know is refused, not forwarded: pParameter
-	 * goes straight into the module. */
 	g_assert_false(certificate_mechanism_parse("RSA_PSS", bad_mgf, "RSA", 2048, FALSE, &mechanism,
 	                                           &mgf_error));
 	g_assert_error(mgf_error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
@@ -174,11 +158,6 @@ static void test_pss_defaults_and_limits(void)
 	                                           &mechanism, &salt_error));
 	g_assert_error(salt_error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
 
-	/* THE SPELLING IS THE INTERFACE'S: "MGF1-<hash>", or plain "MGF1" meaning
-	 * MGF1 over `hash`. A bare hash name used to be accepted, which was
-	 * leniency the interface does not describe and a second backend would not
-	 * implement -- so a caller that relied on it here would have found its
-	 * requests refused elsewhere. */
 	{
 		g_autoptr(GVariant) plain = params("{'hash': <'SHA384'>, 'mgf': <'mgf1'>}");
 		g_autoptr(GVariant) bare_hash = params("{'hash': <'SHA256'>, 'mgf': <'SHA256'>}");
@@ -202,8 +181,7 @@ static void test_rsa_key_too_small(void)
 	CertificateMechanism mechanism;
 	g_autoptr(GError) error = NULL;
 
-	/* 512 bits is 64 bytes; a SHA-512 DigestInfo plus the digest plus the
-	 * minimum padding does not fit. */
+	/* A SHA-512 DigestInfo and required padding exceed a 512-bit RSA modulus. */
 	g_assert_false(certificate_mechanism_parse("RSA_PKCS1_V1_5", parameters, "RSA", 512, FALSE,
 	                                           &mechanism, &error));
 	g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
@@ -252,11 +230,6 @@ static void test_signature_encoding_option(void)
 	g_assert_error(bad_error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
 }
 
-/* RSA_OAEP IS THE ONLY DECRYPTION MECHANISM, and the three signing mechanisms
- * are refused for Decrypt by name. PKCS#1 v1.5 is the one that matters: a
- * decryption whose outcome the caller can observe is a Bleichenbacher oracle
- * over the card's key, which is the capability the digest-only Sign policy
- * exists to withhold, offered through a different door. */
 static void test_only_oaep_may_decrypt(void)
 {
 	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
@@ -274,7 +247,6 @@ static void test_only_oaep_may_decrypt(void)
 		g_assert_error(refused, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
 	}
 
-	/* And the one that is allowed to decrypt may not sign. */
 	{
 		g_autoptr(GError) refused = NULL;
 
@@ -296,9 +268,6 @@ static void test_only_oaep_may_decrypt(void)
 	certificate_mechanism_clear(&mechanism);
 }
 
-/* THE CIPHERTEXT IS EXACTLY ONE MODULUS. It is the only length an RSA
- * ciphertext can have, and the frontend cannot check it because it does not
- * know the modulus size. */
 static void test_oaep_ciphertext_length(void)
 {
 	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
@@ -318,7 +287,6 @@ static void test_oaep_ciphertext_length(void)
 	prepared = certificate_mechanism_prepare(&mechanism, exact, &error);
 	g_assert_no_error(error);
 
-	/* PASSED THROUGH UNCHANGED: nothing wraps or pads a ciphertext. */
 	g_assert_cmpuint(g_bytes_get_size(prepared), ==, sizeof(buffer));
 	g_assert_true(g_bytes_equal(prepared, exact));
 
@@ -334,18 +302,16 @@ static void test_oaep_ciphertext_length(void)
 	certificate_mechanism_clear(&mechanism);
 }
 
-/* The OAEP parameters are validated rather than forwarded: pParameter goes
- * straight into the module. */
 static void test_oaep_parameters(void)
 {
 	CertificateMechanism mechanism;
 	static const char* const refused[] = {
-		"{}",                                            /* no hash */
-		"{'hash': <'SHA3-256'>}",                        /* not a hash this backend knows */
-		"{'hash': <'SHA256'>, 'mgf1_hash': <'SHA1'>}",   /* must be the same hash */
-		"{'hash': <'SHA256'>, 'mgf1_hash': <'nope'>}",   /* not a hash at all */
-		"{'hash': <'SHA256'>, 'label': <'a string'>}",   /* must be a byte array */
-		"{'hash': <'SHA256'>, 'salt_length': <uint32 8>}", /* a signing parameter */
+		"{}",
+		"{'hash': <'SHA3-256'>}",
+		"{'hash': <'SHA256'>, 'mgf1_hash': <'SHA1'>}",
+		"{'hash': <'SHA256'>, 'mgf1_hash': <'nope'>}",
+		"{'hash': <'SHA256'>, 'label': <'a string'>}",
+		"{'hash': <'SHA256'>, 'salt_length': <uint32 8>}",
 		"{'hash': <'SHA256'>, 'signature_encoding': <'der'>}",
 		NULL,
 	};
@@ -362,8 +328,6 @@ static void test_oaep_parameters(void)
 		g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
 	}
 
-	/* A label longer than the interface's 256 bytes. Built rather than parsed,
-	 * because a 257-byte literal in a table is unreadable. */
 	{
 		g_autofree guint8* big = g_malloc0(257);
 		g_autoptr(GVariant) parameters = NULL;
@@ -381,11 +345,8 @@ static void test_oaep_parameters(void)
 		g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
 	}
 
-	/* Accepted: the SHA-256 spelling, a matching mgf1_hash, and a label that
-	 * reaches the mechanism parameter as the module will see it. */
 	{
-		/* The label is written out as bytes rather than as b'...', which
-		 * would carry a trailing NUL into the mechanism parameter. */
+		/* Explicit bytes avoid the trailing NUL that a GVariant bytestring adds. */
 		static const guint8 label[] = { 0x63, 0x74, 0x78 };
 		g_autoptr(GVariant) parameters = params("{'hash': <'SHA-256'>, 'mgf1_hash': <'sha256'>, "
 		                                        "'label': <[byte 0x63, 0x74, 0x78]>}");
@@ -399,7 +360,6 @@ static void test_oaep_parameters(void)
 		g_assert_nonnull(mechanism.oaep.pSourceData);
 		g_assert_cmpint(memcmp(mechanism.oaep.pSourceData, label, sizeof(label)), ==, 0);
 
-		/* The CK_MECHANISM points at the struct's own storage. */
 		{
 			CK_MECHANISM ck;
 
@@ -412,7 +372,6 @@ static void test_oaep_parameters(void)
 		certificate_mechanism_clear(&mechanism);
 	}
 
-	/* A key too small to hold 2*hLen+2 for the named hash. */
 	{
 		g_autoptr(GVariant) parameters = params("{'hash': <'SHA512'>}");
 		g_autoptr(GError) error = NULL;
@@ -422,7 +381,6 @@ static void test_oaep_parameters(void)
 		g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
 	}
 
-	/* And OAEP needs an RSA key. */
 	{
 		g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>}");
 		g_autoptr(GError) error = NULL;
@@ -433,8 +391,6 @@ static void test_oaep_parameters(void)
 	}
 }
 
-/* An unknown parameter is refused rather than ignored: a caller that spelled
- * `salt_len` and got the default salt length would have been told nothing. */
 static void test_unknown_parameter(void)
 {
 	g_autoptr(GVariant) parameters = params("{'hash': <'SHA256'>, 'salt_len': <uint32 8>}");
@@ -449,7 +405,7 @@ static void test_unknown_parameter(void)
 static void test_ecdsa_raw_to_der(void)
 {
 	g_autoptr(GError) error = NULL;
-	/* r has its top bit set, so DER has to prepend a zero byte; s does not. */
+	/* A set high bit requires a leading zero in the signed DER integer. */
 	static const guint8 raw[] = { 0xf0, 0x01, 0x02, 0x03, 0x11, 0x22, 0x33, 0x44 };
 	static const guint8 expected[] = { 0x30, 0x0d, 0x02, 0x05, 0x00, 0xf0, 0x01,
 		                               0x02, 0x03, 0x02, 0x04, 0x11, 0x22, 0x33, 0x44 };
@@ -464,8 +420,6 @@ static void test_ecdsa_raw_to_der(void)
 	g_assert_cmpuint(g_bytes_get_size(der), ==, sizeof(expected));
 	g_assert_cmpint(memcmp(g_bytes_get_data(der, NULL), expected, sizeof(expected)), ==, 0);
 
-	/* Leading zeroes are stripped, because a DER integer is not a fixed-width
-	 * field. */
 	stripped = certificate_ecdsa_raw_to_der(leading_zero, sizeof(leading_zero), &error);
 	g_assert_no_error(error);
 	g_assert_cmpuint(g_bytes_get_size(stripped), ==, sizeof(leading_zero_der));
@@ -478,12 +432,6 @@ static void test_ecdsa_raw_to_der(void)
 	g_assert_error(odd_error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
 }
 
-/* PRESENT WITH THE WRONG TYPE IS AN ERROR, NEVER "ABSENT". Every one of these
- * used to be silently discarded and replaced by the default, because
- * g_variant_lookup(..., "&s", ...) cannot tell a missing key from one holding a
- * uint32. None of the defaults is dangerous by itself, which is exactly why it
- * had to be caught by a test rather than by an incident: a caller whose
- * parameters vanished got an answer computed from parameters it did not send. */
 static void test_mistyped_parameters_are_refused(void)
 {
 	static const struct
@@ -499,7 +447,6 @@ static void test_mistyped_parameters_are_refused(void)
 		{ "RSA_PSS", "{'hash': <'SHA256'>, 'mgf': <uint32 1>}", FALSE },
 		{ "RSA_OAEP", "{'hash': <'SHA256'>, 'mgf1_hash': <uint32 1>}", TRUE },
 		{ "RSA_OAEP", "{'hash': <'SHA256'>, 'mgf1_hash': <b'SHA256'>}", TRUE },
-		/* And the hash itself, which was already right and is a control. */
 		{ "RSA_PSS", "{'hash': <uint32 256>}", FALSE },
 	};
 
@@ -518,10 +465,6 @@ static void test_mistyped_parameters_are_refused(void)
 	}
 }
 
-/* THE SPELLING IS THE INTERFACE'S: "MGF1-<hash>", or bare "MGF1" meaning MGF1
- * over `hash`. It is enforced only here -- the frontend passes `parameters`
- * through with no validator for `mgf` -- so this is the only place the
- * interface's claim about the vocabulary is checked at all. */
 static void test_pss_mgf_vocabulary(void)
 {
 	static const struct
@@ -532,12 +475,7 @@ static void test_pss_mgf_vocabulary(void)
 		{ "{'hash': <'SHA256'>, 'mgf': <'MGF1'>}", TRUE },
 		{ "{'hash': <'SHA256'>, 'mgf': <'MGF1-SHA256'>}", TRUE },
 		{ "{'hash': <'SHA256'>, 'mgf': <'mgf1-sha256'>}", TRUE },
-		/* A DIFFERENT hash is permitted by PKCS#1 and accepted here: the pairing
-		 * is what goes into pParameter, and both halves come out of one table so
-		 * they cannot disagree with each other. */
 		{ "{'hash': <'SHA256'>, 'mgf': <'MGF1-SHA384'>}", TRUE },
-		/* A bare hash name is NOT the spelling. It used to be accepted, which
-		 * was leniency the interface does not describe. */
 		{ "{'hash': <'SHA256'>, 'mgf': <'SHA256'>}", FALSE },
 		{ "{'hash': <'SHA256'>, 'mgf': <'MGF1-SHA3-256'>}", FALSE },
 		{ "{'hash': <'SHA256'>, 'mgf': <'MGF2-SHA256'>}", FALSE },
@@ -564,8 +502,6 @@ static void test_pss_mgf_vocabulary(void)
 		}
 	}
 
-	/* The pairing that reaches the module: MGF1-SHA384 over a SHA-256 signature
-	 * sets the SHA-384 mask function and leaves hashAlg alone. */
 	{
 		g_autoptr(GVariant) parameters =
 		    params("{'hash': <'SHA256'>, 'mgf': <'MGF1-SHA384'>}");
@@ -580,8 +516,6 @@ static void test_pss_mgf_vocabulary(void)
 	}
 }
 
-/* An mgf1_hash that names a different hash than `hash` is refused: the two go
- * into one CK_RSA_PKCS_OAEP_PARAMS and the interface says they must agree. */
 static void test_oaep_mgf1_hash_must_match(void)
 {
 	g_autoptr(GVariant) mismatched =

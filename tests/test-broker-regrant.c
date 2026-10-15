@@ -2,28 +2,6 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * A SECOND AcquireCredential ON A LIVE SESSION, end to end through the broker.
- *
- * The impl interface permits it and the frontend does not refuse it: an
- * application may ask again on the same session handle and the user may pick a
- * different certificate. What the backend used to do with that was open the
- * token session once and never look again -- so the application was handed
- * certificate B, and the next Sign went to certificate A's private key handle,
- * on A's login, with no PIN window. A signature that does not verify against
- * the certificate the portal returned is the one failure this whole repository
- * is meant to make impossible, and it was silent.
- *
- * WHAT IS ASSERTED HERE, in order:
- *
- *   1. the first grant signs, and the signature verifies against certificate A;
- *   2. after the re-grant, the very next operation does NOT produce a
- *      signature -- the login went with the old grant, so the backend asks for
- *      a PIN again (and there is no display in this suite, so it refuses);
- *   3. once the new grant is authenticated, the signature verifies against
- *      certificate B.
- *
- * Skipped without a SoftHSM fixture; tools/softhsm-fixture.sh builds one.
  */
 
 #include <glib.h>
@@ -76,8 +54,6 @@ static void run_and_wait(CertificateTokens* tokens, CertificateImplSession* sess
                          const char* mechanism, const char* hash, GBytes* data, Probe* probe)
 {
 	g_autofree char* text = g_strdup_printf("{'hash': <'%s'>}", hash);
-	/* g_variant_parse() already returns a FULL reference, so ref_sink()ing it
-	 * would add a second one nothing ever drops. */
 	g_autoptr(GVariant) parameters =
 	    g_variant_parse(G_VARIANT_TYPE_VARDICT, text, NULL, NULL, NULL);
 	gint64 deadline;
@@ -112,8 +88,7 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	g_autoptr(GChecksum) checksum = g_checksum_new(G_CHECKSUM_SHA256);
 	gsize digest_length = sizeof(digest);
 
-	/* No windows: a PIN prompt this suite cannot answer is exactly how step 2
-	 * is observed. */
+	/* Disable display access so a required fresh login fails without opening a window. */
 	certificate_ui_set_has_display(FALSE);
 
 	if (directory == NULL)
@@ -165,13 +140,10 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	session = certificate_impl_session_new("/org/freedesktop/portal/desktop/session/t/regrant",
 	                                       "org.example.App");
 
-	/* ------------------------------------------------ the first grant */
-
 	certificate_impl_session_grant(session, first, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE, FALSE,
 	                               300);
 
-	/* Stands in for the user typing the PIN into the window this suite has no
-	 * display for. */
+	/* Simulate PIN entry directly because the test has no display. */
 	g_assert_true(certificate_device_open(&session->device, tokens, first, &error));
 	g_assert_true(certificate_device_login(&session->device, first, FIXTURE_PIN, &error));
 	g_assert_no_error(error);
@@ -182,14 +154,9 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	certificate_test_verify_signature(first, GNUTLS_SIGN_RSA_SHA256, digest, digest_length,
 	                                  probe.signature, FALSE);
 
-	/* ------------------------------------------------ the second grant */
-
 	certificate_impl_session_grant(session, second, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE, FALSE,
 	                               300);
 
-	/* THE OLD GRANT'S LOGIN DOES NOT CARRY OVER. The operation is refused --
-	 * here because there is no display to ask on, in the real thing because a
-	 * PIN window opens. What it must NOT be is a signature. */
 	run_and_wait(tokens, session, "ECDSA", "SHA256", data, &probe);
 	g_assert_true(probe.failed);
 	g_assert_null(probe.signature);
@@ -198,8 +165,6 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	g_assert_false(session->device.logged_in);
 	g_mutex_unlock(&session->device_lock);
 
-	/* ------------------------------------------------ and then it works */
-
 	g_assert_true(certificate_device_login(&session->device, second, FIXTURE_PIN, &error));
 	g_assert_no_error(error);
 
@@ -207,13 +172,9 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	g_assert_false(probe.failed);
 	g_assert_nonnull(probe.signature);
 
-	/* THE POINT OF THE WHOLE FILE: against certificate B, from the certificate
-	 * the token handed back rather than from anything the fixture script
-	 * remembers. */
 	certificate_test_verify_signature(second, GNUTLS_SIGN_ECDSA_SHA256, digest, digest_length,
 	                                  probe.signature, TRUE);
 
-	/* And not against A, which is what the defect produced. */
 	{
 		g_autoptr(GBytes) rsa_signature = NULL;
 
@@ -225,16 +186,11 @@ static void test_regrant_signs_with_the_new_certificate(void)
 
 	g_clear_pointer(&probe.signature, g_bytes_unref);
 	certificate_impl_session_close(session);
-	/* The close runs on a worker; the module must not be finalised under it. */
+	/* Drain asynchronous device closes before finalizing the module. */
 	certificate_impl_session_drain_releases(2000);
 	g_object_unref(session);
 }
 
-/* THE GRANT'S CLOCK IS THE MONOTONIC ONE, like the frontend's. expires_at is
- * only ever compared against another reading of the same clock, and it used to
- * be taken from g_get_real_time(): a wall-clock step -- an NTP correction, a
- * user setting the date -- moved a live grant's expiry by the step, in either
- * direction. Needs no card: the grant is bookkeeping. */
 static void test_grant_expiry_is_monotonic(void)
 {
 	g_autoptr(CertificateCandidate) candidate =

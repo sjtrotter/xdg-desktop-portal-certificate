@@ -14,34 +14,26 @@
 #include "../module/constants.h"
 #include "../redact.h"
 
-/* How often the presence watcher asks the modules what is in the readers.
- * C_WaitForSlotEvent is optional in PKCS#11 and OpenSC's implementation of the
- * blocking form has historically been unreliable, so this polls instead: it is
- * two ioctls a second against pcscd and it cannot wedge a thread forever. */
+/* Poll because C_WaitForSlotEvent is optional and its blocking implementation may stall. */
 #define CERTIFICATE_WATCH_INTERVAL_MS 2000
-/* A reader that reports insert and remove repeatedly must not produce a signal
- * storm, so a change has to survive this many consecutive polls. */
+/* Require consecutive matching polls to debounce reader changes. */
 #define CERTIFICATE_WATCH_DEBOUNCE 2
 
 struct CertificateTokens
 {
-	CK_FUNCTION_LIST** modules; /* p11-kit owned, NULL terminated */
-	GPtrArray* explicit_modules; /* CK_FUNCTION_LIST*, loaded from --module */
-	GHashTable* module_names;    /* CK_FUNCTION_LIST* -> char* (owned), for --module */
-	/* THE DEFAULT IS HARDWARE ONLY. See token_skip_reason(). */
+	CK_FUNCTION_LIST** modules; /* Owned by p11-kit; NULL-terminated. */
+	GPtrArray* explicit_modules; /* CK_FUNCTION_LIST* entries loaded through --module. */
+	GHashTable* module_names;    /* Owns path strings keyed by CK_FUNCTION_LIST* for --module. */
 	gboolean allow_software;
 	GMutex lock;
 
-	/* presence watching */
 	GThread* watch_thread;
 	GMainContext* watch_context;
 	CertificateTokenEvent watch_event;
 	gpointer watch_data;
 	gboolean watch_stop;
-	GPtrArray* watch_known; /* CertificateToken* */
+	GPtrArray* watch_known; /* CertificateToken* elements. */
 };
-
-/* ------------------------------------------------------------------ tokens */
 
 static CertificateToken* certificate_token_new(void)
 {
@@ -79,10 +71,7 @@ gboolean certificate_token_same(const CertificateToken* a, const CertificateToke
 	if (a == NULL || b == NULL)
 		return FALSE;
 
-	/* Slot number is deliberately not part of this. A card reinserted into the
-	 * same slot with the same label is a DIFFERENT token until every stable
-	 * attribute agrees, and a token with no serial at all is never considered
-	 * the same as another observation, because there is nothing to compare. */
+	/* Grant rebinding requires all stable attributes and a serial; slot IDs do not establish identity. */
 	if (a->serial == NULL || *a->serial == '\0')
 		return FALSE;
 
@@ -90,13 +79,7 @@ gboolean certificate_token_same(const CertificateToken* a, const CertificateToke
 	       g_strcmp0(a->model, b->model) == 0 && g_strcmp0(a->manufacturer, b->manufacturer) == 0;
 }
 
-/* PRESENCE, NOT IDENTITY. certificate_token_same() refuses to call a
- * serial-less token the same as any other observation, which is right for
- * re-binding a grant -- there is nothing stable to compare -- and wrong for the
- * watcher, where it made every poll see a change: the two-poll debounce always
- * cleared and such a token produced a TokenRemoved/TokenAdded pair every four
- * seconds forever. Some middleware, and some readers in shared mode, really do
- * report an empty CK_TOKEN_INFO.serialNumber. */
+/* Presence tracking may match serial-less observations; grant rebinding still requires a serial. */
 gboolean certificate_token_same_presence(const CertificateToken* a, const CertificateToken* b)
 {
 	if (a == NULL || b == NULL)
@@ -120,8 +103,6 @@ char* certificate_token_identity(const CertificateToken* token)
 	                       token->serial != NULL ? token->serial : "",
 	                       token->label != NULL ? token->label : "");
 }
-
-/* -------------------------------------------------------------- candidates */
 
 static CertificateCandidate* certificate_candidate_new(void)
 {
@@ -174,8 +155,6 @@ gboolean certificate_candidate_is_not_yet_valid(const CertificateCandidate* cand
 
 static char* certificate_id_for(const GByteArray* der);
 
-/* ------------------------------------------------------------ X.509 parsing */
-
 static char* dn_component(gnutls_x509_crt_t crt, const char* oid, gboolean issuer)
 {
 	char buffer[512];
@@ -212,9 +191,7 @@ static char* dn_full(gnutls_x509_crt_t crt, gboolean issuer)
 	return text;
 }
 
-/* The name shown in the chooser row. CN when there is one, otherwise the whole
- * DN, otherwise an honest placeholder -- never a guess and never empty, because
- * an empty row is a row the user cannot tell apart from another empty row. */
+/* Use CN, then DN, then a placeholder so chooser rows always have a name. */
 static char* display_name(gnutls_x509_crt_t crt, gboolean issuer)
 {
 	char* name = dn_component(crt, GNUTLS_OID_X520_COMMON_NAME, issuer);
@@ -243,11 +220,7 @@ typedef enum
 	EXTENSION_UNREADABLE
 } ExtensionState;
 
-/* Whether the certificate CARRIES the extension, which is not a question the
- * per-purpose accessor can answer: gnutls_x509_crt_get_key_purpose_oid()
- * reports GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE at index 0 both for a
- * certificate with no extension and for one holding an empty SEQUENCE, and
- * those two mean opposite things. */
+/* The per-purpose accessor cannot distinguish absent EKU from an empty EKU sequence. */
 static ExtensionState extension_state(gnutls_x509_crt_t crt, const char* oid)
 {
 	gnutls_datum_t value = { NULL, 0 };
@@ -264,13 +237,7 @@ static ExtensionState extension_state(gnutls_x509_crt_t crt, const char* oid)
 	return EXTENSION_PRESENT;
 }
 
-/* FALSE means the extension is there and could not be read. It is not the same
- * as "no extension" and must not be reported as one: filter.c reads a NULL
- * @out as "unrestricted", so a decode error -- a bad tag, an OID the parser
- * refuses -- would turn a restricted certificate into one good for every
- * purpose. The caller fails the parse, which takes the certificate out of the
- * candidate list entirely. An OID too long for the buffer below cannot be read
- * as an absent extension either: it is a negative return like any other. */
+/* An unreadable EKU must fail parsing; NULL would incorrectly mark the certificate unrestricted. */
 static gboolean parse_eku(gnutls_x509_crt_t crt, char*** out)
 {
 	g_autoptr(GStrvBuilder) builder = g_strv_builder_new();
@@ -297,11 +264,7 @@ static gboolean parse_eku(gnutls_x509_crt_t crt, char*** out)
 		g_strv_builder_add(builder, buffer);
 	}
 
-	/* NULL means "this certificate has no extended key usage extension", which
-	 * is a different fact from "it has one and it is empty": absent is
-	 * unrestricted, empty is restricted to nothing. The purpose rules in
-	 * tokens/filter.c turn on exactly that difference, and an empty SEQUENCE
-	 * reaches them as an EMPTY STRV rather than as NULL. */
+	/* NULL EKU means unrestricted; an empty array means no permitted purposes. */
 	if (!any && state == EXTENSION_ABSENT)
 	{
 		*out = NULL;
@@ -328,7 +291,6 @@ static gboolean parse_key_usage(gnutls_x509_crt_t crt, char*** out)
 	if (rc < 0)
 		return FALSE;
 
-	/* The names are the ones the public interface's certificate_filter uses. */
 	if (usage & GNUTLS_KEY_DIGITAL_SIGNATURE)
 		g_strv_builder_add(builder, "digital_signature");
 	if (usage & GNUTLS_KEY_NON_REPUDIATION)
@@ -361,7 +323,7 @@ static gboolean certificate_parse_der(const guint8* der, gsize length,
 	if (rc < 0)
 	{
 		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
-		                    "Could not allocate a certificate");
+		                    "Certificate allocation failed");
 		return FALSE;
 	}
 
@@ -369,7 +331,7 @@ static gboolean certificate_parse_der(const guint8* der, gsize length,
 	if (rc < 0)
 	{
 		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
-		                    "Not a valid X.509 certificate");
+		                    "Invalid X.509 certificate");
 		gnutls_x509_crt_deinit(crt);
 		return FALSE;
 	}
@@ -380,12 +342,10 @@ static gboolean certificate_parse_der(const guint8* der, gsize length,
 	out->not_before = (gint64) gnutls_x509_crt_get_activation_time(crt);
 	out->not_after = (gint64) gnutls_x509_crt_get_expiration_time(crt);
 
-	/* An extension that will not decode makes the certificate ineligible for
-	 * every purpose, not unrestricted. */
 	if (!parse_eku(crt, &out->eku_oids) || !parse_key_usage(crt, &out->key_usage))
 	{
 		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
-		                    "The key usage extensions could not be decoded");
+		                    "Key usage extensions could not be decoded");
 		gnutls_x509_crt_deinit(crt);
 		return FALSE;
 	}
@@ -424,9 +384,6 @@ static gboolean certificate_parse_der(const guint8* der, gsize length,
 	}
 	else
 	{
-		/* A key this backend has no mechanism for. It is not an error: the
-		 * certificate is simply never a candidate, and saying so honestly beats
-		 * guessing a type. */
 		out->key_type = g_strdup("unsupported");
 		out->key_size = (guint) MAX(bits, 0);
 	}
@@ -450,13 +407,7 @@ CertificateCandidate* certificate_candidate_new_from_der(const guint8* der, gsiz
 	return g_steal_pointer(&candidate);
 }
 
-/* --------------------------------------------------------------- PIV slots */
-
-/* Best effort, and marked as such everywhere it is used. OpenSC's PIV driver
- * uses the PIV key reference as CKA_ID on some cards (0x9a, 0x9c, 0x9d, 0x9e)
- * and a 1-based index on others (0x01..0x04). Anything else yields NULL rather
- * than a guess, because a wrong slot name in a filter silently hides the
- * certificate the user wanted. */
+/* OpenSC PIV IDs may be key references or 1-based indexes; unknown encodings yield NULL. */
 static char* piv_slot_from_id(const GByteArray* cka_id)
 {
 	if (cka_id == NULL || cka_id->len != 1)
@@ -480,8 +431,6 @@ static char* piv_slot_from_id(const GByteArray* cka_id)
 			return NULL;
 	}
 }
-
-/* ------------------------------------------------------------ module loading */
 
 gboolean certificate_module_is_portal_module(const char* name, const char* filename)
 {
@@ -512,12 +461,7 @@ static gboolean module_is_interesting(CK_FUNCTION_LIST* module)
 	if (name == NULL)
 		return TRUE;
 
-	/* p11-kit's own trust module holds CA certificates and no private keys, so
-	 * it can never produce a candidate; enumerating it costs seconds on a
-	 * machine with a large trust store. gnome-keyring's module holds software
-	 * keys the user never put on a token, and offering them in a window that
-	 * says "security token" would be a lie. Either can be brought back with an
-	 * explicit --module. */
+	/* Configured trust and software stores are skipped by default; --module may explicitly select them. */
 	if (g_ascii_strcasecmp(name, "p11-kit-trust") == 0)
 		return FALSE;
 	if (g_ascii_strcasecmp(name, "gnome-keyring") == 0)
@@ -545,8 +489,7 @@ CertificateTokens* certificate_tokens_new(const char* const* module_paths, GErro
 			{
 				g_set_error(error, CERTIFICATE_PKCS11_ERROR,
 				            CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED,
-				            "'%s' is the portal's own client-side module and this backend "
-				            "would recurse into the portal by loading it",
+				            "Portal client module '%s' cannot be loaded by the backend",
 				            module_paths[i]);
 				certificate_tokens_free(tokens);
 				return NULL;
@@ -558,7 +501,7 @@ CertificateTokens* certificate_tokens_new(const char* const* module_paths, GErro
 				g_autofree char* text = certificate_redact_error_text(p11_kit_message());
 
 				g_set_error(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
-				            "Could not load the PKCS#11 module '%s': %s", module_paths[i], text);
+				            "PKCS#11 module '%s' could not be loaded: %s", module_paths[i], text);
 				certificate_tokens_free(tokens);
 				return NULL;
 			}
@@ -580,15 +523,14 @@ CertificateTokens* certificate_tokens_new(const char* const* module_paths, GErro
 		return tokens;
 	}
 
-	/* Managed modules, so that p11-kit owns the C_Initialize refcounting and
-	 * two consumers in one process cannot finalize each other's module. */
+	/* Managed loading lets p11-kit coordinate C_Initialize ownership across consumers. */
 	tokens->modules = p11_kit_modules_load_and_initialize(0);
 	if (tokens->modules == NULL)
 	{
 		g_autofree char* text = certificate_redact_error_text(p11_kit_message());
 
 		g_set_error(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
-		            "Could not load the configured PKCS#11 modules: %s", text);
+		            "Configured PKCS#11 modules could not be loaded: %s", text);
 		certificate_tokens_free(tokens);
 		return NULL;
 	}
@@ -628,7 +570,6 @@ void certificate_tokens_set_allow_software(CertificateTokens* tokens, gboolean a
 	g_mutex_unlock(&tokens->lock);
 }
 
-/* Every module this backend should look at, explicit or configured. */
 static GPtrArray* module_list(CertificateTokens* tokens)
 {
 	GPtrArray* list = g_ptr_array_new();
@@ -648,8 +589,6 @@ static GPtrArray* module_list(CertificateTokens* tokens)
 	return list;
 }
 
-/* ------------------------------------------------------------- enumeration */
-
 static CertificateToken* token_from_slot(CertificateTokens* tokens, CK_FUNCTION_LIST* module,
                                         CK_SLOT_ID slot)
 {
@@ -663,10 +602,7 @@ static CertificateToken* token_from_slot(CertificateTokens* tokens, CK_FUNCTION_
 	if (module->C_GetTokenInfo(slot, &token_info) != CKR_OK)
 		return NULL;
 
-	/* A slot that reports a token which has never been initialised is a slot
-	 * with nothing on it. SoftHSM always presents one; a reader with no card
-	 * does not get this far. Listing it would tell the user they have a token
-	 * they do not have. */
+	/* Ignore uninitialized tokens, including SoftHSM's empty slot. */
 	if ((token_info.flags & CKF_TOKEN_INITIALIZED) == 0)
 		return NULL;
 
@@ -692,14 +628,7 @@ static CertificateToken* token_from_slot(CertificateTokens* tokens, CK_FUNCTION_
 		token->reader_name =
 		    certificate_pkcs11_string(slot_info.slotDescription, sizeof(slot_info.slotDescription));
 
-		/* CKF_HW_SLOT, ON THE *SLOT*, is PKCS#11's only answer to "is this a
-		 * hardware device". It is worth naming the trap: CK_TOKEN_INFO has no
-		 * such flag, and the constant called CKF_HW is (1<<0) in the MECHANISM
-		 * flags -- the same bit that means CKF_RNG in CK_TOKEN_INFO.flags.
-		 * Testing token_info.flags & CKF_HW therefore asks "does this token
-		 * have a random number generator", which SoftHSM answers yes to. This
-		 * code asked exactly that question for one draft; see
-		 * token_skip_reason(). */
+		/* Hardware status comes from CK_SLOT_INFO.CKF_HW_SLOT; CKF_HW is a mechanism flag that overlaps token CKF_RNG. */
 		token->hardware = (slot_info.flags & CKF_HW_SLOT) != 0;
 	}
 	else
@@ -720,38 +649,13 @@ static CertificateToken* token_from_slot(CertificateTokens* tokens, CK_FUNCTION_
 	return token;
 }
 
-/* WHY THIS TOKEN IS NOT OFFERED, or NULL when it is. One predicate, used by
- * every enumeration in this file, so that a token can never be listed by one
- * path and refused by another.
- *
- * THE DEFAULT IS HARDWARE ONLY, and it is a default about HONESTY rather than
- * about strength. p11-kit on an ordinary GNOME machine presents software key
- * stores as tokens -- gnome-keyring's module is the one that started this --
- * and a window headed "security token" that offers keys sitting in the user's
- * home directory is a window telling the user something untrue about where
- * their key is. CKF_HW is the only bit PKCS#11 has on the question. It is a
- * claim by the module, not a fact anything can check, so this is a default and
- * NOT a security boundary: a module that lies about CKF_HW is a module that was
- * already loaded into this process.
- *
- * TWO WAYS PAST IT, both deliberate acts:
- *
- *   --allow-software-tokens   offer them anyway, everywhere.
- *   --module PATH             the operator named this module. Naming a module
- *                             is already saying "use this one", and the tests
- *                             and tools/ point --module at SoftHSM; making them
- *                             say it twice would add a flag and no decision.
- *                             p11-kit's CONFIGURED set is "whatever this machine
- *                             happens to have", which is the set the default is
- *                             about. */
+/* Hardware flags are module claims; software-token overrides are documented in docs/IMPL-INTERFACE.md. */
 static const char* token_skip_reason(const CertificateTokens* tokens,
                                      const CertificateToken* token)
 {
-	/* p11-kit's trust module is skipped by name in module_is_interesting();
-	 * this catches a trust token reached through an explicit --module, and any
-	 * other module that decided to present itself with that model string. */
+	/* Explicit module selection can still expose trust tokens, which cannot supply client credentials. */
 	if (g_strcmp0(token->model, CERTIFICATE_P11_KIT_TRUST_MODEL) == 0)
-		return "trust store: it holds CA certificates, never a private key";
+		return "Trust store has no private keys";
 
 	if (token->hardware || token->module_named_explicitly)
 		return NULL;
@@ -759,8 +663,7 @@ static const char* token_skip_reason(const CertificateTokens* tokens,
 	if (tokens != NULL && tokens->allow_software)
 		return NULL;
 
-	return "not a hardware token (the slot does not set CKF_HW_SLOT); pass "
-	       "--allow-software-tokens or --module to use it";
+	return "Token slot lacks CKF_HW_SLOT; use --allow-software-tokens or --module to include it";
 }
 
 static GPtrArray* slots_with_token(CK_FUNCTION_LIST* module)
@@ -791,19 +694,12 @@ static char** mechanisms_for(CK_FUNCTION_LIST* module, CK_SLOT_ID slot, const ch
 {
 	g_autoptr(GStrvBuilder) builder = g_strv_builder_new();
 
-	/* The names are the frontend's; the frontend intersects this with its own
-	 * allow list, so a mechanism named here that the portal does not permit is
-	 * dropped rather than honoured. */
 	if (g_strcmp0(key_type, "RSA") == 0)
 	{
 		if (certificate_pkcs11_has_mechanism(module, slot, CKM_RSA_PKCS))
 			g_strv_builder_add(builder, "RSA_PKCS1_V1_5");
 		if (certificate_pkcs11_has_mechanism(module, slot, CKM_RSA_PKCS_PSS))
 			g_strv_builder_add(builder, "RSA_PSS");
-		/* Decryption only, and only where the token really has it. A card that
-		 * cannot do OAEP must not be offered for a Decrypt grant: the
-		 * interface has no other decryption mechanism, so the alternative is a
-		 * grant that says it may decrypt and fails at the first attempt. */
 		if (certificate_pkcs11_has_mechanism(module, slot, CKM_RSA_PKCS_OAEP))
 			g_strv_builder_add(builder, "RSA_OAEP");
 	}
@@ -833,9 +729,6 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 	rv = module->C_OpenSession(token->slot, CKF_SERIAL_SESSION, NULL, NULL, &session);
 	if (rv != CKR_OK)
 	{
-		/* One unopenable slot takes that token out of the answer and leaves
-		 * every other token in it. A wedged reader is not a reason to tell the
-		 * user they have no cards. */
 		certificate_log_debug(CERTIFICATE_REASON_DISCOVERY_RESULT, "slot-open-failed");
 		return;
 	}
@@ -844,8 +737,7 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 	                                          &local_error);
 	if (handles == NULL)
 	{
-		/* A token holding no matching object reports failure with no output.
-		 * That is not an error and must not abort discovery. */
+		/* No matching object may be reported as failure without output and must not abort discovery. */
 		certificate_log_debug(CERTIFICATE_REASON_DISCOVERY_RESULT, "find-objects-failed");
 		module->C_CloseSession(session);
 		return;
@@ -875,24 +767,11 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 		cka_id = certificate_pkcs11_get_attribute(module, session, handle, CKA_ID);
 		if (cka_id == NULL || cka_id->len == 0)
 		{
-			/* Without a CKA_ID there is no way to find the private key that
-			 * goes with this certificate, so it can never be used. */
+			/* CKA_ID is required to pair the certificate with its private key. */
 			continue;
 		}
 
-		/* A certificate with no matching key on the same token is a certificate
-		 * this backend cannot sign with, so it is not a candidate -- offering it
-		 * would produce a chooser row that fails at Sign.
-		 *
-		 * THE SESSION IS NOT LOGGED IN HERE, on purpose: enumerating what is on
-		 * a card must not spend the user's presence. On most tokens the private
-		 * key OBJECT is still visible (its value is not), which is what PIV
-		 * cards through OpenSC do. On tokens where CKA_PRIVATE hides it --
-		 * SoftHSM, and some middleware -- the matching PUBLIC key stands in as
-		 * proof that a key pair with this id exists, and failing that, a token
-		 * that says CKF_LOGIN_REQUIRED is given the benefit of the doubt rather
-		 * than reporting the card as empty. Which of the three happened decides
-		 * how can_sign and can_decrypt are established. */
+		/* Discovery must not log in; hidden private keys use public-key or login-required evidence. See docs/IMPL-INTERFACE.md. */
 		key_count = 0;
 		key_template[key_count].type = CKA_CLASS;
 		key_template[key_count].pValue = &private_class;
@@ -931,13 +810,7 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 
 		candidate->piv_slot = piv_slot_from_id(cka_id);
 
-		/* CKA_SIGN and CKA_DECRYPT are read off the PRIVATE KEY where it can be
-		 * seen, not guessed from the certificate's key usage: the card is the
-		 * authority on what its key will do. Where it cannot be seen, the
-		 * public key's CKA_VERIFY and CKA_ENCRYPT are the closest honest
-		 * answer, and where neither can be seen the certificate's own key usage
-		 * is -- which is why the grant re-checks everything at Sign time
-		 * against the key it actually opened. */
+		/* Use private-key capabilities when visible; fallback estimates must be checked again after login. */
 		if (keys != NULL && keys->len > 0)
 		{
 			CK_OBJECT_HANDLE key = g_array_index(keys, CK_OBJECT_HANDLE, 0);
@@ -960,10 +833,7 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 		{
 			const char* const* usage = (const char* const*) candidate->key_usage;
 
-			/* No key usage extension means the key is restricted by none, so
-			 * both answers are yes. Where there is one it decides both: a
-			 * keyEncipherment-only key-management certificate must not come
-			 * out of here claiming it will sign. */
+			/* Absent key usage is unrestricted; present usage constrains signing and decryption independently. */
 			candidate->can_sign = usage == NULL || g_strv_contains(usage, "digital_signature") ||
 			                      g_strv_contains(usage, "content_commitment");
 			candidate->can_decrypt = usage == NULL || g_strv_contains(usage, "key_encipherment") ||
@@ -973,8 +843,6 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 		candidate->supported_mechanisms = mechanisms_for(module, token->slot, candidate->key_type);
 		if (candidate->supported_mechanisms == NULL || candidate->supported_mechanisms[0] == NULL)
 		{
-			/* No mechanism this portal knows -- a DSA or Ed25519 key, say.
-			 * Never offered, because the grant would be empty. */
 			continue;
 		}
 
@@ -1059,8 +927,7 @@ void certificate_tokens_enumerate_async(CertificateTokens* tokens, GCancellable*
 	task = g_task_new(NULL, cancellable, callback, user_data);
 	g_task_set_source_tag(task, certificate_tokens_enumerate_async);
 	g_task_set_task_data(task, data, g_free);
-	/* Never on the main thread: loading a certificate off a card can take
-	 * seconds, and the window that is about to appear has to stay responsive. */
+	/* Card enumeration may block for seconds and must run on a worker. */
 	g_task_run_in_thread(task, enumerate_thread);
 }
 
@@ -1070,11 +937,7 @@ GPtrArray* certificate_tokens_enumerate_finish(CertificateTokens* tokens, GAsync
 	return g_task_propagate_pointer(G_TASK(result), error);
 }
 
-/* @include_skipped is TRUE only for --list-tokens, which has to be able to say
- * "there IS a token here and this is why it is not being offered". Everything
- * else -- the presence watcher included -- gets the tokens this backend will
- * actually use, because a TokenAdded for a token no grant could ever name is a
- * signal about nothing. */
+/* Only --list-tokens includes skipped tokens; presence watching follows the usable-token policy. */
 static GPtrArray* list_tokens(CertificateTokens* tokens, gboolean include_skipped)
 {
 	GPtrArray* list = g_ptr_array_new_with_free_func((GDestroyNotify) certificate_token_unref);
@@ -1144,14 +1007,10 @@ gboolean certificate_tokens_open_session(CertificateTokens* tokens, const Certif
 			CK_SESSION_HANDLE session = CK_INVALID_HANDLE;
 			CK_RV rv;
 
-			/* The slot number the token was FOUND at is not how it is looked up
-			 * again. A different card in the same slot is a different token. */
+			/* Re-resolve identity because a different card may occupy the same slot. */
 			if (present == NULL || !certificate_token_same(present, token))
 				continue;
 
-			/* BELT TO THE BRACES. Nothing can hold a grant on a token that was
-			 * never enumerated, so this cannot fire today; it is here so that
-			 * "which tokens may be used" has exactly one answer in this file. */
 			if (token_skip_reason(tokens, present) != NULL)
 				continue;
 
@@ -1204,11 +1063,7 @@ void certificate_tokens_refresh_flags(CertificateTokens* tokens, CertificateToke
 			if (present == NULL || !certificate_token_same_presence(present, token))
 				continue;
 
-			/* Three booleans, written from the login worker thread and read on
-			 * the main thread after that worker has completed, which is a
-			 * happens-before the GTask completion gives for free. Nothing else
-			 * about the token is touched: this is the PIN state, not a
-			 * re-discovery. */
+			/* The login worker updates PIN flags; task completion makes them visible to the main thread. */
 			token->pin_count_low = present->pin_count_low;
 			token->pin_final_try = present->pin_final_try;
 			token->pin_locked = present->pin_locked;
@@ -1260,12 +1115,7 @@ void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanism
 	}
 	g_mutex_unlock(&tokens->lock);
 
-	/* WITH NO TOKEN PRESENT, report what this backend can drive rather than the
-	 * empty set: GetCapabilities is a question about the backend, asked so that
-	 * an application can adapt WITHOUT provoking a dialog, and answering "no
-	 * mechanisms" because the card is in the user's pocket would make every
-	 * caller conclude the feature does not exist. AcquireCredential is where
-	 * the absence of a card is reported, and it reports it honestly. */
+	/* Without a token, report backend-supported mechanisms so capability discovery remains useful. */
 	if (!any_token)
 	{
 		rsa_pkcs = TRUE;
@@ -1288,8 +1138,6 @@ void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanism
 	if (protected_path_out != NULL)
 		*protected_path_out = protected_path;
 }
-
-/* -------------------------------------------------------- presence watching */
 
 typedef struct
 {
@@ -1376,9 +1224,7 @@ static gpointer watch_thread(gpointer user_data)
 			continue;
 		}
 
-		/* Debounce: a reader that reports insert and remove repeatedly must not
-		 * produce a signal storm, so a change has to survive consecutive polls
-		 * before anything is emitted. */
+		/* Require consecutive matching polls before emitting a presence change. */
 		stable++;
 		if (stable < CERTIFICATE_WATCH_DEBOUNCE)
 			continue;

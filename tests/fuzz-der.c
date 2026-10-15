@@ -4,44 +4,6 @@
  * xdg-desktop-portal-certificate
  */
 
-/** @file
- *  The client-side module's hostile-input surface, driven by one entry point.
- *
- *  Two producers reach this code and neither is under the module's control: the
- *  portal's reply, whose certificate DER came off a card through two services
- *  that promise nothing about its shape, and a TLS peer, which chooses the
- *  mechanism and the bytes of a CertificateVerify. Both run inside the
- *  CONSUMER's process -- a browser, a mail client -- so a defect here is a
- *  defect in somebody else's address space. docs/SECURITY.md says why that is
- *  the module's problem and not the portal's.
- *
- *  WHAT IS DRIVEN:
- *    - portal_der_read(), walked over the whole input;
- *    - portal_digestinfo_parse(), which a TLS 1.2 CKM_RSA_PKCS signature
- *      reaches directly;
- *    - portal_objects_new() with the input as certificate DER, which is
- *      parse_certificate(), the SubjectPublicKeyInfo split and the leading-zero
- *      strip;
- *    - the same, mutated: each corpus file with bytes replaced and lengths
- *      corrupted, which is the shape a card or a buggy service produces;
- *    - the attribute protocol -- portal_template_wants_credential(),
- *      portal_template_fingerprint(), portal_objects_find() and
- *      portal_object_get_attributes() -- against a template built out of the
- *      input, including the size-query and buffer-too-small paths.
- *
- *  TWO WAYS TO BUILD IT. With clang, meson builds a libFuzzer target as well,
- *  automatically, whenever the compiler accepts -fsanitize=fuzzer:
- *
- *      CC=clang meson setup build-fuzz -Db_sanitize=address,undefined \
- *          -Db_lundef=false
- *      build-fuzz/tests/fuzz-der-libfuzzer -max_total_time=60 \
- *          tests/fixtures/fuzz-corpus
- *
- *  Without it -- and always, so that `meson test` covers this -- the same
- *  function is driven from a main() over a built-in corpus plus a directory of
- *  files, which is what a fuzzing run's findings get checked in as.
- */
-
 #include "config.h"
 
 #include <stdint.h>
@@ -107,10 +69,7 @@ static void drive_digestinfo(const uint8_t* data, size_t size)
 	g_assert(digest >= data && digest + digest_length <= data + size);
 }
 
-/* A template out of the input. Two bytes name an attribute, one gives a value
- * length, and the rest is the value: enough to reach every branch of
- * portal_object_matches() and of the C_GetAttributeValue protocol, including a
- * pValue that is too small and a NULL one. */
+/* Input bytes select an attribute, value length and value to exercise malformed templates. */
 static CK_ATTRIBUTE* build_template(const uint8_t* data, size_t size, CK_ULONG* count,
                                     GPtrArray* buffers)
 {
@@ -135,7 +94,6 @@ static CK_ATTRIBUTE* build_template(const uint8_t* data, size_t size, CK_ULONG* 
 
 		if (value_length == 0)
 		{
-			/* The size query: pValue NULL, ulValueLen answered by the module. */
 			templ[n].pValue = NULL_PTR;
 			templ[n].ulValueLen = 0;
 		}
@@ -171,8 +129,6 @@ static void drive_attributes(const uint8_t* data, size_t size)
 
 	templ = build_template(data, size, &count, buffers);
 
-	/* No objects needed: these two answer for a template alone, and the first
-	 * decides whether a search may raise a chooser. */
 	portal_template_wants_credential(templ, count);
 	portal_template_fingerprint(templ, count);
 
@@ -221,8 +177,6 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
 
 #ifndef PKCS11_PORTAL_FUZZING_ENGINE
 
-/* The corpus replay. Everything a fuzzing run has found so far, plus the shapes
- * that made the parsers exist, run under whatever sanitizer the build has. */
 static const char* const seeds[] = {
 	"",
 	"\x30",
@@ -259,10 +213,7 @@ static void test_seeds(void)
 		run_one((const guint8*) seeds[i], seed_sizes[i]);
 }
 
-/* Cheap coverage of shapes no hand-written seed reaches: a deterministic PRNG,
- * so a failure is reproducible from the seed and the iteration number alone.
- * PKCS11_PORTAL_FUZZ_RUNS and PKCS11_PORTAL_FUZZ_SEED make a longer run possible
- * without a libFuzzer; `meson test` runs the small default. */
+/* The PRNG seed and iteration reproduce failures; environment variables permit longer replay runs. */
 static void test_random(void)
 {
 	guint64 runs = 4096;
@@ -301,9 +252,7 @@ static const char* corpus_dir(void)
 	return dir_name != NULL ? dir_name : CERTIFICATE_FIXTURE_DIR "/fuzz-corpus";
 }
 
-/* The seed corpus, plus whatever a libFuzzer run left behind. Two of the files
- * are real certificates, so that portal_objects_new() succeeds and the
- * attribute protocol is reached with objects to answer for. */
+/* Real certificate seeds reach object and attribute paths. */
 static void test_corpus(void)
 {
 	g_autoptr(GDir) dir = g_dir_open(corpus_dir(), 0, NULL);
@@ -328,11 +277,7 @@ static void test_corpus(void)
 	}
 }
 
-/* WHERE THE INTERESTING INPUTS ARE. Random bytes almost never parse as a
- * certificate, so without this the object and attribute paths are only reached
- * by the clean corpus. Each corpus file is mutated -- bytes replaced, truncated,
- * lengths corrupted -- which is the shape a card, a backend or a portal with a
- * bug would actually produce. */
+/* Mutate valid certificate seeds because random bytes rarely reach object parsing. */
 static void test_mutations(void)
 {
 	g_autoptr(GDir) dir = g_dir_open(corpus_dir(), 0, NULL);
@@ -394,4 +339,4 @@ int main(int argc, char** argv)
 	return g_test_run();
 }
 
-#endif /* PKCS11_PORTAL_FUZZING_ENGINE */
+#endif

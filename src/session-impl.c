@@ -24,16 +24,10 @@ G_DEFINE_FINAL_TYPE_WITH_CODE(CertificateImplSession, certificate_impl_session,
                               G_IMPLEMENT_INTERFACE(XDP_IMPL_TYPE_SESSION,
                                                     certificate_impl_session_iface_init))
 
-/* CLOSE IS AUTHORISED LIKE EVERY OTHER METHOD. The Session skeleton is exported
- * on the same bus name as the Certificate interface, at a path whose shape is
- * guessable, and Close() on it logs the card out and destroys a grant. Object
- * path secrecy is not an access control. */
+/* Session paths are guessable, so Close() requires frontend-owner authorization. */
 static gboolean handle_close(XdpImplSession* object, GDBusMethodInvocation* invocation)
 {
-	/* THE REFERENCE COMES FIRST, before the authorisation check: resolving who
-	 * owns the frontend name can discover that it has changed hands, and the
-	 * first thing that discovery does is invalidate and drop every session the
-	 * previous owner created -- which is this one. */
+	/* Take a reference before authorization, which may discover owner loss and remove this session. */
 	g_autoptr(CertificateImplSession) session = g_object_ref(CERTIFICATE_IMPL_SESSION(object));
 
 	if (!certificate_impl_sender_is_frontend_default(
@@ -47,14 +41,10 @@ static gboolean handle_close(XdpImplSession* object, GDBusMethodInvocation* invo
 		return TRUE;
 	}
 
-	/* IDEMPOTENT. The frontend answers SessionInvalidated with Close(), so the
-	 * second close of a session this backend already tore down is the normal
-	 * case and must succeed rather than telling the application the device
-	 * failed. */
+	/* The frontend answers invalidation with Close(), so closing an already-closed session must succeed. */
 	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "closed-by-portal");
 
-	/* forget() drops the table's reference, which is the only other one, so the
-	 * invocation is completed under the reference taken above. */
+	/* The local reference keeps the session alive after forget() drops the table's reference. */
 	certificate_impl_session_close(session);
 	certificate_impl_session_forget(session);
 	xdp_impl_session_complete_close(object, invocation);
@@ -71,13 +61,7 @@ static void certificate_impl_session_finalize(GObject* object)
 {
 	CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(object);
 
-	/* SYNCHRONOUS, AND THE ONE PLACE THAT IS RIGHT. There is no object left to
-	 * hand a worker, and there cannot be one running: the asynchronous close
-	 * holds a reference for its whole life, so finalize cannot be reached until
-	 * it has finished -- which means that by the time this runs the device is
-	 * already closed and this is a mutex acquisition and a NULL check. It is
-	 * still called, because a session that was never closed (a test, an early
-	 * error path) must not leak a logged-in card session. */
+	/* Async release holds a reference until completion; finalization also closes devices on early error paths. */
 	certificate_impl_session_release_device(session);
 
 	if (session->expiry_source != 0)
@@ -102,10 +86,7 @@ static void certificate_impl_session_class_init(CertificateImplSessionClass* kla
 
 	object_class->finalize = certificate_impl_session_finalize;
 
-	/* Carries the reason string straight through to SessionInvalidated. The
-	 * vocabulary is the interface's, not this file's; see
-	 * docs/IMPL-INTERFACE.md for why "expired" is among the ones emitted even
-	 * though the impl XML's prose lists only three. */
+	/* The reason passes unchanged to SessionInvalidated; see docs/IMPL-INTERFACE.md. */
 	signals[SIGNAL_INVALIDATED] =
 	    g_signal_new("invalidated", CERTIFICATE_TYPE_IMPL_SESSION, G_SIGNAL_RUN_LAST, 0, NULL,
 	                 NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
@@ -137,10 +118,7 @@ gboolean certificate_impl_session_export(CertificateImplSession* session,
 	if (session->exported)
 		return TRUE;
 
-	/* A FAILURE HERE ABORTS THE CALL. It used to be a warning, and the session
-	 * was inserted anyway: the frontend then held a session handle for an
-	 * object that was not on the bus, and could neither close it nor learn
-	 * that it could not. */
+	/* Export failure must abort creation because the frontend needs Session.Close(). */
 	if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(session), connection,
 	                                      session->id, error))
 		return FALSE;
@@ -164,17 +142,7 @@ static gboolean on_lifetime_expired(gpointer user_data)
 
 	session->expiry_source = 0;
 
-	/* THE BACKEND ENFORCES THE LIFETIME TOO. The frontend refuses an expired
-	 * grant before this backend is called at all, so this is not the check that
-	 * stops the operation -- it is what stops this process from sitting on a
-	 * logged-in card session after the authorisation for it has run out.
-	 *
-	 * EXPIRY BELONGS TO THE FRONTEND, which arms its own timer at the lifetime
-	 * it decided, tells the application and closes this session. That Close
-	 * cancels this timer, so this handler is what happens when the frontend did
-	 * not: it runs CERTIFICATE_EXPIRY_GRACE_SECONDS late for exactly that
-	 * reason, so that the ordinary path is the frontend's and the application
-	 * hears about the expiry once. */
+	/* This timer releases device state if the frontend misses its expiry deadline. */
 	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "lifetime-expired");
 	certificate_impl_session_invalidate(session, "expired");
 
@@ -191,33 +159,20 @@ void certificate_impl_session_grant(CertificateImplSession* session,
 	session->may_sign = may_sign;
 	session->may_decrypt = may_decrypt;
 
-	/* THE DEVICE IS NOT TOUCHED HERE, and it is not left alone either: the
-	 * candidate this session now carries is a different one, and
-	 * certificate_device_open() compares what it was opened for against what it
-	 * is asked for and re-opens when they differ. Doing it there rather than
-	 * here is what keeps it race-free -- the comparison, the close and the
-	 * re-open all happen on the worker under device_lock, so a Sign that
-	 * arrives in the same turn as the re-grant cannot slip between them.
-	 *
-	 * The budget is charged and reset under the same lock the workers read it
-	 * under. */
+	/* Device rebinding and budget updates share device_lock with operation workers. */
 	g_mutex_lock(&session->device_lock);
 	session->decrypt_count = 0;
 	g_mutex_unlock(&session->device_lock);
 
 	session->lifetime = lifetime;
-	/* THE MONOTONIC CLOCK, like the frontend's own expiry. expires_at is only
-	 * ever compared against another reading of the same clock, and a wall clock
-	 * a user or NTP can step would shorten or extend a grant by the step. */
+	/* Monotonic expiry prevents wall-clock adjustments from extending grants. */
 	session->expires_at = (g_get_monotonic_time() / G_USEC_PER_SEC) + lifetime;
 	session->granted = TRUE;
 
 	if (session->expiry_source != 0)
 		g_source_remove(session->expiry_source);
 
-	/* The operations stop at the lifetime -- certificate_impl_session_is_expired()
-	 * uses expires_at, not this timer. Only the teardown waits for the grace
-	 * period, so that the frontend's Close is what normally ends the session. */
+	/* Operations expire at expires_at; only device teardown receives the grace period. */
 	session->expiry_source = g_timeout_add_seconds(lifetime + CERTIFICATE_EXPIRY_GRACE_SECONDS,
 	                                               on_lifetime_expired, session);
 }
@@ -237,8 +192,7 @@ void certificate_impl_session_release_device(CertificateImplSession* session)
 	g_mutex_unlock(&session->device_lock);
 }
 
-/* Outstanding asynchronous closes, process-wide. Only certificate_impl_shutdown()
- * reads it, and only to know whether there is anything left to wait for. */
+/* Atomic count of pending worker releases, drained during shutdown. */
 static gint certificate_release_pending = 0;
 
 static void release_thread(GTask* task, gpointer source, gpointer task_data,
@@ -257,12 +211,7 @@ void certificate_impl_session_release_device_async(CertificateImplSession* sessi
 {
 	g_autoptr(GTask) task = NULL;
 
-	/* THE COMMON CASE COSTS NOTHING. Most sessions are closed without ever
-	 * having opened a token session, and a thread spent discovering that is a
-	 * thread spent for nothing. trylock rather than lock, because the whole
-	 * point of this function is that it does not block the main thread: a
-	 * contended lock means a worker is busy, which means there is something to
-	 * close. */
+	/* Avoid blocking the main thread when a worker holds device_lock. */
 	if (g_mutex_trylock(&session->device_lock))
 	{
 		gboolean idle = session->device.module == NULL;
@@ -288,7 +237,7 @@ void certificate_impl_session_drain_releases(guint timeout_ms)
 	{
 		if (g_get_monotonic_time() >= deadline)
 		{
-			/* C_Logout is left to the module's own teardown. */
+			/* Remaining logout work is left to module teardown. */
 			g_message("device-close-unfinished detail=shutdown-timeout timeout_ms=%u",
 			          timeout_ms);
 			return;
@@ -299,6 +248,7 @@ void certificate_impl_session_drain_releases(guint timeout_ms)
 	}
 }
 
+/* Keep the skeleton exported until frontend Close() or finalization. */
 void certificate_impl_session_close(CertificateImplSession* session)
 {
 	if (session->closed)
@@ -312,36 +262,11 @@ void certificate_impl_session_close(CertificateImplSession* session)
 		session->expiry_source = 0;
 	}
 
-	/* OFF THE MAIN THREAD. Every caller of this function -- Close(), lifetime
-	 * expiry, token removal, the frontend going away, shutdown -- is on the
-	 * main thread, and C_Logout plus C_CloseSession behind a lock a worker may
-	 * hold for the length of a C_Login is not something the main loop can wait
-	 * for. The session is kept alive by the worker's own reference. */
+	/* The worker owns a session reference while waiting on device_lock and the token. */
 	certificate_impl_session_release_device_async(session);
-
-	/* THE SKELETON STAYS ON THE BUS. Unexporting here is what made the
-	 * frontend's own Close() -- which it sends in answer to
-	 * SessionInvalidated -- come back as UnknownObject to the application. It
-	 * comes off the bus in handle_close() and at finalize, and nowhere else. */
 }
 
-/* THE VOCABULARY IS THE INTERFACE'S, and it is closed. The frontend forwards
- * @reason verbatim into GrantInvalidated, so a value invented here goes
- * straight to applications, which have no way to learn what it means and a
- * documented list that says it cannot happen.
- *
- * data/org.freedesktop.impl.portal.experimental.Certificate1.xml is the
- * authority: SessionInvalidated forwards `token_removed`, `policy`,
- * `backend_gone` or `error`. `policy` is not this backend's to emit -- it is
- * a decision the frontend makes -- but it stays in the table because it is
- * still a legal wire value and the assertion below is a typo guard, not a
- * record of what this file currently sends.
- *
- * `expired` is the frontend's own per the impl XML, which says a backend need
- * not send it. This one does, once: on_lifetime_expired() above is the
- * backstop for a frontend that missed its own deadline, and it fires only
- * CERTIFICATE_EXPIRY_GRACE_SECONDS after that deadline, so the ordinary case
- * is still the frontend announcing it first. */
+/* The wire vocabulary accepts policy, but this backend never emits it; expiry is a delayed fallback. */
 static const char* const certificate_session_reasons[] = {
 	"expired", "token_removed", "policy", "backend_gone", "error",
 };
@@ -354,10 +279,8 @@ static const char* checked_reason(const char* reason)
 			return reason;
 	}
 
-	/* A programming error, not a caller's. Say so loudly in a development
-	 * build and send the one value that is always honest in a shipped one,
-	 * rather than putting a word the interface does not define on the bus. */
-	g_critical("SessionInvalidated reason '%s' is not in the interface's vocabulary",
+	/* Invalid internal reason values fall back to the wire value error. */
+	g_critical("Invalid SessionInvalidated reason: '%s'",
 	           reason != NULL ? reason : "(null)");
 	return "error";
 }
@@ -369,13 +292,8 @@ void certificate_impl_session_invalidate(CertificateImplSession* session, const 
 
 	reason = checked_reason(reason);
 
-	/* Tell the frontend BEFORE the object goes away, so that it can turn this
-	 * into GrantInvalidated for a caller that would otherwise only discover the
-	 * loss at its next Sign. */
 	g_signal_emit(session, signals[SIGNAL_INVALIDATED], 0, reason);
 
-	/* And say so on the Session object itself, which is what upstream's
-	 * XdpDbusImplSession::Closed is for. */
 	if (session->exported)
 		xdp_impl_session_emit_closed(XDP_IMPL_SESSION(session));
 

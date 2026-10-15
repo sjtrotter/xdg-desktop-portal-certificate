@@ -1,18 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
-#
-# test-tools-lib.sh -- the two parts of tools/lib.sh that decide something
-# dangerous: which portals.conf the development stack ends up with, and which
-# directories it is willing to delete.
-#
-# WHY THESE ARE TESTED IN SHELL. Both are shell, both were wrong, and both fail
-# in ways nobody sees: a portals.conf that quietly drops a `none` gives a
-# development stack a backend the session had switched OFF, and a fixture check
-# that accepts a forged marker gives `rm -rf` a directory this project did not
-# make. Neither shows up in a run that works.
-#
-# Everything here runs inside one mktemp -d and touches nothing else.
 
 set -u
 
@@ -64,7 +52,7 @@ expect_no_line() {
 	fi
 }
 
-# A subshell that must die. tools/lib.sh calls exit 40 on refusal.
+# Refusal exits 40, so run it in a subshell.
 expect_refused() {
 	local what="$1"
 	shift
@@ -98,8 +86,7 @@ expect_accepted() {
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/xdp-certificate-libtest.XXXXXXXX")" || exit 99
 trap 'rm -rf --one-file-system -- "$ROOT"' EXIT
 
-# THE FIXTURE HELPERS ARE TESTED AGAINST A TMPDIR OF THEIR OWN, so that nothing
-# here can reach the operator's real scratch directories.
+# Use an isolated TMPDIR so fixture tests cannot reach the user's scratch directories.
 export TMPDIR="$ROOT/tmp"
 mkdir -p "$TMPDIR"
 
@@ -107,8 +94,6 @@ mkdir -p "$TMPDIR"
 . "$REPO/tools/lib.sh"
 
 echo "TAP version 13"
-
-# ------------------------------------------------------------ the portal chain
 
 conf_dir() {
 	local dir="$1"
@@ -146,20 +131,13 @@ expect_eq "the chain is both files, user configuration first" \
 FLAT="$ROOT/flat.conf"
 xdp_flatten_preferred "$CHAIN_HOME/portals.conf" "$CHAIN_ETC/portals.conf" >"$FLAT"
 
-# THE ONE THE REVIEW ASKED FOR. A user configuration that switches Screenshot
-# off must survive being merged with an /etc file that switches it on: the
-# frontend consults the user's first and stops there.
 expect_line "a user 'none' beats a later backend for the same interface" \
 	"$FLAT" "org.freedesktop.impl.portal.Screenshot=none;"
 
-# An interface only /etc names still resolves, and picks up /etc's default
-# behind its own list, which is the order the frontend tries them in.
 expect_line "an interface named only in /etc keeps its list and then the default" \
 	"$FLAT" "org.freedesktop.impl.portal.Access=gtk;gnome;"
 
 expect_line "the default carries through" "$FLAT" "default=gnome;"
-
-# ---------------------------------------------------- the generated portal dir
 
 mkdir -p "$ROOT/data-home/xdg-desktop-portal/portals"
 DEVDIR="$ROOT/devdir"
@@ -170,7 +148,7 @@ xdp_write_portal_dir "$DEVDIR" "$REPO" private 2>/dev/null
 expect_line "the Certificate line names this backend" \
 	"$DEVDIR/portals.conf" "org.freedesktop.impl.portal.experimental.Certificate1=certificate;"
 
-expect_no_line "the configured Certificate backend is replaced, not shadowed" \
+expect_no_line "Certificate backend configuration is replaced" \
 	"$DEVDIR/portals.conf" "org.freedesktop.impl.portal.experimental.Certificate1=somethingelse"
 
 expect_line "a private run switches the Secret backend off" \
@@ -184,8 +162,6 @@ xdp_write_portal_dir "$DEVDIR" "$REPO" live 2>/dev/null
 
 expect_no_line "a live run leaves the Secret backend alone" \
 	"$DEVDIR/portals.conf" "^org.freedesktop.impl.portal.Secret="
-
-# -------------------------------------------------------- the fixture checks
 
 GOOD="$(fixture_mktemp xdp-certificate-libtest-good libtest)"
 expect_accepted "a fixture this library made passes" fixture_check "$GOOD" libtest
@@ -210,7 +186,7 @@ chmod 600 "$FORGED/$XDP_FIXTURE_MARKER"
 expect_accepted "the same marker at 0600 passes" fixture_check "$FORGED" libtest
 
 chmod 755 "$FORGED"
-expect_refused "a fixture that is not 0700 is refused rather than repaired" \
+expect_refused "Fixture with mode 0755 is refused" \
 	fixture_check "$FORGED" libtest
 chmod 700 "$FORGED"
 
@@ -230,7 +206,7 @@ expect_refused "fixture_create refuses to adopt a directory that exists" \
 
 expect_accepted "fixture_remove deletes a fixture it validated" \
 	fixture_remove "$GOOD" libtest
-expect_eq "and it is gone" "gone" "$([ -e "$GOOD" ] && echo present || echo gone)"
+expect_eq "Removed fixture no longer exists" "gone" "$([ -e "$GOOD" ] && echo present || echo gone)"
 
 expect_refused "fixture_remove refuses a directory it did not make" \
 	fixture_remove "$UNMARKED" libtest

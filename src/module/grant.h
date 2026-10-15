@@ -8,16 +8,14 @@
 
 #include <glib.h>
 
-/** What one AcquireCredential returned. No key material, no PIN, no PKCS#11
- *  handle: this is the whole of what the module knows about the credential. */
 typedef struct
 {
-	char* session_handle;         /**< the Session object path; the grant handle */
-	GBytes* certificate_der;      /**< the chosen leaf */
-	char* key_type;               /**< "RSA" or "EC" */
-	guint key_size;               /**< modulus bits, or curve size */
-	char* key_curve;              /**< curve name for EC, or NULL */
-	GStrv supported_mechanisms;   /**< the grant's own list, already clamped */
+	char* session_handle;
+	GBytes* certificate_der;
+	char* key_type;               /**< RSA or EC. */
+	guint key_size;               /**< RSA modulus bits or EC curve size. */
+	char* key_curve;              /**< NULL for RSA. */
+	GStrv supported_mechanisms;   /**< Grant mechanism list after frontend restrictions. */
 	gboolean may_sign;
 	gboolean may_decrypt;
 	gint64 expires_at;
@@ -31,16 +29,14 @@ GQuark portal_module_error_quark(void);
 typedef enum
 {
 	PKCS11_PORTAL_ERROR_FAILED,
-	/** The user cancelled, or policy refused. Not retried immediately. */
+	/** User or policy refusal is not retried immediately. */
 	PKCS11_PORTAL_ERROR_CANCELLED,
-	/** No portal, or no certificate backend configured behind it. Never an
-	 *  error to report to an application: it means this token is not present. */
+	/** An unavailable portal presents as an absent token. */
 	PKCS11_PORTAL_ERROR_UNAVAILABLE,
-	/** The grant went away: expiry, token removal, a dead backend. */
 	PKCS11_PORTAL_ERROR_INVALIDATED,
 	PKCS11_PORTAL_ERROR_TIMEOUT
 } PortalModuleErrorCode;
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(PortalGrant, portal_grant_free)
 
-#endif /* PKCS11_PORTAL_GRANT_H */
+#endif

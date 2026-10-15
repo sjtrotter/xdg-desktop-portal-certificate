@@ -2,21 +2,9 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * The consumer this module exists for, reduced to its two calls:
- *
- *     g_tls_certificate_new_from_pkcs11_uris(certificate_uri, private_key_uri)
- *     g_tls_connection_handshake()
- *
- * That constructor is the one WebKitGTK's network process reaches through
- * glib-networking, and it has NO MODULE PARAMETER: the URIs are resolved by
- * whatever p11-kit has configured, which is why this module is a p11-kit module
- * and not an endpoint. A completed mutual-TLS handshake here is the property
- * SPIKES.md S3 was written to test.
- *
- * Not a meson test: it needs a portal, a chooser and a person, or
- * tools/module-smoke.sh standing in for the person.
  */
+
+/* URI imports resolve through p11-kit configuration; tools/module-smoke.sh supplies the portal and display. */
 
 #include <stdlib.h>
 
@@ -25,9 +13,7 @@
 static gboolean accept_any_server(GTlsConnection* connection, GTlsCertificate* peer,
                                   GTlsCertificateFlags errors, gpointer user_data)
 {
-	/* The server's own certificate is not what is under test, and the fixture
-	 * has no CA to anchor it to. The CLIENT certificate is checked by the
-	 * server, which is the direction that matters here. */
+	/* Skip fixture server validation; the server verifies the client credential under test. */
 	return TRUE;
 }
 
@@ -91,8 +77,7 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
-	/* One read, not read_all: the server answers and closes, and a peer that
-	 * closes without close_notify is a TLS error rather than an end of file. */
+	/* Use one read because fixture closure without close_notify is a TLS error. */
 	if (g_input_stream_read_all(g_io_stream_get_input_stream(tls), reply, sizeof(reply) - 1,
 	                            &read, NULL, &error))
 	{

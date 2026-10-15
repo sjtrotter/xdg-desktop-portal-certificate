@@ -23,7 +23,6 @@ typedef struct
 	gsize oid_length;
 } HashEntry;
 
-/* The digest OIDs as they appear inside a DigestInfo AlgorithmIdentifier. */
 static const guint8 oid_sha1[] = { 0x2b, 0x0e, 0x03, 0x02, 0x1a };
 static const guint8 oid_sha224[] = { 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x04 };
 static const guint8 oid_sha256[] = { 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01 };
@@ -181,7 +180,6 @@ gboolean portal_digestinfo_parse(const guint8* data, gsize size, const char** ha
 
 	if (!portal_der_read_tag(data, size, PORTAL_DER_SEQUENCE, &outer))
 		return FALSE;
-	/* Trailing bytes after the DigestInfo are not a DigestInfo. */
 	if (outer.consumed != size)
 		return FALSE;
 
@@ -191,8 +189,7 @@ gboolean portal_digestinfo_parse(const guint8* data, gsize size, const char** ha
 	if (!portal_der_read_tag(algorithm.value, algorithm.length, PORTAL_DER_OID, &oid))
 		return FALSE;
 
-	/* The parameters are absent or explicit NULL; anything else is not one of
-	 * the five digests this module can name. */
+	/* Digest AlgorithmIdentifier parameters must be absent or NULL. */
 	if (oid.consumed != algorithm.length)
 	{
 		PortalDerTlv parameters;

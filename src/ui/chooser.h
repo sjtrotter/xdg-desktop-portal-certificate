@@ -12,44 +12,7 @@
 #include "../certificate.h"
 #include "../tokens/discovery.h"
 
-/** @file
- *  The trusted chooser. THIS WINDOW IS THE CONSENT DECISION.
- *
- *  DRAWN BY THE BACKEND, FROM FACTS THE FRONTEND ESTABLISHED. This is the
- *  division upstream makes for every portal that asks a question, and it is the
- *  one that makes the answer trustworthy: the side that knows who is calling is
- *  not the side that draws the window, so the window cannot be talked into
- *  naming the wrong application by the application. app_id and HOW WELL THAT
- *  NAME IS KNOWN (the app_identity_level option) arrive as arguments. The
- *  backend renders them. It never derives them.
- *
- *  NOTE WHAT DOES NOT ARRIVE. The branch interface passes app_id and
- *  app_identity_level and nothing else about the caller: there is no
- *  app_display_name option, so the human-readable name is this backend's to
- *  produce from the app id (a desktop file lookup) or to omit. There is also no
- *  `context` option -- the earlier sketch's "requested destination host" hint
- *  does not exist on the wire, and the only caller-supplied text that does is
- *  `reason`. Nor is there a remembered selection: the interface has no
- *  selection memory, so this window is the whole of the choice every time.
- *
- *  Not the PIN prompt. The PIN proves the user was present and knew the PIN; it
- *  does not tell them which application asked, for what, or how long the answer
- *  lasts. A design where the PIN prompt is the only user-visible moment has
- *  taught the user to type their PIN whenever asked, which is precisely what an
- *  attacker needs.
- *
- *  NOTHING CALLER-SUPPLIED MAY OCCUPY THE TRUSTED IDENTITY POSITION. Not
- *  reason, not a title, not the token label, not the certificate subject. A
- *  caller that sends reason "Microsoft Login" must not get a window that reads
- *  as Microsoft's: the reason is escaped, collapsed to one line, truncated, and
- *  rendered quoted under a label that says the application wrote it.
- *
- *  ACCESSIBILITY IS AN ACCEPTANCE CRITERION, NOT POLISH. A security dialog a
- *  screen-reader user cannot navigate is a dialog that user cannot give
- *  informed consent through. Complete keyboard-only operation, Escape cancels,
- *  meaningful focus order, and no information carried by colour alone --
- *  including "expired", which is a word in the row and not a red tint.
- */
+/** Chooser trust and accessibility requirements are documented in docs/IMPL-INTERFACE.md. */
 
 typedef struct
 {
@@ -58,51 +21,32 @@ typedef struct
 	gboolean may_sign;
 	gboolean may_decrypt;
 	guint32 lifetime_seconds;
-	const char* reason; /**< UNTRUSTED. Displayed labelled, subordinate. Never logged. */
+	const char* reason; /**< Untrusted subordinate text; never logged. */
 } CertificateChooserRequest;
 
 typedef struct
 {
-	CertificateCandidate* chosen; /**< NULL if the user cancelled */
+	CertificateCandidate* chosen; /**< NULL on user cancellation. */
 } CertificateChooserResult;
 
 typedef void (*CertificateChooserDone)(const CertificateChooserResult* result, gpointer user_data);
 
-/** Show the chooser. @parent_window uses the portal window-identifier
- *  convention. AN INVALID OR EXPIRED PARENT MUST NOT FAIL THE REQUEST: it
- *  degrades to an unparented, service-controlled window. @activation_token
- *  authorises focus. */
+/** Invalid or expired parent handles fall back to an unparented backend window. */
 void certificate_chooser_show(const char* parent_window, const char* activation_token,
                               GPtrArray* candidates, const CertificateChooserRequest* request,
                               GCancellable* cancellable, CertificateChooserDone done,
                               gpointer user_data);
 
-/* ------------------------------------------------------- the display helpers
- *
- * EXPOSED SO THEY CAN BE TESTED. The window itself needs a display and a user,
- * and neither is available to `meson test` -- but the strings it puts in front
- * of the user are where a hostile card label or a hostile desktop file would do
- * its work, and those are pure functions. They are not part of any interface
- * and nothing outside src/ui/chooser.c and tests/ calls them.
- *
- * Every one of them returns a NEW string the caller owns, and every one of them
- * has already passed the card- and desktop-file-sourced parts of its input
- * through certificate_display_text(). */
+/* Display helpers return owned strings with external fields sanitized and capped. */
 
-/** The name shown in the trusted identity position: the desktop file's Name=,
- *  or the app id, or a fixed phrase -- sanitised and capped, always non-NULL,
- *  and never more than one line. */
 char* certificate_chooser_display_name(const CertificateCallerIdentity* caller);
 
-/** "5 minutes". There is no zero case: a zero lifetime is refused before it
- *  reaches a window. */
+/** Lifetime is positive before display formatting. */
 char* certificate_chooser_format_lifetime(guint32 seconds);
 
-/** "Valid until <date>", "EXPIRED on <date>" or "NOT YET VALID" -- a WORD, so
- *  that the fact survives a monochrome screen and a screen reader. */
+/** Validity is expressed in words for accessibility. */
 char* certificate_chooser_format_expiry(const CertificateCandidate* candidate, gint64 now);
 
-/** The row's second line: expiry, key type and size, token label and reader. */
 char* certificate_chooser_format_detail(const CertificateCandidate* candidate, gint64 now);
 
-#endif /* CERTIFICATE_UI_CHOOSER_H */
+#endif

@@ -17,10 +17,7 @@
 
 typedef struct
 {
-	/* ATOMIC. A cancellation handler runs on whatever thread called
-	 * g_cancellable_cancel(), and the idle it queues takes a reference of its
-	 * own; every one of those is the main thread today, and g_atomic_int_*
-	 * costs nothing measurable and removes the need to say so. */
+	/* Cancellation and idle references may be released on different threads. */
 	gint refs;
 
 	GPtrArray* candidates;
@@ -77,9 +74,7 @@ static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen)
 
 	chooser->finished = TRUE;
 
-	/* THE ORDER MATTERS: disconnect first, so that a cancellation being
-	 * delivered on another thread cannot queue an idle behind the removal
-	 * below. g_cancellable_disconnect() blocks until such a handler returns. */
+	/* Disconnect before removing the idle so concurrent cancellation cannot queue another source. */
 	if (chooser->cancel_id != 0)
 	{
 		g_cancellable_disconnect(chooser->cancellable, chooser->cancel_id);
@@ -95,17 +90,11 @@ static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen)
 	if (chosen != NULL)
 		certificate_candidate_ref(chosen);
 
-	/* Disconnected BEFORE the destroy, not after: gtk_window_destroy() runs the
-	 * whole widget tree's dispose, and a list box being emptied emits
-	 * row-selected at a point where the buttons those handlers touch have
-	 * already gone. */
+	/* Disconnect before destroy because widget disposal can emit signals after dependent widgets are gone. */
 	if (chooser->list != NULL)
 		g_signal_handlers_disconnect_by_data(chooser->list, chooser);
 	if (chooser->window != NULL)
 		g_signal_handlers_disconnect_by_data(chooser->window, chooser);
-	/* EVERY handler, not only the two that used to be listed. The `finished`
-	 * guard makes a late callback harmless, but "harmless because the first
-	 * line returns" is a weaker property than "cannot be called". */
 	if (chooser->use_button != NULL)
 		g_signal_handlers_disconnect_by_data(chooser->use_button, chooser);
 	if (chooser->cancel_button != NULL)
@@ -128,8 +117,6 @@ static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen)
 	if (chosen != NULL)
 		certificate_candidate_unref(chosen);
 
-	/* The creation reference. A queued cancellation idle holding one of its own
-	 * keeps the object alive until it is dispatched and finds it finished. */
 	chooser_unref(chooser);
 }
 
@@ -186,12 +173,7 @@ static gboolean on_cancelled_idle(gpointer user_data)
 	return G_SOURCE_REMOVE;
 }
 
-/* Close() arrives on whichever thread GDBus felt like using, and a queued idle
- * outlives the window: a pending click is dispatched at G_PRIORITY_DEFAULT
- * before an idle at G_PRIORITY_DEFAULT_IDLE, so "the user chose, the window
- * closed, the idle then ran on freed memory" was the LIKELY ordering rather
- * than the unlucky one. The idle now holds a reference and the source is
- * removed in chooser_finish(). */
+/* Cancellation may arrive off-thread; the queued idle holds a reference and finish removes its source. */
 static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 {
 	Chooser* chooser = user_data;
@@ -207,9 +189,7 @@ static void on_row_selected(GtkListBox* list, GtkListBoxRow* row, gpointer user_
 {
 	Chooser* chooser = user_data;
 
-	/* Tearing the window down empties the list box, which emits row-selected
-	 * with NULL after the buttons have already been disposed. Nothing in here
-	 * may touch a widget once the answer has been given. */
+	/* List teardown emits row-selected after dependent widgets may have been disposed. */
 	if (chooser->finished)
 		return;
 
@@ -226,12 +206,7 @@ static void on_row_activated(GtkListBox* list, GtkListBoxRow* row, gpointer user
 	on_use(NULL, chooser);
 }
 
-/* ------------------------------------------------------------- the chrome */
-
-/* THE TRUSTED IDENTITY POSITION. Everything in here came from the frontend as
- * an argument; none of it can be influenced by the application. The identity
- * LEVEL is stated in words next to the name, because an application name shown
- * without saying how it was established is a lie by omission. */
+/* Display frontend-established identity assurance beside the caller name. */
 static GtkWidget* build_identity(const CertificateCallerIdentity* caller)
 {
 	GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
@@ -263,9 +238,7 @@ static GtkWidget* build_identity(const CertificateCallerIdentity* caller)
 	gtk_widget_add_css_class(name, "title-2");
 	gtk_box_append(GTK_BOX(box), name);
 
-	/* The raw app id is always shown as well, even when a display name was
-	 * resolved: the name comes from a desktop file and the id is the thing the
-	 * frontend actually established. */
+	/* Always show the established app ID alongside the desktop-file display name. */
 	if (app_id != NULL && g_strcmp0(app_id, display) != 0)
 	{
 		GtkWidget* id_label = gtk_label_new(app_id);
@@ -291,11 +264,6 @@ static GtkWidget* build_identity(const CertificateCallerIdentity* caller)
 
 char* certificate_chooser_format_lifetime(guint32 seconds)
 {
-	/* THERE IS NO ZERO CASE. A lifetime of 0 is refused in
-	 * certificate-impl.c's option parsing and an absent one defaults to 300, so
-	 * the "this operation only" wording that used to be here was a string no
-	 * window could ever show. A dead branch in a window that carries a security
-	 * decision is a claim about behaviour that does not exist. */
 	if (seconds < 120)
 		return g_strdup_printf("%u seconds", seconds);
 
@@ -307,11 +275,7 @@ char* certificate_chooser_format_lifetime(guint32 seconds)
 
 char* certificate_chooser_display_name(const CertificateCallerIdentity* caller)
 {
-	/* THE DESKTOP FILE IS NOT TRUSTED INPUT. Name= is read out of
-	 * XDG_DATA_DIRS, which includes ~/.local/share/applications -- writable by
-	 * any unsandboxed process and by any Flatpak with home access -- and
-	 * GKeyFile unescapes \n in it. Sanitised and capped before it can put a
-	 * second line of pseudo-chrome under the identity heading. */
+	/* Desktop-file Name values are writable external input and may contain escaped newlines. */
 	g_autofree char* app_name =
 	    certificate_display_text(caller->app_display_name, CERTIFICATE_DISPLAY_MAX_APP_NAME, NULL);
 	g_autofree char* app_id =
@@ -329,18 +293,13 @@ char* certificate_chooser_display_name(const CertificateCallerIdentity* caller)
 char* certificate_chooser_format_expiry(const CertificateCandidate* candidate, gint64 now)
 {
 	g_autoptr(GDateTime) expiry = g_date_time_new_from_unix_local(candidate->not_after);
-	/* OWNED, not inlined into the printf. g_date_time_format() returns a new
-	 * string, and the two call sites this replaces leaked one per certificate
-	 * row per chooser. */
 	g_autofree char* date =
 	    expiry != NULL ? g_date_time_format(expiry, "%x") : g_strdup("an unknown date");
 
 	if (date == NULL)
 		date = g_strdup("an unknown date");
 
-	/* EXPIRY IS A WORD, NOT A COLOUR. "Expired" has to survive a monochrome
-	 * screen and a screen reader; the CSS class is an addition, never the
-	 * carrier of the fact. */
+	/* Expiry must be stated in words for screen readers and monochrome displays. */
 	if (certificate_candidate_is_expired(candidate, now))
 		return g_strdup_printf("EXPIRED on %s", date);
 
@@ -352,11 +311,8 @@ char* certificate_chooser_format_expiry(const CertificateCandidate* candidate, g
 
 char* certificate_chooser_format_detail(const CertificateCandidate* candidate, gint64 now)
 {
-	/* THE TOKEN LABEL AND READER NAME COME OFF A CARD. Whoever issued it chose
-	 * them, and a token can be handed to a user by somebody who is not a
-	 * friend: inside their own row they could still draw several lines of
-	 * plausible chrome, so both are sanitised and capped. */
 	g_autofree char* expiry_text = certificate_chooser_format_expiry(candidate, now);
+	/* Token labels and reader names are external input and require display sanitization. */
 	g_autofree char* token_text = certificate_display_text(
 	    candidate->token->label, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "unnamed token");
 	g_autofree char* reader_text = certificate_display_text(
@@ -375,11 +331,7 @@ static GtkWidget* build_row(CertificateCandidate* candidate, gint64 now)
 	GtkWidget* subject = NULL;
 	g_autofree char* detail = certificate_chooser_format_detail(candidate, now);
 	g_autoptr(GString) accessible = g_string_new(NULL);
-	/* SUBJECT AND ISSUER COME OFF A CARD, like the token label and reader name
-	 * that certificate_chooser_format_detail() handles. They do not occupy the
-	 * trusted identity position, but inside their own row they could still draw
-	 * several lines of plausible chrome, so every one of them is sanitised and
-	 * capped. */
+	/* Certificate subjects and issuers require display sanitization. */
 	g_autofree char* subject_text = certificate_display_text(
 	    candidate->subject_display, CERTIFICATE_DISPLAY_MAX_SUBJECT, "Unnamed certificate");
 	g_autofree char* issuer_text = certificate_display_text(
@@ -465,7 +417,6 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 
 	window = adw_window_new();
 	chooser->window = GTK_WINDOW(window);
-	/* The window's own title is this backend's, never the caller's. */
 	gtk_window_set_title(GTK_WINDOW(window), "Use a Certificate");
 	gtk_window_set_modal(GTK_WINDOW(window), TRUE);
 	gtk_window_set_default_size(GTK_WINDOW(window), 520, 560);
@@ -482,7 +433,6 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	gtk_box_append(GTK_BOX(content), build_identity(request->caller));
 
 	{
-		/* The purpose in THIS BACKEND'S OWN WORDS. Never the caller's. */
 		g_autofree char* text =
 		    g_strdup_printf("wants to use a certificate on your security token to %s.",
 		                    certificate_purpose_display(request->purpose));
@@ -493,9 +443,7 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 		gtk_box_append(GTK_BOX(content), label);
 	}
 
-	/* THE CALLER'S OWN TEXT, VISIBLY SEPARATED AND LABELLED AS THE
-	 * APPLICATION'S. Sanitised to one line so that it cannot draw chrome of its
-	 * own, and never in the identity position above. */
+	/* Caller text stays labelled and subordinate to trusted identity text. */
 	reason = certificate_sanitize_untrusted_text(request->reason, CERTIFICATE_REASON_MAX_CHARS);
 	if (reason != NULL)
 	{
@@ -546,8 +494,6 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 
 	lifetime = certificate_chooser_format_lifetime(request->lifetime_seconds);
 	{
-		/* WHETHER FURTHER OPERATIONS MAY HAPPEN WITHOUT ANOTHER PROMPT, stated
-		 * plainly, because this is the part users get wrong. */
 		g_autofree char* text = g_strdup_printf(
 		    "%s\n\nThis grant lasts %s. %s You will be asked for your PIN the first time the "
 		    "key is used.",

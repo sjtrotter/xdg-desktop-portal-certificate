@@ -1,58 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
-#
-# module-smoke.sh -- the CLIENT-SIDE PKCS#11 MODULE, driven by three consumers
-# that were never told about this project.
-#
-# The stack is tools/ui-smoke.sh's: a private bus inside a headless X server,
-# the development frontend, this repository's backend, the SoftHSM fixture, and
-# xdotool for the chooser and the PIN prompt. What is different is that nothing
-# here speaks D-Bus. Everything talks PKCS#11 to
-# build/src/module/libpkcs11-portal-certificate.so and the module does the
-# talking:
-#
-#   0  p11tool --list-all-certs on a TOKEN-ONLY URI, and pkcs11-tool
-#                                             --list-objects: two searches that
-#                                             name no object, and NEITHER may
-#                                             put a chooser up
-#   1  p11tool --provider ... --list-all      GnuTLS enumerating the token, with
-#                                             PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1
-#   2  pkcs11-tool --sign                     one signature, verified with
-#                                             openssl against the certificate
-#                                             the module handed back
-#   3  tests/gtls-client                      g_tls_certificate_new_from_pkcs11_uris()
-#                                             plus a real mutual-TLS handshake
-#                                             against a python server
-#
-# PHASE 0 IS THE ONE THAT CHANGED IN 2026-09. A chooser used to appear for any
-# search whose CKA_CLASS this token has, which meant GnuTLS verifying a SERVER's
-# certificate chain -- issuer and subject lookups issued across every p11-kit
-# module on the machine -- raised one seconds after a sign-in window opened, for
-# a certificate nobody had asked for. Only a search that names the object label,
-# a CKA_ID or the private key acquires now; src/module/objects.c has the table.
-# Phase 1 is an enumerating consumer and opts back in by hand, which is what
-# PKCS11_PORTAL_CERTIFICATE_ENUMERATE is for and the only thing it is for.
-#
-# Phase 3 is the one that matters. It is docs/SPIKES.md S3 in its smallest
-# honest form: the constructor WebKitGTK reaches through glib-networking has no
-# module parameter, so the module has to be findable through p11-kit
-# configuration alone.
-#
-# NOTHING IS INSTALLED SYSTEM WIDE. p11-kit reads user module files from
-# $XDG_CONFIG_HOME/pkcs11/modules, so the run points XDG_CONFIG_HOME at a
-# directory under $LOGDIR holding one .module file with an absolute path in it.
-#
-# WHAT IT NEEDS:
-#
-#   Xvfb, xdotool          as tools/ui-smoke.sh
-#   a SoftHSM fixture      tools/softhsm-fixture.sh
-#   a built frontend       as tools/dev-stack.sh describes
-#   p11tool, pkcs11-tool, openssl, python3
-#
-#     tools/module-smoke.sh
-#     tools/module-smoke.sh --phase 3        # just the handshake
-#     tools/module-smoke.sh --phase 0        # just the "no chooser" proof
+# Exercise the client module through PKCS#11 consumers; see docs/TESTING.md for prerequisites and phases.
 
 set -u
 
@@ -70,10 +19,7 @@ XVFB="${XVFB:-$(command -v Xvfb || true)}"
 XDOTOOL="${XDOTOOL:-$(command -v xdotool || true)}"
 PIN="${PIN:-123456}"
 CERT_LABEL="${CERT_LABEL:-Portal Certificate}"
-# The URIs src/module/portal-token.h agrees with the web-auth backend. The
-# object= is part of that contract now -- XDG_PORTAL_CERTIFICATE_CERT_URI and
-# _KEY_URI carry it -- because a single-object import refuses a URI without one.
-# $URI_OBJECT can be emptied to watch that refusal happen.
+# Single-object imports require object=; these URIs follow src/module/portal-token.h.
 URI_TOKEN="pkcs11:model=portal-cert;manufacturer=freedesktop.org;token=Portal%20Certificate"
 URI_OBJECT="${URI_OBJECT-;object=Portal%20Certificate}"
 CERT_URI="${URI_TOKEN}${URI_OBJECT};type=cert"
@@ -125,17 +71,13 @@ DEVDIR="$LOGDIR/portals"
 (umask 077 && mkdir -p "$DEVDIR")
 xdp_write_portal_dir "$DEVDIR" "$REPO" private
 
-# THE MODULE IS CONFIGURED FOR THIS RUN AND NOWHERE ELSE. `module:` is absolute
-# here because the build tree is not p11-kit's module directory.
+# The build-tree module needs an absolute path in the run's private p11-kit configuration.
 CONFDIR="$LOGDIR/config"
 (umask 077 && mkdir -p "$CONFDIR/pkcs11/modules")
 cat >"$CONFDIR/pkcs11/modules/xdg-desktop-portal-certificate.module" <<EOF
 module: $MODULE_SO
 critical: no
 priority: -10
-# MODULE_LOG_CALLS=1 makes p11-kit log every call into the module on the
-# consumer's stderr, which is the only way to see what a TLS stack asked for
-# before it gave up.
 ${MODULE_LOG_CALLS:+log-calls: yes}
 EOF
 
@@ -158,9 +100,7 @@ export XDG_DESKTOP_PORTAL_DIR="$DEVDIR"
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-dev}"
 export XDG_CONFIG_HOME="$CONFDIR"
 
-# The RSA fixture, so that phase 2 can name one mechanism instead of guessing
-# from whichever row the driver happened to select. A consumer that can use
-# either key type leaves this unset and takes what the user picks.
+# Select the RSA fixture so phase 2 can name its signing mechanism.
 export PKCS11_PORTAL_CERTIFICATE_KEY_ALGORITHMS=RSA
 export PKCS11_PORTAL_CERTIFICATE_REASON="tools/module-smoke.sh"
 export G_MESSAGES_DEBUG=pkcs11-portal-certificate
@@ -168,11 +108,7 @@ export G_MESSAGES_DEBUG=pkcs11-portal-certificate
 SOFTHSM_MODULE="$(cat "$SOFTHSM_DIR/module-path")"
 
 cat >"$LOGDIR/tls-server.py" <<'PYTHON_EOF'
-# A TLS server that REQUIRES a client certificate and checks it against the
-# fixture's own certificate. It is deliberately not gnutls-serv: the fixture
-# certificates are self-signed leaves without basicConstraints CA:TRUE, which
-# GnuTLS will not accept as an anchor and OpenSSL will when it is the peer's own
-# certificate in the trust store.
+# OpenSSL accepts the fixture's self-signed leaf as a peer trust anchor; GnuTLS requires CA constraints.
 import socket, ssl, sys, threading
 
 cert, key, ca, portfile = sys.argv[1:5]
@@ -212,9 +148,6 @@ connection.close()
 print("PASS", flush=True)
 PYTHON_EOF
 
-# THE PERSON AT THE KEYBOARD, IN A LOOP. Each phase is its own process and gets
-# its own grant, so each puts up its own chooser and its own PIN prompt. The
-# driver answers whatever appears until the run says it is finished.
 cat >"$LOGDIR/driver.sh" <<'DRIVER_EOF'
 #!/bin/bash
 set -u
@@ -234,10 +167,7 @@ press() {
 	done
 }
 
-# A window that is still there ten seconds after being answered was not
-# answered: there is no window manager, so a focus set before the window was
-# mapped goes nowhere and the keys land on nothing. The retry presses Return
-# only, because Down has already moved the selection.
+# Without a window manager, focus may precede mapping; retry Return without moving the selection again.
 handle() {
 	local wid="$1" now
 	shift
@@ -302,10 +232,7 @@ inner() {
 	"$LOGDIR/driver.sh" >"$LOGDIR/driver.log" 2>&1 &
 	DRIVER=$!
 
-	# THE COUNT IS THE PROOF. A grant is a chooser the user answered, so the
-	# question "did that search put a window up" is answered by how many
-	# grant-created lines the backend wrote, not by whether the command
-	# succeeded -- both of these are expected to succeed and find nothing.
+	# Count grants because successful empty searches must not open a chooser.
 	grants_created() {
 		grep -c 'grant-created' "$LOGDIR/backend.log" 2>/dev/null || true
 	}
@@ -313,7 +240,7 @@ inner() {
 	if phase_wanted 0; then
 		local before after
 		echo
-		echo "=== 0  a search that names no object must not ask for one ==="
+		echo "=== 0  unnamed searches do not acquire credentials ==="
 		before="$(grants_created)"
 
 		timeout 180 p11tool --provider "$MODULE_SO" --list-all-certs "$URI_TOKEN" \
@@ -340,8 +267,6 @@ inner() {
 	if phase_wanted 1 && [ "$rc" = 0 ]; then
 		echo
 		echo "=== 1  p11tool --list-all through the module ==="
-		# The opt-in, and the only place in this repository that sets it: this
-		# is a consumer that names no object because it is asking what is there.
 		if PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1 timeout 180 \
 			p11tool --provider "$MODULE_SO" --list-all \
 			>"$LOGDIR/p11tool.log" 2>&1; then
@@ -362,8 +287,7 @@ inner() {
 		echo "=== 2  pkcs11-tool --sign, verified with openssl ==="
 		printf 'the quick brown fox' >"$LOGDIR/data"
 
-		# pkcs11-tool will not read an object without being told which, and
-		# neither will GnuTLS: CKA_LABEL is a constant for exactly that reason.
+		# Single-object imports require the constant CKA_LABEL.
 		timeout 180 pkcs11-tool --module "$MODULE_SO" --login --read-object --type cert \
 			--label "$CERT_LABEL" \
 			--output-file "$LOGDIR/cert.der" >"$LOGDIR/read-object.log" 2>&1
@@ -387,7 +311,7 @@ inner() {
 				-signature "$LOGDIR/sig" "$LOGDIR/data"; then
 				echo "module-smoke: the signature verifies against the certificate the module returned"
 			else
-				echo "module-smoke: the signature DID NOT verify"
+				echo "module-smoke: Signature verification failed"
 				rc=1
 			fi
 		fi
@@ -397,9 +321,6 @@ inner() {
 		echo
 		echo "=== 3  g_tls_certificate_new_from_pkcs11_uris + mutual TLS ==="
 
-		# A throwaway server certificate. What is under test is the CLIENT's,
-		# and tests/gtls-client.c accepts any server certificate for that
-		# reason.
 		openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
 			-keyout "$LOGDIR/server.key" -out "$LOGDIR/server.pem" >/dev/null 2>&1
 

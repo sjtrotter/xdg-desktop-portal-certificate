@@ -31,29 +31,14 @@ G_DEFINE_FINAL_TYPE_WITH_CODE(CertificateImplRequest, certificate_impl_request,
                               G_IMPLEMENT_INTERFACE(XDP_IMPL_TYPE_REQUEST,
                                                     certificate_impl_request_iface_init))
 
-/* THE DEFAULT Close() HANDLER. Every operation connects its own handler to the
- * "handle-close" signal to finish its pending call with response 2; those
- * handlers return FALSE so that emission continues into this class closure,
- * which is the only place that unexports and answers Close() itself. Splitting
- * it that way is upstream's idiom and it is what keeps "answered exactly once"
- * true on both the response path and the close path. */
+/* Only the Request class closure answers Close() and unexports; operation handlers return FALSE to reach it. */
 static gboolean certificate_impl_request_handle_close(XdpImplRequest* object,
                                                       GDBusMethodInvocation* invocation)
 {
-	/* THE REFERENCE COMES FIRST, before the authorisation check, for the reason
-	 * session-impl.c's handle_close() takes one: resolving who owns the
-	 * frontend name can discover that it has changed hands, and the first thing
-	 * that discovery does is cancel every transaction the previous owner
-	 * created -- which is the one holding the other reference to this Request.
-	 * The unexport below drops the export's reference too, and the invocation
-	 * is completed after it. */
+	/* Take a reference before authorization, which can discover owner loss and drop the transaction's reference. */
 	g_autoptr(CertificateImplRequest) request = g_object_ref(CERTIFICATE_IMPL_REQUEST(object));
 
-	/* CLOSE IS AUTHORISED LIKE EVERY OTHER METHOD. A request path is
-	 * /org/freedesktop/portal/desktop/request/<sender>/<handle_token> and the
-	 * token is very often a fixed string, so anything on the bus could have
-	 * cancelled consent dialogs and PIN prompts as they appeared. It is only a
-	 * denial of service, but it is one against smart-card sign-in. */
+	/* Request paths are guessable, so Close() requires frontend-owner authorization. */
 	if (!certificate_impl_sender_is_frontend_default(
 	        g_dbus_method_invocation_get_sender(invocation)))
 	{
@@ -65,8 +50,6 @@ static gboolean certificate_impl_request_handle_close(XdpImplRequest* object,
 		return TRUE;
 	}
 
-	/* Cancelling first: every window and every worker this transaction owns is
-	 * tied to this cancellable, so one call tears all of it down. */
 	g_cancellable_cancel(request->cancellable);
 
 	if (request->exported)
@@ -124,9 +107,7 @@ gboolean certificate_impl_request_export(CertificateImplRequest* request,
 	if (request->exported)
 		return TRUE;
 
-	/* A FAILURE HERE ABORTS THE CALL. It used to be a warning and the
-	 * transaction went on without a Request on the bus, which degraded
-	 * silently into a prompt the frontend could not cancel. */
+	/* Abort on export failure because the frontend must be able to cancel the request. */
 	if (!g_dbus_interface_skeleton_export(G_DBUS_INTERFACE_SKELETON(request), connection,
 	                                      request->id, error))
 		return FALSE;

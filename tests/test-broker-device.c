@@ -2,16 +2,6 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * The cryptographic path, end to end, against a real PKCS#11 module: discovery,
- * C_OpenSession, C_Login, the mechanism mapping, C_Sign, and a verification of
- * the signature against the certificate the token handed back.
- *
- * SKIPPED unless a SoftHSM fixture exists. tools/softhsm-fixture.sh builds one;
- * docs/TESTING.md says how. A SOFTWARE TOKEN IS A REHEARSAL, NOT A TEST OF THE
- * HARDWARE -- the card path is the author's, in docs/TESTING.md -- but it is the
- * only automated coverage C_Sign can have, and it catches the whole class of
- * mistake where a DigestInfo prefix or a PSS parameter is wrong.
  */
 
 #include <glib.h>
@@ -161,8 +151,7 @@ static void sign_and_verify(Fixture* fixture, const char* key_type, const char* 
 	g_assert_true(certificate_device_open(&device, fixture->tokens, candidate, &error));
 	g_assert_no_error(error);
 
-	/* The private key is invisible on SoftHSM until the login, which is exactly
-	 * the case discovery has to survive. */
+	/* SoftHSM hides private keys before login. */
 	g_assert_true(certificate_device_login(&device, candidate, FIXTURE_PIN, &error));
 	g_assert_no_error(error);
 	g_assert_cmpuint(device.private_key, !=, (guint) CK_INVALID_HANDLE);
@@ -179,16 +168,6 @@ static void sign_and_verify(Fixture* fixture, const char* key_type, const char* 
 	certificate_mechanism_clear(&mechanism);
 }
 
-/* A SECOND AcquireCredential ON A LIVE SESSION IS A NEW CREDENTIAL, and the
- * open device has to notice. It used to return early on "a module is loaded",
- * so the next Sign went to the PREVIOUS grant's private key handle -- with the
- * login state of the previous grant, so no PIN window either. The application
- * had been handed certificate B and got a signature only certificate A's key
- * could have made.
- *
- * This is the device half: rebinding closes the old session, forgets the key
- * handle and forgets the login. The end-to-end half -- that the signature then
- * verifies against certificate B -- is tests/test-broker-regrant.c. */
 static void test_regrant_rebinds_the_device(Fixture* fixture, gconstpointer user_data)
 {
 	CertificateCandidate* first = candidate_of_type(fixture, "RSA");
@@ -217,23 +196,18 @@ static void test_regrant_rebinds_the_device(Fixture* fixture, gconstpointer user
 	first_session = device.session;
 	first_key = device.private_key;
 
-	/* Opening for the SAME candidate is still a no-op: the login is not thrown
-	 * away by every operation, which is the whole point of "one PIN per
-	 * grant". */
 	g_assert_true(certificate_device_open(&device, fixture->tokens, first, &error));
 	g_assert_no_error(error);
 	g_assert_true(device.logged_in);
 	g_assert_cmpuint(device.session, ==, first_session);
 	g_assert_cmpuint(device.private_key, ==, first_key);
 
-	/* Opening for a DIFFERENT one is a rebind. */
 	g_assert_true(certificate_device_open(&device, fixture->tokens, second, &error));
 	g_assert_no_error(error);
 	g_assert_false(device.logged_in);
 	g_assert_cmpuint(device.session, !=, first_session);
 	g_assert_cmpuint(device.private_key, !=, first_key);
 
-	/* And the new grant's own login finds the new grant's key. */
 	g_assert_true(certificate_device_login(&device, second, FIXTURE_PIN, &error));
 	g_assert_no_error(error);
 	g_assert_cmpuint(device.private_key, !=, (guint) CK_INVALID_HANDLE);
@@ -262,17 +236,7 @@ static void test_ecdsa(Fixture* fixture, gconstpointer user_data)
 	sign_and_verify(fixture, "EC", "ECDSA", "SHA256", GNUTLS_SIGN_ECDSA_SHA256);
 }
 
-/* Encrypt to the certificate's public key with RSA-OAEP, using openssl(1).
- *
- * WHY A SUBPROCESS AND NOT GNUTLS. The ciphertext has to come from something
- * that is not this backend -- if the two disagree about how OAEP is spelled,
- * the round trip has to fail rather than agree with itself. GnuTLS is here
- * already and would have done, except that its RSA-OAEP will not use SHA-1 and
- * SoftHSM 2.x will not use anything else, so the two cannot meet. openssl
- * does both, is present wherever a card is being tested, and being a separate
- * implementation is the property that was wanted in the first place.
- *
- * Returns NULL and skips the test when openssl is not installed or refuses. */
+/* Use OpenSSL for OAEP encryption because GnuTLS and SoftHSM 2.x do not share a supported OAEP hash. */
 static GBytes* oaep_encrypt(CertificateCandidate* candidate, const char* hash_name,
                             const guint8* label, gsize label_length, const char* plaintext)
 {
@@ -390,7 +354,6 @@ out:
 	return out;
 }
 
-/* Set up the RSA candidate's device, logged in, or skip. */
 static CertificateCandidate* logged_in_rsa(Fixture* fixture, CertificateDevice* device)
 {
 	CertificateCandidate* candidate = NULL;
@@ -429,21 +392,7 @@ static CertificateMechanism oaep_mechanism(CertificateCandidate* candidate, cons
 	return mechanism;
 }
 
-/* THE ROUND TRIP. GnuTLS encrypts with RSA-OAEP to the public key in the
- * certificate the token handed back; this backend decrypts with the private key
- * on the token; the plaintext has to come back byte for byte. The ciphertext
- * comes from an implementation that is not this one, which is the point: if the
- * two disagree about how OAEP is spelled, the round trip fails.
- *
- * SHA-1 AND NO LABEL, because that is all SoftHSM 2.x implements -- it refuses
- * any other hashAlg, any other mgf, and any pSourceData at C_DecryptInit. That
- * is a limitation of the software token and not of this backend or of the
- * interface, and it is why the SHA-256 mapping and the label are covered by
- * tests/test-mechanism.c against CK_RSA_PKCS_OAEP_PARAMS rather than against a
- * module. A card that implements the rest is docs/TESTING.md tier 3.
- *
- * The labelled half runs anyway and skips itself if the module says no, so it
- * starts covering the label the day it runs against something that has one. */
+/* SoftHSM 2.x supports SHA-1 OAEP without labels; unsupported label cases skip. */
 static void test_oaep_round_trip(Fixture* fixture, gconstpointer user_data)
 {
 	static const char* const plaintext = "a session key would go here";
@@ -480,7 +429,6 @@ static void test_oaep_round_trip(Fixture* fixture, gconstpointer user_data)
 	g_clear_pointer(&payload, g_bytes_unref);
 	g_clear_pointer(&plain, g_bytes_unref);
 
-	/* And with a label on both sides, where the module has one. */
 	labelled_ciphertext = oaep_encrypt(candidate, "sha1", label, sizeof(label), plaintext);
 	if (labelled_ciphertext != NULL)
 	{
@@ -509,14 +457,6 @@ static void test_oaep_round_trip(Fixture* fixture, gconstpointer user_data)
 	certificate_device_close(&device);
 }
 
-/* A ciphertext that is not one modulus long never reaches the card, and one
- * that is the right length but is not a valid OAEP encoding comes back as a
- * failure rather than as a plaintext.
- *
- * The length check is the one the frontend cannot make: it does not know the
- * modulus. Making the two failures INDISTINGUISHABLE TO THE CALLER is
- * broker/operations.c's job, not this layer's, and tests/test-broker-decrypt.c
- * is what asserts it. */
 static void test_oaep_bad_input_is_refused(Fixture* fixture, gconstpointer user_data)
 {
 	static const char* const plaintext = "a session key would go here";
@@ -537,14 +477,13 @@ static void test_oaep_bad_input_is_refused(Fixture* fixture, gconstpointer user_
 		return;
 	}
 
-	/* The right length, and not a ciphertext. */
 	{
 		gsize length = candidate->key_size / 8;
 		g_autofree guint8* garbage = g_malloc0(length);
 		g_autoptr(GBytes) not_a_ciphertext = NULL;
 
 		memset(garbage, 0x42, length);
-		garbage[0] = 0x00; /* keep it below the modulus */
+		garbage[0] = 0x00; /* Keep the malformed ciphertext below the modulus to reach unpadding. */
 		not_a_ciphertext = g_bytes_new(garbage, length);
 
 		mechanism = oaep_mechanism(candidate, "{'hash': <'SHA1'>}");
@@ -557,8 +496,6 @@ static void test_oaep_bad_input_is_refused(Fixture* fixture, gconstpointer user_
 		g_clear_pointer(&payload, g_bytes_unref);
 	}
 
-	/* A byte short. Refused while the payload is prepared; the card is never
-	 * asked. */
 	{
 		g_autoptr(GBytes) truncated =
 		    g_bytes_new_from_bytes(ciphertext, 0, g_bytes_get_size(ciphertext) - 1);
@@ -573,10 +510,7 @@ static void test_oaep_bad_input_is_refused(Fixture* fixture, gconstpointer user_
 	certificate_device_close(&device);
 }
 
-/* The wrong PIN must come back as PIN_INCORRECT and nothing else: collapsing
- * that into a generic failure is how a user blocks a card while being told
- * "authentication failed". This spends one of the token's attempts, which is
- * why it runs against a fixture and never against a card. */
+/* Wrong-PIN attempts are confined to the software fixture because they consume token retries. */
 static void test_wrong_pin(Fixture* fixture, gconstpointer user_data)
 {
 	CertificateCandidate* candidate = NULL;
@@ -598,15 +532,12 @@ static void test_wrong_pin(Fixture* fixture, gconstpointer user_data)
 	g_assert_error(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT);
 	g_clear_error(&error);
 
-	/* And the right PIN still works afterwards: a failed attempt must not leave
-	 * the session unusable. */
 	g_assert_true(certificate_device_login(&device, candidate, FIXTURE_PIN, &error));
 	g_assert_no_error(error);
 
 	certificate_device_close(&device);
 }
 
-/* Discovery has to see both certificates on the token WITHOUT logging in. */
 static void test_discovery_without_login(Fixture* fixture, gconstpointer user_data)
 {
 	gboolean saw_rsa = FALSE;

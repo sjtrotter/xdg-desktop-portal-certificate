@@ -26,10 +26,7 @@ static void find_private_key(CertificateDevice* device, const CertificateCandida
 		device->private_key = g_array_index(keys, CK_OBJECT_HANDLE, 0);
 }
 
-/* Whether an already open device is the one this candidate needs. The
- * certificate id is the SHA-256 of the DER, so two candidates compare equal
- * only when they are the same certificate, and the token comparison catches the
- * same certificate present on two cards. */
+/* Certificate hashes and token identities must both match before reusing a device. */
 static gboolean device_is_bound_to(const CertificateDevice* device,
                                    const CertificateCandidate* candidate)
 {
@@ -48,14 +45,7 @@ gboolean certificate_device_open(CertificateDevice* device, CertificateTokens* t
 		if (device_is_bound_to(device, candidate))
 			return TRUE;
 
-		/* A DIFFERENT CREDENTIAL, SO A DIFFERENT SESSION. The grant this device
-		 * was opened for has been replaced -- a second AcquireCredential on a
-		 * live session, which the interface permits -- and everything the old
-		 * one left behind is wrong for the new one: the private key handle
-		 * belongs to the previous certificate, the login state was spent on it,
-		 * and the token may not even be the same card. Logging out and closing
-		 * here is what makes the next operation prompt for the PIN and sign
-		 * with the key the application was told about. */
+		/* A replacement credential requires a fresh session and login. */
 		certificate_device_close(device);
 	}
 
@@ -90,8 +80,7 @@ gboolean certificate_device_login(CertificateDevice* device,
 		return FALSE;
 	}
 
-	/* A protected authentication path gets a NULL PIN: the token or the reader
-	 * collects the secret and this process never sees it. */
+	/* A NULL PIN selects the token's protected authentication path. */
 	rv = device->module->C_Login(device->session, CKU_USER,
 	                             pin != NULL ? (CK_UTF8CHAR_PTR) pin : NULL,
 	                             pin != NULL ? (CK_ULONG) strlen(pin) : 0);
@@ -107,8 +96,7 @@ gboolean certificate_device_login(CertificateDevice* device,
 
 	device->logged_in = TRUE;
 
-	/* Some tokens only reveal the private key object once the session is
-	 * authenticated, so this is the second and decisive attempt to find it. */
+	/* Some tokens expose private keys only after login. */
 	if (device->private_key == CK_INVALID_HANDLE)
 		find_private_key(device, candidate);
 
@@ -136,10 +124,7 @@ GBytes* certificate_device_perform(CertificateDevice* device, gboolean decrypt,
 
 	if (device->private_key == CK_INVALID_HANDLE)
 	{
-		/* NOT "token removed". The card is in the reader; what is missing is a
-		 * private key object for this certificate, which is a different thing
-		 * to tell a user and must not invalidate the grant as though the
-		 * hardware had gone. */
+		/* A missing private key does not imply token removal. */
 		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR,
 		                    CERTIFICATE_PKCS11_ERROR_NO_PRIVATE_KEY,
 		                    "No private key is available on this token");
@@ -159,9 +144,6 @@ GBytes* certificate_device_perform(CertificateDevice* device, gboolean decrypt,
 		return NULL;
 	}
 
-	/* Length first, then the value: the module is the authority on how big its
-	 * answer is, and a fixed buffer here would be a truncation bug on the first
-	 * key size nobody thought of. */
 	if (decrypt)
 		rv = device->module->C_Decrypt(device->session, (CK_BYTE_PTR) bytes,
 		                               (CK_ULONG) payload_size, NULL, &length);
@@ -195,9 +177,6 @@ GBytes* certificate_device_perform(CertificateDevice* device, gboolean decrypt,
 
 void certificate_device_close(CertificateDevice* device)
 {
-	/* Cleared whether or not a module was ever loaded, so that a device that
-	 * failed to open cannot be mistaken for one bound to the candidate it
-	 * failed on. */
 	g_clear_pointer(&device->candidate, certificate_candidate_unref);
 
 	if (device->module == NULL)
@@ -205,8 +184,7 @@ void certificate_device_close(CertificateDevice* device)
 
 	if (device->session != CK_INVALID_HANDLE)
 	{
-		/* C_Logout is issued because the token may honour it. NOTHING HERE MAY
-		 * CLAIM THE CARD HAS FORGOTTEN. */
+		/* Token middleware may retain authentication after C_Logout. */
 		if (device->logged_in)
 			device->module->C_Logout(device->session);
 
