@@ -17,8 +17,8 @@
  */
 
 #define CERTIFICATE_IMPL_BUS_NAME "org.freedesktop.impl.portal.desktop.certificate"
-#define CERTIFICATE_IMPL_OBJECT_PATH "/org/freedesktop/portal/desktop/experimental"
-#define CERTIFICATE_IMPL_INTERFACE "org.freedesktop.impl.portal.Certificate.X1"
+#define CERTIFICATE_IMPL_OBJECT_PATH "/org/freedesktop/portal/desktop"
+#define CERTIFICATE_IMPL_INTERFACE "org.freedesktop.impl.portal.experimental.Certificate1"
 #define CERTIFICATE_IMPL_INTERFACE_VERSION 1u
 
 /** The only bus name whose owner may call this backend. */

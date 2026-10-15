@@ -3,6 +3,8 @@
 Date: 2026-09-04
 Status: accepted (for the sketch), amended by [0010](0010-backend-only-frontend-lives-upstream.md)
 
+Superseded in part by [ADR 0012](0012-merged-experimental-portal-convention.md).
+
 > **Amendment (0010).** `Certificate` is still the name, and the reasoning below is why.
 > Every *fully qualified* name in this ADR is historical: the project-controlled
 > `io.github.sjtrotter.*` interfaces it renamed no longer exist on either side of the

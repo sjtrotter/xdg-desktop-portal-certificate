@@ -5,6 +5,8 @@ Status: accepted, implemented — this decision **supersedes the compatibility h
 [0007](0007-brokered-operations-are-the-core.md) and answers
 [SPIKES.md](../SPIKES.md) S1 and S3
 
+Superseded in part by [ADR 0012](0012-merged-experimental-portal-convention.md).
+
 ## Context
 
 [0006](0006-failure-modes-of-naive-p11kit-forwarding.md) killed token-scoped forwarding.

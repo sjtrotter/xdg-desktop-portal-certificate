@@ -1,26 +1,23 @@
 # The public interface is not in this repository
 
-This document used to specify `org.freedesktop.portal.Certificate.X1`'s
-predecessor at length, because this repository shipped the frontend that exported it. It
-does not any more: the frontend is a branch of xdg-desktop-portal, and **the XML on that
-branch is the specification**. See
-[decisions/0010-backend-only-frontend-lives-upstream.md](decisions/0010-backend-only-frontend-lives-upstream.md).
+The frontend is xdg-desktop-portal branch `experimental/integration`. Its XML defines
+`org.freedesktop.portal.experimental.Certificate1`; this document summarises that interface.
 
 ## Where it is
 
 ```
 repository   a local checkout of xdg-desktop-portal   (origin: sjtrotter/xdg-desktop-portal)
 branch       experimental/integration
-commit       fb80027  certificate: Add an experimental Certificate portal
-public XML   data/org.freedesktop.portal.Certificate.X1.xml
-impl XML     data/org.freedesktop.impl.portal.Certificate.X1.xml
+commit       39f5833  certificate: Add an experimental Certificate portal
+public XML   data/org.freedesktop.portal.experimental.Certificate1.xml
+impl XML     data/org.freedesktop.impl.portal.experimental.Certificate1.xml
 frontend     desktop-portal/certificate.c
 mock backend tests/templates/certificate.py
 tests        tests/test_certificate.py
 ```
 
 The impl half is also here, as a verbatim tracking copy:
-[`../data/org.freedesktop.impl.portal.Certificate.X1.xml`](../data/org.freedesktop.impl.portal.Certificate.X1.xml).
+[`../data/org.freedesktop.impl.portal.experimental.Certificate1.xml`](../data/org.freedesktop.impl.portal.experimental.Certificate1.xml).
 The public half is deliberately **not** copied: this repository has no reason to hold a
 second copy of an interface it does not implement, and a stale one would be worse than
 none.
@@ -30,17 +27,18 @@ right.
 
 ## Summary
 
-Interface `org.freedesktop.portal.Certificate.X1`, on bus name
+Interface `org.freedesktop.portal.experimental.Certificate1`, on bus name
 `org.freedesktop.portal.Desktop`, object path
-`/org/freedesktop/portal/desktop/experimental` — experimental portals are exported one
-level below the desktop path, while the `Request` and `Session` objects they hand out stay
-on the path above. `version` property `1`.
+`/org/freedesktop/portal/desktop`. `version` property `1`.
+Request and Session handles remain under `/org/freedesktop/portal/desktop/request/`
+and `/org/freedesktop/portal/desktop/session/`.
 
-**It is not exported unless a backend has been configured for
-`org.freedesktop.impl.portal.Certificate.X1`.** With none configured it is absent from
-introspection and `Properties.Get` fails. It is experimental and can change or be removed
-without a version bump; the `.X1` suffix is the major version and a client must match it
-exactly.
+The frontend exports the interface only with a configured backend for
+`org.freedesktop.impl.portal.experimental.Certificate1` and `Certificate1` listed in
+`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` at startup. The list is comma separated with no
+spaces, such as `Certificate1,WebAuthentication1`. Without both conditions the interface is
+absent from introspection and `Properties.Get` fails. A breaking change increments the
+trailing number in the interface name; a non-breaking change increments `version`.
 
 ```
 CreateSession      (a{sv} options)                            → o handle          [Request]

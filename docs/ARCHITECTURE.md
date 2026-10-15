@@ -31,7 +31,7 @@ upstream: the left-hand column now describes code that exists, in
 |---|---|---|
 | **Caller identity** | `xdp_invocation_get_app_info()`; derives `app_identity_level` (`sandboxed` / `host` / `unidentified`) once and forwards it | Never derives anything. Receives `app_id` and `app_identity_level` as **arguments** |
 | **Bus name applications use** | `org.freedesktop.portal.Desktop` — the only one | `org.freedesktop.impl.portal.desktop.certificate` — not for applications |
-| **Object path** | `/org/freedesktop/portal/desktop/experimental` — experimental portals hang one level down; `Request` and `Session` objects stay on the path above | `/org/freedesktop/portal/desktop`, on its own bus name |
+| **Object path** | `/org/freedesktop/portal/desktop`; handles use `/request/...` and `/session/...` beneath it | `/org/freedesktop/portal/desktop`, on its own bus name |
 | **Policy** | `xdp_filter_options()` with per-key validators: `purpose` ∈ `client_auth\|signing\|email\|ssh` (required), `interaction_mode` ∈ `required\|allowed\|forbidden`, `mechanism` ∈ `RSA_PKCS1_V1_5\|RSA_PSS\|ECDSA`, `reason` ≤ 256 chars, `data` ≤ 1 MiB. Unknown keys dropped, not forwarded | Enforces what it is told, plus its own hard limits. Never widens |
 | **Grant lifetime** | `requested_lifetime` clamped to 3600 s, default 300, forwarded as `lifetime` — a decision, not a request | Obeys it. Cannot expire or renew a grant |
 | **Results clamping** | Intersects the backend's `supported_mechanisms` and `permitted_operations` with its own lists, in its own order, before the app sees them *and* before recording them on the grant | Reports what it can do; over-claiming gets clamped, not believed |
@@ -210,9 +210,8 @@ not re-described here; read `desktop-portal/certificate.c` on the branch.
 ### The impl skeleton — [`../src/certificate-impl.h`](../src/certificate-impl.h), [`request-impl.h`](../src/request-impl.h), [`session-impl.h`](../src/session-impl.h)
 
 Owns `org.freedesktop.impl.portal.desktop.certificate` on the session bus and exports
-`/org/freedesktop/portal/desktop/experimental` [[S35](SOURCES.md)]: the path a stable backend
-uses, with the `/experimental` segment the convention adds for an experimental interface. One file per portal interface, exactly as
-xdg-desktop-portal-gtk does it. The impl `Request` has `Close()` and no `Response` signal:
+`/org/freedesktop/portal/desktop` [[S35](SOURCES.md)]. One file per portal interface, as in
+xdg-desktop-portal-gtk. The impl `Request` has `Close()` and no `Response` signal:
 the result of an impl call is the method's own return value, and exactly one object — the
 frontend's `Request` — is responsible for the at-most-one-terminal-response rule.
 
@@ -426,7 +425,7 @@ own process**. It is not part of the backend and links none of it.
       │  C_GetSlotList / C_FindObjects / C_SignInit / C_Sign
       ▼
   libpkcs11-portal-certificate.so          ← IN THE APPLICATION'S PROCESS
-      │  org.freedesktop.portal.Certificate.X1
+      │  org.freedesktop.portal.experimental.Certificate1
       │  CreateSession → AcquireCredential → Sign
       ▼
   xdg-desktop-portal  ──impl──▶  this backend  ──▶  p11-kit ──▶ the card
@@ -528,10 +527,11 @@ one repository; it is `src/` now because only one of those is here.
 - **The impl interface is private.** Applications talk to `org.freedesktop.portal.Desktop`
   and nothing else. How that is enforced — and what it does and does not protect against on
   a same-UID desktop — is [IMPL-INTERFACE.md](IMPL-INTERFACE.md).
-- **The public interface appears only with a backend behind it.** With nothing configured
-  for `org.freedesktop.impl.portal.Certificate.X1`, `org.freedesktop.portal.Certificate.X1`
-  is not exported, does not appear in introspection, and this backend is never called. That
-  is a property of the frontend, and this repository cannot turn it on.
+- **The public interface requires frontend opt-in and a configured backend.**
+  `org.freedesktop.portal.experimental.Certificate1` needs a backend for
+  `org.freedesktop.impl.portal.experimental.Certificate1` and
+  `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` in the frontend's startup environment.
+  The list is comma separated with no spaces. Without both, the interface is absent.
 - **UI toolkit.** GTK4 here. A Qt/KDE chooser and PIN prompt is a second *backend package*
   with its own `.portal` file, selected by `portals.conf`, not a second code path inside one
   binary. It remains a phase 1 goal and a prerequisite for phase 2; there is still no KDE

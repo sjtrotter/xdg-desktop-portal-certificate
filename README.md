@@ -14,7 +14,7 @@ the application, and the sandbox hole closes: the application talks to
 ## What this repository is
 
 An xdg-desktop-portal **backend** for the experimental
-`org.freedesktop.impl.portal.Certificate.X1` interface, plus a **client-side PKCS#11
+`org.freedesktop.impl.portal.experimental.Certificate1` interface, plus a **client-side PKCS#11
 module** for applications that cannot call D-Bus. Two interfaces are in play throughout: the
 **public interface** is what applications call on xdg-desktop-portal, and the **impl interface** is
 what xdg-desktop-portal calls on a backend such as this one. The backend discovers PKCS#11 tokens,
@@ -67,9 +67,9 @@ operation, a PIN-pad reader, a second card, KDE, and the OpenSSL 3 provider.
 ## How it works
 
 ```
-  application ──────── org.freedesktop.portal.Certificate.X1 ──────────┐
-                   on org.freedesktop.portal.Desktop, at                │
-                   /org/freedesktop/portal/desktop/experimental         ▼
+  application ──────── org.freedesktop.portal.experimental.Certificate1 ┐
+                   on org.freedesktop.portal.Desktop, at               │
+                   /org/freedesktop/portal/desktop                     ▼
                                                    ┌───────────────────────────────────┐
                                                    │ FRONTEND  xdg-desktop-portal      │
                                                    │ branch experimental/integration   │
@@ -78,8 +78,8 @@ operation, a PIN-pad reader, a second card, KDE, and the OpenSSL 3 provider.
                                                    │ request and session lifecycle     │
                                                    └───────────────────┬───────────────┘
                                                                        │
-                    org.freedesktop.impl.portal.Certificate.X1          │ app_id is an
-                    on org.freedesktop.impl.portal.desktop.certificate  │ ARGUMENT here
+              org.freedesktop.impl.portal.experimental.Certificate1    │ app_id is an
+              on org.freedesktop.impl.portal.desktop.certificate       │ ARGUMENT here
                                                                        ▼
                                                    ┌───────────────────────────────────┐
                                                    │ BACKEND: THIS REPOSITORY          │
@@ -127,8 +127,8 @@ boundary; the portal is. [0011](docs/decisions/0011-client-side-pkcs11-module.md
 
 ## Interface at a glance
 
-**Public**, `org.freedesktop.portal.Certificate.X1` on `org.freedesktop.portal.Desktop`, at
-`/org/freedesktop/portal/desktop/experimental`. Defined by the frontend branch, not here;
+**Public**, `org.freedesktop.portal.experimental.Certificate1` on `org.freedesktop.portal.Desktop`, at
+`/org/freedesktop/portal/desktop`. Defined by the frontend branch, not here;
 summarised in
 [docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md).
 
@@ -146,12 +146,12 @@ summarised in
 `operation_policy` (`sign` is the only key), `requested_lifetime` (clamped), `interaction_mode` and
 `reason`.
 
-**Impl**, frontend to backend, `org.freedesktop.impl.portal.Certificate.X1` on
+**Impl**, frontend to backend, `org.freedesktop.impl.portal.experimental.Certificate1` on
 `org.freedesktop.impl.portal.desktop.certificate`, at
-`/org/freedesktop/portal/desktop/experimental`. Described
+`/org/freedesktop/portal/desktop`. Described
 in [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md), declared in
-[`data/org.freedesktop.impl.portal.Certificate.X1.xml`](data/org.freedesktop.impl.portal.Certificate.X1.xml),
-a copy of the branch's file with a provenance comment added, which must track it.
+[`data/org.freedesktop.impl.portal.experimental.Certificate1.xml`](data/org.freedesktop.impl.portal.experimental.Certificate1.xml),
+a copy of the frontend branch's file, byte for byte apart from a provenance comment.
 **Applications do not call this.**
 
 | | |
@@ -182,7 +182,10 @@ are installed.
 and without asking for a PIN. Only hardware tokens are offered by default; `--allow-software-tokens`
 turns that off, and `--module PATH` names one module and loads nothing else.
 
-The end-to-end stack needs the frontend branch:
+The end-to-end stack needs frontend branch `experimental/integration`. The frontend must
+start with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` and a configured backend.
+The list is comma separated with no spaces; use `Certificate1,WebAuthentication1` for both
+portals. The scripts append `Certificate1` to the caller's existing list when missing:
 
 ```console
 $ XDP_BUILD=/path/to/xdg-desktop-portal/build tools/dev-stack.sh --softhsm
@@ -204,7 +207,7 @@ To select this backend explicitly, put in `portals.conf`:
 
 ```ini
 [preferred]
-org.freedesktop.impl.portal.Certificate.X1=certificate
+org.freedesktop.impl.portal.experimental.Certificate1=certificate
 ```
 
 ## Related repositories
@@ -217,10 +220,8 @@ org.freedesktop.impl.portal.Certificate.X1=certificate
   for an interactive sign-in, which in turn drives this Certificate portal for the
   client-certificate challenge.
 - <https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration>
-  The frontend fork branch that defines both public interfaces. 10 commits on upstream `86bd3e2`,
-  tip `1aaffaf`; the Certificate portal is commit `a4c1f62`. `tests/test_certificate.py` is 26 test
-  functions, 49 parametrised cases, 98 runs across the host and Flatpak fixtures, all green against
-  a python-dbusmock backend. Pushed to that fork and proposed to nobody.
+  The frontend fork branch that defines both public interfaces, based on upstream `8eba842`.
+  The Certificate portal is commit `39f5833`; its XML is the source of truth for this backend.
 - <https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate-webauthentication+delegation>
   The **archived delegation branch**: an earlier version of the frontend that derived a grant for a
   caller's descendant processes, so that one application raised one chooser. Tip `209f9ff`. Referred

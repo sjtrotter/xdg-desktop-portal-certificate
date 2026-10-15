@@ -3,6 +3,8 @@
 Date: 2026-09-03
 Status: accepted (for the sketch), amended by [0010](0010-backend-only-frontend-lives-upstream.md)
 
+Superseded in part by [ADR 0012](0012-merged-experimental-portal-convention.md).
+
 > **Amendment (0010).** The namespace argument below stands; the names it chose are gone.
 > This repository no longer ships a frontend or a public interface, so it no longer picks
 > an interface name at all: the impl interface it implements is **dictated by the

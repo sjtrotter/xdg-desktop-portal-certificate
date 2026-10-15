@@ -7,10 +7,9 @@
  *
  * The D-Bus activated per-user service that owns
  * org.freedesktop.impl.portal.desktop.certificate and implements
- * org.freedesktop.impl.portal.Certificate.X1 at
- * /org/freedesktop/portal/desktop/experimental -- the object path the
- * experimental-portal convention assigns to a backend of an experimental
- * interface (doc/experimental-portals.rst in xdg-desktop-portal). It is laid out like every other out-of-tree backend
+ * org.freedesktop.impl.portal.experimental.Certificate1 at
+ * /org/freedesktop/portal/desktop.
+ * The layout follows other out-of-tree backends
  * (xdg-desktop-portal-gtk, xdg-desktop-portal-termfilechooser): src/ holds one
  * file per portal interface implemented, data/ holds the .portal file, the
  * D-Bus service file and the interface XML.
@@ -22,9 +21,9 @@
  *
  * THE FRONTEND IS NOT IN THIS REPOSITORY. It is a branch of xdg-desktop-portal
  * itself, experimental/integration, which exports
- * org.freedesktop.portal.Certificate.X1 at
- * /org/freedesktop/portal/desktop/experimental whenever a backend for it is
- * configured. See docs/decisions/0010-backend-only-frontend-lives-upstream.md.
+ * org.freedesktop.portal.experimental.Certificate1 at
+ * /org/freedesktop/portal/desktop with a configured backend.
+ * The frontend needs XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1.
  *
  * The main() shape -- gtk_init plus a plain GMainLoop rather than GtkApplication,
  * g_bus_own_name with REPLACE under --replace, and quitting on name-lost -- is
@@ -126,13 +125,13 @@ static const char* description =
     "\n"
     "ENABLING THE FRONTEND\n"
     "  The public interface\n"
-    "    org.freedesktop.portal.Certificate.X1\n"
+    "    org.freedesktop.portal.experimental.Certificate1\n"
     "  lives in xdg-desktop-portal itself, on the branch\n"
     "    experimental/integration\n"
     "  and is EXPERIMENTAL: it is exported on\n"
-    "    /org/freedesktop/portal/desktop/experimental\n"
-    "  whenever a backend for it is configured. With no backend configured the\n"
-    "  interface is absent from introspection and this backend is never called.\n"
+    "    /org/freedesktop/portal/desktop\n"
+    "  with a configured backend and this variable in the frontend environment:\n"
+    "    XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1\n"
     "  tools/dev-stack.sh wires a development frontend, this backend and an\n"
     "  end-to-end client together on a private bus; docs/TESTING.md has the\n"
     "  commands for a run against a real card.\n"

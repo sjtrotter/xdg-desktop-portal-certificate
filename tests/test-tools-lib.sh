@@ -123,7 +123,7 @@ CHAIN_ETC="$(conf_dir "$ROOT/etc")"
 cat >"$CHAIN_HOME/portals.conf" <<'EOF'
 [preferred]
 org.freedesktop.impl.portal.Screenshot=none;
-org.freedesktop.impl.portal.Certificate.X1=somethingelse;
+org.freedesktop.impl.portal.experimental.Certificate1=somethingelse;
 EOF
 
 cat >"$CHAIN_ETC/portals.conf" <<'EOF'
@@ -168,10 +168,10 @@ mkdir -p "$DEVDIR"
 xdp_write_portal_dir "$DEVDIR" "$REPO" private 2>/dev/null
 
 expect_line "the Certificate line names this backend" \
-	"$DEVDIR/portals.conf" "org.freedesktop.impl.portal.Certificate.X1=certificate;"
+	"$DEVDIR/portals.conf" "org.freedesktop.impl.portal.experimental.Certificate1=certificate;"
 
 expect_no_line "the configured Certificate backend is replaced, not shadowed" \
-	"$DEVDIR/portals.conf" "Certificate=somethingelse"
+	"$DEVDIR/portals.conf" "org.freedesktop.impl.portal.experimental.Certificate1=somethingelse"
 
 expect_line "a private run switches the Secret backend off" \
 	"$DEVDIR/portals.conf" "org.freedesktop.impl.portal.Secret=none;"

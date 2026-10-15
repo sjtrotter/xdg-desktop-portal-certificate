@@ -175,6 +175,7 @@ inner() {
 	# this since the day it hit that; this script had not, and it only started
 	# failing once the portal directory grew a settings backend for GTK to
 	# reach.
+	XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL="$(xdp_experimental_portals Certificate1)" \
 	"$XDP_BUILD/desktop-portal/xdg-desktop-portal" -v >"$LOGDIR/frontend.log" 2>&1 &
 	FE=$!
 	xdp_wait_for_name org.freedesktop.portal.Desktop "$FE" || {
@@ -280,7 +281,7 @@ inner() {
 # by every user on the machine and /proc/*/environ is not. It is the fixture PIN
 # today; it is also the line anyone adapting this script for a card will copy.
 export PIN LOGDIR REPO XDP_BUILD BACKEND MODULE XDOTOOL DRIVE_WINDOWS PIN_PROMPT PROMPTER_BIN
-dbus-run-session -- bash -c "$(declare -f xdp_wait_for_name); $(declare -f inner); inner \"\$@\"" -- "$@"
+dbus-run-session -- bash -c "$(declare -f xdp_experimental_portals); $(declare -f xdp_wait_for_name); $(declare -f inner); inner \"\$@\"" -- "$@"
 rc=$?
 
 echo

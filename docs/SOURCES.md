@@ -261,16 +261,16 @@ not merged**. Sebastian Wick,
 `org.freedesktop.portal.experimental.Credentials`. It should also not be exposed by default and
 have a environment variable to turn it on (e.g.
 `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=credentials`)."
-**Scope of what this confirms:** the convention exists as a maintainer's instruction on an open
-pull request. It is **not** in `main` — a checkout of `main` at `86bd3e26` contains no
-`experimental` namespace and no such environment variable. The gate and the
-`org.freedesktop.portal.experimental.*` XML exist only on that PR's branch, where the flag value
-implemented is `credential`, singular.
-**Superseded as to spelling:**
-[PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129) settled the convention
-differently — an `.X#` major-version suffix on the interface name, export on
-`/org/freedesktop/portal/desktop/experimental`, and no environment variable at all. This entry is
-kept as the record of where the question was first put.
+**Current convention:**
+[PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129) was merged on
+2026-10-15. Experimental interfaces use `org.freedesktop.portal.experimental.{Name}{N}`
+and `org.freedesktop.impl.portal.experimental.{Name}{N}`, with both sides at
+`/org/freedesktop/portal/desktop`. A configured backend and a comma-separated list of
+portal names in the frontend's `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` environment are
+required, such as `Certificate1,WebAuthentication1`, with no spaces. Breaking changes
+increment the trailing interface number.
+[PR #2173](https://github.com/flatpak/xdg-desktop-portal/pull/2173) fixed the opt-in check;
+upstream `main` at `8eba842` includes both changes.
 
 **[S28] xdg-desktop-portal#662, "PKCS#11 portal", is the prior discussion.**
 [flatpak/xdg-desktop-portal#662](https://github.com/flatpak/xdg-desktop-portal/issues/662),
@@ -351,10 +351,11 @@ portals appear under the bus name `org.freedesktop.portal.Desktop` and the objec
 prose documentation; it is the code convention —
 [`xdg-desktop-portal-gtk`, `src/utils.h`](https://github.com/flatpak/xdg-desktop-portal-gtk/blob/main/src/utils.h)
 defines `DESKTOP_PORTAL_OBJECT_PATH "/org/freedesktop/portal/desktop"` and every backend
-interface is exported there. For an *experimental* interface the convention in
-[PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129) (`doc/experimental-portals.rst`)
-moves both sides one level down: the frontend must export on
-`/org/freedesktop/portal/desktop/experimental` and "the backend object path should be the same".
+interface is exported there. The merged experimental convention in
+[PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129)
+(`doc/experimental-portals.rst`) uses the same path for experimental frontends and backends.
+Request and Session handles remain under `/org/freedesktop/portal/desktop/request/` and
+`/org/freedesktop/portal/desktop/session/`.
 
 **[S36] xdg-desktop-portal, -gtk and -gnome are LGPL-2.1-or-later.**
 [xdg-desktop-portal `LICENSES/LGPL-2.1-or-later.txt`](https://github.com/flatpak/xdg-desktop-portal/tree/main/LICENSES)

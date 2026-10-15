@@ -24,9 +24,9 @@ between them is kept private, including what that does *not* protect against, an
 frontend is not here.
 
 **The interface is experimental.** The public side is exported on
-`/org/freedesktop/portal/desktop/experimental`, and only once a certificate backend has been
-configured for it. Installing this backend on a machine whose portal does not know the interface
-adds no attack surface: the `.portal` file names an interface nothing matches, and this process is
+`/org/freedesktop/portal/desktop` when a certificate backend is configured and the frontend
+starts with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1`. Installing this backend
+on a machine whose portal does not know the interface adds no attack surface: the `.portal` file names an interface nothing matches, and this process is
 never activated.
 
 **The boundary this intends to provide is narrower than it sounds.** For **sandboxed** applications

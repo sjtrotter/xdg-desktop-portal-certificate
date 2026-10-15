@@ -15,7 +15,7 @@
 
 /** @file
  *  This backend's implementation of
- *  org.freedesktop.impl.portal.Certificate.X1.
+ *  org.freedesktop.impl.portal.experimental.Certificate1.
  *
  *  One file per portal, exactly as xdg-desktop-portal-gtk does it
  *  (src/filechooser.c, src/account.c, ...) and as every out-of-tree backend

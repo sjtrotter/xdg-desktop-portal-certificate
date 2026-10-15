@@ -21,7 +21,11 @@
 Decryption code exists in the broker (`broker-decrypt`) and in the client module, but `Decrypt` is
 not on either interface and this code is unreachable.
 
-and outside `meson test`, because they need a bus and a display:
+The frontend needs a configured backend and
+`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` in its startup environment. The
+scripts append `Certificate1` to the caller's list when missing.
+
+Outside `meson test`, these scripts need a bus and a display:
 
 | | |
 |---|---|
@@ -78,7 +82,7 @@ argument lives in it.
   the window.
 - **Backend discovery**, from this side: that the installed `.portal` file names the interface the
   installed binary actually implements, and that `tools/dev-stack.sh` gets from a cold private bus
-  to "Providing portal org.freedesktop.portal.Certificate.X1". *Done, by
+  to "Providing portal org.freedesktop.portal.experimental.Certificate1". *Done, by
   `tools/dev-stack.sh` itself, though nothing asserts on the log line yet.* `portals.conf`
   precedence is upstream's to test.
 - **Filter logic** (`src/tokens/filter.h`) against fixture certificates: EKU, key usage, issuer DN

@@ -1,30 +1,30 @@
-# The implementation interface — `org.freedesktop.impl.portal.Certificate.X1`
+# The implementation interface — `org.freedesktop.impl.portal.experimental.Certificate1`
 
 Status: EXPERIMENTAL, and **more** unstable than the public interface, deliberately. Upstream
 treats the `org.freedesktop.impl.portal.*` interfaces as an internal contract between a frontend
 and the backends of the same release, versioned but not promised to applications. This one is the
-same, with less of a track record and an `.X1` major-version suffix that says so on the wire.
+same, with less of a track record and a trailing `1` major-version suffix that says so on the wire.
 
 **This interface is not for applications.** It is what xdg-desktop-portal calls on a backend it
 selected — here, `xdg-desktop-portal-certificate` on bus name
 `org.freedesktop.impl.portal.desktop.certificate`, object path
-`/org/freedesktop/portal/desktop/experimental` — the experimental-portal convention puts a
-backend of an experimental interface on the same path as its frontend.
+`/org/freedesktop/portal/desktop`. The frontend needs a configured backend and
+`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` in its environment.
 
 ## The XML this repository ships is a copy, and it must track its source
 
-[`../data/org.freedesktop.impl.portal.Certificate.X1.xml`](../data/org.freedesktop.impl.portal.Certificate.X1.xml)
-is a **verbatim copy**, apart from a header comment saying so, of
+[`../data/org.freedesktop.impl.portal.experimental.Certificate1.xml`](../data/org.freedesktop.impl.portal.experimental.Certificate1.xml)
+is, apart from its provenance comment block, a **byte-for-byte copy** of
 
 ```
-xdg-desktop-portal, branch experimental/integration, commit fb80027
-data/org.freedesktop.impl.portal.Certificate.X1.xml
+xdg-desktop-portal, branch experimental/integration, commit 39f5833
+data/org.freedesktop.impl.portal.experimental.Certificate1.xml
 ```
 
 The interface belongs to the frontend. This repository does not get to change it, and a
 divergence between the two files is not a difference of opinion — it is a backend that no longer
 implements the interface it claims in `data/certificate.portal`. To update: copy the branch's file
-again and change the commit id in the header.
+again without editing it.
 
 Upstream keeps `org.freedesktop.impl.portal.*.xml` in xdg-desktop-portal itself and backends
 consume it from that project's pkg-config interfaces directory —

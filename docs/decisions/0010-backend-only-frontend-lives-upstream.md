@@ -4,6 +4,8 @@ Date: 2026-09-04
 Status: accepted (for the sketch); supersedes the *packaging* half of
 [0008](0008-build-to-the-upstream-shape.md) and retires the incubating frontend
 
+Superseded in part by [ADR 0012](0012-merged-experimental-portal-convention.md).
+
 > **Amendment (2026-09-07).** The route below stands; the spelling of the convention has
 > moved on. [PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129) settled how
 > an experimental portal is named and exposed, replacing the `experimental` infix and the

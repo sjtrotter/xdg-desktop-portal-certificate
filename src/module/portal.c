@@ -158,7 +158,7 @@ static gboolean subscribe_invalidated(gpointer data)
 
 	client->invalidated_subscription = g_dbus_connection_signal_subscribe(
 	    client->connection, PKCS11_PORTAL_BUS_NAME, PKCS11_PORTAL_INTERFACE, "GrantInvalidated",
-	    PKCS11_PORTAL_EXPERIMENTAL_OBJECT_PATH, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
+	    PKCS11_PORTAL_OBJECT_PATH, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
 	    on_grant_invalidated, client, NULL);
 
 	return G_SOURCE_REMOVE;
@@ -371,7 +371,7 @@ static gboolean request_start(gpointer data)
 
 	request->client->calls++;
 	g_dbus_connection_call(request->client->connection, PKCS11_PORTAL_BUS_NAME,
-	                       PKCS11_PORTAL_EXPERIMENTAL_OBJECT_PATH, PKCS11_PORTAL_INTERFACE,
+	                       PKCS11_PORTAL_OBJECT_PATH, PKCS11_PORTAL_INTERFACE,
 	                       request->method,
 	                       request->parameters, G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE,
 	                       METHOD_TIMEOUT_MS, request->client->call_cancellable,
@@ -634,7 +634,7 @@ static void probe_capabilities(PortalClient* client)
 	g_variant_builder_init(&empty, G_VARIANT_TYPE_VARDICT);
 
 	reply = g_dbus_connection_call_sync(
-	    client->connection, PKCS11_PORTAL_BUS_NAME, PKCS11_PORTAL_EXPERIMENTAL_OBJECT_PATH,
+	    client->connection, PKCS11_PORTAL_BUS_NAME, PKCS11_PORTAL_OBJECT_PATH,
 	    PKCS11_PORTAL_INTERFACE, "GetCapabilities",
 	    g_variant_new("(a{sv})", &empty), G_VARIANT_TYPE("(a{sv})"),
 	    G_DBUS_CALL_FLAGS_NO_AUTO_START, CAPABILITIES_TIMEOUT_MS, NULL, &error);
@@ -646,7 +646,9 @@ static void probe_capabilities(PortalClient* client)
 		 * is configured behind it, and when the frontend refuses to identify
 		 * this process -- three different problems with three different fixes,
 		 * and no way to tell them apart without the error. */
-		g_debug("the Certificate portal is not available: %s", error->message);
+		g_debug("the Certificate portal is not available; check "
+		        "XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1 "
+		        "in the frontend environment: %s", error->message);
 		return;
 	}
 

@@ -12,7 +12,7 @@
 #include "grant.h"
 
 /** @file
- *  The module's client of org.freedesktop.portal.Certificate.X1.
+ *  The module's client of org.freedesktop.portal.experimental.Certificate1.
  *
  *  A PKCS#11 call arrives on whatever thread the application felt like, and the
  *  portal answers Request-shaped calls with a signal. So the client owns a

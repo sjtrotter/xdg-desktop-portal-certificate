@@ -5,7 +5,7 @@ module, and 13 meson test suites exist and pass. The interface is not upstream, 
 branch that defines it is not merged. The most useful contribution today is still not code.
 
 **The interface is not changed here.** It is defined by the xdg-desktop-portal branch
-`experimental/integration`, and `data/org.freedesktop.impl.portal.Certificate.X1.xml`
+`experimental/integration`, and `data/org.freedesktop.impl.portal.experimental.Certificate1.xml`
 is a verbatim copy of the branch's file. A change to the interface is a change to that branch,
 followed by re-copying the file; a hand-edit here produces a backend that no longer implements what
 it claims. See [docs/decisions/0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md).
@@ -88,10 +88,15 @@ Three rules that are easy to break by accident:
   argument on the impl interface — that is, a change to the branch — not a lookup in the backend.
 - **Do not add a way for an application to reach the impl interface.** Not a convenience method, not
   a debug flag, not a "direct mode". See [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md).
-- **Do not edit `data/org.freedesktop.impl.portal.Certificate.X1.xml`.** It is a tracking
+- **Do not edit `data/org.freedesktop.impl.portal.experimental.Certificate1.xml`.** It is a tracking
   copy.
 
 ## Running the tests
+
+The frontend branch needs `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` in its
+startup environment and a configured backend. The development scripts append `Certificate1`
+to an existing comma-separated list when missing. Include `WebAuthentication1` when running
+both portals.
 
 `meson setup build && meson test -C build` runs the headless suites (tier 0 of
 [docs/TESTING.md](docs/TESTING.md)); a sanitizer build and the software-token and real-card tiers

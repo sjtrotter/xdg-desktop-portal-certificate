@@ -16,37 +16,37 @@ repository   a local checkout of xdg-desktop-portal
 remote       upstream → https://github.com/flatpak/xdg-desktop-portal.git
              origin   → https://github.com/sjtrotter/xdg-desktop-portal.git
 branch       experimental/integration
-base         local main = c95490a (upstream/main 86bd3e2 plus one settings build fix)
-commits      b269c19  doc: Document experimental portals                  ┐
-             0138498  xdp: Add support to export experimental portals     │ series 1
-             c3c4f7e  doc: Render experimental interface titles           ┘
-             51b2d78  session-dex: Add xdp_session_dex_close()            ┐
-             3784cfc  session-dex: Fix the wrapped session store          │
-             47fdbee  request-dex: Let a portal see that a request was    │ series 2
-                      closed                                              │
-             fb80027  certificate: Add an experimental Certificate portal │ ← this one
-             066c0b0  tests: Add Certificate portal tests                 ┘
-             0770c26  request-dex: Let a portal close an impl request     ┐
-             357e4d7  web-authentication: Add an experimental             │ series 3
-                      WebAuthentication portal                            │
-             2201f41  tests: Add WebAuthentication portal tests           ┘
+base         upstream/main 8eba842
+commits      89c21da  session-dex: Add xdp_session_dex_close()
+             0b92282  session-dex: Fix the wrapped session store
+             9d25725  request-dex: Let a portal see that a request was closed
+             39f5833  certificate: Add an experimental Certificate portal
+             c0ef8e4  tests: Add Certificate portal tests
+             0cce8cf  request-dex: Let a portal close an impl request
+             fc43671  web-authentication: Add an experimental WebAuthentication portal
+             9d13443  tests: Add WebAuthentication portal tests
 ```
 
-**Three series, proposed in that order**, because they are three separate questions: the
-convention for experimental portals at all, then the one this repository implements, then
-the smaller interface. Series 1 follows
-[PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129), which settled the
-convention: an `.X#` major-version suffix on the interface name and export on
-`/org/freedesktop/portal/desktop/experimental`, with no environment variable and no gate —
-an experimental portal appears exactly when a backend for it is configured.
+The experimental-portal convention is merged upstream in
+[PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129), with the opt-in check
+fixed by [PR #2173](https://github.com/flatpak/xdg-desktop-portal/pull/2173).
+Certificate and WebAuthentication remain on the fork's `experimental/integration` branch.
+Propose the Certificate series, then WebAuthentication.
 
-`fb80027` is the commit this repository tracks. Series 2 carries three small changes to
-shared frontend code, each landing with its first user: `51b2d78` adds an
+The frontend needs a configured backend and
+`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` at startup. For both portals use
+`Certificate1,WebAuthentication1`, comma separated with no spaces. Interfaces are
+`org.freedesktop.portal.experimental.Certificate1` and
+`org.freedesktop.portal.experimental.WebAuthentication1`; both frontend and backend use
+`/org/freedesktop/portal/desktop`. Breaking changes increment the trailing interface number.
+
+`39f5833` is the commit this repository tracks. The Certificate series carries three small changes to
+shared frontend code, each landing with its first user: `89c21da` adds an
 `xdp_session_dex_close()` that upstream was missing and that a session-shaped portal cannot
-do without; `3784cfc` fixes `xdp_session_dex_store_new_wrapped()`, which has never worked —
+do without; `0b92282` fixes `xdp_session_dex_store_new_wrapped()`, which has never worked —
 it read the address of the session field rather than the field, so the store aborted in a
 cast — and which the Certificate portal is the first thing to use, keeping a grant on the
-session object rather than in a table keyed by its object path; `47fdbee` adds the accessor
+session object rather than in a table keyed by its object path; `9d25725` adds the accessor
 that lets a portal decline to commit state for a request the application has closed.
 
 **What came out of the branch before it was shown to anyone**, after two independent
@@ -63,28 +63,13 @@ upstream/main..HEAD` passes, `black --check` passes.
 
 ## Why `experimental` is not a claim of acceptance
 
-[PR #1889](https://github.com/flatpak/xdg-desktop-portal/pull/1889) ("Introduce
-Credentials portal (experimental)") is where the mechanism was settled; Sebastian Wick's
-instruction on it, and what standing it does and does not carry, is quoted in
-[0010](decisions/0010-backend-only-frontend-lives-upstream.md). Isaiah Inuwa, on the same
-thread, 2026-01-28:
+The merged convention reserves `org.freedesktop.portal.experimental.{Name}{N}` and
+`org.freedesktop.impl.portal.experimental.{Name}{N}` for experimental portals. These
+interfaces require frontend opt-in and a configured backend; they carry no stability promise
+or claim of acceptance for the Certificate portal. See
+[0012](decisions/0012-merged-experimental-portal-convention.md).
 
-> I noticed the other portals have singular names: should we do that here too?
-> `org.freedesktop.portal.experimental.Credential`
-
-So: a singular name, and not exported by default. The *shape* of "not exported by
-default" has since been settled differently — [PR
-#2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129) replaced the
-`experimental` infix and the `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` variable with an
-`.X#` major-version suffix and a separate object path, and made "a backend is configured"
-the only condition for export. That is what an unfinished portal looks like upstream now,
-and it is what the branch implements. It carries no more standing than the old
-`io.github.sjtrotter.*` names did — it just carries it in the place where the people whose
-opinion matters can see it.
-
-The impl-side name follows: `org.freedesktop.impl.portal.Certificate.X1`, which keeps the
-frontend and backend generated symbols in step so the whole experimental surface can be
-deleted with the suffix if it is dropped.
+The impl-side name is `org.freedesktop.impl.portal.experimental.Certificate1`.
 
 ## What this repository is now
 
@@ -99,7 +84,7 @@ An out-of-tree backend, in the shape `xdg-desktop-portal-termfilechooser` and
 | `src/redact.h` | logging rules — was `shared/`, when there were two sides here to share between |
 | `data/certificate.portal.in` | `DBusName`, `Interfaces`, `UseIn`; installed into `$datadir/xdg-desktop-portal/portals` |
 | `data/org.freedesktop.impl.portal.desktop.certificate.service.in` | D-Bus activation |
-| `data/org.freedesktop.impl.portal.Certificate.X1.xml` | a **verbatim tracking copy** of the branch's file; deleted the day the branch lands and the file ships in xdg-desktop-portal's interfaces directory |
+| `data/org.freedesktop.impl.portal.experimental.Certificate1.xml` | a **verbatim tracking copy** of the branch's file; deleted the day the branch lands and the file ships in xdg-desktop-portal's interfaces directory |
 | `tools/` | `trigger-certificate.sh`, `dev-stack.sh` |
 
 What is *gone*, and was deleted rather than moved: `frontend/src/request.h`, `session.h`,
@@ -255,9 +240,9 @@ SUNET fork adds TLS-PSK and seccomp but still no per-client authorization or cal
 Neither is OpenSC-maintained.
 
 **[xdg-desktop-portal PR #1889](https://github.com/flatpak/xdg-desktop-portal/pull/1889)**,
-"Introduce Credentials portal (experimental)" — **open, not merged**, so the experimental
-namespace and the gate live on its branch rather than in `main` [[S27](SOURCES.md)]. Already
-load-bearing here for the naming and gating convention (above), and relevant a second time:
+"Introduce Credentials portal (experimental)" — **open, not merged** [[S27](SOURCES.md)]. The
+experimental-portal convention it started from is in `main` since PR 2129 (above); the
+Credentials portal itself is not. Relevant a second time:
 certificate-backed signing may belong there as a
 credential **type** rather than beside it as a rival portal. That is the maintainers' call.
 

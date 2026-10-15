@@ -68,7 +68,7 @@
 #   1. writes a throwaway $XDG_DESKTOP_PORTAL_DIR holding A SYMLINK TO EVERY
 #      .portal FILE ON THE MACHINE, this repository's certificate.portal, and a
 #      COPY of the machine's effective portals.conf with one line added routing
-#      org.freedesktop.impl.portal.Certificate.X1 to this backend.
+#      org.freedesktop.impl.portal.experimental.Certificate1 to this backend.
 #
 #      All of it, and not just ours, because setting XDG_DESKTOP_PORTAL_DIR
 #      makes the frontend ignore every other .portal and portals.conf directory
@@ -83,9 +83,7 @@
 #      used.
 #   3. starts this repository's backend, so that its stderr is visible rather
 #      than being swallowed by D-Bus activation.
-#   4. starts the frontend. The experimental Certificate interface appears on
-#      /org/freedesktop/portal/desktop/experimental because step 1 configured a
-#      backend for it; nothing else is needed to expose it.
+#   4. starts the frontend with XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1.
 #   5. runs tools/certificate-e2e.py with whatever came after `--`.
 
 set -u
@@ -239,8 +237,10 @@ start_stack() {
 	# rather than telling the reader what to look for.
 	FRONTEND_LOG="$DEVDIR/frontend.log"
 	if [ "$MODE" = live ]; then
+		XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL="$(xdp_experimental_portals Certificate1)" \
 		"$FRONTEND_BIN" -r -v > >(tee "$FRONTEND_LOG") 2>&1 &
 	else
+		XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL="$(xdp_experimental_portals Certificate1)" \
 		"$FRONTEND_BIN" -v > >(tee "$FRONTEND_LOG") 2>&1 &
 	fi
 	FRONTEND_PID=$!
@@ -267,9 +267,9 @@ check_frontend_log() {
 	local configured="no" provided="no" i
 
 	for i in $(seq 1 20); do
-		grep -q "in configuration for org.freedesktop.impl.portal.Certificate.X1" \
+		grep -q "in configuration for org.freedesktop.impl.portal.experimental.Certificate1" \
 			"$FRONTEND_LOG" 2>/dev/null && configured="yes"
-		grep -q "Providing portal org.freedesktop.portal.Certificate.X1" \
+		grep -q "Providing portal org.freedesktop.portal.experimental.Certificate1" \
 			"$FRONTEND_LOG" 2>/dev/null && provided="yes"
 		[ "$configured" = yes ] && [ "$provided" = yes ] && break
 		sleep 0.25

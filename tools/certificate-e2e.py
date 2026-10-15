@@ -6,8 +6,8 @@
 # end, the way an application would, and check that what comes back verifies.
 #
 # THIS TALKS TO THE FRONTEND, NEVER TO THIS REPOSITORY'S BACKEND. Everything
-# below goes to org.freedesktop.portal.Certificate.X1 on
-# org.freedesktop.portal.Desktop at /org/freedesktop/portal/desktop/experimental.
+# below goes to org.freedesktop.portal.experimental.Certificate1 on
+# org.freedesktop.portal.Desktop at /org/freedesktop/portal/desktop.
 # An application would do exactly this, and it is the only way to exercise the
 # backend the way it is meant to be exercised: through the frontend's app id
 # derivation, option validation, lifetime ceiling, grant table and results
@@ -17,8 +17,9 @@
 #     the certificate that came back
 #
 # The interface only exists if the running xdg-desktop-portal has a certificate
-# backend configured. With none configured, this says so and exits 40 rather
-# than dumping a D-Bus traceback: that is the frontend working, not a bug.
+# backend configured and Certificate1 listed in XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL.
+# Without either, this says so and exits 40 rather than dumping a D-Bus
+# traceback: that is the frontend working, not a bug.
 #
 # Exit codes match the backend's:
 #     0  PASS                  40 unavailable (no portal, no backend, no token)
@@ -46,10 +47,7 @@ from gi.repository import GLib, Gio  # noqa: E402
 
 BUS_NAME = "org.freedesktop.portal.Desktop"
 OBJECT_PATH = "/org/freedesktop/portal/desktop"
-# Experimental interfaces are exported one level down; the Request and Session
-# objects they hand out stay on the path above.
-EXPERIMENTAL_OBJECT_PATH = OBJECT_PATH + "/experimental"
-IFACE = "org.freedesktop.portal.Certificate.X1"
+IFACE = "org.freedesktop.portal.experimental.Certificate1"
 REQUEST_IFACE = "org.freedesktop.portal.Request"
 
 EXIT_PASS = 0
@@ -86,7 +84,7 @@ class Portal:
     def call(self, method, parameters, reply_type):
         return self.bus.call_sync(
             BUS_NAME,
-            EXPERIMENTAL_OBJECT_PATH,
+            OBJECT_PATH,
             IFACE,
             method,
             parameters,
@@ -225,7 +223,7 @@ def check_exported(portal):
     try:
         portal.bus.call_sync(
             BUS_NAME,
-            EXPERIMENTAL_OBJECT_PATH,
+            OBJECT_PATH,
             "org.freedesktop.DBus.Properties",
             "Get",
             GLib.Variant("(ss)", (IFACE, "version")),
@@ -244,13 +242,9 @@ def check_exported(portal):
             )
         die(
             EXIT_UNAVAILABLE,
-            f"{IFACE} is not exported on {EXPERIMENTAL_OBJECT_PATH}.\n"
-            "The portal must be the branch experimental/integration, and a "
-            "certificate backend must be configured for "
-            "org.freedesktop.impl.portal.Certificate.X1: the frontend exports "
-            "the interface only when it found one.\n"
-            "With no backend configured the interface is absent from "
-            "introspection; that is the frontend working, not a bug.\n"
+            f"{IFACE} is not exported on {OBJECT_PATH}.\n"
+            "Use frontend branch experimental/integration with a configured certificate backend "
+            "and XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1 in its environment.\n"
             f"D-Bus said: {error.message}",
         )
 

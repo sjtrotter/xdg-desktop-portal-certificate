@@ -4,16 +4,17 @@
 #
 # trigger-certificate.sh -- poke the PUBLIC Certificate portal interface.
 #
-# This calls org.freedesktop.portal.Certificate.X1 on
+# This calls org.freedesktop.portal.experimental.Certificate1 on
 # org.freedesktop.portal.Desktop at
-# /org/freedesktop/portal/desktop/experimental -- the frontend, never this
+# /org/freedesktop/portal/desktop -- the frontend, never this
 # repository's backend. An application would do exactly this, and it is the only
 # way to exercise the backend the way it is meant to be exercised.
 #
 # The interface only exists if the running xdg-desktop-portal has a certificate
-# backend configured. With none configured the interface is not exported at all
-# and every call below fails with "no such interface" -- which is the intended
-# behaviour, not a bug in this script.
+# backend configured and Certificate1 listed in XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL.
+# Without either, the interface is not exported at all and every call below
+# fails with "no such interface" -- which is the intended behaviour, not a bug
+# in this script.
 #
 # It defaults to --session-bus, i.e. whatever DBUS_SESSION_BUS_ADDRESS points
 # at. To keep the real desktop out of it, run the whole thing on a private bus:
@@ -29,16 +30,16 @@
 # whole flow and verifies the signature at the end.
 #
 # Method and argument shapes are taken from
-# data/org.freedesktop.portal.Certificate.X1.xml on the
-# xdg-desktop-portal branch experimental/integration (commit fb80027) and from
+# data/org.freedesktop.portal.experimental.Certificate1.xml on the
+# xdg-desktop-portal branch experimental/integration and from
 # that branch's tests/test_certificate.py.
 
 set -u
 
 BUS="${BUS:---session}"          # --session (default) or --system
 DEST=org.freedesktop.portal.Desktop
-PATH_=/org/freedesktop/portal/desktop/experimental
-IFACE=org.freedesktop.portal.Certificate.X1
+PATH_=/org/freedesktop/portal/desktop
+IFACE=org.freedesktop.portal.experimental.Certificate1
 
 usage() {
 	cat <<EOF
@@ -47,7 +48,7 @@ Usage: ${0##*/} [command]
 Commands:
   version        read the interface's version property (works with no backend
                  running, as long as the interface is exported)
-  introspect     list the interfaces the portal exports on the experimental path
+  introspect     list the interfaces the portal exports on the desktop path
   capabilities   GetCapabilities(a{sv}) -> a{sv}; a plain method, answers directly
   session        CreateSession(a{sv}) -> o handle
                  NOTE: this is a Request. The session_handle comes back in the

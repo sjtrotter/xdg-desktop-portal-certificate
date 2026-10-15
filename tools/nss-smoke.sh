@@ -280,6 +280,7 @@ inner() {
 	PERM=$!
 	sleep 1
 
+	XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL="$(xdp_experimental_portals Certificate1)" \
 	"$XDP_BUILD/desktop-portal/xdg-desktop-portal" -v >"$LOGDIR/frontend.log" 2>&1 &
 	FE=$!
 	xdp_wait_for_name org.freedesktop.portal.Desktop "$FE" || {
@@ -480,7 +481,7 @@ inner() {
 export PIN LOGDIR REPO XDP_BUILD BACKEND MODULE_SO XDOTOOL SOFTHSM_MODULE SOFTHSM_DIR \
 	PHASES TOKEN_LABEL CERT_LABEL CERTUTIL MODUTIL TSTCLNT
 dbus-run-session -- bash -c \
-	"$(declare -f xdp_wait_for_name); $(declare -f phase_wanted); $(declare -f inner); inner"
+	"$(declare -f xdp_experimental_portals); $(declare -f xdp_wait_for_name); $(declare -f phase_wanted); $(declare -f inner); inner"
 rc=$?
 
 echo

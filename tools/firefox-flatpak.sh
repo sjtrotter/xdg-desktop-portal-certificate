@@ -81,8 +81,8 @@ fi
 # behind it. gdbus is used from the host: the interface list is the same one the
 # sandbox sees.
 if ! gdbus introspect --session --dest org.freedesktop.portal.Desktop \
-	--object-path /org/freedesktop/portal/desktop/experimental 2>/dev/null |
-	grep -q "org.freedesktop.portal.Certificate.X1"; then
+	--object-path /org/freedesktop/portal/desktop 2>/dev/null |
+	grep -q "org.freedesktop.portal.experimental.Certificate1"; then
 	die "the session's xdg-desktop-portal does not export the Certificate interface; run tools/dev-stack.sh --live --keep --no-e2e --pin-prompt=system first"
 fi
 if ! busctl --user list 2>/dev/null | grep -q "org.freedesktop.impl.portal.desktop.certificate"; then
@@ -103,8 +103,8 @@ else
 fi
 flatpak run "${RUN_ARGS[@]}" --command=gdbus "$APP" introspect --session \
 	--dest org.freedesktop.portal.Desktop \
-	--object-path /org/freedesktop/portal/desktop/experimental 2>/dev/null |
-	grep -q "org.freedesktop.portal.Certificate.X1" ||
+	--object-path /org/freedesktop/portal/desktop 2>/dev/null |
+	grep -q "org.freedesktop.portal.experimental.Certificate1" ||
 	die "the sandbox cannot see the Certificate interface on the portal bus"
 echo "${0##*/}: portal bus: Certificate interface visible from the sandbox"
 

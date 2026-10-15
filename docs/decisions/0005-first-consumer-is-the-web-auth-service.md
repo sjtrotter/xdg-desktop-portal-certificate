@@ -3,6 +3,8 @@
 Date: 2026-09-03
 Status: accepted (for the sketch), amended by [0010](0010-backend-only-frontend-lives-upstream.md)
 
+Superseded in part by [ADR 0012](0012-merged-experimental-portal-convention.md).
+
 ## Context
 
 A service like this needs a consumer before it needs a specification. Without one it is an interface

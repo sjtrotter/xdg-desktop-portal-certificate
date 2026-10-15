@@ -9,13 +9,14 @@
 # org.freedesktop.impl.portal.desktop.<backend>.
 #
 # xdg-desktop-portal activates this name when portals.conf (or UseIn) selects
-# certificate.portal for org.freedesktop.impl.portal.Certificate.X1.
+# certificate.portal for org.freedesktop.impl.portal.experimental.Certificate1.
 # APPLICATIONS HAVE NO REASON TO HOLD THIS NAME and are not expected to reach
 # it; see docs/IMPL-INTERFACE.md, "Why an application cannot call this".
 #
 # EXPERIMENTAL, and the interface it implements is an unmerged branch. On a machine
 # whose xdg-desktop-portal has never heard of that interface this file is inert:
-# nothing matches certificate.portal, so nothing ever activates this name.
+# nothing matches certificate.portal, so nothing ever activates this name. The
+# frontend that does know it also needs XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1.
 
 [D-BUS Service]
 Name=org.freedesktop.impl.portal.desktop.certificate
