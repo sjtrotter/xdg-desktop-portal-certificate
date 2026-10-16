@@ -2,11 +2,6 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * The redaction rules. The important tests here are the NEGATIVE ones: a
- * library error string carrying a PKCS#11 URI with a pin-value attribute must
- * be truncated before the URI, and caller-supplied text must not be able to
- * draw chrome of its own.
  */
 
 #include <glib.h>
@@ -26,8 +21,6 @@ static void test_error_text_is_truncated_before_a_uri(void)
 		{ "pkcs11:token=Foo;pin-value=1234", "(redacted)" },
 		{ "the module said pin-value=1234", "the module said (redacted)" },
 		{ "reading pin-source=/tmp/x failed", "reading (redacted)" },
-		/* THE EARLIEST MARKER, not the first one looked for. Searching for
-		 * "pkcs11:" first cut here and kept the PIN that came before it. */
 		{ "pin-value=1234 while opening pkcs11:token=Foo", "(redacted)" },
 		{ "loading pin-value=1234 from pkcs11:token=Foo", "loading (redacted)" },
 		{ "at pin-source=/tmp/x for pkcs11:token=Foo", "at (redacted)" },
@@ -43,8 +36,6 @@ static void test_error_text_is_truncated_before_a_uri(void)
 	}
 }
 
-/* Whatever else changes, the string "pin-value" must never survive the
- * redactor, because that is the attribute a PIN travels in. */
 static void test_no_pin_attribute_survives(void)
 {
 	static const char* const inputs[] = {
@@ -79,9 +70,6 @@ static void test_serials_are_reduced_to_four_characters(void)
 	g_assert_cmpstr(none, ==, "(none)");
 }
 
-/* NOTHING CALLER-SUPPLIED MAY DRAW ITS OWN CHROME. A reason that contains
- * newlines, control characters or bidi overrides must come out as one plain
- * line. */
 static void test_untrusted_text_is_flattened(void)
 {
 	g_autofree char* multiline =
@@ -99,8 +87,6 @@ static void test_untrusted_text_is_flattened(void)
 	g_assert_cmpstr(controls, ==, "a b");
 	g_assert_cmpstr(tabs, ==, "a b c");
 
-	/* U+202E RIGHT-TO-LEFT OVERRIDE is a format character and does not
-	 * survive. */
 	g_assert_nonnull(bidi);
 	g_assert_null(strstr(bidi, "\xe2\x80\xae"));
 }
@@ -111,12 +97,9 @@ static void test_untrusted_text_is_capped(void)
 	g_autofree char* capped = certificate_sanitize_untrusted_text(long_input, 20);
 
 	g_assert_nonnull(capped);
-	/* Twenty characters plus a one-character ellipsis. */
 	g_assert_cmpint(g_utf8_strlen(capped, -1), ==, 21);
 }
 
-/* Text that is empty once cleaned yields NULL, so that a caller cannot reserve
- * a labelled, framed area of the window with whitespace. */
 static void test_untrusted_text_that_is_only_whitespace(void)
 {
 	g_assert_null(certificate_sanitize_untrusted_text("   \n\t  ", 160));
@@ -132,10 +115,6 @@ static void test_invalid_utf8_does_not_escape(void)
 	g_assert_true(g_utf8_validate(out, -1, NULL));
 }
 
-/* THE LOGGING ENTRY POINTS TAKE NO FORMAT STRING. This test does not assert on
- * output; it exists so that the compiler checks the signatures stay as they
- * are, and so that a future certificate_log_printf() has to delete a test that
- * says why it must not exist. */
 static void test_logging_entry_points_are_structural(void)
 {
 	certificate_log_decision("test", "org.example.App", "derived_host", "client_auth", TRUE);
@@ -146,9 +125,6 @@ static void test_logging_entry_points_are_structural(void)
 	g_assert_true(TRUE);
 }
 
-/* A newline in an app id used to forge a second journal line. The app id is
- * frontend-established and upstream validates it, but "somebody else checked"
- * is not what the structural-redaction rule in redact.h promises. */
 static void test_logged_fields_are_escaped(void)
 {
 	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE, "*app_id=org.example.App\\x0aMESSAGE:*");
@@ -156,9 +132,6 @@ static void test_logged_fields_are_escaped(void)
 	g_test_assert_expected_messages();
 }
 
-/* A LONG RUN OF COMBINING MARKS is how one "character" is made to cover the
- * line above it. Accented text is legitimate and must survive; a hundred marks
- * on one base character must not. */
 static void test_combining_mark_runs_are_capped(void)
 {
 	g_autofree char* accented = certificate_sanitize_untrusted_text("e\xcc\x81t\xc3\xa9", 80);
@@ -173,12 +146,9 @@ static void test_combining_mark_runs_are_capped(void)
 
 	capped = certificate_sanitize_untrusted_text(attack->str, 200);
 	g_assert_nonnull(capped);
-	/* one base character plus at most the permitted run */
 	g_assert_cmpuint(g_utf8_strlen(capped, -1), <=, 5);
 }
 
-/* Every externally sourced label goes through this, and a value that is empty
- * once cleaned falls back rather than leaving a blank where a name should be. */
 static void test_display_text_falls_back(void)
 {
 	g_autofree char* empty = certificate_display_text("   \n\t ", 40, "unnamed token");
@@ -193,10 +163,6 @@ static void test_display_text_falls_back(void)
 	g_assert_null(strchr(flattened, '\n'));
 }
 
-/* Library error text is external text: it reaches a journal line and a D-Bus
- * error_message, so it is capped and its control characters are escaped like
- * every other field. A module that puts a newline in a message must not be able
- * to forge a second journal entry. */
 static void test_error_text_is_capped_and_escaped(void)
 {
 	g_autofree char* forged = certificate_redact_error_text("module said\nMESSAGE: forged");
@@ -209,7 +175,6 @@ static void test_error_text_is_capped_and_escaped(void)
 	g_assert_null(strchr(forged, '\n'));
 	g_assert_nonnull(strstr(forged, "\\x0a"));
 
-	/* The field cap plus its ellipsis, and nothing near the input's length. */
 	g_assert_cmpuint(strlen(capped), <=, 131);
 
 	both = certificate_redact_error_text(with_uri);

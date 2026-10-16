@@ -30,9 +30,7 @@ static gboolean strv_has_ci(char** strv, const char* needle)
 	return FALSE;
 }
 
-/* A certificate with no extended key usage extension is not restricted by one:
- * X.509 says the key may be used for any purpose. eku_oids is NULL in exactly
- * that case, which is why it is NULL rather than an empty array. */
+/* Absent EKU is unrestricted; an empty EKU array permits no purpose. */
 static gboolean eku_unrestricted(const CertificateCandidate* candidate)
 {
 	return candidate->eku_oids == NULL;
@@ -49,7 +47,6 @@ static gboolean eku_allows(const CertificateCandidate* candidate, const char* oi
 	return strv_has(candidate->eku_oids, oid);
 }
 
-/* No key usage extension means the key is not restricted by one. */
 static gboolean key_usage_allows_signing(const CertificateCandidate* candidate)
 {
 	if (candidate->key_usage == NULL)
@@ -59,8 +56,7 @@ static gboolean key_usage_allows_signing(const CertificateCandidate* candidate)
 	       strv_has(candidate->key_usage, "content_commitment");
 }
 
-/* The other half of an S/MIME pair. dataEncipherment is included because a few
- * issuers set it instead of keyEncipherment on a key-transport certificate. */
+/* Some S/MIME issuers use dataEncipherment for key transport. */
 static gboolean key_usage_allows_decryption(const CertificateCandidate* candidate)
 {
 	if (candidate->key_usage == NULL)
@@ -70,9 +66,7 @@ static gboolean key_usage_allows_decryption(const CertificateCandidate* candidat
 	       strv_has(candidate->key_usage, "data_encipherment");
 }
 
-/* Can this candidate sign at all? The card is the authority on that, not the
- * certificate's key usage -- but the key usage still restricts what the
- * signature may be for. */
+/* Key capabilities and certificate usage both constrain signing. */
 static gboolean candidate_signs(const CertificateCandidate* candidate)
 {
 	return candidate->can_sign && key_usage_allows_signing(candidate);
@@ -89,9 +83,6 @@ CertificateOperations certificate_purpose_operations(const CertificateCandidate*
 	switch (purpose)
 	{
 		case CERTIFICATE_PURPOSE_CLIENT_AUTH:
-			/* clientAuth, or the Microsoft smart-card logon OID that PIV
-			 * authentication certificates carry, or no EKU restriction at all
-			 * together with a key usage that permits signing. */
 			if (!candidate_signs(candidate))
 				return CERTIFICATE_OPERATION_NONE;
 			if (eku_unrestricted(candidate) ||
@@ -105,8 +96,6 @@ CertificateOperations certificate_purpose_operations(const CertificateCandidate*
 				return CERTIFICATE_OPERATION_NONE;
 			if (eku_unrestricted(candidate))
 				return CERTIFICATE_OPERATION_SIGN;
-			/* A certificate marked ONLY for server authentication is not a
-			 * signing credential the user should be offered here. */
 			if (strv_has(candidate->eku_oids, CERTIFICATE_EKU_ANY) ||
 			    strv_has(candidate->eku_oids, CERTIFICATE_EKU_CODE_SIGNING) ||
 			    strv_has(candidate->eku_oids, CERTIFICATE_EKU_EMAIL_PROTECTION) ||
@@ -117,17 +106,7 @@ CertificateOperations certificate_purpose_operations(const CertificateCandidate*
 
 		case CERTIFICATE_PURPOSE_EMAIL:
 		{
-			/* Email is the one purpose with a specific EKU, and a certificate
-			 * with no EKU at all does qualify -- but one restricted to
-			 * something else does not.
-			 *
-			 * It is also the one purpose that does not end in a signature.
-			 * S/MIME uses one certificate to sign a message and another to
-			 * unwrap a received one, and on a card those are separate keys in
-			 * separate slots: a PIV key-management certificate is
-			 * keyEncipherment with no digitalSignature, and the key behind it
-			 * will decrypt and never sign. Requiring can_sign here made that
-			 * certificate match nothing at all. */
+			/* S/MIME supports separate signing and decryption credentials, including encipherment-only keys. */
 			CertificateOperations operations = CERTIFICATE_OPERATION_NONE;
 
 			if (!eku_allows(candidate, CERTIFICATE_EKU_EMAIL_PROTECTION))
@@ -142,10 +121,7 @@ CertificateOperations certificate_purpose_operations(const CertificateCandidate*
 		}
 
 		case CERTIFICATE_PURPOSE_SSH:
-			/* SSH does not look at X.509 extensions at all: it uses the raw
-			 * key. Any RSA or EC key that will sign qualifies, which is why
-			 * this is its own purpose rather than "signing with extra steps".
-			 * The key usage is not consulted for the same reason. */
+			/* SSH uses the raw signing key without consulting X.509 usage restrictions. */
 			if (!candidate->can_sign)
 				return CERTIFICATE_OPERATION_NONE;
 			if (g_strcmp0(candidate->key_type, "RSA") == 0 ||
@@ -187,11 +163,7 @@ static gboolean issuer_matches(const CertificateCandidate* candidate, GPtrArray*
 	return FALSE;
 }
 
-/* "key types and signature schemes the CALLER can use". A value matches when it
- * names the key type ("RSA", "EC"), or one of the mechanisms this candidate
- * actually supports ("ECDSA", "RSA_PSS", ...). Anything else is treated as a
- * scheme name whose prefix says which key it needs, which is how TLS-flavoured
- * names like "ecdsa_secp256r1_sha256" and "rsa_pss_rsae_sha256" arrive. */
+/* Accept key types, supported mechanisms or TLS signature-scheme prefixes. */
 static gboolean key_algorithm_matches(const CertificateCandidate* candidate, char** algorithms)
 {
 	if (algorithms == NULL || algorithms[0] == NULL)
@@ -259,8 +231,7 @@ gboolean certificate_filter_matches(const CertificateCandidate* candidate,
 
 	if (filter->piv_slot != NULL && *filter->piv_slot != '\0')
 	{
-		/* A candidate whose PIV slot could not be determined is NOT a match for
-		 * a request that named one. Guessing here would offer the wrong key. */
+		/* An unknown PIV slot cannot satisfy an explicit slot filter. */
 		if (g_strcmp0(candidate->piv_slot, filter->piv_slot) != 0)
 			return FALSE;
 	}
@@ -283,9 +254,7 @@ GPtrArray* certificate_filter_apply(GPtrArray* candidates, const CertificateFilt
 		if (!certificate_filter_matches(candidate, filter))
 			continue;
 
-		/* RULE 1. Expired and not-yet-valid certificates are OFFERED and
-		 * MARKED, never hidden -- but they sort below the ones that work, so
-		 * that a working credential is never buried under a broken one. */
+		/* Keep expired and not-yet-valid certificates selectable after currently valid ones. */
 		if (certificate_candidate_is_expired(candidate, now) ||
 		    certificate_candidate_is_not_yet_valid(candidate, now))
 			g_ptr_array_add(unusable, certificate_candidate_ref(candidate));
@@ -337,9 +306,7 @@ gboolean certificate_filter_parse(GVariant* options, CertificatePurpose purpose,
 	if (filter == NULL)
 		return TRUE;
 
-	/* PRESENT WITH THE WRONG TYPE IS NOT ABSENT. It used to be: a mistyped
-	 * certificate_filter was silently dropped, and the chooser then offered
-	 * certificates the caller had said it could not use. */
+	/* A present filter with the wrong type must not be treated as absent. */
 	if (!g_variant_is_of_type(filter, G_VARIANT_TYPE_VARDICT))
 	{
 		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
@@ -354,7 +321,6 @@ gboolean certificate_filter_parse(GVariant* options, CertificatePurpose purpose,
 		GVariantIter iter;
 		const char* key = NULL;
 
-		/* A key nobody understood may have been the one that said "less". */
 		g_variant_iter_init(&iter, filter);
 		while (g_variant_iter_next(&iter, "{&sv}", &key, NULL))
 		{
@@ -367,9 +333,7 @@ gboolean certificate_filter_parse(GVariant* options, CertificatePurpose purpose,
 		}
 	}
 
-	/* A filter is REJECTED rather than half-applied. Ignoring a key that was
-	 * not understood would offer credentials the caller said it could not use,
-	 * and the caller would then fail at the handshake with no way to know why. */
+	/* Reject the whole filter if any constraint is invalid or unknown. */
 	issuers = g_variant_lookup_value(filter, "issuers", NULL);
 	if (issuers != NULL)
 	{

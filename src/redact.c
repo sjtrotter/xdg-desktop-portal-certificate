@@ -10,15 +10,9 @@
 
 static gboolean certificate_verbose = FALSE;
 
-/* The longest any externally sourced field may be in a log line. */
 #define CERTIFICATE_LOG_FIELD_MAX 128
 
-/* EVERY EXTERNAL STRING THAT REACHES A LOG LINE GOES THROUGH THIS. Structural
- * redaction stops a secret being formatted into a message; it does not by
- * itself stop a newline in an app id from forging a second journal entry, or a
- * kilobyte of text from filling the journal. Control characters become \xNN,
- * the result is capped, and NULL becomes "(none)" so that no call site has to
- * remember to. */
+/* Escape controls and cap every external log field to prevent forged entries and unbounded output. */
 static char* field(const char* text)
 {
 	GString* out = NULL;
@@ -114,14 +108,7 @@ char* certificate_redact_error_text(const char* text)
 	if (text == NULL)
 		return g_strdup("(no message)");
 
-	/* p11-kit, OpenSC and GnuTLS all put PKCS#11 URIs into error strings, and a
-	 * URI may carry a pin-value attribute. Truncating is cheap and correct;
-	 * passing library error text through unmodified is how a PIN reaches a
-	 * journal. Both cases are covered: the scheme in a URI, and the bare
-	 * attribute name in case some library prints it on its own.
-	 *
-	 * THE EARLIEST OF THE THREE, not the first one looked for: "pin-value=1234
-	 * for pkcs11:..." searched for the scheme first and kept the PIN. */
+	/* Truncate at the earliest URI or PIN attribute marker because library errors may contain PINs. */
 	for (gsize i = 0; i < G_N_ELEMENTS(markers); i++)
 	{
 		const char* hit = strstr(text, markers[i]);
@@ -130,9 +117,6 @@ char* certificate_redact_error_text(const char* text)
 			cut = hit;
 	}
 
-	/* Library text is external text: it is capped and its control characters
-	 * are escaped like every other field, because this string reaches a log
-	 * line and a D-Bus error_message. */
 	if (cut == NULL)
 		return field(text);
 
@@ -151,9 +135,7 @@ char* certificate_redact_serial(const char* serial)
 	if (serial == NULL || *serial == '\0')
 		return g_strdup("(none)");
 
-	/* A card serial is a stable hardware identifier. The last four characters
-	 * are enough for a human to tell two cards apart in a log and are not
-	 * enough to identify the card anywhere else. */
+	/* Reveal only the serial suffix for operator recognition. */
 	length = strlen(serial);
 	if (length <= 4)
 		return g_strdup("****");

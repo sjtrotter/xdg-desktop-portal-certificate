@@ -2,17 +2,8 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * THE PIN PROMPT, MINUS THE WINDOW. Everything that decides anything is here:
- * the locked buffer, the login worker, the attempt cap, the FINAL_TRY rule, the
- * flag re-read, the serialisation queue, the deferred cancel and the login
- * timeout. The two implementations that actually ask a human -- ui/pin-gtk.c
- * and ui/pin-system.c -- collect characters and draw warnings, and decide
- * nothing.
  */
 
-/* explicit_bzero(), posix_memalign(), mlock(), madvise(): the PIN buffer needs
- * all four. */
 #define _GNU_SOURCE 1
 
 #include "pin.h"
@@ -38,13 +29,7 @@ gboolean certificate_ui_has_display(void)
 	return ui_has_display;
 }
 
-/* ------------------------------------------------------- choosing a prompt */
-
-/* THE MODULE DEFAULT IS THE IN-PROCESS WINDOW, and that is a safety property
- * rather than a preference: a test, or anything else that links this code
- * without asking, must not start putting prompts on the operator's real
- * session shell because a name happened to be on the bus. main() is the only
- * caller that opts in to AUTO. */
+/* Linking the PIN module defaults to GTK; only main() opts into automatic system-prompt selection. */
 static CertificatePinPromptKind pin_prompt_kind = CERTIFICATE_PIN_PROMPT_GTK;
 static const PinPromptImpl* pin_prompt_resolved = NULL;
 
@@ -67,9 +52,7 @@ gboolean certificate_pin_set_prompt_kind(const char* name, GError** error)
 	return TRUE;
 }
 
-/* RESOLVED ONCE, AND THE ANSWER IS LOGGED. Which process drew the window the
- * user typed a PIN into is exactly the sort of thing that must not be a
- * mystery afterwards. */
+/* Resolve once and log which process will draw the PIN prompt. */
 static const PinPromptImpl* pin_impl(void)
 {
 	if (pin_prompt_resolved != NULL)
@@ -82,9 +65,6 @@ static const PinPromptImpl* pin_impl(void)
 			pin_prompt_resolved = certificate_pin_impl_system();
 			break;
 #else
-			/* --pin-prompt=system does not exist in a build without gcr, so
-			 * this is unreachable from the command line; it stays as the
-			 * answer for anything that sets the kind programmatically. */
 			pin_prompt_resolved = certificate_pin_impl_gtk();
 			break;
 #endif
@@ -115,21 +95,7 @@ const char* certificate_pin_prompt_name(void)
 	return pin_impl()->name;
 }
 
-/* ------------------------------------------------------------- PIN buffer */
-
-/* Page-aligned, mlock()ed where the kernel and the rlimit allow, marked
- * MADV_DONTDUMP so that it is left out of a core dump even if one is somehow
- * produced, and wiped with explicit_bzero() on every exit path.
- *
- * MLOCK FAILURE POLICY, stated because it is a real one: mlock() failing is NOT
- * fatal and does not refuse the login. The default RLIMIT_MEMLOCK is small and a
- * desktop session may have spent it, and refusing to unlock a card because the
- * kernel would not pin one page would be a denial of service with no security
- * gain -- the page is still wiped, and the process still has core dumps and
- * ptrace attach disabled (see main.c). It is warned about ONCE per process, at
- * message level, so that the difference between "not written to swap" and
- * "probably not written to swap" is in the journal rather than assumed.
- * docs/SECURITY.md says the same thing in the same words. */
+/* PIN buffer locking, dump exclusion and wipe guarantees are documented in docs/SECURITY.md. */
 typedef struct
 {
 	char* data;
@@ -137,13 +103,9 @@ typedef struct
 	gboolean locked;
 } PinBuffer;
 
-/* The longest PIN this backend will send to a token. It is the ENFORCED
- * maximum, not a hint: pin_buffer_set() refuses anything longer. */
 #define PIN_BUFFER_CAPACITY 512
 
-/* Attempts one prompt may spend before it gives up and hands the outcome back
- * to the caller. A PIN prompt that offers unbounded retries is a prompt in
- * which a card can be walked all the way to locked. */
+/* Limit attempts per prompt to avoid unbounded token retries. */
 #define PIN_MAX_ATTEMPTS 3
 
 static gboolean pin_mlock_warned = FALSE;
@@ -167,13 +129,10 @@ static PinBuffer* pin_buffer_new(void)
 	if (!buffer->locked && !pin_mlock_warned)
 	{
 		pin_mlock_warned = TRUE;
-		/* The page is still wiped and still excluded from core dumps. */
 		g_message("pin-buffer-unlocked detail=mlock-failed");
 	}
 
-	/* Best effort and unchecked on purpose: an older kernel that does not know
-	 * the advice simply keeps the page dumpable, which main.c has already made
-	 * moot by disabling dumps outright. */
+	/* MADV_DONTDUMP is best effort; main.c also disables process dumps. */
 #ifdef MADV_DONTDUMP
 	(void) madvise(buffer->data, buffer->capacity, MADV_DONTDUMP);
 #endif
@@ -222,10 +181,7 @@ static gboolean pin_buffer_set(PinBuffer* buffer, const char* text)
 	return TRUE;
 }
 
-/* A PRIVATE COPY FOR THE WORKER. The login task owns this one and wipes and
- * frees it itself, so that cancelling the prompt cannot pull the buffer out
- * from under a C_Login that is already in flight -- which would hand the card a
- * truncated PIN and spend an attempt on it. */
+/* The worker owns and wipes a private PIN copy that survives prompt cancellation. */
 static PinBuffer* pin_buffer_dup(const PinBuffer* source)
 {
 	PinBuffer* copy = pin_buffer_new();
@@ -242,21 +198,7 @@ static PinBuffer* pin_buffer_dup(const PinBuffer* source)
 	return copy;
 }
 
-/* --------------------------------------------------------- the login timeout */
-
-/* HOW LONG A SUBMITTED C_Login MAY GO UNANSWERED before the interaction is
- * given up on. Zero disables it. A wedged middleware daemon is a normal
- * Tuesday, and before this the prompt simply stayed on the screen forever with
- * a spinner in it.
- *
- * WHAT IT DOES NOT DO, and docs/SECURITY.md says the same: it does not
- * interrupt the module. PKCS#11 has no way to withdraw a C_Login, so the
- * attempt is spent whatever happens here, and the CALLER IS STILL ANSWERED ONLY
- * WHEN THE MODULE RETURNS -- answering earlier would mean freeing, on the main
- * thread, the interaction a worker thread is still reading through. What the
- * timeout buys is that the prompt comes down at a known moment, the failure has
- * a reason of its own, and a login that lands afterwards is ABANDONED rather
- * than being handed to whoever is still waiting. */
+/* Timeout hides the prompt but waits for C_Login to return; discard and undo any late success. */
 #define PIN_LOGIN_TIMEOUT_DEFAULT_SECONDS 60
 
 static guint pin_login_timeout_seconds = PIN_LOGIN_TIMEOUT_DEFAULT_SECONDS;
@@ -271,11 +213,7 @@ guint certificate_pin_login_timeout(void)
 	return pin_login_timeout_seconds;
 }
 
-/* -------------------------------------------------------------- the prompt */
-
-/* PROMPTS ARE SERIALISED PROCESS-WIDE. Two grants must not race two PIN
- * prompts at the user: whichever arrives second waits, and a user who is asked
- * for one PIN is never looking at two prompts wondering which is real. */
+/* Serialize PIN prompts process-wide across grants. */
 static GQueue pin_queue = G_QUEUE_INIT;
 static PinPrompt* pin_active = NULL;
 
@@ -295,9 +233,7 @@ static void pin_prompt_free(PinPrompt* prompt)
 	g_free(prompt->purpose_display);
 	g_clear_object(&prompt->cancellable);
 
-	/* LAST, because it is what tells the caller nothing will read login_data
-	 * again: the done callback has run, and so has the abandon callback that
-	 * follows it on a cancelled login that succeeded anyway. */
+	/* Free login_data after both done and any abandon callback. */
 	if (prompt->login_data_free != NULL)
 		prompt->login_data_free(prompt->login_data);
 
@@ -333,8 +269,6 @@ void certificate_pin_prompt_unref(PinPrompt* prompt)
 	pin_prompt_unref(prompt);
 }
 
-/* Everything that has to happen on the main thread once the answer is known,
- * and NOT ONE STEP OF IT while a worker is still reading this object. */
 void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outcome)
 {
 	CertificatePinDone done = NULL;
@@ -345,15 +279,7 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 	if (prompt->finished)
 		return;
 
-	/* A CANCEL OR A TIMEOUT WHILE C_LOGIN IS IN FLIGHT. The prompt goes away,
-	 * because that is what was asked for, but the callback, the buffer free and
-	 * the object free all wait for the worker: the alternative is a
-	 * use-after-free across two threads on a page the token is reading a PIN
-	 * out of.
-	 *
-	 * The card operation itself is NOT cancellable. PKCS#11 has no way to
-	 * withdraw a C_Login, so the attempt that was submitted is spent whatever
-	 * the user does with the prompt. */
+	/* Cancellation cannot withdraw C_Login; retain buffers and defer completion until the worker returns. */
 	if (prompt->login_in_flight)
 	{
 		if (!prompt->cancel_deferred)
@@ -379,9 +305,7 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 	abandon = prompt->login_succeeded && outcome != CERTIFICATE_PIN_OK ? prompt->abandon : NULL;
 	login_data = prompt->login_data;
 
-	/* THE ORDER MATTERS: disconnect first, so that no new idle can be queued
-	 * behind the removal below. g_cancellable_disconnect() blocks until a
-	 * handler already running on another thread has returned. */
+	/* Disconnect before idle removal so concurrent cancellation cannot queue another source. */
 	if (prompt->cancel_id != 0)
 	{
 		g_cancellable_disconnect(prompt->cancellable, prompt->cancel_id);
@@ -400,8 +324,7 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 		prompt->login_timeout_id = 0;
 	}
 
-	/* The buffer is wiped before anything else can run, including the caller's
-	 * callback. */
+	/* Wipe the buffer before invoking the caller's callback. */
 	pin_buffer_wipe(prompt->buffer_opaque);
 
 	prompt->impl->close(prompt);
@@ -420,28 +343,20 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 
 	done(outcome, user_data);
 
-	/* A LOGIN NOBODY IS GOING TO USE IS A LOGIN THAT HAS TO BE UNDONE. The card
-	 * is slower than the Escape key: an attempt submitted before the cancel can
-	 * succeed after it, and PKCS#11 has no way to withdraw one. The prompt said
-	 * the request was cancelled, so the token must not be left authenticated
-	 * for the rest of the grant -- the next Sign would otherwise go through
-	 * with no prompt and no consent. Called AFTER done(), so that the caller
-	 * has already answered its waiters and this sees the settled state. */
+	/* After done(), abandon a successful cancelled login so it cannot authorize later operations. */
 	if (abandon != NULL)
 	{
 		certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, NULL, "abandoning-cancelled-login");
 		abandon(login_data);
 	}
 
-	/* The creation reference. Any worker or queued idle still holding one keeps
-	 * the object alive until it drops it. */
 	pin_prompt_unref(prompt);
 }
 
 typedef struct
 {
-	PinPrompt* prompt; /* a reference the task owns */
-	PinBuffer* buffer; /* a PRIVATE COPY the task owns and wipes */
+	PinPrompt* prompt; /* Owned task reference. */
+	PinBuffer* buffer; /* Private PIN copy owned and wiped by the task. */
 	gboolean protected_path;
 } LoginTask;
 
@@ -461,18 +376,14 @@ static void login_thread(GTask* task, gpointer source, gpointer task_data,
 	g_autoptr(GError) error = NULL;
 	const char* pin = data->protected_path || data->buffer == NULL ? NULL : data->buffer->data;
 
-	/* C_Login on a card takes hundreds of milliseconds and can block for as
-	 * long as the middleware wants. It never runs on the main thread. */
+	/* C_Login may block indefinitely and must run on a worker. */
 	if (data->prompt->login(pin, data->prompt->login_data, &error))
 	{
 		g_task_return_boolean(task, TRUE);
 		return;
 	}
 
-	/* THE FLAGS ARE RE-READ HERE, on this thread, while the failure is fresh:
-	 * CKF_USER_PIN_FINAL_TRY is normally set BY the attempt that just failed,
-	 * and a prompt that keeps showing the flags captured at discovery will
-	 * never warn anybody. */
+	/* Refresh flags after refusal because the failed attempt may newly set FINAL_TRY. */
 	if (data->prompt->refresh != NULL &&
 	    g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT))
 		data->prompt->refresh(data->prompt->token, data->prompt->login_data);
@@ -488,9 +399,7 @@ static void set_busy(PinPrompt* prompt, gboolean busy)
 		prompt->impl->busy(prompt, busy);
 }
 
-/* The remaining-attempts hint, and NOTHING ELSE. PKCS#11 has no portable way to
- * ask a token how many tries are left, so this reports only the three flags the
- * standard defines, and never a number. A wrong count is worse than none. */
+/* PKCS#11 exposes retry-state flags without a portable remaining-attempt count. */
 const char* certificate_pin_prompt_retry_hint(const PinPrompt* prompt)
 {
 	if (prompt->token->pin_locked)
@@ -505,7 +414,7 @@ const char* certificate_pin_prompt_retry_hint(const PinPrompt* prompt)
 
 const char* certificate_pin_prompt_final_try_warning(void)
 {
-	return "This is the LAST attempt before the token locks. Confirm to use it, or Cancel.";
+	return "Token will lock if this last attempt fails. Confirm to continue, or Cancel.";
 }
 
 const char* certificate_pin_prompt_heading(const PinPrompt* prompt)
@@ -522,9 +431,7 @@ const char* certificate_pin_prompt_protected_note(void)
 
 gboolean certificate_pin_prompt_needs_final_confirm(PinPrompt* prompt)
 {
-	/* THE LAST ATTEMPT IS NOT SPENT ON A SINGLE PRESS. When the token says
-	 * CKF_USER_PIN_FINAL_TRY, the next refusal locks the card, so the prompt
-	 * says so and requires the user to ask a second time. */
+	/* FINAL_TRY requires explicit second confirmation before submission. */
 	if (!prompt->token->pin_final_try || prompt->final_try_confirmed)
 		return FALSE;
 
@@ -549,9 +456,6 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 	if (ok)
 		prompt->login_succeeded = TRUE;
 
-	/* The prompt was closed, Escape was pressed, Close() arrived, or the login
-	 * timeout ran out while the card was busy. The answer that was asked for is
-	 * given now that nothing is reading the buffer any more. */
 	if (prompt->cancel_deferred)
 	{
 		prompt->cancel_deferred = FALSE;
@@ -582,9 +486,6 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 	{
 		certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, NULL, "retry-offered");
 
-		/* The flags were re-read on the worker thread after the refusal, so the
-		 * warning the implementation is about to draw is about the state the
-		 * token is in NOW. */
 		prompt->final_try_confirmed = FALSE;
 
 		if (prompt->token->pin_locked)
@@ -596,15 +497,11 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 		if (prompt->protected_path)
 		{
-			/* A protected authentication path cannot be retried from here: the
-			 * reader owns the interaction. */
+			/* The reader owns protected-path interaction, so this UI cannot retry it. */
 			certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_INCORRECT);
 			return;
 		}
 
-		/* THE PROMPT DOES NOT OFFER UNBOUNDED RETRIES. Three refused attempts
-		 * is where it stops asking; the caller can ask again, which makes a new
-		 * decision rather than a habit. */
 		if (prompt->attempts >= PIN_MAX_ATTEMPTS)
 		{
 			certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, NULL, "attempt-cap");
@@ -612,8 +509,7 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 			return;
 		}
 
-		/* RETRIES ARE USER-INITIATED. The implementation asks again with the
-		 * field cleared; nothing here spends another attempt on its own. */
+		/* Retries require user input after the entry has been cleared. */
 		pin_buffer_wipe(prompt->buffer_opaque);
 		prompt->impl->retry(prompt, "That PIN was not accepted. Try again.");
 		return;
@@ -654,16 +550,7 @@ gboolean certificate_pin_prompt_hold(PinPrompt* prompt, const char* pin)
 	if (prompt->finished || prompt->login_in_flight)
 		return FALSE;
 
-	/* AN EMPTY PIN NEVER REACHES C_Login, AND THE RULE IS HERE so that both
-	 * implementations obey it. A stray Return in the shell's prompt used to
-	 * arrive as "", be held, be submitted, and SPEND AN ATTEMPT: PKCS#11 says
-	 * nothing about how a token counts a zero-length PIN, and the ones that
-	 * count it as a failure are the ones where the counter matters. The window
-	 * had its own check for this and the prompter path did not, which is
-	 * exactly the shape of bug a shared rule in a shared place prevents.
-	 *
-	 * It is not a refusal of the interaction: the implementation is asked
-	 * again, with a warning, on the prompt that is already up. */
+	/* Empty PINs rearm the prompt without submission because a token may count them as failed attempts. */
 	if (pin == NULL || *pin == '\0')
 	{
 		prompt->impl->retry(prompt, "Enter the PIN for this token.");
@@ -672,7 +559,7 @@ gboolean certificate_pin_prompt_hold(PinPrompt* prompt, const char* pin)
 
 	if (!pin_buffer_set(prompt->buffer_opaque, pin))
 	{
-		prompt->impl->retry(prompt, "That is longer than any PIN this backend will send.");
+		prompt->impl->retry(prompt, "PIN exceeds the supported length.");
 		return FALSE;
 	}
 
@@ -703,8 +590,7 @@ void certificate_pin_prompt_submit(PinPrompt* prompt)
 		}
 	}
 
-	/* From here the PIN is in the task's own page and nowhere else this module
-	 * owns. */
+	/* Only the task's private page retains this module's PIN copy after submission. */
 	pin_buffer_wipe(prompt->buffer_opaque);
 
 	prompt->attempts++;
@@ -733,16 +619,7 @@ static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 {
 	PinPrompt* prompt = user_data;
 
-	/* A cancellation is delivered on whatever thread called
-	 * g_cancellable_cancel(). Today that is always the main thread -- no
-	 * skeleton in this backend sets
-	 * G_DBUS_INTERFACE_SKELETON_FLAGS_HANDLE_METHOD_INVOCATIONS_IN_THREAD, so
-	 * every Close() handler runs on the main context -- and this function is
-	 * written not to depend on that: it touches no widget and queues an idle.
-	 * g_cancellable_disconnect() in certificate_pin_prompt_answer() blocks
-	 * until this returns, so the prompt is alive here, and the idle takes its
-	 * own reference because the object may be finished and freed before the
-	 * idle is dispatched. */
+	/* Cancellation may run off-thread; queue an idle with its own reference and touch no widgets here. */
 	if (prompt->cancel_idle != 0)
 		return;
 
@@ -770,12 +647,7 @@ void certificate_pin_login_full(CertificateToken* token, const char* parent_wind
 	PinPrompt* prompt = NULL;
 	const PinPromptImpl* impl = pin_impl();
 
-	/* NEVER READ A PIN FROM STDIN. With no display there is no way for THIS
-	 * process to ask, and inventing one would be a trusted prompt nobody can
-	 * see. The system prompter is the exception that proves the rule: the
-	 * window is the shell's, so this process needs no display of its own -- and
-	 * the shell is still a graphical session, which is why the answer is
-	 * "no_display" rather than "headless works now". */
+	/* Never read PINs from stdin; GTK requires a display and system prompts require a graphical prompter. */
 	if (impl->needs_display && !certificate_ui_has_display())
 	{
 		done(CERTIFICATE_PIN_NO_DISPLAY, user_data);
@@ -816,8 +688,7 @@ void certificate_pin_login_full(CertificateToken* token, const char* parent_wind
 
 	if (prompt->buffer_opaque == NULL)
 	{
-		/* The answer first, so that login_data_free -- which pin_prompt_free()
-		 * calls -- is last here too. */
+		/* Deliver the answer before the last reference can free login_data. */
 		done(CERTIFICATE_PIN_DEVICE_ERROR, user_data);
 		pin_prompt_unref(prompt);
 		return;

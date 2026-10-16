@@ -19,22 +19,16 @@
 
 #define PORTAL_SLOT_ID 1UL
 
-/* A digest, and nothing else, reaches a mechanism that does not hash: 64 bytes
- * of SHA-512, or a 51-byte DigestInfo. The cap is what keeps a caller from
- * buffering a message here in the belief that it will be hashed. */
+/* Non-hashing mechanisms accept only bounded digest input. */
 #define PRE_HASHED_LIMIT 512
 
-/* The 36 bytes of MD5 || SHA1 that TLS 1.0 and 1.1 sign with CKM_RSA_PKCS. It
- * has no hash name the portal will accept, and there is nothing to fall back
- * to; see docs/decisions/0011-client-side-pkcs11-module.md. */
+/* TLS 1.0 and 1.1 MD5 || SHA1 has no portal hash name; see docs/decisions/0011-client-side-pkcs11-module.md. */
 #define TLS10_MD5_SHA1_LENGTH 36
 
 typedef struct
 {
 	CK_SESSION_HANDLE handle;
-	/* WHICH open this is, and not which handle: C_Initialize restarts the
-	 * handles at 1, so a handle taken before a wait can name somebody else's
-	 * session afterwards. The serial never restarts. */
+	/* Session serials never restart, even when C_Initialize reuses handles. */
 	guint serial;
 	CK_FLAGS flags;
 
@@ -58,17 +52,12 @@ typedef struct
 } PortalSession;
 
 static GMutex module_lock;
-/* Signalled when an acquire that ran with module_lock released has finished,
- * and when finalization begins. */
 static GCond module_acquire_cond;
 static gboolean module_acquiring;
 static gboolean module_initialized;
-/* WHICH C_Initialize this is. A search that waited for someone else's chooser
- * wakes into whatever the module has become meanwhile, which may be a different
- * initialization altogether. */
+/* The lifecycle generation distinguishes module initializations across unlocked waits. */
 static guint module_lifecycle;
-/* Set before C_Finalize releases the lock to wait. Waiters give up on it and
- * nothing new starts. */
+/* Finalization blocks new work before releasing the lock. */
 static gboolean module_finalizing;
 static guint module_session_serial;
 static PortalClient* module_client;
@@ -82,8 +71,6 @@ static gboolean module_logged_in;
 static gint64 module_refusal_time;
 static guint module_refusal_fingerprint;
 static char module_serial[PKCS11_PORTAL_TOKEN_SERIAL_SIZE + 1];
-
-/* --------------------------------------------------------------- utilities */
 
 static void pad_field(CK_UTF8CHAR* field, gsize size, const char* value)
 {
@@ -158,11 +145,7 @@ static PortalSession* session_lookup(CK_SESSION_HANDLE handle)
 	return g_hash_table_lookup(module_sessions, GUINT_TO_POINTER(handle));
 }
 
-/** The session @handle named when @lifecycle and @serial were taken, or NULL if
- *  it is no longer that session: the module was finalized, reinitialized, or
- *  the session was closed and its handle handed out again. Every wait in this
- *  file is followed by one of these, because the lock is not held across one
- *  and a handle on its own says nothing afterwards. */
+/** Revalidate lifecycle and session serial after every unlocked wait because handles can be reused. */
 static PortalSession* session_revalidate(CK_SESSION_HANDLE handle, guint lifecycle,
                                          guint serial)
 {
@@ -177,8 +160,6 @@ static PortalSession* session_revalidate(CK_SESSION_HANDLE handle, guint lifecyc
 
 	return session;
 }
-
-/* ------------------------------------------------------------- grant state */
 
 static void drop_objects(void)
 {
@@ -201,7 +182,7 @@ static gboolean grant_still_good(void)
 
 	if (portal_client_grant_gone(module_client, module_grant))
 	{
-		g_debug("the grant was invalidated");
+		g_debug("Grant invalidated");
 		drop_objects();
 		return FALSE;
 	}
@@ -209,7 +190,7 @@ static gboolean grant_still_good(void)
 	if (module_grant->expires_at != 0 &&
 	    g_get_real_time() / G_USEC_PER_SEC >= module_grant->expires_at)
 	{
-		g_debug("the grant expired");
+		g_debug("Grant expired");
 		drop_objects();
 		return FALSE;
 	}
@@ -217,18 +198,7 @@ static gboolean grant_still_good(void)
 	return TRUE;
 }
 
-/** Acquire a credential if this search could use one. Returns FALSE when there
- *  is nothing to search, which is a zero-object answer and never an error.
- *  @handle, @lifecycle and @serial are the caller's session as it was before
- *  any waiting started.
- *
- *  CALLED WITH module_lock HELD, AND RELEASES IT ACROSS THE ACQUIRE ITSELF. The
- *  chooser is on screen for as long as the person takes -- up to the request
- *  timeout, five minutes -- and every other entry point in this module takes
- *  that lock, so holding it here wedges the whole of a multithreaded consumer's
- *  crypto stack. Nothing read before the acquire may be believed after it:
- *  another thread can have dropped the objects or finalized the module
- *  meanwhile, and the caller's own PKCS#11 session can have been closed. */
+/** Called with module_lock held; releases it during acquisition, so all prior state requires revalidation. */
 static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_HANDLE handle,
                              guint lifecycle, guint serial)
 {
@@ -237,15 +207,10 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_
 	PortalGrant* grant;
 	guint fingerprint;
 
-	/* ONE ACQUIRE AT A TIME. Two threads searching is one person, one chooser
-	 * and one grant; the second waits and then finds the first one's. */
+	/* Concurrent searches share one acquisition and grant. */
 	while (module_acquiring && !module_finalizing)
 		g_cond_wait(&module_acquire_cond, &module_lock);
 
-	/* THE WAIT IS WHERE THE MODULE CHANGES UNDERNEATH THIS CALL. A search that
-	 * queued behind someone else's chooser must not open a second one for a
-	 * session that has been closed, or for a module that has been finalized and
-	 * initialized again since -- which hands the same handles out afresh. */
 	if (module_acquiring || session_revalidate(handle, lifecycle, serial) == NULL)
 		return FALSE;
 
@@ -272,8 +237,7 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_
 			module_refusal_time = 0;
 	}
 
-	/* Pinned for the unlocked stretch: C_Finalize waits for module_acquiring
-	 * before it frees the client, so this pointer stays good. */
+	/* C_Finalize waits for module_acquiring before freeing the client. */
 	client = module_client;
 	module_acquiring = TRUE;
 	g_mutex_unlock(&module_lock);
@@ -296,9 +260,7 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_
 		return FALSE;
 	}
 
-	/* Finalized while the chooser was up, or the session that asked is gone.
-	 * There is nowhere to put the grant and nobody to use it, so it goes back
-	 * rather than being leaked to the card. */
+	/* Release grants acquired after finalization or closure of the requesting session. */
 	if (module_client != client || session_revalidate(handle, lifecycle, serial) == NULL)
 	{
 		portal_client_release(client, grant);
@@ -306,8 +268,6 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_
 		return FALSE;
 	}
 
-	/* Someone published one while the lock was down. Ours is a second grant on
-	 * a module that holds one; the first one wins. */
 	if (module_grant != NULL)
 	{
 		portal_client_release(client, grant);
@@ -320,15 +280,13 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_
 	module_objects = portal_objects_new(module_grant, ++module_generation, &error);
 	if (module_objects == NULL)
 	{
-		g_debug("the granted certificate did not become objects");
+		g_debug("Granted certificate object creation failed");
 		release_grant();
 		return FALSE;
 	}
 
 	return TRUE;
 }
-
-/* ----------------------------------------------------------- function lists */
 
 static CK_FUNCTION_LIST function_list;
 static CK_FUNCTION_LIST_3_0 function_list_3_0;
@@ -339,8 +297,6 @@ static CK_FUNCTION_LIST_3_0 function_list_3_0;
 		if (!g_atomic_int_get(&module_initialized))                                           \
 			return CKR_CRYPTOKI_NOT_INITIALIZED;                                              \
 	} while (0)
-
-/* ------------------------------------------------------------- the entries */
 
 CK_RV C_Initialize(void* init_args)
 {
@@ -373,9 +329,6 @@ CK_RV C_Initialize(void* init_args)
 			return CKR_ARGUMENTS_BAD;
 		}
 
-		/* This module locks with the platform's own primitives. An application
-		 * that supplies mutex functions and will not permit that is told so
-		 * rather than quietly ignored. */
 		if (all_mutex && (args->flags & CKF_OS_LOCKING_OK) == 0)
 		{
 			g_mutex_unlock(&module_lock);
@@ -395,7 +348,7 @@ CK_RV C_Initialize(void* init_args)
 
 	if (portal_client_self_excluded())
 	{
-		g_debug("this process must not load the portal module; no slot will be offered");
+		g_debug("Portal module disabled in this process; no slot is available");
 	}
 	else
 	{
@@ -422,16 +375,9 @@ CK_RV C_Finalize(void* reserved)
 		return CKR_CRYPTOKI_NOT_INITIALIZED;
 	}
 
-	/* SAID BEFORE THE LOCK IS EVER RELEASED BELOW, so that a search waiting for
-	 * someone else's chooser gives up instead of waking into a module that is
-	 * being taken apart -- or into the next initialization. */
 	module_finalizing = TRUE;
 	g_cond_broadcast(&module_acquire_cond);
 
-	/* A chooser may be on screen with module_lock released, and the thread
-	 * waiting on it owns the client. Abandoning the request makes that thread
-	 * return now; waiting out the request timeout instead would be a
-	 * five-minute exit. */
 	if (module_acquiring)
 	{
 		portal_client_cancel(module_client);
@@ -528,7 +474,7 @@ CK_RV C_GetInterface(unsigned char* interface_name, CK_VERSION* version,
 	if (interface_name != NULL && strcmp((const char*) interface_name, "PKCS 11") != 0)
 		return CKR_ARGUMENTS_BAD;
 
-	/* No fork-safety is claimed, so no flag can be required of it. */
+	/* No fork-safety flags are advertised. */
 	if (flags != 0)
 		return CKR_ARGUMENTS_BAD;
 
@@ -563,9 +509,7 @@ CK_RV C_GetSlotList(unsigned char token_present, CK_SLOT_ID* slot_list, unsigned
 	present = portal_client_available(module_client);
 	g_mutex_unlock(&module_lock);
 
-	/* No portal, or no certificate backend configured behind it. The module
-	 * still loaded and still initialised: an application that loads every
-	 * configured module must not break because one of them has nothing to say. */
+	/* An unavailable portal leaves the initialized module with no token. */
 	if (!present)
 	{
 		*count = 0;
@@ -635,26 +579,7 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO* info)
 	pad_field(info->model, sizeof(info->model), XDG_PORTAL_CERTIFICATE_TOKEN_MODEL);
 	pad_field(info->serialNumber, sizeof(info->serialNumber), module_serial);
 
-	/* The PIN is the portal's business and is collected in the backend's own
-	 * window, which is exactly what a protected authentication path means to a
-	 * consumer: do not ask for one, and do not offer a field.
-	 *
-	 * CKF_LOGIN_REQUIRED IS NOT SET, and that is a 2026-09 correction rather
-	 * than an omission. Nothing in this module is gated on a login: C_Login
-	 * sets a flag nothing reads, and every object and every operation is
-	 * available without one, because the authentication that matters happens in
-	 * the backend's own window at the first Sign. Claiming a login is required
-	 * made NSS authenticate BEFORE it would list anything -- Firefox's
-	 * FindClientCertificatesWithPrivateKeys() calls PK11_Authenticate() on
-	 * every slot that is not "friendly" before PK11_ListCertsInSlot() -- and
-	 * NSS's password callback in Firefox puts up a modal alert for a protected
-	 * authentication path that the person has to dismiss by hand. One dialog
-	 * before the chooser, saying nothing, for a login that does nothing.
-	 * docs/SOURCES.md S59; docs/TESTING.md 2.6.
-	 *
-	 * CKF_PROTECTED_AUTHENTICATION_PATH STAYS. A consumer that logs in anyway
-	 * -- GnuTLS and pkcs11-tool both do, whatever this flag says -- must not
-	 * ask the user for a PIN to pass down here. */
+	/* Backend lazy login requires CKF_PROTECTED_AUTHENTICATION_PATH without CKF_LOGIN_REQUIRED; see docs/SOURCES.md and docs/TESTING.md. */
 	info->flags = CKF_TOKEN_INITIALIZED | CKF_PROTECTED_AUTHENTICATION_PATH |
 	              CKF_USER_PIN_INITIALIZED;
 
@@ -776,8 +701,6 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags, void* application, CK_NO
 		return CKR_SLOT_ID_INVALID;
 	if ((flags & CKF_SERIAL_SESSION) == 0)
 		return CKR_SESSION_PARALLEL_NOT_SUPPORTED;
-	/* Nothing here is writable, so a read/write session would be a promise the
-	 * module cannot keep. */
 	if ((flags & CKF_RW_SESSION) != 0)
 		return CKR_TOKEN_WRITE_PROTECTED;
 
@@ -818,11 +741,7 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE session_handle)
 	if (!g_hash_table_remove(module_sessions, GUINT_TO_POINTER(session_handle)))
 		rv = CKR_SESSION_HANDLE_INVALID;
 
-	/* THE GRANT OUTLIVES THE SESSIONS. GnuTLS opens and closes a session for
-	 * every object import and every signature; releasing the grant with the
-	 * last session would put the chooser up again for each of them. The grant
-	 * ends at C_Finalize, at its own expiry, or when the portal invalidates
-	 * it. PKCS#11's login state is per application, so that does end here. */
+	/* Grants survive PKCS#11 session closure until finalization, expiry or portal invalidation. */
 	if (rv == CKR_OK && g_hash_table_size(module_sessions) == 0)
 		module_logged_in = FALSE;
 
@@ -882,9 +801,7 @@ CK_RV C_Login(CK_SESSION_HANDLE session_handle, CK_USER_TYPE user_type, unsigned
 
 	MODULE_CHECK();
 
-	/* @pin is neither read nor copied nor forwarded. There is no PIN on this
-	 * side of the boundary: the portal's backend collects one in its own window
-	 * at first private-key use. */
+	/* PIN arguments must never be read, copied or forwarded; the backend collects PINs. */
 	(void) pin;
 	(void) pin_len;
 
@@ -925,8 +842,6 @@ CK_RV C_Logout(CK_SESSION_HANDLE session_handle)
 	return rv;
 }
 
-/* ---------------------------------------------------------------- searching */
-
 CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session_handle, CK_ATTRIBUTE* templ,
                         unsigned long count)
 {
@@ -964,10 +879,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE session_handle, CK_ATTRIBUTE* templ,
 	lifecycle = module_lifecycle;
 	serial = session->serial;
 
-	/* THE CHOOSER APPEARS HERE. A search that could be answered by a credential
-	 * is the first moment the module knows the application wants one. The lock
-	 * is down for the whole of it, so everything above is checked again -- and
-	 * by identity, not by handle. */
+	/* Acquisition releases module_lock; recheck session identity after it returns. */
 	acquired = ensure_grant(templ, count, session_handle, lifecycle, serial);
 
 	session = session_revalidate(session_handle, lifecycle, serial);
@@ -1102,8 +1014,6 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session_handle, CK_OBJECT_HANDLE obj
 	return rv;
 }
 
-/* ------------------------------------------------------------------ signing */
-
 static gsize signature_length(void)
 {
 	if (module_grant == NULL || module_grant->key_size == 0)
@@ -1150,15 +1060,12 @@ static CK_RV sign_setup(PortalSession* session, CK_MECHANISM* mechanism)
 		if (entry->hash != NULL && strcmp(entry->hash, hash) != 0)
 			return CKR_MECHANISM_PARAM_INVALID;
 
-		/* PKCS#1 permits MGF1 over a different digest; this interface does not,
-		 * so a mismatch is refused here rather than sent to be refused there. */
+		/* Portal requests from this module use matching signature and MGF1 hashes. */
 		mgf_hash = portal_mgf_hash(parameters->mgf);
 		if (mgf_hash == NULL || strcmp(mgf_hash, hash) != 0)
 			return CKR_MECHANISM_PARAM_INVALID;
 
-		/* sLen is a CK_ULONG and the interface carries a uint32. A value that
-		 * does not survive the narrowing is refused, because truncating it
-		 * would sign with a salt length nobody asked for. */
+		/* The wire salt length is uint32; reject values lost by narrowing. */
 		if (parameters->sLen != (CK_ULONG) (guint32) parameters->sLen)
 			return CKR_MECHANISM_PARAM_INVALID;
 
@@ -1204,8 +1111,7 @@ static CK_RV sign_feed(PortalSession* session, const unsigned char* data, unsign
 		return CKR_OK;
 	}
 
-	/* Subtraction, because `size` is the caller's own unsigned long and
-	 * len + size wraps to a small number for the values near its maximum. */
+	/* Subtract to avoid unsigned overflow in len + size. */
 	if (session->sign_buffer->len > PRE_HASHED_LIMIT ||
 	    size > PRE_HASHED_LIMIT - session->sign_buffer->len)
 		return CKR_DATA_LEN_RANGE;
@@ -1236,8 +1142,7 @@ static CK_RV sign_perform(PortalSession* session, GBytes** signature)
 		if (!portal_digestinfo_parse(session->sign_buffer->data, session->sign_buffer->len,
 		                             &hash, &data, &size))
 		{
-			/* TLS 1.0 and 1.1 sign MD5 || SHA1 with CKM_RSA_PKCS. There is no
-			 * hash name for it and no way to describe it to the portal. */
+			/* The portal cannot represent the TLS 1.0 and 1.1 MD5 || SHA1 digest. */
 			return session->sign_buffer->len == TLS10_MD5_SHA1_LENGTH
 			           ? CKR_MECHANISM_INVALID
 			           : CKR_DATA_INVALID;
@@ -1393,7 +1298,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE session_handle, unsigned char* data, unsigned lon
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
 
-	/* A size query neither consumes the input nor ends the operation. */
+	/* Size queries preserve the input and operation state. */
 	if (signature == NULL)
 	{
 		*signature_len = signature_length();
@@ -1487,8 +1392,6 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE session_handle, unsigned char* signature,
 	return rv;
 }
 
-/* --------------------------------------------------------------- decryption */
-
 CK_RV C_DecryptInit(CK_SESSION_HANDLE session_handle, CK_MECHANISM* mechanism,
                     CK_OBJECT_HANDLE key)
 {
@@ -1503,8 +1406,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session_handle, CK_MECHANISM* mechanism,
 	if (mechanism == NULL)
 		return CKR_ARGUMENTS_BAD;
 
-	/* RSA_OAEP and nothing else. A v1.5 decryption would be a Bleichenbacher
-	 * oracle over the key on the token, and the portal refuses it too. */
+	/* PKCS#1 v1.5 decryption exposes a padding oracle; only RSA_OAEP is supported. */
 	if (mechanism->mechanism != CKM_RSA_PKCS_OAEP)
 		return CKR_MECHANISM_INVALID;
 
@@ -1616,9 +1518,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session_handle, unsigned char* ciphertext,
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
 
-	/* The plaintext length is not known until the portal has decrypted, and a
-	 * size query must not put a window up, so the modulus size is reported as
-	 * the upper bound PKCS#11 permits. */
+	/* Size queries must not prompt; the modulus size bounds the unknown plaintext length. */
 	if (plaintext == NULL)
 	{
 		*plaintext_len = signature_length();
@@ -1661,8 +1561,6 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session_handle, unsigned char* ciphertext,
 
 	return CKR_OK;
 }
-
-/* ------------------------------------------------------------ not supported */
 
 CK_RV C_WaitForSlotEvent(CK_FLAGS flags, CK_SLOT_ID* slot, void* reserved)
 {
@@ -1789,8 +1687,7 @@ static CK_RV not_supported_3_0(void)
 	return CKR_FUNCTION_NOT_SUPPORTED;
 }
 
-/* The 3.0 table exists so that C_GetInterface is not a way past C_GetFunctionList.
- * Everything 3.0 added is refused; the entries are the same functions. */
+/* PKCS#11 3.0 entry points use the same functions and reject unsupported additions. */
 static CK_FUNCTION_LIST_3_0 function_list_3_0 = {
 	.version = { 3, 0 },
 	FUNCTION_LIST_2_40_FIELDS,

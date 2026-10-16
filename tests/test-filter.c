@@ -2,12 +2,6 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * The purpose and certificate_filter rules, against real certificates rather
- * than against a mock of them. Every fixture in tests/fixtures is a certificate
- * certtool actually issued, so a change in how GnuTLS reports an extension
- * fails a test here rather than silently changing which credentials a user is
- * offered.
  */
 
 #include <glib.h>
@@ -28,32 +22,17 @@ typedef struct
 	gboolean ssh;
 } PurposeCase;
 
-/* The ordinary request: operation_policy defaults to {'sign': true}. */
+/* The default operation policy permits signing only. */
 static void test_purposes(void)
 {
 	static const PurposeCase cases[] = {
-		/* clientAuth EKU, digitalSignature: everything but email. */
 		{ "client-auth-rsa.pem", TRUE, TRUE, FALSE, TRUE },
-		/* emailProtection EKU on an EC key: email and signing, not client
-		 * authentication -- an EKU that names something else is a restriction,
-		 * not a suggestion. */
 		{ "email-ec.pem", FALSE, TRUE, TRUE, TRUE },
-		/* NO EKU EXTENSION AT ALL is not the same as an empty one: X.509 says
-		 * the key is unrestricted, so every purpose matches. */
 		{ "no-eku-rsa.pem", TRUE, TRUE, TRUE, TRUE },
-		/* serverAuth only. Not a credential to offer a user for signing in. */
 		{ "server-auth-only.pem", FALSE, FALSE, FALSE, TRUE },
-		/* keyEncipherment only, no EKU: the key usage rules out signing, and
-		 * ssh still matches because SSH never looks at the certificate. */
 		{ "encipherment-only.pem", FALSE, FALSE, FALSE, TRUE },
-		/* emailProtection EKU, keyEncipherment only -- the S/MIME decryption
-		 * half of a PIV card. Nothing here matches, because this candidate is
-		 * asked about with a sign-only policy. */
 		{ "email-encipherment-only.pem", FALSE, FALSE, FALSE, TRUE },
-		/* emailProtection EKU with both bits set: the ordinary single-
-		 * certificate S/MIME setup, which signs as well as decrypts. */
 		{ "email-sign-and-encipher.pem", FALSE, TRUE, TRUE, TRUE },
-		/* Expired is STILL A MATCH. It is offered and marked, never hidden. */
 		{ "expired-client-auth.pem", TRUE, TRUE, FALSE, TRUE },
 	};
 
@@ -78,8 +57,6 @@ static void test_purposes(void)
 	}
 }
 
-/* A key the card will not sign with is not a candidate for anything: every
- * purpose here ends in a signature. */
 static void test_key_that_will_not_sign(void)
 {
 	g_autoptr(CertificateCandidate) candidate =
@@ -90,8 +67,6 @@ static void test_key_that_will_not_sign(void)
 	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SSH,
 	                                          CERTIFICATE_OPERATION_SIGN));
 
-	/* Not even when the caller would take a decryption: none of the three
-	 * signing purposes has a decryption to offer. */
 	g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH,
 	                                          CERTIFICATE_OPERATION_SIGN |
 	                                              CERTIFICATE_OPERATION_DECRYPT));
@@ -103,10 +78,6 @@ static void test_key_that_will_not_sign(void)
 	                                              CERTIFICATE_OPERATION_DECRYPT));
 }
 
-/* THE S/MIME DECRYPTION HALF. A PIV key-management certificate is
- * keyEncipherment with no digitalSignature, behind a key that will decrypt and
- * never sign. It used to match no purpose at all, which made brokered Decrypt
- * unreachable for the case it exists for. */
 static void test_decryption_only_certificate(void)
 {
 	static const char* const fixtures[] = { "email-encipherment-only.pem",
@@ -122,7 +93,6 @@ static void test_decryption_only_certificate(void)
 		g_assert_cmpint(certificate_purpose_operations(candidate, CERTIFICATE_PURPOSE_EMAIL), ==,
 		                CERTIFICATE_OPERATION_DECRYPT);
 
-		/* Offered for email ONLY when the request said it would decrypt. */
 		g_assert_false(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_EMAIL,
 		                                          CERTIFICATE_OPERATION_SIGN));
 		g_assert_true(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_EMAIL,
@@ -131,8 +101,6 @@ static void test_decryption_only_certificate(void)
 		                                         CERTIFICATE_OPERATION_SIGN |
 		                                             CERTIFICATE_OPERATION_DECRYPT));
 
-		/* And for nothing else, however much the caller would accept: a key
-		 * that will not sign cannot authenticate, sign or serve ssh. */
 		g_assert_cmpint(certificate_purpose_operations(candidate,
 		                                              CERTIFICATE_PURPOSE_CLIENT_AUTH),
 		                ==, CERTIFICATE_OPERATION_NONE);
@@ -143,8 +111,6 @@ static void test_decryption_only_certificate(void)
 	}
 }
 
-/* The S/MIME SIGNING half is not a decryption credential either, and a mail
- * client asking only to decrypt must not be offered it. */
 static void test_signing_email_certificate_is_not_offered_for_decryption(void)
 {
 	g_autoptr(CertificateCandidate) candidate =
@@ -156,9 +122,6 @@ static void test_signing_email_certificate_is_not_offered_for_decryption(void)
 	                                          CERTIFICATE_OPERATION_DECRYPT));
 }
 
-/* A certificate whose key does both, with the key usage to match, is offered
- * for either half -- and the operations it is offered for are the ones the
- * request permits, not everything the key can do. */
 static void test_certificate_that_signs_and_decrypts(void)
 {
 	g_autoptr(CertificateCandidate) both =
@@ -171,17 +134,10 @@ static void test_certificate_that_signs_and_decrypts(void)
 	g_assert_cmpint(certificate_purpose_operations(both, CERTIFICATE_PURPOSE_CLIENT_AUTH), ==,
 	                CERTIFICATE_OPERATION_NONE);
 
-	/* The card is still the authority on what the key will do: a certificate
-	 * whose key usage permits both, on a key whose CKA_DECRYPT is clear, is a
-	 * signing credential only. */
 	g_assert_cmpint(certificate_purpose_operations(signing_key_only, CERTIFICATE_PURPOSE_EMAIL),
 	                ==, CERTIFICATE_OPERATION_SIGN);
 }
 
-/* THE KEY USAGE RESTRICTS THE CARD, TOO. A token that sets CKA_SIGN on every
- * key it has -- some do -- must not turn a key-management certificate into a
- * signing credential, or the grant would carry an operation the certificate
- * itself forbids. */
 static void test_key_usage_restricts_a_token_that_claims_everything(void)
 {
 	g_autoptr(CertificateCandidate) candidate =
@@ -193,8 +149,6 @@ static void test_key_usage_restricts_a_token_that_claims_everything(void)
 	                CERTIFICATE_OPERATION_NONE);
 }
 
-/* End to end through the filter: a decrypt-only request offers the
- * key-management certificate and nothing else on the card. */
 static void test_filter_offers_decryption_certificate_for_email(void)
 {
 	static const char* const fixtures[] = { "client-auth-rsa.pem", "email-ec.pem",
@@ -258,9 +212,6 @@ static GPtrArray* candidate_list(const char* const* fixtures)
 	return list;
 }
 
-/* RULE 1: an expired certificate is offered and marked, never hidden -- but it
- * sorts below the ones that work, so a working credential is never buried under
- * a broken one. */
 static void test_expired_is_offered_but_sorts_last(void)
 {
 	static const char* const fixtures[] = { "expired-client-auth.pem", "client-auth-rsa.pem",
@@ -301,8 +252,6 @@ static void test_filter_token_label(void)
 	g_assert_cmpuint(miss->len, ==, 0);
 }
 
-/* A candidate whose PIV slot could not be determined is NOT a match for a
- * request that named one: guessing would offer the wrong key. */
 static void test_filter_piv_slot(void)
 {
 	static const char* const fixtures[] = { "client-auth-rsa.pem", NULL };
@@ -347,7 +296,6 @@ static void test_filter_key_algorithms(void)
 	g_assert_cmpuint(only_rsa->len, ==, 1);
 	g_assert_cmpstr(((CertificateCandidate*) g_ptr_array_index(only_rsa, 0))->key_type, ==, "RSA");
 
-	/* A TLS-flavoured scheme name is understood by its prefix. */
 	filter.key_algorithms = tls_names;
 	only_ec = certificate_filter_apply(candidates, &filter);
 	g_assert_cmpuint(only_ec->len, ==, 1);
@@ -404,9 +352,6 @@ static void test_filter_issuer_dn(void)
 	                first->certificate_id);
 }
 
-/* A MALFORMED FILTER IS REJECTED, NOT HALF-APPLIED. A filter that silently
- * ignored the part it did not understand would offer credentials the caller
- * said it could not use. */
 static void test_filter_parse_rejects_malformed(void)
 {
 	static const char* const bad[] = {
@@ -458,8 +403,6 @@ static void test_filter_parse_accepts_wellformed(void)
 	certificate_filter_clear(&filter);
 }
 
-/* No certificate_filter at all is a valid request, and matches on purpose
- * alone. */
 static void test_filter_parse_absent(void)
 {
 	g_autoptr(GVariant) options = g_variant_parse(G_VARIANT_TYPE_VARDICT, "{}", NULL, NULL, NULL);
@@ -475,10 +418,6 @@ static void test_filter_parse_absent(void)
 	certificate_filter_clear(&filter);
 }
 
-/* The backend enumerates p11-kit's configured modules, and one of them may be
- * the portal's own client-side module, which answers by calling the portal --
- * which calls this backend. It has to be skipped by name, and by an explicit
- * --module path as well. */
 static void test_portal_module_is_refused(void)
 {
 	g_autoptr(GError) error = NULL;
@@ -498,9 +437,7 @@ static void test_portal_module_is_refused(void)
 	g_assert_error(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED);
 }
 
-/* Where the extension's value begins, given the DER of its OID. Aborts if the
- * shape is not the one the fixtures have: a short-form OCTET STRING, with or
- * without the critical BOOLEAN in front of it. */
+/* Fixture extensions use short-form OCTET STRING lengths and an optional critical BOOLEAN. */
 static gsize extension_value_offset(const GByteArray* der, const guint8* oid, gsize oid_length)
 {
 	for (gsize i = 0; i + oid_length + 4 < der->len; i++)
@@ -510,20 +447,18 @@ static gsize extension_value_offset(const GByteArray* der, const guint8* oid, gs
 		if (memcmp(der->data + i, oid, oid_length) != 0)
 			continue;
 
-		if (der->data[at] == 0x01) /* critical BOOLEAN */
+		if (der->data[at] == 0x01)
 			at += 3;
 
-		g_assert_cmpuint(der->data[at], ==, 0x04);      /* extnValue */
-		g_assert_cmpuint(der->data[at + 1], <, 0x80);   /* short form length */
+		g_assert_cmpuint(der->data[at], ==, 0x04);
+		g_assert_cmpuint(der->data[at + 1], <, 0x80);
 		return at + 2;
 	}
 
 	g_assert_not_reached();
 }
 
-/* The fixture's own bytes with one extension's value made undecodable. certtool
- * will not issue such a certificate; a card can hold one, and so can anything
- * that hands this backend a DER. */
+/* Corrupt the extension after issuance because certtool will not generate this malformed certificate. */
 static GByteArray* der_with_broken_extension(const GByteArray* der, const guint8* oid,
                                              gsize oid_length)
 {
@@ -533,16 +468,10 @@ static GByteArray* der_with_broken_extension(const GByteArray* der, const guint8
 	g_byte_array_append(copy, der->data, der->len);
 	at = extension_value_offset(copy, oid, oid_length);
 
-	/* The wrong tag where the value's own SEQUENCE or BIT STRING belongs. */
 	copy->data[at] = 0x2a;
 	return copy;
 }
 
-/* THE FOUR STATES OF AN EXTENSION, and the one that used to be read as another.
- * A decode error -- a bad tag, an OID longer than the buffer -- yielded NULL,
- * which tokens/filter.c reads as "no extension, unrestricted": a certificate
- * whose EKU could not be read became a certificate good for every purpose. It
- * is now excluded at discovery instead. */
 static void test_undecodable_extension_is_not_unrestricted(void)
 {
 	static const guint8 eku_oid[] = { 0x06, 0x03, 0x55, 0x1d, 0x25 };
@@ -555,12 +484,10 @@ static void test_undecodable_extension_is_not_unrestricted(void)
 	g_autoptr(CertificateCandidate) other =
 	    certificate_test_candidate("server-auth-only.pem", TRUE, FALSE);
 
-	/* Absent: X.509 says the key is unrestricted. */
 	g_assert_null(absent->eku_oids);
 	g_assert_true(certificate_purpose_matches(absent, CERTIFICATE_PURPOSE_CLIENT_AUTH,
 	                                          CERTIFICATE_OPERATION_SIGN));
 
-	/* Present and matching, and present and naming something else. */
 	g_assert_nonnull(matching->eku_oids);
 	g_assert_true(certificate_purpose_matches(matching, CERTIFICATE_PURPOSE_CLIENT_AUTH,
 	                                          CERTIFICATE_OPERATION_SIGN));
@@ -568,7 +495,6 @@ static void test_undecodable_extension_is_not_unrestricted(void)
 	g_assert_false(certificate_purpose_matches(other, CERTIFICATE_PURPOSE_CLIENT_AUTH,
 	                                           CERTIFICATE_OPERATION_SIGN));
 
-	/* Malformed: not a candidate at all, for either extension. */
 	for (gsize i = 0; i < G_N_ELEMENTS(oids); i++)
 	{
 		g_autoptr(GByteArray) broken =
@@ -582,9 +508,7 @@ static void test_undecodable_extension_is_not_unrestricted(void)
 	}
 }
 
-/* The fixture re-issued with a different extended key usage value. The
- * signature no longer matches the TBS after this, which nothing here checks and
- * a card would not check either: what is under test is the decoder. */
+/* Rewriting EKU invalidates the fixture signature; this test exercises decoding without signature verification. */
 static GByteArray* der_with_eku_value(const GByteArray* der, const guint8* value, gsize length)
 {
 	gnutls_x509_crt_t crt = NULL;
@@ -606,10 +530,6 @@ static GByteArray* der_with_eku_value(const GByteArray* der, const guint8* value
 	return copy;
 }
 
-/* AN EMPTY EKU IS NOT AN ABSENT ONE. GnuTLS answers
- * GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE at index 0 for both a certificate with
- * no extension and one holding an empty SEQUENCE, and reading the second as the
- * first made a certificate that names NO purpose good for EVERY purpose. */
 static void test_empty_eku_is_restricted_to_nothing(void)
 {
 	static const guint8 empty_sequence[] = { 0x30, 0x00 };
@@ -625,7 +545,6 @@ static void test_empty_eku_is_restricted_to_nothing(void)
 	g_assert_nonnull(candidate);
 	candidate->can_sign = TRUE;
 
-	/* Present, and naming nothing: an empty strv, not NULL. */
 	g_assert_nonnull(candidate->eku_oids);
 	g_assert_null(candidate->eku_oids[0]);
 
@@ -637,15 +556,10 @@ static void test_empty_eku_is_restricted_to_nothing(void)
 	                                           CERTIFICATE_OPERATION_SIGN |
 	                                               CERTIFICATE_OPERATION_DECRYPT));
 
-	/* SSH is exempt by construction, as it is for every other restricted
-	 * certificate here: it uses the raw key and never reads the extensions. */
 	g_assert_true(certificate_purpose_matches(candidate, CERTIFICATE_PURPOSE_SSH,
 	                                          CERTIFICATE_OPERATION_SIGN));
 }
 
-/* AN OID TOO LONG FOR THE 128-BYTE BUFFER must not read as an absent extension
- * either. GnuTLS may refuse it or hand back a truncated string; what must not
- * happen is "unrestricted". */
 static void test_oversized_eku_oid_is_not_unrestricted(void)
 {
 	guint8 value[132];
@@ -655,8 +569,7 @@ static void test_oversized_eku_oid_is_not_unrestricted(void)
 	g_autoptr(GError) error = NULL;
 	g_autoptr(CertificateCandidate) candidate = NULL;
 
-	/* SEQUENCE (129 bytes) { OID (127 bytes: 1.3 then 126 arcs of 1) }, whose
-	 * dotted form is 255 characters. */
+	/* This OID's DER is 127 bytes but its dotted text is 255 characters. */
 	value[0] = 0x30;
 	value[1] = 0x81;
 	value[2] = 129;
@@ -669,7 +582,6 @@ static void test_oversized_eku_oid_is_not_unrestricted(void)
 	der = der_with_eku_value(source->der, value, sizeof(value));
 	candidate = certificate_candidate_new_from_der(der->data, der->len, &error);
 
-	/* Refused outright is a correct answer. */
 	if (candidate == NULL)
 	{
 		g_assert_error(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED);

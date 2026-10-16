@@ -2,8 +2,6 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * The server half of the system-prompt protocol, scripted. See pin-prompter.h.
  */
 
 #define GCR_API_SUBJECT_TO_CHANGE 1
@@ -11,8 +9,6 @@
 #include "pin-prompter.h"
 
 #include <gcr/gcr.h>
-
-/* ---------------------------------------------------------------- the script */
 
 typedef enum
 {
@@ -23,8 +19,8 @@ typedef enum
 typedef struct
 {
 	RoundKind kind;
-	char* password; /* ROUND_PASSWORD; NULL means "cancelled" */
-	gboolean ok;    /* ROUND_CONFIRM */
+	char* password; /* NULL means cancellation for a password round. */
+	gboolean ok;
 } ScriptedRound;
 
 static GQueue script = G_QUEUE_INIT;
@@ -153,8 +149,6 @@ guint certificate_test_prompter_closes(void)
 	return prompt_closes;
 }
 
-/* ----------------------------------------------------------------- the prompt */
-
 #define TEST_TYPE_PROMPT (test_prompt_get_type())
 G_DECLARE_FINAL_TYPE(TestPrompt, test_prompt, TEST, PROMPT, GObject)
 
@@ -173,9 +167,7 @@ struct _TestPrompt
 	gboolean choice_chosen;
 	gboolean password_new;
 
-	/* The answer to the round in flight. gcr_prompt_password_finish() returns a
-	 * borrowed string owned by the prompt, so it lives here and is replaced --
-	 * not appended to -- on the next round. */
+	/* gcr borrows this answer until the next prompt call. */
 	char* answer;
 
 	GTask* pending;
@@ -205,9 +197,6 @@ enum
 	PROP_CANCEL_LABEL
 };
 
-/* The prompt the prompter is serving right now, so that a test can dismiss it
- * the way a person would. GcrSystemPrompter instantiates the type itself and
- * the script is process-wide already, so there is nowhere else to keep it. */
 static TestPrompt* current_prompt = NULL;
 
 static void test_prompt_init(TestPrompt* self)
@@ -344,9 +333,6 @@ static void test_prompt_class_init(TestPromptClass* klass)
 	object_class->set_property = test_prompt_set_property;
 	object_class->get_property = test_prompt_get_property;
 
-	/* Every property GcrPrompt defines, overridden. An implementation that
-	 * misses one warns at run time and the prompter stops working, so they are
-	 * listed rather than looped over. */
 	g_object_class_override_property(object_class, PROP_TITLE, "title");
 	g_object_class_override_property(object_class, PROP_MESSAGE, "message");
 	g_object_class_override_property(object_class, PROP_DESCRIPTION, "description");
@@ -360,8 +346,6 @@ static void test_prompt_class_init(TestPromptClass* klass)
 	g_object_class_override_property(object_class, PROP_CANCEL_LABEL, "cancel-label");
 }
 
-/* What the prompt was showing when this round was asked for. Recorded on the
- * way in, because the client sets the properties and then asks. */
 static void record(TestPrompt* self)
 {
 	g_free(seen_title);
@@ -466,7 +450,7 @@ static const gchar* test_prompt_password_finish(GcrPrompt* prompt, GAsyncResult*
 	if (!g_task_propagate_boolean(G_TASK(result), error))
 		return NULL;
 
-	/* gcr's convention: NULL with no error is "the user pressed Cancel". */
+	/* gcr represents Cancel as NULL without an error. */
 	return self->answer;
 }
 
@@ -505,8 +489,6 @@ static GcrPromptReply test_prompt_confirm_finish(GcrPrompt* prompt, GAsyncResult
 	                                                             : GCR_PROMPT_REPLY_CANCEL;
 }
 
-/* The client closed the prompt. A round in flight comes back as if the user
- * had dismissed it, which is what a real prompter does. */
 static void test_prompt_close(GcrPrompt* prompt)
 {
 	TestPrompt* self = TEST_PROMPT(prompt);
@@ -542,8 +524,6 @@ static void test_prompt_iface_init(GcrPromptInterface* iface)
 	iface->prompt_close = test_prompt_close;
 }
 
-/* --------------------------------------------------------------- the prompter */
-
 struct _CertificateTestPrompter
 {
 	GcrSystemPrompter* prompter;
@@ -557,9 +537,7 @@ CertificateTestPrompter* certificate_test_prompter_start(GDBusConnection* connec
 	CertificateTestPrompter* self = g_new0(CertificateTestPrompter, 1);
 
 	self->connection = g_object_ref(connection);
-	/* MULTIPLE, so that a second prompt does not have to wait for the first to
-	 * be closed. The backend serialises its own prompts anyway; making the
-	 * fixture the thing that enforces it would hide a regression. */
+	/* Allow concurrent fixture prompts so only backend serialization controls overlap. */
 	self->prompter = gcr_system_prompter_new(GCR_SYSTEM_PROMPTER_MULTIPLE, TEST_TYPE_PROMPT);
 	gcr_system_prompter_register(self->prompter, connection);
 
@@ -572,10 +550,7 @@ CertificateTestPrompter* certificate_test_prompter_start(GDBusConnection* connec
 
 void certificate_test_prompter_dismiss(void)
 {
-	/* gcr's prompter is connected to this signal on the prompt it created; its
-	 * handler stops prompting and calls PromptDone on the client, which is what
-	 * gnome-shell does when Cancel is pressed on a prompt with nothing pending.
-	 * The client's own GcrPrompt then emits prompt-close. */
+	/* Emitting prompt-close drives gcr's PromptDone callback even without a pending round. */
 	if (current_prompt != NULL)
 		gcr_prompt_close(GCR_PROMPT(current_prompt));
 }
@@ -585,10 +560,7 @@ void certificate_test_prompter_vanish(CertificateTestPrompter* self)
 	if (self == NULL || self->owner_id == 0)
 		return;
 
-	/* THE NAME AND NOTHING ELSE. gcr_system_prompter_unregister() would send
-	 * PromptDone to every caller, which is the polite shutdown and not what
-	 * this is for: a prompter that is killed says nothing at all, and what the
-	 * client has to survive is its own name watch firing. */
+	/* Drop only the name to simulate prompter death without graceful PromptDone messages. */
 	g_bus_unown_name(self->owner_id);
 	self->owner_id = 0;
 }
@@ -607,12 +579,7 @@ void certificate_test_prompter_stop(CertificateTestPrompter* self)
 	g_free(self);
 }
 
-/* -------------------------------------------- the prompter that answers nothing */
-
-/* THE PROTOCOL BY HAND, because GcrSystemPrompter is too well behaved to
- * reproduce the bug. See pin-prompter.h for what this is for. The three method
- * names, the two callback method names and the argument types are gcr's, from
- * gcr/gcr-dbus-constants.h and gcr/gcr-system-prompter.c. */
+/* Implement gcr's D-Bus protocol directly to hold replies that GcrSystemPrompter answers immediately. */
 #define PROMPTER_OBJECT_PATH "/org/gnome/keyring/Prompter"
 #define PROMPTER_INTERFACE "org.gnome.keyring.internal.Prompter"
 #define CALLBACK_INTERFACE "org.gnome.keyring.internal.Prompter.Callback"
@@ -646,9 +613,7 @@ struct _CertificateTestStallingPrompter
 
 	gboolean send_ready;
 
-	/* Held and never answered until a test says so. The vtable hands this
-	 * function ownership of the invocation and one of the return_*() calls is
-	 * what releases it, so stop() answers anything still outstanding. */
+	/* Own the held invocation until the test answers it; stop() resolves any remaining call. */
 	GDBusMethodInvocation* performing;
 };
 
@@ -660,9 +625,7 @@ static void stalling_send_ready(CertificateTestStallingPrompter* self, const cha
 
 	g_variant_builder_init(&properties, G_VARIANT_TYPE("a{sv}"));
 
-	/* An empty response, which is gcr's "nothing has been answered yet"; the
-	 * secret exchange has to be a real one or the client warns, and a warning
-	 * is fatal under g_test_init(). */
+	/* A real secret exchange is required even for an empty prompt response. */
 	g_dbus_connection_call(self->connection, sender, path, CALLBACK_INTERFACE, "PromptReady",
 	                       g_variant_new("(sa{sv}s)", "", &properties, begun),
 	                       G_VARIANT_TYPE("()"), G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, NULL, NULL,
@@ -691,8 +654,6 @@ static void stalling_method_call(GDBusConnection* connection, const char* sender
 
 	if (g_strcmp0(method_name, "PerformPrompt") == 0)
 	{
-		/* NOT ANSWERED. This is the call gcr leaves in ->pending, and leaving
-		 * it on the wire is the whole point of this object. */
 		self->performing = invocation;
 		return;
 	}

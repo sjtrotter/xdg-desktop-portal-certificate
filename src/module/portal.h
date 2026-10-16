@@ -11,83 +11,44 @@
 
 #include "grant.h"
 
-/** @file
- *  The module's client of org.freedesktop.portal.experimental.Certificate1.
- *
- *  A PKCS#11 call arrives on whatever thread the application felt like, and the
- *  portal answers Request-shaped calls with a signal. So the client owns a
- *  thread running its own GMainContext: signal subscriptions are made there and
- *  dispatched there, and the PKCS#11 caller blocks on a condition variable
- *  rather than on the application's main loop, which may not exist and is not
- *  ours to run.
- *
- *  Plain method calls -- GetCapabilities, ReleaseGrant -- are made with
- *  g_dbus_connection_call_sync() on the calling thread, which needs no context
- *  of its own.
- */
+/** A private context thread dispatches portal signals while PKCS#11 callers wait independently of the application's loop. */
 
 typedef struct _PortalClient PortalClient;
 
-/** Connect, and probe GetCapabilities without letting D-Bus activate anything:
- *  a module loaded into every p11-kit consumer on the machine must not start
- *  the desktop portal merely by being listed. Never fails: a client that could
- *  not reach the portal reports itself unavailable, which is how a token that
- *  is not present is spelled. */
+/** Probe without D-Bus activation; an unavailable portal presents as an absent token. */
 PortalClient* portal_client_new(void);
 
 void portal_client_free(PortalClient* client);
 
-/** Abandon every request that is still waiting: each caller is answered
- *  PKCS11_PORTAL_ERROR_CANCELLED and each request is Closed at the portal, and
- *  no further request is started on this client.
- *
- *  C_Finalize needs this. A blocking acquire holds the client while the chooser
- *  is on screen, so the client cannot be freed until that caller returns, and
- *  waiting out the request timeout would mean a five-minute exit. */
+/** Cancel and close outstanding requests before C_Finalize waits for their callers. */
 void portal_client_cancel(PortalClient* client);
 
-/** Whether the interface answered. FALSE means no portal, or no certificate
- *  backend configured behind it -- indistinguishable by design. */
 gboolean portal_client_available(PortalClient* client);
 
-/** The portal's mechanism names, from GetCapabilities. */
 const char* const* portal_client_mechanisms(PortalClient* client);
 
-/** CreateSession followed by AcquireCredential, blocking until the user has
- *  answered the chooser. Returns NULL with PKCS11_PORTAL_ERROR_CANCELLED when
- *  the user said no. */
+/** Blocks for the chooser; user refusal returns PKCS11_PORTAL_ERROR_CANCELLED. */
 PortalGrant* portal_client_acquire(PortalClient* client, GError** error);
 
-/** One brokered Sign. @data is the digest named by @hash. */
+/** @data is the digest named by @hash. */
 gboolean portal_client_sign(PortalClient* client, const PortalGrant* grant,
                             const char* mechanism, const char* hash, const char* mgf,
                             gboolean have_salt_length, guint32 salt_length, const guint8* data,
                             gsize size, GBytes** signature, GError** error);
 
-/** One brokered Decrypt, RSA-OAEP only. */
 gboolean portal_client_decrypt(PortalClient* client, const PortalGrant* grant, const char* hash,
                                const char* mgf1_hash, GBytes* label, const guint8* data,
                                gsize size, GBytes** plaintext, GError** error);
 
-/** ReleaseGrant. Releasing a grant that is already gone succeeds. */
+/** Session.Close() releases the grant; an absent grant succeeds. */
 void portal_client_release(PortalClient* client, const PortalGrant* grant);
 
-/** Whether GrantInvalidated has named this grant's session. Read from the
- *  PKCS#11 caller's thread; the signal handler only ever writes it, and never
- *  takes the module lock, so a caller may hold that lock across a portal
- *  call. */
+/** Invalidation uses its own lock, so PKCS#11 callers may hold module_lock across portal calls. */
 gboolean portal_client_grant_gone(PortalClient* client, const PortalGrant* grant);
 
-/** Whether this process must not talk to the portal at all: the portal frontend
- *  and this project's own backend would recurse into themselves. Matched on the
- *  executable's exact base name -- a portal BACKEND that merely starts with
- *  "xdg-desktop-portal", such as xdg-desktop-portal-webauth, is an ordinary
- *  consumer and is not excluded. PKCS11_PORTAL_CERTIFICATE_DISABLE=1 excludes
- *  any process by hand. */
+/** Exact executable names exclude recursive frontend and certificate-backend calls; the environment flag excludes other consumers. */
 gboolean portal_client_self_excluded(void);
 
-/** The name half of the check above, without reading /proc/self/exe, so that a
- *  test can name programs it is not. */
 gboolean portal_program_is_excluded(const char* program);
 
-#endif /* PKCS11_PORTAL_PORTAL_H */
+#endif

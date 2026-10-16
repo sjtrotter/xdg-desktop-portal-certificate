@@ -2,24 +2,6 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * CANCELLING WHILE THE CARD IS BUSY. This is the regression test for the worst
- * bug the 2026 review found: cancelling the PIN window while C_Login was in
- * flight wiped and freed the buffer the worker was passing to the token, freed
- * the prompt the worker was reading its callbacks out of, and freed the
- * operation the login was being performed for -- across two threads, on a page
- * that had just been munlock()ed.
- *
- * The consequence was not only a crash. A torn buffer means the card is handed
- * a truncated PIN, which SPENDS AN ATTEMPT, and the callback that would have
- * said so ran on freed memory. On a PIV card that is one of three.
- *
- * RUN IT UNDER ASAN. `meson setup build-asan -Db_sanitize=address,undefined`
- * and `meson test -C build-asan`: without a sanitizer these tests pass on a
- * lucky allocator. docs/TESTING.md has the invocation.
- *
- * The login half needs a display (it opens the real window); the sign half
- * needs a SoftHSM fixture. Each skips itself when it cannot run.
  */
 
 #include <glib.h>
@@ -31,8 +13,6 @@
 #include "ui/pin.h"
 
 #define FIXTURE_PIN "123456"
-
-/* ------------------------------------------------------- cancel during login */
 
 typedef struct
 {
@@ -49,8 +29,7 @@ typedef struct
 	CertificateToken* token;
 } LoginProbe;
 
-/* Stands in for C_Login: blocks until the test lets it go, exactly as a card
- * does for the hundreds of milliseconds that matter. */
+/* Hold the synthetic C_Login until the test releases it. */
 static gboolean probe_login(const char* pin, gpointer user_data, GError** error)
 {
 	LoginProbe* probe = user_data;
@@ -62,9 +41,7 @@ static gboolean probe_login(const char* pin, gpointer user_data, GError** error)
 	while (!probe->login_may_return)
 		g_cond_wait(&probe->cond, &probe->lock);
 
-	/* THE BUFFER MUST STILL BE THERE. Reading it after the window was
-	 * cancelled is precisely what used to be a use-after-free, and what handed
-	 * the card a zero-length PIN. */
+	/* Read after cancellation to check the worker's PIN buffer lifetime. */
 	g_assert_nonnull(pin);
 	g_assert_cmpstr(pin, ==, "1234");
 
@@ -89,9 +66,6 @@ static void probe_done(CertificatePinOutcome outcome, gpointer user_data)
 
 static CertificateToken* make_token(void)
 {
-	/* CertificateToken has no public constructor: it is only ever produced from
-	 * a slot, which is why the struct is in the header and why building one by
-	 * hand is legitimate here and nowhere else. */
 	CertificateToken* token = g_new0(CertificateToken, 1);
 
 	g_atomic_ref_count_init(&token->ref_count);
@@ -122,11 +96,7 @@ static void iterate_for(guint milliseconds)
 	g_main_loop_run(loop);
 }
 
-/* AN EMPTY RETURN IS A RETRY, ON EVERY ACCESSIBILITY BACKEND. The retry path
- * announces its status; GTK 4.22's stub accessibility context, which is what
- * GTK_A11Y=test and a session without an accessibility bus produce, has no
- * announce implementation and used to be called through a NULL vfunc. Runs
- * first so that GTK is initialised without an accessibility bus. */
+/* Initialize GTK with stub accessibility before other tests to exercise empty-PIN retry announcements. */
 static void test_empty_return_is_a_retry(void)
 {
 	LoginProbe probe = { 0 };
@@ -157,7 +127,6 @@ static void test_empty_return_is_a_retry(void)
 	}
 	iterate_for(300);
 
-	/* Nothing was submitted, nothing was answered, the window is still up. */
 	g_mutex_lock(&probe.lock);
 	g_assert_false(probe.login_entered);
 	g_assert_cmpuint(probe.done_calls, ==, 0);
@@ -198,8 +167,6 @@ static void test_cancel_during_login(void)
 	certificate_pin_login(probe.token, NULL, "Test application", "prove who you are", probe_login,
 	                      NULL, NULL, &probe, cancellable, probe_done, &probe);
 
-	/* Type a PIN and press Unlock, the way ui-smoke.sh does with xdotool but
-	 * without needing one. */
 	{
 		GtkWidget* entry = find_pin_entry();
 
@@ -208,7 +175,6 @@ static void test_cancel_during_login(void)
 		g_signal_emit_by_name(entry, "activate");
 	}
 
-	/* Wait for the worker to be inside the login. */
 	g_mutex_lock(&probe.lock);
 	deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
 	while (!probe.login_entered)
@@ -218,19 +184,15 @@ static void test_cancel_during_login(void)
 	}
 	g_mutex_unlock(&probe.lock);
 
-	/* CANCEL, exactly as Request.Close() does, while the card is busy. */
 	g_cancellable_cancel(cancellable);
 	iterate_for(200);
 
-	/* NOTHING MAY HAVE BEEN ANSWERED YET: the worker is still reading the
-	 * prompt and the buffer. */
 	g_mutex_lock(&probe.lock);
 	g_assert_cmpuint(probe.done_calls, ==, 0);
 	probe.login_may_return = TRUE;
 	g_cond_broadcast(&probe.cond);
 	g_mutex_unlock(&probe.lock);
 
-	/* Now the answer arrives, exactly once, and only after the worker returned. */
 	deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
 	while (probe.done_calls == 0 && g_get_monotonic_time() < deadline)
 		g_main_context_iteration(NULL, FALSE);
@@ -246,8 +208,6 @@ static void test_cancel_during_login(void)
 	g_cond_clear(&probe.cond);
 }
 
-/* A cancellation delivered before the window is even up must answer once and
- * free nothing twice. */
 static void test_cancel_before_prompt(void)
 {
 	LoginProbe probe = { 0 };
@@ -278,8 +238,6 @@ static void test_cancel_before_prompt(void)
 	g_cond_clear(&probe.cond);
 }
 
-/* ------------------------------- a cancelled login that succeeded regardless */
-
 typedef struct
 {
 	GMutex lock;
@@ -295,9 +253,7 @@ typedef struct
 	CertificateToken* token;
 } AbandonProbe;
 
-/* Blocks like a card, and then SUCCEEDS. That is the case nothing used to
- * handle: the attempt was already submitted when the user pressed Escape, and
- * PKCS#11 cannot withdraw one. */
+/* Hold login until after cancellation, then return success to exercise abandonment. */
 static gboolean abandon_probe_login(const char* pin, gpointer user_data, GError** error)
 {
 	AbandonProbe* probe = user_data;
@@ -327,9 +283,6 @@ static void abandon_probe_abandon(gpointer user_data)
 	AbandonProbe* probe = user_data;
 
 	probe->abandon_calls++;
-	/* THE ORDER IS PART OF THE CONTRACT. The caller has to have answered its
-	 * own waiters before it is told to undo the login, or it would be deciding
-	 * whether anybody still wants it from a list it has not emptied yet. */
 	probe->abandoned_after_done = probe->done_calls > 0;
 }
 
@@ -392,11 +345,6 @@ static gboolean pin_window_is_up(void)
 	return found;
 }
 
-/* THE CARD IS LOGGED IN AND NOBODY ASKED FOR IT. The user cancelled while
- * C_Login was in flight and the login succeeded anyway; the outcome the caller
- * is given is "cancelled", and the token must not be left authenticated for the
- * rest of the grant -- the next Sign would otherwise go through with no window.
- * broker/operations.c answers this callback by closing the token session. */
 static void test_cancelled_login_is_abandoned(void)
 {
 	AbandonProbe probe = { 0 };
@@ -439,7 +387,6 @@ static void test_cancelled_login_is_abandoned(void)
 	g_assert_cmpuint(probe.done_calls, ==, 0);
 	g_assert_cmpuint(probe.abandon_calls, ==, 0);
 
-	/* And now the card says yes, too late. */
 	g_mutex_lock(&probe.lock);
 	probe.login_may_return = TRUE;
 	g_cond_broadcast(&probe.cond);
@@ -461,9 +408,6 @@ static void test_cancelled_login_is_abandoned(void)
 	g_cond_clear(&probe.cond);
 }
 
-/* A login that is NOT cancelled must not be abandoned: the callback exists to
- * undo an unwanted login, and undoing a wanted one would make every grant ask
- * for the PIN twice. */
 static void test_successful_login_is_not_abandoned(void)
 {
 	AbandonProbe probe = { 0 };
@@ -506,8 +450,6 @@ static void test_successful_login_is_not_abandoned(void)
 	g_cond_clear(&probe.cond);
 }
 
-/* -------------------------------------------------------- cancel during sign */
-
 typedef struct
 {
 	guint calls;
@@ -544,12 +486,7 @@ static char* fixture_directory(void)
 	return NULL;
 }
 
-/* THE WORKER IS HELD WHERE A CARD WOULD BE. SoftHSM answers a C_Sign in
- * microseconds, so a cancel issued after certificate_broker_perform() returns
- * always lands before the operation has started -- which is
- * test_cancel_before_prompt again, not this. The gate blocks the worker inside
- * sign_thread, with the device lock held, at exactly the point a real card
- * spends its time. */
+/* Hold the worker under device_lock because SoftHSM completes too quickly for timed cancellation. */
 typedef struct
 {
 	GMutex lock;
@@ -572,9 +509,6 @@ static void sign_gate_hold(gpointer user_data)
 	g_mutex_unlock(&sign_gate.lock);
 }
 
-/* The signature path, cancelled WHILE THE DEVICE CALL IS IN PROGRESS. The
- * session is logged in first, so no window is needed and the test is headless:
- * what is under test is the operation's own lifetime, not the prompt's. */
 static void test_cancel_during_sign(void)
 {
 	g_autofree char* directory = fixture_directory();
@@ -637,15 +571,13 @@ static void test_cancel_during_sign(void)
 	certificate_impl_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
 	                               FALSE, 300);
 
-	/* Logged in up front: the point of this test is the operation, and a PIN
-	 * window would need a display. */
+	/* Pre-login avoids opening a PIN window during the operation test. */
 	g_assert_true(certificate_device_open(&session->device, tokens, candidate, &error));
 	g_assert_true(certificate_device_login(&session->device, candidate, FIXTURE_PIN, &error));
 	g_assert_no_error(error);
 
 	memset(digest, 0x5a, sizeof(digest));
 	data = g_bytes_new(digest, sizeof(digest));
-	/* g_variant_parse() already returns a FULL reference. */
 	parameters = g_variant_parse(G_VARIANT_TYPE_VARDICT, "{'hash': <'SHA256'>}", NULL, NULL,
 	                             NULL);
 
@@ -656,10 +588,7 @@ static void test_cancel_during_sign(void)
 	certificate_broker_perform(tokens, session, FALSE, "RSA_PKCS1_V1_5", parameters, data, NULL,
 	                           "Test application", cancellable, on_operation_done, &probe);
 
-	/* Wait until the worker is inside the operation, holding the device lock,
-	 * about to hand the payload to the module. THE MAIN LOOP HAS TO KEEP
-	 * TURNING: open_thread's completion callback is what starts the signing
-	 * worker, and it is dispatched here. */
+	/* Iterate the main loop so open_thread's completion can start the gated signing worker. */
 	deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
 	for (;;)
 	{
@@ -678,10 +607,8 @@ static void test_cancel_during_sign(void)
 		g_main_context_iteration(NULL, FALSE);
 	}
 
-	/* NOTHING MAY HAVE BEEN ANSWERED: the operation is in flight. */
 	g_assert_cmpuint(probe.calls, ==, 0);
 
-	/* CANCEL, exactly as Request.Close() does, mid-operation. */
 	g_cancellable_cancel(cancellable);
 	iterate_for(200);
 
@@ -696,11 +623,6 @@ static void test_cancel_during_sign(void)
 
 	iterate_for(300);
 
-	/* EXACTLY ONE ANSWER, whether the card won the race or the cancel did.
-	 * Which one it is depends on the module: the operation was submitted, so a
-	 * signature may well have come back, and the GTask carries the cancellable
-	 * so GIO reports it as cancelled anyway. What must never happen is two
-	 * answers, no answer, or a device failure. */
 	g_assert_cmpuint(probe.calls, ==, 1);
 	g_assert_true(probe.cancelled);
 
@@ -709,23 +631,11 @@ static void test_cancel_during_sign(void)
 	g_cond_clear(&sign_gate.cond);
 
 	certificate_impl_session_close(session);
-	/* The close runs on a worker now, and the module below must not be
-	 * finalised under it. */
+	/* Drain asynchronous device closes before finalizing the module. */
 	certificate_impl_session_drain_releases(2000);
 	g_object_unref(session);
 }
 
-/* ------------------------------------------- one waiter, cancelled on its own */
-
-/* TWO Sign CALLS ON A LOGGED-OUT GRANT SHARE ONE WINDOW, and until now they
- * also shared one cancellation: closing the request that opened the prompt
- * closed the window and told every other caller behind it that the USER had
- * cancelled -- which they had not. Cancelling a waiter, conversely, did nothing
- * at all until the prompt in front of it finished.
- *
- * The window belongs to the SESSION now. A cancelled operation leaves the queue
- * and is answered on its own; the window comes down only when the last live
- * waiter has gone. */
 static void test_one_waiter_cancels_alone(void)
 {
 	g_autofree char* directory = fixture_directory();
@@ -800,11 +710,9 @@ static void test_one_waiter_cancels_alone(void)
 
 	memset(digest, 0x5a, sizeof(digest));
 	data = g_bytes_new(digest, sizeof(digest));
-	/* g_variant_parse() already returns a FULL reference. */
 	parameters = g_variant_parse(G_VARIANT_TYPE_VARDICT, "{'hash': <'SHA256'>}", NULL, NULL,
 	                             NULL);
 
-	/* NOT logged in: the first operation opens the one PIN window. */
 	certificate_broker_perform(tokens, session, FALSE, "RSA_PKCS1_V1_5", parameters, data, NULL,
 	                           "First application", first_cancellable, on_operation_done, &first);
 
@@ -814,8 +722,6 @@ static void test_one_waiter_cancels_alone(void)
 
 	g_assert_true(pin_window_is_up());
 
-	/* The second arrives while the window is up, so it joins the queue rather
-	 * than opening a second window at the user. */
 	certificate_broker_perform(tokens, session, FALSE, "RSA_PKCS1_V1_5", parameters, data, NULL,
 	                           "Second application", second_cancellable, on_operation_done,
 	                           &second);
@@ -825,19 +731,15 @@ static void test_one_waiter_cancels_alone(void)
 	g_assert_cmpuint(second.calls, ==, 0);
 	g_assert_true(pin_window_is_up());
 
-	/* CANCEL THE ONE THAT OPENED THE WINDOW. It is answered, on its own, now. */
 	g_cancellable_cancel(first_cancellable);
 	iterate_for(300);
 
 	g_assert_cmpuint(first.calls, ==, 1);
 	g_assert_true(first.cancelled);
 
-	/* AND THE OTHER ONE IS STILL WAITING, in front of a window that is still
-	 * up, for a request nobody cancelled. */
 	g_assert_cmpuint(second.calls, ==, 0);
 	g_assert_true(pin_window_is_up());
 
-	/* The last live waiter going takes the window with it. */
 	g_cancellable_cancel(second_cancellable);
 	iterate_for(300);
 
@@ -850,24 +752,7 @@ static void test_one_waiter_cancels_alone(void)
 	g_object_unref(session);
 }
 
-/* ------------------------ the abandon path, through the broker's own callbacks */
-
-/* ONE OBJECT, TWO CALLBACKS. The two tests above hold ui/pin.c to its contract
- * with probes of their own; this one runs the broker's real login interaction
- * -- do_login(), on_pin_done(), do_abandon() -- so that the object the prompt
- * hands to both of them is the one broker/operations.c allocates. on_pin_done()
- * used to free it and do_abandon() then read it, on the one path whose whole
- * job is to close a token session nobody asked to have opened.
- *
- * THE LOGIN IS HELD WHERE SoftHSM IS FAST: do_login() takes the session's
- * device lock before it reaches C_Login, so a test holding that lock keeps the
- * login in flight for as long as it needs to. The cancel goes to the session's
- * login cancellable -- the one waiter_cancelled_idle() cancels when the last
- * waiter leaves -- because that idle takes the same device lock and so cannot
- * run while this test is holding it.
- *
- * RUN IT UNDER ASAN, or failing that with MALLOC_PERTURB_ set: a freed
- * three-pointer block that nothing has reused still reads like itself. */
+/* Hold device_lock to stall login; cancel the session directly because waiter cancellation needs the same lock. */
 static void test_broker_cancelled_login_is_abandoned(void)
 {
 	g_autofree char* directory = fixture_directory();
@@ -941,12 +826,9 @@ static void test_broker_cancelled_login_is_abandoned(void)
 
 	memset(digest, 0x5a, sizeof(digest));
 	data = g_bytes_new(digest, sizeof(digest));
-	/* g_variant_parse() already returns a FULL reference. */
 	parameters = g_variant_parse(G_VARIANT_TYPE_VARDICT, "{'hash': <'SHA256'>}", NULL, NULL,
 	                             NULL);
 
-	/* NOT logged in: this is the lazy login, with the real window in front of
-	 * it and the real interaction behind it. */
 	certificate_broker_perform(tokens, session, FALSE, "RSA_PKCS1_V1_5", parameters, data, NULL,
 	                           "Test application", NULL, on_operation_done, &probe);
 
@@ -956,8 +838,6 @@ static void test_broker_cancelled_login_is_abandoned(void)
 
 	g_assert_true(pin_window_is_up());
 
-	/* From here the login cannot get past the device lock, so it stays in
-	 * flight until this test lets it go. */
 	g_mutex_lock(&session->device_lock);
 	g_assert_nonnull(session->login_cancellable);
 	prompt_cancellable = g_object_ref(session->login_cancellable);
@@ -967,15 +847,11 @@ static void test_broker_cancelled_login_is_abandoned(void)
 	gtk_editable_set_text(GTK_EDITABLE(entry), FIXTURE_PIN);
 	g_signal_emit_by_name(entry, "activate");
 
-	/* The PIN is with the card, as far as anything here can tell, and the
-	 * request is cancelled. */
 	g_cancellable_cancel(prompt_cancellable);
 	iterate_for(200);
 
-	/* Nothing may have been answered: the worker is still inside the login. */
 	g_assert_cmpuint(probe.calls, ==, 0);
 
-	/* And now the card says yes, too late. */
 	g_mutex_unlock(&session->device_lock);
 
 	deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
@@ -984,14 +860,10 @@ static void test_broker_cancelled_login_is_abandoned(void)
 
 	iterate_for(300);
 
-	/* ONE ANSWER, AND IT IS THE CANCEL. */
 	g_assert_cmpuint(probe.calls, ==, 1);
 	g_assert_true(probe.cancelled);
 	g_assert_false(pin_window_is_up());
 
-	/* AND THE LOGIN THAT LANDED ANYWAY IS UNDONE, on a worker: the token
-	 * session is closed, so the next Sign asks for the PIN again instead of
-	 * signing for a request the user refused. */
 	certificate_impl_session_drain_releases(2000);
 	g_assert_false(session->device.logged_in);
 

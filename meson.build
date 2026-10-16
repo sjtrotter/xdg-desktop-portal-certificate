@@ -1,27 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
 
-# xdg-desktop-portal-certificate: an out-of-tree BACKEND for the experimental
-# org.freedesktop.impl.portal.experimental.Certificate1 portal interface.
-#
-# ONE BINARY, because there is one process:
-#
-#   xdg-desktop-portal-certificate   src/   the chooser, the PIN prompt, token
-#                                           discovery and the brokered
-#                                           operations
-#
-# There is no frontend here. The portal frontend -- app id derivation, option
-# validation, policy, the grant registry, the permission store, Request and
-# Session lifecycle, backend selection -- is a branch of xdg-desktop-portal
-# itself: experimental/integration.
-# The frontend needs XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1.
-# See docs/decisions/0010-backend-only-frontend-lives-upstream.md and
-# docs/UPSTREAMING.md.
-#
-# LIBDEX IS DELIBERATELY NOT A DEPENDENCY. The frontend branch uses it for its
-# fibers; backends do not, and no released distribution ships it as a backend
-# dependency. Everything here is plain GLib/GIO async plus GTask worker threads
-# for the PKCS#11 calls, which is what xdg-desktop-portal-gtk does.
+# The frontend lives in xdg-desktop-portal's experimental/integration branch; see docs/UPSTREAMING.md.
 
 project(
   'xdg-desktop-portal-certificate',
@@ -57,16 +37,10 @@ add_project_arguments(
 prefix = get_option('prefix')
 datadir = prefix / get_option('datadir')
 libdir = prefix / get_option('libdir')
-# The backend is D-Bus activated and is not meant to be run from a shell, so it
-# belongs in libexecdir -- as xdg-desktop-portal-gtk's backend does.
 libexecdir = prefix / get_option('libexecdir')
 dbus_service_dir = datadir / 'dbus-1' / 'services'
 dbus_interfaces_dir = datadir / 'dbus-1' / 'interfaces'
 
-# THE REAL DIRECTORY. Out-of-tree backends install their .portal file into
-# ${datadir}/xdg-desktop-portal/portals -- that is where the frontend looks
-# (desktop-portal/xdp-portal-config.c:364) and there is nowhere else it would
-# find it.
 portal_dir = datadir / 'xdg-desktop-portal' / 'portals'
 
 glib_dep = dependency('glib-2.0', version: '>= 2.66')
@@ -74,24 +48,13 @@ gobject_dep = dependency('gobject-2.0', version: '>= 2.66')
 gio_dep = dependency('gio-2.0', version: '>= 2.66')
 gio_unix_dep = dependency('gio-unix-2.0', version: '>= 2.66')
 
-# p11-kit is used for MANAGED MODULE loading -- NOT for scoping. See
-# docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md.
+# Module loading does not scope access; see docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md.
 p11kit_dep = dependency('p11-kit-1', version: '>= 0.23')
-# GnuTLS parses the DER the token hands back: subject, issuer, validity, key
-# usage, extended key usage, key type. Nothing is signed or verified with it.
 gnutls_dep = dependency('gnutls', version: '>= 3.6')
-# The chooser and the PIN prompt are this backend's own windows and are the
-# controls that carry the security decision; see docs/IMPL-INTERFACE.md.
 gtk_dep = dependency('gtk4', version: '>= 4.10')
 adw_dep = dependency('libadwaita-1', version: '>= 1.4')
 
-# Parenting a dialog to the requesting application's window. Both are optional:
-# a backend on a display server it was not built for simply draws an unparented
-# window, which the chooser is required to do anyway for an invalid handle.
-# THE SYSTEM PROMPTER. Optional, and the option it enables does not exist
-# without it: with gcr-4 present the backend can hand the PIN FIELD to the
-# desktop shell (org.gnome.keyring.SystemPrompter) instead of drawing it
-# itself. What that moves and what it does not is docs/SECURITY.md.
+# gcr-4 enables the system PIN prompter; see docs/SECURITY.md for its trust boundary.
 gcr_dep = dependency('gcr-4', version: '>= 4.0', required: get_option('gcr'))
 
 gtk_wayland_dep = dependency('gtk4-wayland', required: false)
@@ -107,10 +70,7 @@ configure_file(output: 'config.h', configuration: config)
 
 config_inc = include_directories('.')
 
-# WHERE p11-kit ITSELF LOOKS. A module file whose `module:` line is a bare name
-# is resolved against p11-kit's own module directory and nowhere else, so the
-# two paths below decide whether the installed module file needs an absolute
-# path. src/module/meson.build makes that choice.
+# Bare module names resolve only within p11-kit's module directory.
 p11kit_module_path = p11kit_dep.get_variable(
   pkgconfig: 'p11_module_path',
   default_value: libdir / 'pkcs11',

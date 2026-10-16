@@ -56,7 +56,6 @@ CertificateCandidate* certificate_test_candidate(const char* name, gboolean can_
 	candidate->can_sign = can_sign;
 	candidate->can_decrypt = can_decrypt;
 
-	/* What a token would have reported for a key of this type. */
 	if (g_strcmp0(candidate->key_type, "RSA") == 0)
 	{
 		const char* mechanisms[] = { "RSA_PKCS1_V1_5", "RSA_PSS", NULL };
@@ -81,9 +80,7 @@ void certificate_test_attach_token(CertificateCandidate* candidate, const char* 
 	g_clear_pointer(&candidate->token, certificate_token_unref);
 	g_clear_pointer(&candidate->piv_slot, g_free);
 
-	/* CertificateToken has no public constructor: it is only ever produced from
-	 * a slot. The test builds one by hand, which is the one place that is
-	 * legitimate, and is why the struct is in the header. */
+	/* Build a token by hand because discovery exposes no public token constructor. */
 	candidate->token = g_new0(CertificateToken, 1);
 	g_atomic_ref_count_init(&candidate->token->ref_count);
 	candidate->token->label = g_strdup(label);
@@ -114,7 +111,7 @@ void certificate_test_verify_signature(CertificateCandidate* candidate,
 		gsize raw_length = 0;
 		const guint8* raw = g_bytes_get_data(signature, &raw_length);
 
-		/* PKCS#11 produces r||s; X.509 wants an ECDSA-Sig-Value. */
+		/* Re-encode PKCS#11 r||s for X.509 verification. */
 		encoded = certificate_ecdsa_raw_to_der(raw, raw_length, &error);
 		g_assert_no_error(error);
 		sig.data = (unsigned char*) g_bytes_get_data(encoded, NULL);

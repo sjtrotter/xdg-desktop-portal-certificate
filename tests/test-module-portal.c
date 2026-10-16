@@ -2,21 +2,9 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * The client-side PKCS#11 module driven through C_GetFunctionList, against a
- * portal that is stood up here rather than mocked out. tests/test-module.c
- * covers the parts that need no bus; these three need one, because what they
- * are about is what the module does while a request is outstanding:
- *
- *   - the process-wide lock is NOT held across the chooser;
- *   - a request that times out is Closed at the portal rather than abandoned;
- *   - the lengths a caller can put in a CK_MECHANISM are bounded before they
- *     are narrowed.
- *
- * The fake portal runs on its own thread with its own GMainContext, so a test
- * body can make blocking PKCS#11 calls on the main thread exactly as an
- * application does.
  */
+
+/* The fake portal runs on its own context thread so tests can make blocking PKCS#11 calls. */
 
 #include <string.h>
 
@@ -33,14 +21,10 @@
 #define CERTIFICATE_FIXTURE_DIR "tests/fixtures"
 #endif
 
-/* PRE_HASHED_LIMIT in src/module/module.c. A private constant deliberately, so
- * the boundary is restated here rather than shared: a change to either has to
- * be a change to both. */
+/* Keep in step with the private PRE_HASHED_LIMIT in src/module/module.c. */
 #define PREHASH_LIMIT 512
 
 #define WAIT_MS 5000
-
-/* ----------------------------------------------------------- the fake portal */
 
 static const char introspection[] =
     "<node>"
@@ -72,14 +56,12 @@ static const char introspection[] =
     "  </interface>"
     "</node>";
 
-/* What the fake does with the next AcquireCredential. */
 typedef enum
 {
-	ACQUIRE_ANSWER,     /* reply, then Response with a credential */
-	ACQUIRE_STALL,      /* reply, and no Response ever */
-	ACQUIRE_HOLD_REPLY, /* not even the method reply, until the test lets go --
-	                     * and then it names a path the module never predicted */
-	ACQUIRE_FAIL,       /* a D-Bus error, so there is no request object at all */
+	ACQUIRE_ANSWER,
+	ACQUIRE_STALL,
+	ACQUIRE_HOLD_REPLY, /* Hold the reply, then return an unpredicted request path. */
+	ACQUIRE_FAIL,
 } AcquireMode;
 
 typedef struct
@@ -97,20 +79,15 @@ typedef struct
 	GCond cond;
 	gboolean ready;
 
-	/* Knobs and observations. Written on the fake's thread, read by the
-	 * test's. */
 	AcquireMode acquire_mode;
 	guint acquire_count;
 	char* acquire_path;
 	char* acquire_sender;
-	/* The held AcquireCredential: the invocation is owned here until the test
-	 * releases it, which is how a reply is made to lose a race on purpose. */
+	/* Owns the held invocation until the test releases the method reply. */
 	GDBusMethodInvocation* held;
 	char* held_path;
 	GPtrArray* closed;
-	/* Request and Session objects, so that one test's paths do not collide with
-	 * the next one's: the module's tokens restart at C_Initialize and the bus
-	 * name is the same connection throughout. */
+	/* Keep fixture objects distinct across module initializations, which restart request tokens. */
 	GArray* exported;
 } FakePortal;
 
@@ -142,10 +119,7 @@ static GBytes* fixture_der(const char* name)
 	return bytes;
 }
 
-/* The same rule as request_path_for() in src/module/portal.c: the module
- * predicts this path and subscribes to it before it makes the call, so a fake
- * that answered on a path of its own would be testing the recovery and not the
- * ordinary case. */
+/* Match the module's predicted request path to exercise ordinary subscription timing. */
 static char* portal_object_path(const char* prefix, const char* sender, const char* token)
 {
 	g_autofree char* escaped = g_strdup(sender[0] == ':' ? sender + 1 : sender);
@@ -203,8 +177,6 @@ static guint export_object(const char* path, const char* interface,
 	return id;
 }
 
-/* A request or a session object, which lasts as long as the test that provoked
- * it. The interface object itself is not one of these. */
 static void export_transient(const char* path, const char* interface,
                              const GDBusInterfaceVTable* vtable)
 {
@@ -264,8 +236,6 @@ static GVariant* credential_results(void)
 	return g_variant_builder_end(&builder);
 }
 
-/* Recorded before the reply, so a test can wait for the call itself and not for
- * whatever the fake decides to do about it. */
 static void acquire_seen(const char* request_path, const char* sender, AcquireMode* mode)
 {
 	g_mutex_lock(&fake.lock);
@@ -351,8 +321,6 @@ static void on_certificate_call(GDBusConnection* connection, const char* sender,
 		g_autofree char* late_token = g_strdup_printf("%s_late", handle_token);
 		g_autofree char* late_path = portal_object_path("request", sender, late_token);
 
-		/* The portal picks the request object's path, and nothing says it has
-		 * to be the one the caller predicted. */
 		export_transient(late_path, PKCS11_PORTAL_REQUEST_INTERFACE, &request_vtable);
 
 		g_mutex_lock(&fake.lock);
@@ -365,8 +333,6 @@ static void on_certificate_call(GDBusConnection* connection, const char* sender,
 
 	g_dbus_method_invocation_return_value(invocation, g_variant_new("(o)", request_path));
 
-	/* THE CHOOSER IS ON SCREEN AND NOTHING ANSWERS. Everything about the
-	 * module's behaviour during a request is only visible here. */
 	if (mode == ACQUIRE_STALL)
 		return;
 
@@ -391,8 +357,7 @@ static gpointer fake_thread(gpointer data)
 
 	g_main_context_push_thread_default(fake.context);
 
-	/* Deliberately not g_bus_get_sync(): the singleton belongs to the module
-	 * under test, and two users of one connection would hide a dispatch bug. */
+	/* Use a separate connection so shared dispatch cannot hide a module bug. */
 	fake.connection = g_dbus_connection_new_for_address_sync(
 	    g_test_dbus_get_bus_address(bus),
 	    G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
@@ -495,9 +460,6 @@ static guint fake_acquire_count(void)
 	return count;
 }
 
-/** The AcquireCredential count, after waiting up to @ms for a second one to
- *  turn up. A bounded wait for something that must not happen: it is what makes
- *  "no second chooser" an assertion and not a hope. */
 static guint fake_wait_for_second_acquire(guint ms)
 {
 	gint64 deadline = g_get_monotonic_time() + ms * G_TIME_SPAN_MILLISECOND;
@@ -526,7 +488,6 @@ static guint fake_close_count(void)
 	return count;
 }
 
-/** The request path AcquireCredential was called on, or NULL after @ms. */
 static char* fake_wait_for_acquire(guint ms)
 {
 	gint64 deadline = g_get_monotonic_time() + ms * G_TIME_SPAN_MILLISECOND;
@@ -563,7 +524,6 @@ static gboolean fake_wait_for_close(const char* path, guint ms)
 	return closed;
 }
 
-/** The path the held AcquireCredential reply will name, or NULL after @ms. */
 static char* fake_wait_for_held_reply(guint ms)
 {
 	gint64 deadline = g_get_monotonic_time() + ms * G_TIME_SPAN_MILLISECOND;
@@ -607,7 +567,6 @@ static void fake_release_held_reply(void)
 	g_source_unref(source);
 }
 
-/** Answer the stalled AcquireCredential, so the blocked caller comes back. */
 static gboolean answer_acquire(gpointer data)
 {
 	guint32 response = GPOINTER_TO_UINT(data);
@@ -629,8 +588,6 @@ static void fake_answer_acquire(guint32 response)
 	g_source_unref(source);
 }
 
-/* --------------------------------------------------------------- the module */
-
 static CK_FUNCTION_LIST* functions;
 
 static CK_SESSION_HANDLE open_session(void)
@@ -643,7 +600,6 @@ static CK_SESSION_HANDLE open_session(void)
 	return session;
 }
 
-/* The private-key search, which is the template that acquires a credential. */
 typedef struct
 {
 	CK_OBJECT_CLASS object_class;
@@ -672,10 +628,7 @@ static void search_init(Search* search, CK_SESSION_HANDLE session)
 	g_cond_init(&search->cond);
 }
 
-/* The same search with a key identifier in it. It acquires exactly as the plain
- * one does, but its refusal fingerprint is a different one -- so a refusal
- * another search collected does not silence it, which is what makes it usable
- * as the SECOND search in these tests. */
+/* A key identifier changes refusal memory so the second search can acquire independently. */
 static void search_init_by_id(Search* search, CK_SESSION_HANDLE session)
 {
 	static const guint8 identifier[4] = { 1, 2, 3, 4 };
@@ -729,8 +682,7 @@ static gpointer find_thread(gpointer data)
 	return NULL;
 }
 
-/* C_Finalize off the main thread, so that a test can keep answering the portal
- * while it drains. */
+/* Finalize on another thread while this thread services portal replies. */
 static gpointer finalize_thread(gpointer data)
 {
 	Search* search = data;
@@ -752,10 +704,6 @@ static gpointer session_info_thread(gpointer data)
 	return NULL;
 }
 
-/* M1 OF THE 2026 REVIEW. C_FindObjectsInit used to hold the module's one global
- * lock across the acquire, so a browser that opened a second connection while
- * the chooser was up wedged its whole crypto stack -- for up to the five-minute
- * request timeout. */
 static void test_the_chooser_does_not_hold_the_module_lock(void)
 {
 	Search find;
@@ -779,8 +727,6 @@ static void test_the_chooser_does_not_hold_the_module_lock(void)
 	acquired = fake_wait_for_acquire(WAIT_MS);
 	g_assert_nonnull(acquired);
 
-	/* The chooser is up on the other thread. This one is a different PKCS#11
-	 * session doing something the portal is not involved in at all. */
 	other = g_thread_new("info", session_info_thread, &info);
 	g_assert_true(search_wait(&info, WAIT_MS));
 	g_assert_cmpuint(info.rv, ==, CKR_OK);
@@ -798,10 +744,6 @@ static void test_the_chooser_does_not_hold_the_module_lock(void)
 	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
 }
 
-/* THE OTHER SIDE OF THE SAME CHANGE. With the lock down across the acquire, the
- * thread that is blocked on the chooser owns the portal client, so C_Finalize
- * cannot simply free it -- and it must not wait out the request timeout either.
- * It abandons the request instead. */
 static void test_finalize_while_the_chooser_is_up(void)
 {
 	Search find;
@@ -826,12 +768,6 @@ static void test_finalize_while_the_chooser_is_up(void)
 	g_assert_true(fake_wait_for_close(acquired, WAIT_MS));
 }
 
-/* THE REPLY THE PORTAL HAD NOT SENT YET. Cancelling a request Closes the path
- * the caller predicted, but the portal chooses the path, and its reply can name
- * a different one. If the client's context is torn down before that reply is
- * dispatched, the request object it names is one nothing will ever close -- a
- * chooser left on screen -- and the callback's own references are stranded on a
- * context nobody runs again. */
 static void test_a_late_reply_closes_the_path_it_names(void)
 {
 	Search find;
@@ -854,7 +790,6 @@ static void test_a_late_reply_closes_the_path_it_names(void)
 	g_assert_nonnull(late);
 	g_assert_cmpstr(late, !=, predicted);
 
-	/* Finalize with the reply still in the portal's hands. */
 	finisher = g_thread_new("finalize", finalize_thread, &finalize);
 	g_assert_true(search_wait(&find, WAIT_MS));
 	g_thread_join(finder);
@@ -872,9 +807,6 @@ static void test_a_late_reply_closes_the_path_it_names(void)
 	search_clear(&finalize);
 }
 
-/* A method call the portal REFUSES leaves no request object behind, at either
- * path, so there is nothing to Close -- and a Close sent anyway is a message to
- * an object that never existed. */
 static void test_a_refused_call_closes_nothing(void)
 {
 	CK_OBJECT_CLASS object_class = CKO_PRIVATE_KEY;
@@ -887,7 +819,6 @@ static void test_a_refused_call_closes_nothing(void)
 	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
 	session = open_session();
 
-	/* No credential is not an error: it is an empty search. */
 	g_assert_cmpuint(functions->C_FindObjectsInit(session, templ, 1), ==, CKR_OK);
 	g_assert_cmpuint(functions->C_FindObjects(session, handles, G_N_ELEMENTS(handles), &count),
 	                 ==, CKR_OK);
@@ -900,9 +831,6 @@ static void test_a_refused_call_closes_nothing(void)
 	g_assert_cmpuint(fake_close_count(), ==, 0);
 }
 
-/* Two searches on two threads, one chooser. The second waits for the first
- * rather than opening a window of its own, and then finds what the first one
- * was given. */
 static void test_two_searches_share_one_chooser(void)
 {
 	Search first;
@@ -947,10 +875,6 @@ static void test_two_searches_share_one_chooser(void)
 	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
 }
 
-/* A SESSION CLOSED WHILE ITS SEARCH WAS QUEUED behind somebody else's chooser.
- * The wait is not a place where the handle keeps its meaning: by the time this
- * search runs there is no session to answer, and opening a second chooser for
- * it would be a window nobody asked for. */
 static void test_a_session_closed_during_the_wait_asks_for_nothing(void)
 {
 	Search first;
@@ -974,7 +898,7 @@ static void test_a_session_closed_during_the_wait_asks_for_nothing(void)
 
 	g_assert_cmpuint(functions->C_CloseSession(second.session), ==, CKR_OK);
 
-	/* Refused, so the waiting search does not simply inherit a grant. */
+	/* Refuse the first acquisition so the queued search cannot inherit a grant. */
 	fake_answer_acquire(1);
 
 	g_assert_true(search_wait(&first, WAIT_MS));
@@ -992,10 +916,6 @@ static void test_a_session_closed_during_the_wait_asks_for_nothing(void)
 	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
 }
 
-/* THE SAME HANDLE, A DIFFERENT MODULE. C_Initialize hands the session handles
- * out again from 1, so a search that was queued across a finalize wakes into a
- * module where its handle names somebody else's session -- and used to acquire
- * a credential through the new client and publish into that session. */
 static void test_a_search_does_not_survive_reinitialization(void)
 {
 	Search first;
@@ -1028,8 +948,7 @@ static void test_a_search_does_not_survive_reinitialization(void)
 	g_thread_join(finisher);
 	g_thread_join(one);
 
-	/* The handles start again, so this is the number the waiting search is
-	 * still holding. */
+	/* Reinitialization reuses the waiting search's numeric handle. */
 	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
 	reused = open_session();
 	g_assert_cmpuint(reused, ==, first.session);
@@ -1046,9 +965,6 @@ static void test_a_search_does_not_survive_reinitialization(void)
 	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
 }
 
-/* A timed-out request used to be dropped on the floor: this side stopped
- * waiting, and the chooser -- or a PIN prompt behind it -- stayed up with a
- * grant nobody was going to collect. */
 static void test_a_timed_out_request_is_closed(void)
 {
 	CK_OBJECT_CLASS object_class = CKO_PRIVATE_KEY;
@@ -1062,8 +978,6 @@ static void test_a_timed_out_request_is_closed(void)
 	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
 	session = open_session();
 
-	/* Times out rather than answering, and a search that acquired nothing is
-	 * an empty search and not an error. */
 	g_assert_cmpuint(functions->C_FindObjectsInit(session, templ, 1), ==, CKR_OK);
 	g_assert_cmpuint(functions->C_FindObjectsFinal(session), ==, CKR_OK);
 
@@ -1099,9 +1013,6 @@ static CK_RV sign_init(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE key, CK_ULONG
 	return functions->C_SignInit(session, &mechanism, key);
 }
 
-/* The two lengths a caller chooses that used to be narrowed instead of
- * refused: the PSS salt length, and the amount fed to a mechanism that does not
- * hash. */
 static void test_caller_lengths_are_bounded_before_they_are_narrowed(void)
 {
 	guint8 block[PREHASH_LIMIT];
@@ -1115,21 +1026,16 @@ static void test_caller_lengths_are_bounded_before_they_are_narrowed(void)
 	session = open_session();
 	key = find_the_private_key(session);
 
-	/* The pre-hash buffer, at the boundary and one byte past it. */
 	g_assert_cmpuint(sign_init(session, key, 32), ==, CKR_OK);
 	g_assert_cmpuint(functions->C_SignUpdate(session, block, PREHASH_LIMIT), ==, CKR_OK);
 	g_assert_cmpuint(functions->C_SignUpdate(session, block, 1), ==, CKR_DATA_LEN_RANGE);
 
-	/* And past it by so much that len + size wraps back under it. The old
-	 * check added, so this one was accepted and then truncated into a guint. */
 	g_assert_cmpuint(sign_init(session, key, 32), ==, CKR_OK);
 	g_assert_cmpuint(functions->C_SignUpdate(session, block, 100), ==, CKR_OK);
 	g_assert_cmpuint(functions->C_SignUpdate(session, block, G_MAXULONG - 50), ==,
 	                 CKR_DATA_LEN_RANGE);
 
-	/* The PSS salt length is a CK_ULONG and the interface carries a uint32. The
-	 * largest that fits is this module's business to forward and the backend's
-	 * to refuse against the key. */
+	/* The uint32 salt boundary must reach the backend, which validates it against the key. */
 	g_assert_cmpuint(sign_init(session, key, G_MAXUINT32), ==, CKR_OK);
 	g_assert_cmpuint(functions->C_SignUpdate(session, block, G_MAXULONG), ==,
 	                 CKR_DATA_LEN_RANGE);
@@ -1152,8 +1058,7 @@ int main(int argc, char** argv)
 
 	g_test_init(&argc, &argv, NULL);
 
-	/* One bus for the whole process: the module reaches it through
-	 * g_bus_get_sync(), whose singleton outlives any one GTestDBus. */
+	/* Use one bus because the module's shared GDBus connection survives individual fixtures. */
 	bus = g_test_dbus_new(G_TEST_DBUS_NONE);
 	g_test_dbus_up(bus);
 	fake_start(bus);
@@ -1183,12 +1088,7 @@ int main(int argc, char** argv)
 
 	fake_stop();
 
-	/* stop() and not down(): down() waits for the GDBusConnection singleton to
-	 * be destroyed, and this module reaches the bus through g_bus_get_sync()
-	 * precisely because the connection belongs to the application and not to
-	 * it. A request abandoned at C_Finalize can also leave one reply
-	 * outstanding on a context nobody runs again. The GTestDBus is not unreffed
-	 * either: disposing one runs down(). */
+	/* Use stop() and retain the fixture because down() waits for the application's singleton connection. */
 	g_test_dbus_stop(bus);
 
 	return result;

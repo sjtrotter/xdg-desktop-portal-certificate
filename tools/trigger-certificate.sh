@@ -1,38 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
-#
-# trigger-certificate.sh -- poke the PUBLIC Certificate portal interface.
-#
-# This calls org.freedesktop.portal.experimental.Certificate1 on
-# org.freedesktop.portal.Desktop at
-# /org/freedesktop/portal/desktop -- the frontend, never this
-# repository's backend. An application would do exactly this, and it is the only
-# way to exercise the backend the way it is meant to be exercised.
-#
-# The interface only exists if the running xdg-desktop-portal has a certificate
-# backend configured and Certificate1 listed in XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL.
-# Without either, the interface is not exported at all and every call below
-# fails with "no such interface" -- which is the intended behaviour, not a bug
-# in this script.
-#
-# It defaults to --session-bus, i.e. whatever DBUS_SESSION_BUS_ADDRESS points
-# at. To keep the real desktop out of it, run the whole thing on a private bus:
-#
-#     dbus-run-session -- tools/trigger-certificate.sh
-#
-# ...but a private bus has no portal on it, so in practice use
-#     tools/dev-stack.sh --keep --no-e2e
-# which starts a frontend and a backend on a private bus and leaves them up, and
-# then run this from another shell with the DBUS_SESSION_BUS_ADDRESS it printed.
-#
-# For anything more than poking one method, tools/certificate-e2e.py does the
-# whole flow and verifies the signature at the end.
-#
-# Method and argument shapes are taken from
-# data/org.freedesktop.portal.experimental.Certificate1.xml on the
-# xdg-desktop-portal branch experimental/integration and from
-# that branch's tests/test_certificate.py.
+# Calls targeting Certificate1 fail when it is not exported; introspect can still list other interfaces at the shared object path.
 
 set -u
 
@@ -51,8 +20,7 @@ Commands:
   introspect     list the interfaces the portal exports on the desktop path
   capabilities   GetCapabilities(a{sv}) -> a{sv}; a plain method, answers directly
   session        CreateSession(a{sv}) -> o handle
-                 NOTE: this is a Request. The session_handle comes back in the
-                 Response signal on the returned handle, not as a return value.
+                 session_handle arrives in the Request's Response signal
   acquire PATH   AcquireCredential(o session, s parent_window, a{sv}) -> o handle
   sign PATH      Sign(o session, s parent_window, a{sv}) -> o handle
   release PATH   Session.Close(); a grant ends with its session
@@ -65,12 +33,9 @@ EOF
 }
 
 monitor_bg() {
-	# The answer to CreateSession/AcquireCredential/Sign arrives as a Response
-	# signal on the Request object, not as the method's return value, so
-	# something has to be watching before the call is made.
+	# Subscribe before calling so asynchronous Response signals are observed.
 	gdbus monitor "$BUS" --dest "$DEST" &
 	MONITOR_PID=$!
-	# Give the monitor a moment to attach before anything is sent.
 	sleep 1
 }
 
@@ -83,7 +48,7 @@ cmd_version() {
 cmd_introspect() {
 	gdbus introspect "$BUS" --dest "$DEST" --object-path "$PATH_" |
 		grep -E '^[[:space:]]*interface org\.freedesktop\.portal\.' ||
-		echo "no experimental interfaces exported"
+		echo "No portal interfaces exported"
 }
 
 cmd_capabilities() {
@@ -99,9 +64,7 @@ cmd_session() {
 
 cmd_acquire() {
 	local session="$1"
-	# purpose is REQUIRED and there is deliberately no value meaning "anything".
-	# requested_lifetime is a ceiling request: the frontend clamps it to 3600 and
-	# forwards its own decision to the backend as `lifetime`.
+	# The frontend caps requested_lifetime at 3600 seconds and forwards its decision as lifetime.
 	gdbus call "$BUS" --dest "$DEST" --object-path "$PATH_" \
 		--method "$IFACE".AcquireCredential \
 		"$session" "" \
@@ -114,8 +77,6 @@ cmd_acquire() {
 
 cmd_sign() {
 	local session="$1"
-	# mechanism must be one the grant reported in supported_mechanisms; the
-	# frontend's allow list is RSA_PKCS1_V1_5, RSA_PSS, ECDSA.
 	gdbus call "$BUS" --dest "$DEST" --object-path "$PATH_" \
 		--method "$IFACE".Sign \
 		"$session" "" \
@@ -158,7 +119,6 @@ main() {
 		echo "== capabilities"; cmd_capabilities
 		echo "== CreateSession"
 		cmd_session
-		# The Response is asynchronous; give it a moment to land in the monitor.
 		sleep 2
 		;;
 	-h | --help | help) usage ;;

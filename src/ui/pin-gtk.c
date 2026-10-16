@@ -2,11 +2,6 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * THE IN-PROCESS PIN WINDOW. This file draws widgets and reports what the user
- * did; every decision -- whether an attempt may be spent, whether a retry is
- * offered, what the token's flags mean -- is ui/pin.c's. See ui/pin-internal.h
- * for the contract.
  */
 
 #include <adwaita.h>
@@ -18,7 +13,7 @@
 
 typedef struct
 {
-	PinPrompt* prompt; /* borrowed: the prompt owns this struct */
+	PinPrompt* prompt; /* Borrowed; owned by the prompt. */
 
 	GtkWindow* window;
 	GtkWidget* entry;
@@ -41,12 +36,7 @@ static GtkPinPrompt* gtk_pin(PinPrompt* prompt)
 	return prompt->impl_data;
 }
 
-/* GTK 4.22's stub accessibility context -- what GTK_A11Y=none and a session
- * with no accessibility bus produce (GTK_A11Y=test names it), which is every
- * dbus-run-session stack --
- * has no announce implementation, and gtk_accessible_announce() calls through
- * the NULL vfunc. Only the AT-SPI context can carry an announcement, so only
- * that one is asked. */
+/* GTK's stub accessibility context has no announce vfunc; only the AT-SPI context supports announcements. */
 static gboolean announcement_reaches_anyone(GtkAccessible* accessible)
 {
 	GtkATContext* context = gtk_accessible_get_at_context(accessible);
@@ -73,8 +63,7 @@ static void set_status(PinPrompt* prompt, const char* text, gboolean is_error)
 	if (is_error)
 	{
 		gtk_widget_add_css_class(ui->status, "error");
-		/* The failure state IS announced: a screen-reader user must learn that
-		 * an attempt was spent. The PIN itself never enters this tree. */
+		/* Announce attempt failures without exposing the PIN to accessibility. */
 		if (ui->window != NULL && announcement_reaches_anyone(GTK_ACCESSIBLE(ui->window)))
 			gtk_accessible_announce(GTK_ACCESSIBLE(ui->window), text,
 			                        GTK_ACCESSIBLE_ANNOUNCEMENT_PRIORITY_HIGH);
@@ -106,48 +95,26 @@ static void on_unlock(GtkWidget* widget, gpointer user_data)
 	if (prompt->busy || prompt->finished || prompt->login_in_flight)
 		return;
 
-	/* AN EMPTY FIELD IS NOT AN ATTEMPT, and that rule is no longer written
-	 * here: it is certificate_pin_prompt_hold()'s, so that the shell's prompter
-	 * obeys the same one. What comes back is FALSE and a retry with a warning.
-	 *
-	 * GTK's own storage is a GtkPasswordEntryBuffer, which GTK allocates from
-	 * its secure-memory pool and zeroes when it frees it -- but GTK guarantees
-	 * nothing about the intermediate copies a text widget, an input method or a
-	 * Pango layout may have made, so this backend does not claim the PIN
-	 * existed in exactly one place. It claims what is true: ui/pin.c holds it
-	 * in one wiped, locked, non-dumpable page. */
+	/* GTK may make intermediate PIN copies; locked core storage guarantees are documented in docs/SECURITY.md. */
 	text = gtk_editable_get_text(GTK_EDITABLE(ui->entry));
 	set_status(prompt, NULL, FALSE);
 
 	if (!certificate_pin_prompt_hold(prompt, text))
 		return;
 
-	/* THE LAST ATTEMPT IS NOT SPENT ON A SINGLE CLICK. When the token says
-	 * CKF_USER_PIN_FINAL_TRY, the next refusal locks the card, so the window
-	 * says so and requires the user to press Unlock a second time -- with what
-	 * they already typed still in the field, so the confirmation is a decision
-	 * rather than a retype. The value is already in the locked page by then;
-	 * the second press spends the attempt, exactly as the confirmation round
-	 * does on the shell's prompt. */
+	/* FINAL_TRY requires a second Unlock press before spending the token's last attempt. */
 	if (certificate_pin_prompt_needs_final_confirm(prompt))
 	{
 		set_status(prompt, certificate_pin_prompt_final_try_warning(), TRUE);
 		return;
 	}
 
-	/* Cleared the moment the value is in the locked buffer, and before the
-	 * worker starts, so the field is empty for the whole time the card is
-	 * busy. */
+	/* Clear the entry after copying into locked memory and before starting login. */
 	gtk_editable_set_text(GTK_EDITABLE(ui->entry), "");
 	certificate_pin_prompt_submit(prompt);
 }
 
-/* THE LAST ATTEMPT ON A PIN PAD IS STILL THE LAST ATTEMPT. A protected
- * authentication path has no field in this window, so the second press that
- * confirms CKF_USER_PIN_FINAL_TRY is a button of its own -- without it the
- * NULL-PIN login went out the moment the window appeared, which made the
- * "unconditional" in docs/SECURITY.md untrue for exactly the tokens whose
- * counter cannot be seen. */
+/* Protected-path login also requires explicit confirmation before its final attempt. */
 static void on_protected_confirm(GtkWidget* widget, gpointer user_data)
 {
 	PinPrompt* prompt = user_data;
@@ -242,11 +209,7 @@ static void gtk_pin_start(PinPrompt* prompt)
 		gtk_box_append(GTK_BOX(content), heading);
 	}
 
-	/* The window restates the verified caller and the purpose from the chooser,
-	 * so that a PIN prompt arriving on its own is still attributable. EVERY
-	 * VALUE BELOW IS SANITISED AND CAPPED: the caller display comes from a
-	 * desktop file and the token label and reader name come off the card, and
-	 * none of the three may draw chrome of its own inside this window. */
+	/* Restate the caller and purpose; sanitize desktop and token metadata before display. */
 	{
 		g_autofree char* caller = certificate_display_text(prompt->caller_display,
 		                                                   CERTIFICATE_DISPLAY_MAX_APP_NAME, NULL);
@@ -292,9 +255,7 @@ static void gtk_pin_start(PinPrompt* prompt)
 	gtk_widget_set_visible(ui->status, FALSE);
 	gtk_box_append(GTK_BOX(content), ui->status);
 
-	/* Created whether or not there is a hint to show right now: the flags are
-	 * re-read after every refusal, and a warning that only exists if it was
-	 * needed at window-open time is a warning that arrives too late. */
+	/* Create the warning widget before login because retries may newly set PIN warning flags. */
 	ui->hint = gtk_label_new(NULL);
 	gtk_label_set_wrap(GTK_LABEL(ui->hint), TRUE);
 	gtk_label_set_xalign(GTK_LABEL(ui->hint), 0.0f);
@@ -325,11 +286,7 @@ static void gtk_pin_start(PinPrompt* prompt)
 	}
 	else if (certificate_pin_prompt_needs_final_confirm(prompt))
 	{
-		/* The reader will collect the PIN, but the attempt this window is about
-		 * to spend is the last one the token has -- so it is asked for, here,
-		 * before the NULL-PIN login goes out. Calling
-		 * certificate_pin_prompt_needs_final_confirm() has already RECORDED the
-		 * confirmation, so the button below is the second press. */
+		/* The first confirmation check records the warning; the protected-path button supplies the second press. */
 		ui->confirm_button = gtk_button_new_with_mnemonic("Use the _last attempt");
 		gtk_widget_add_css_class(ui->confirm_button, "destructive-action");
 		g_signal_connect(ui->confirm_button, "clicked", G_CALLBACK(on_protected_confirm),
@@ -359,10 +316,8 @@ static void gtk_pin_start(PinPrompt* prompt)
 	}
 	else if (ui->confirm_button != NULL)
 	{
-		/* NOTHING IS SUBMITTED YET. The reader is not asked for anything until
-		 * the last attempt has been confirmed; Cancel keeps the focus so that a
-		 * stray Return does not spend it. */
 		set_status(prompt, certificate_pin_prompt_final_try_warning(), TRUE);
+		/* Keep focus on Cancel until the final attempt is confirmed. */
 		gtk_widget_grab_focus(ui->cancel_button);
 	}
 	else
@@ -387,8 +342,6 @@ static void gtk_pin_retry(PinPrompt* prompt, const char* status)
 {
 	GtkPinPrompt* ui = gtk_pin(prompt);
 
-	/* The flags were re-read on the worker thread after the refusal, so this is
-	 * about the state the token is in NOW. */
 	update_retry_hint(prompt);
 
 	if (ui->entry != NULL)
@@ -415,12 +368,7 @@ static void gtk_pin_close(PinPrompt* prompt)
 	if (ui == NULL)
 		return;
 
-	/* Disconnected before the destroy, for the same reason the chooser does it:
-	 * tearing a window down emits signals at a point where the widgets those
-	 * handlers touch have already been disposed. EVERY handler, not only the
-	 * two that used to be listed. The `finished` guard makes a late callback
-	 * harmless, but "harmless because the first line returns" is a weaker
-	 * property than "cannot be called". */
+	/* Disconnect before destroying widgets because disposal emits signals. */
 	if (ui->entry != NULL)
 		g_signal_handlers_disconnect_by_data(ui->entry, prompt);
 	if (ui->window != NULL)

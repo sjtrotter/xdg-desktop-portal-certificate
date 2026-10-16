@@ -10,8 +10,7 @@
 
 #include "../redact.h"
 
-/* The largest attribute this backend will allocate for. A certificate is a few
- * kilobytes, a CKA_ID a few bytes; the length is a number the module chooses. */
+/* Bound allocations because attribute lengths are supplied by the module. */
 #define CERTIFICATE_PKCS11_ATTRIBUTE_MAX (64 * 1024)
 
 G_DEFINE_QUARK(certificate-pkcs11-error, certificate_pkcs11_error)
@@ -46,9 +45,7 @@ void certificate_pkcs11_set_error(GError** error, CK_RV rv, const char* what)
 {
 	g_autofree char* text = NULL;
 
-	/* p11_kit_strerror() is a library string and OpenSC has been seen to put a
-	 * PKCS#11 URI into one. It goes through the redactor like every other
-	 * library message; see src/redact.h. */
+	/* Library error text may contain PIN-bearing URIs and requires redaction. */
 	text = certificate_redact_error_text(p11_kit_strerror(rv));
 
 	g_set_error(error, CERTIFICATE_PKCS11_ERROR, certificate_pkcs11_error_code(rv),
@@ -67,9 +64,7 @@ char* certificate_pkcs11_string(const CK_UTF8CHAR* field, gsize size)
 	if (raw == NULL)
 		return g_strdup("");
 
-	/* A token is a device and its strings come off a wire. Anything that is not
-	 * valid UTF-8 is replaced rather than passed on to a GVariant, which would
-	 * abort, or to a label, which would render as mojibake. */
+	/* Token strings may be invalid UTF-8 and must be repaired before display or D-Bus use. */
 	if (!g_utf8_validate(raw, -1, NULL))
 	{
 		char* clean = g_utf8_make_valid(raw, -1);
@@ -91,10 +86,6 @@ GByteArray* certificate_pkcs11_get_attribute(CK_FUNCTION_LIST* module, CK_SESSIO
 	if (rv != CKR_OK || attribute.ulValueLen == (CK_ULONG) -1 || attribute.ulValueLen == 0)
 		return NULL;
 
-	/* THE LENGTH COMES OFF THE CARD. A module that reports a gigabyte for
-	 * CKA_ID gets an allocation of a gigabyte, and a hostile or broken one can
-	 * report it on every object. Nothing this backend reads -- a certificate, a
-	 * key id, a label -- is anywhere near the cap. */
 	if (attribute.ulValueLen > CERTIFICATE_PKCS11_ATTRIBUTE_MAX)
 		return NULL;
 
@@ -104,8 +95,7 @@ GByteArray* certificate_pkcs11_get_attribute(CK_FUNCTION_LIST* module, CK_SESSIO
 	attribute.pValue = value->data;
 
 	rv = module->C_GetAttributeValue(session, object, &attribute, 1);
-	/* The second call may report a different length. Growing here would hand
-	 * back a buffer whose tail the module never wrote. */
+	/* The second attribute read may change length; never expose an unwritten buffer tail. */
 	if (rv != CKR_OK || attribute.ulValueLen > allocated)
 	{
 		g_byte_array_unref(value);

@@ -18,8 +18,7 @@
 
 G_DEFINE_QUARK(pkcs11-portal-certificate, portal_module_error)
 
-/* Handles are (generation << 4) | index, so that a handle from a released grant
- * does not name an object of the next one. */
+/* Handle generations prevent a released grant's handles from naming new objects. */
 #define HANDLE_CERTIFICATE 1u
 #define HANDLE_PUBLIC_KEY 2u
 #define HANDLE_PRIVATE_KEY 3u
@@ -36,8 +35,6 @@ void portal_grant_free(PortalGrant* grant)
 	g_strfreev(grant->supported_mechanisms);
 	g_free(grant);
 }
-
-/* ------------------------------------------------------------- attributes */
 
 static void attribute_clear(gpointer data)
 {
@@ -120,10 +117,6 @@ static void object_free(gpointer data)
 	g_free(object);
 }
 
-/* ----------------------------------------------------------------- parsing */
-
-/* SubjectPublicKeyInfo ::= SEQUENCE { algorithm SEQUENCE { OID, params OPTIONAL },
- *                                     subjectPublicKey BIT STRING } */
 static gboolean spki_split(GBytes* spki, GBytes** parameters, GBytes** key_bits)
 {
 	gsize size = 0;
@@ -213,14 +206,14 @@ static gboolean parse_certificate(GBytes* der, ParsedCertificate* parsed, GError
 	if (gnutls_x509_crt_init(&parsed->certificate) < 0)
 	{
 		g_set_error_literal(error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_FAILED,
-		                    "Could not allocate a certificate");
+		                    "Certificate allocation failed");
 		return FALSE;
 	}
 
 	if (gnutls_x509_crt_import(parsed->certificate, &input, GNUTLS_X509_FMT_DER) < 0)
 	{
 		g_set_error_literal(error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_FAILED,
-		                    "The portal returned a certificate that will not parse");
+		                    "Portal returned an invalid certificate");
 		parsed_certificate_clear(parsed);
 		return FALSE;
 	}
@@ -229,7 +222,7 @@ static gboolean parse_certificate(GBytes* der, ParsedCertificate* parsed, GError
 	    gnutls_pubkey_import_x509(parsed->public_key, parsed->certificate, 0) < 0)
 	{
 		g_set_error_literal(error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_FAILED,
-		                    "The certificate has no usable public key");
+		                    "Certificate has no usable public key");
 		parsed_certificate_clear(parsed);
 		return FALSE;
 	}
@@ -237,7 +230,7 @@ static gboolean parse_certificate(GBytes* der, ParsedCertificate* parsed, GError
 	if (gnutls_pubkey_export2(parsed->public_key, GNUTLS_X509_FMT_DER, &raw) < 0)
 	{
 		g_set_error_literal(error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_FAILED,
-		                    "The public key will not export");
+		                    "Public key export failed");
 		parsed_certificate_clear(parsed);
 		return FALSE;
 	}
@@ -248,7 +241,7 @@ static gboolean parse_certificate(GBytes* der, ParsedCertificate* parsed, GError
 	if (gnutls_hash_fast(GNUTLS_DIG_SHA1, spki_data, spki_size, digest) < 0)
 	{
 		g_set_error_literal(error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_FAILED,
-		                    "Could not derive an object identifier");
+		                    "Object identifier derivation failed");
 		parsed_certificate_clear(parsed);
 		return FALSE;
 	}
@@ -280,8 +273,6 @@ static gboolean parse_certificate(GBytes* der, ParsedCertificate* parsed, GError
 
 	return TRUE;
 }
-
-/* ------------------------------------------------------------ construction */
 
 static void add_key_public_parts(PortalObject* object, const ParsedCertificate* parsed,
                                  gboolean is_rsa)
@@ -402,7 +393,6 @@ PortalObjects* portal_objects_new(const PortalGrant* grant, guint generation, GE
 	add_bool(object, CKA_ALWAYS_AUTHENTICATE, FALSE);
 	add_key_public_parts(object, &parsed, is_rsa);
 
-	/* The attributes that would carry key material exist and refuse. */
 	add_sensitive(object, CKA_VALUE);
 	if (is_rsa)
 	{
@@ -442,8 +432,6 @@ PortalObject* portal_objects_lookup(PortalObjects* objects, CK_OBJECT_HANDLE han
 
 	return NULL;
 }
-
-/* ---------------------------------------------------------------- matching */
 
 gboolean portal_object_matches(const PortalObject* object, CK_ATTRIBUTE_PTR templ, CK_ULONG count)
 {
@@ -557,52 +545,6 @@ CK_RV portal_object_get_attributes(const PortalObject* object, CK_ATTRIBUTE_PTR 
 	return CKR_OK;
 }
 
-/* -------------------------------------------------------------- the gate */
-
-/* WHAT A SEARCH HAS TO SAY BEFORE A WINDOW OPENS.
- *
- * The chooser appears at C_FindObjectsInit, because that is the first moment
- * this module learns that the consumer wants a credential. The trouble is that
- * it is not the only thing a consumer searches for. GnuTLS verifying a SERVER's
- * certificate chain calls gnutls_pkcs11_get_raw_issuer() and
- * _gnutls_pkcs11_crt_is_known(), which issue C_FindObjectsInit for CKO_
- * CERTIFICATE with CKA_SUBJECT, CKA_ISSUER or a trust category ACROSS EVERY
- * p11-kit MODULE ON THE MACHINE -- this one included, and long before any
- * client-certificate challenge. A chooser two seconds after a sign-in window
- * opened, for a certificate nobody asked for, is that.
- *
- * So the class alone is not enough. A search acquires a credential only when it
- * can mean nothing else:
- *
- *   CKA_LABEL == "Portal Certificate"   the object label of the shared
- *                                       contract; what a PKCS#11 URI naming
- *                                       an object imports by
- *   CKA_ID                              a non-empty key identifier; a consumer
- *                                       that has one got it from us
- *   CKA_CLASS == CKO_PRIVATE_KEY        nothing on a server's chain is a
- *     (with CKA_SIGN / CKA_DECRYPT)     private key
- *
- * Everything else -- an issuer, subject or serial lookup, a trust category, a
- * data object, a plain "list the certificates", an empty template -- answers no
- * objects while there is no grant, and never asks for one. Once a grant exists,
- * ordinary matching applies and these searches see the three objects like any
- * other.
- *
- * CKA_TOKEN == CK_TRUE IS NOT A DISTINGUISHING ATTRIBUTE. It says the object is
- * persistent, which every object this module has is, and it names no object at
- * all. NSS attaches it to every search it makes -- [CKA_TOKEN, CKA_CLASS] to
- * list certificates, [CKA_CLASS, CKA_TOKEN] to list private keys -- so counting
- * it as a distinguishing attribute made both of those "somebody else's object",
- * answered zero for a token that had the credential, and left
- * PKCS11_PORTAL_CERTIFICATE_ENUMERATE with nothing to switch. It is passed over
- * here for the same reason CKA_SIGN and CKA_DECRYPT are. CKA_TOKEN == CK_FALSE
- * asks for session objects, which this token never has, and stays on the
- * refusing side.
- *
- * PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1 puts class-only enumeration back on the
- * acquiring side. NSS asks for CKO_CERTIFICATE and nothing that names an
- * object; that is an experiment, not a supported configuration, and a process
- * that sets it is asking for a chooser it did not otherwise get. */
 static gboolean template_names_our_label(const CK_ATTRIBUTE* attribute)
 {
 	gsize length = strlen(PKCS11_PORTAL_OBJECT_LABEL);
@@ -624,6 +566,7 @@ static gboolean template_says_token_object(const CK_ATTRIBUTE* attribute)
 	return value == CK_TRUE;
 }
 
+/* Only credential-specific searches may prompt by default; NSS enumeration exceptions are documented in docs/decisions/0011-client-side-pkcs11-module.md. */
 PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG count)
 {
 	CK_OBJECT_CLASS object_class = 0;
@@ -677,9 +620,7 @@ PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG cou
 			key_shaped = FALSE;
 	}
 
-	/* A LABEL DECIDES ON ITS OWN, both ways. One that is ours names this
-	 * token's credential and nothing else; one that is not names some other
-	 * object, and adding a CKA_ID to it does not make it ours. */
+	/* A label decides ownership even when a CKA_ID is also present. */
 	if (have_label)
 		return label_is_ours ? PORTAL_TEMPLATE_NAMES_CREDENTIAL : PORTAL_TEMPLATE_UNRELATED;
 

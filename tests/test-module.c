@@ -2,11 +2,6 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * The client-side PKCS#11 module's rules, with no D-Bus and no portal: the
- * DigestInfo parser, the mechanism map, the object model, the attribute
- * protocol and template matching. These are the parts a hostile or merely
- * unusual consumer reaches first, and none of them needs a bus to be wrong.
  */
 
 #include <string.h>
@@ -24,8 +19,6 @@
 #ifndef CERTIFICATE_FIXTURE_DIR
 #define CERTIFICATE_FIXTURE_DIR "tests/fixtures"
 #endif
-
-/* ---------------------------------------------------------------- fixtures */
 
 static GBytes* fixture_der(const char* name)
 {
@@ -70,8 +63,6 @@ static PortalGrant* fixture_grant(const char* name, const char* key_type, guint 
 	return grant;
 }
 
-/* ---------------------------------------------------------------------- DER */
-
 static void test_der_reads_definite_lengths(void)
 {
 	static const guint8 short_form[] = { 0x04, 0x03, 0x01, 0x02, 0x03 };
@@ -94,8 +85,6 @@ static void test_der_reads_definite_lengths(void)
 	g_assert_cmpuint(tlv.length, ==, 128);
 	g_assert_cmpuint(tlv.consumed, ==, 131);
 
-	/* A one-byte long form under 0x80 is the short form spelled wastefully, and
-	 * accepting it would accept two encodings of one value. */
 	g_assert_false(portal_der_read(non_minimal, sizeof(non_minimal), &tlv));
 	g_assert_false(portal_der_read(indefinite, sizeof(indefinite), &tlv));
 	g_assert_false(portal_der_read(overrun, sizeof(overrun), &tlv));
@@ -126,8 +115,6 @@ static void test_der_encodes_both_length_forms(void)
 	g_assert_cmpint(data[2], ==, 1);
 	g_assert_cmpint(data[3], ==, 44);
 }
-
-/* --------------------------------------------------------------- DigestInfo */
 
 static GBytes* digest_info(const char* hash, gsize digest_length, gboolean with_null)
 {
@@ -217,8 +204,7 @@ static void test_digestinfo_refuses_everything_else(void)
 	const guint8* data;
 	gsize size = 0;
 
-	/* TLS 1.0 and 1.1 sign MD5 || SHA1 with CKM_RSA_PKCS. It is not a
-	 * DigestInfo and there is no hash name to send. */
+	/* Legacy MD5 || SHA1 has no portal hash name and is not DigestInfo. */
 	memset(md5_sha1, 0x11, sizeof(md5_sha1));
 	g_assert_false(portal_digestinfo_parse(md5_sha1, sizeof(md5_sha1), NULL, NULL, NULL));
 
@@ -235,8 +221,6 @@ static void test_digestinfo_refuses_everything_else(void)
 
 	g_assert_false(portal_digestinfo_parse(NULL, 0, NULL, NULL, NULL));
 }
-
-/* --------------------------------------------------------------- mechanisms */
 
 static void test_mechanism_map(void)
 {
@@ -264,7 +248,6 @@ static void test_mechanism_map(void)
 	g_assert_true(mechanism->can_decrypt);
 	g_assert_false(mechanism->can_sign);
 
-	/* Nothing else is offered, whatever the token behind the portal can do. */
 	g_assert_null(portal_mechanism_lookup(CKM_RSA_X_509));
 	g_assert_null(portal_mechanism_lookup(CKM_AES_CBC));
 	g_assert_null(portal_mechanism_lookup(CKM_SHA256));
@@ -310,8 +293,6 @@ static void test_hash_names(void)
 	g_assert_cmpstr(portal_mgf_hash(CKG_MGF1_SHA384), ==, "SHA384");
 	g_assert_null(portal_mgf_name(0x9999));
 }
-
-/* ------------------------------------------------------------------ objects */
 
 static PortalObject* object_of_class(PortalObjects* objects, CK_OBJECT_CLASS wanted)
 {
@@ -361,8 +342,6 @@ static void test_objects_are_three(void)
 	g_assert_nonnull(private_key);
 	g_assert_nonnull(object_of_class(objects, CKO_PUBLIC_KEY));
 
-	/* Handles carry the generation, so a handle from a released grant does not
-	 * name an object of the next one. */
 	g_assert_cmpuint(certificate->handle, !=, 0);
 	g_assert_cmpuint(certificate->handle >> 4, ==, 1);
 
@@ -392,8 +371,6 @@ static void test_private_key_never_yields_key_material(void)
 	for (gsize i = 0; i < 3; i++)
 		g_assert_cmpuint(sensitive[i].ulValueLen, ==, CK_UNAVAILABLE_INFORMATION);
 
-	/* One sensitive attribute in a template does not stop the readable ones
-	 * being answered. */
 	g_assert_cmpint(portal_object_get_attributes(private_key, mixed, 2), ==,
 	                CKR_ATTRIBUTE_SENSITIVE);
 	g_assert_cmpuint(mixed[0].ulValueLen, ==, 20);
@@ -432,9 +409,7 @@ static void test_ec_key_carries_its_curve(void)
 	const guint8* point_data = g_bytes_get_data(point, NULL);
 
 	g_assert_cmpint(*(const CK_KEY_TYPE*) g_bytes_get_data(key_type, NULL), ==, CKK_EC);
-	/* CKA_EC_PARAMS is the curve OID as it appears in the SubjectPublicKeyInfo. */
 	g_assert_cmpint(data[0], ==, PORTAL_DER_OID);
-	/* CKA_EC_POINT is the point wrapped in an OCTET STRING, uncompressed. */
 	g_assert_cmpint(point_data[0], ==, PORTAL_DER_OCTET_STRING);
 	g_assert_cmpint(point_data[2], ==, 0x04);
 }
@@ -463,8 +438,6 @@ static void test_attribute_size_protocol(void)
 
 	g_assert_cmpint(portal_object_get_attributes(certificate, NULL, 0), ==, CKR_OK);
 }
-
-/* ----------------------------------------------------------------- matching */
 
 static void test_template_matching(void)
 {
@@ -500,9 +473,6 @@ static void test_template_matching(void)
 	g_assert_null(portal_objects_lookup(objects, 0));
 }
 
-/* THE GATING TABLE, which is the whole of the answer to "why did a chooser
- * appear when nobody asked for a certificate". Each row is a template a real
- * consumer sends; the column is whether it may acquire a credential. */
 static void test_only_a_credential_search_provokes_a_chooser(void)
 {
 	CK_OBJECT_CLASS certificate = CKO_CERTIFICATE;
@@ -517,7 +487,6 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 	guint8 identifier[4] = { 1, 2, 3, 4 };
 	guint8 name[8] = { 0x30, 0x06, 0x31, 0x04, 0x13, 0x02, 'x', 'y' };
 
-	/* Names the credential: acquires. */
 	CK_ATTRIBUTE by_label[] = { { CKA_LABEL, label, sizeof(label) - 1 } };
 	CK_ATTRIBUTE cert_by_label[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
 		                             { CKA_LABEL, label, sizeof(label) - 1 } };
@@ -528,23 +497,18 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 	CK_ATTRIBUTE want_private[] = { { CKA_CLASS, &private_key, sizeof(private_key) } };
 	CK_ATTRIBUTE signing_key[] = { { CKA_CLASS, &private_key, sizeof(private_key) },
 		                          { CKA_SIGN, &yes, sizeof(yes) } };
-	/* NSS's PK11_ListPrivKeysInSlot(). CKA_TOKEN == CK_TRUE says the object is
-	 * persistent, which all three of ours are; it names nothing, so it is passed
-	 * over and this is the private-key row. */
+	/* NSS private-key searches include CKA_TOKEN == CK_TRUE, which names no specific object. */
 	CK_ATTRIBUTE nss_private_keys[] = { { CKA_CLASS, &private_key, sizeof(private_key) },
 		                                { CKA_TOKEN, &yes, sizeof(yes) } };
 
-	/* Enumerates: acquires only with the environment opt-in. */
 	CK_ATTRIBUTE want_certificate[] = { { CKA_CLASS, &certificate, sizeof(certificate) } };
 	CK_ATTRIBUTE want_public[] = { { CKA_CLASS, &public_key, sizeof(public_key) } };
-	/* NSS's PK11_ListCertsInSlot(), which is what Firefox's client-authentication
-	 * path starts from. */
+	/* NSS lists client certificates using a class-only search. */
 	CK_ATTRIBUTE nss_certificates[] = { { CKA_TOKEN, &yes, sizeof(yes) },
 		                                { CKA_CLASS, &certificate, sizeof(certificate) } };
 	CK_ATTRIBUTE only_on_token[] = { { CKA_TOKEN, &yes, sizeof(yes) } };
 
-	/* Unrelated: never acquires. GnuTLS verifying a SERVER's chain sends the
-	 * issuer and subject rows at every handshake, through every module. */
+	/* GnuTLS sends issuer and subject searches across modules during server verification. */
 	CK_ATTRIBUTE by_issuer[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
 		                         { CKA_ISSUER, name, sizeof(name) } };
 	CK_ATTRIBUTE by_subject[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
@@ -556,11 +520,9 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 		                       { CKA_TRUSTED, &yes, sizeof(yes) } };
 	CK_ATTRIBUTE in_category[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
 		                           { CKA_CERTIFICATE_CATEGORY, &category, sizeof(category) } };
-	/* A SESSION object is not a thing this token has, so CKA_TOKEN == CK_FALSE
-	 * stays on the refusing side while CK_TRUE is passed over. */
 	CK_ATTRIBUTE not_on_token[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
 		                           { CKA_TOKEN, &no, sizeof(no) } };
-	/* NSS's CERT_FindCertByIssuerAndSN, with the CKA_TOKEN NSS always adds. */
+	/* NSS issuer-and-serial searches include CKA_TOKEN. */
 	CK_ATTRIBUTE nss_by_serial[] = { { CKA_TOKEN, &yes, sizeof(yes) },
 		                             { CKA_CLASS, &certificate, sizeof(certificate) },
 		                             { CKA_ISSUER, name, sizeof(name) },
@@ -611,7 +573,6 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 	g_assert_cmpint(portal_template_intent(malformed, 1), ==, PORTAL_TEMPLATE_UNRELATED);
 	g_assert_cmpint(portal_template_intent(empty_identifier, 2), ==, PORTAL_TEMPLATE_UNRELATED);
 
-	/* The gate itself: only the first group opens a window by default. */
 	g_unsetenv(PKCS11_PORTAL_ENV_ENUMERATE);
 	g_assert_true(portal_template_wants_credential(cert_by_label, 2));
 	g_assert_true(portal_template_wants_credential(want_private, 1));
@@ -622,8 +583,6 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 	g_assert_false(portal_template_wants_credential(by_issuer, 2));
 	g_assert_false(portal_template_wants_credential(want_data, 1));
 
-	/* The NSS escape hatch moves the middle group, and only the middle group.
-	 * nss_certificates is the row Firefox needs it for. */
 	g_setenv(PKCS11_PORTAL_ENV_ENUMERATE, "1", TRUE);
 	g_assert_true(portal_template_wants_credential(NULL, 0));
 	g_assert_true(portal_template_wants_credential(want_certificate, 1));
@@ -647,8 +606,6 @@ static void test_refusal_fingerprint_ignores_the_class(void)
 	CK_ATTRIBUTE different[] = { { CKA_CLASS, &private_key, sizeof(private_key) },
 		                         { CKA_ID, other, sizeof(other) } };
 
-	/* One handshake looks for the certificate and then for its key. A refusal
-	 * has to cover both, or cancelling the chooser prompts again immediately. */
 	g_assert_cmpuint(portal_template_fingerprint(certificate_search, 2), ==,
 	                 portal_template_fingerprint(key_search, 2));
 	g_assert_cmpuint(portal_template_fingerprint(certificate_search, 2), !=,
@@ -673,21 +630,12 @@ static void test_token_constants_match_the_uris(void)
 	const CK_OBJECT_CLASS classes[] = { CKO_CERTIFICATE, CKO_PUBLIC_KEY, CKO_PRIVATE_KEY };
 	size_t i;
 
-	/* portal-token.h is shared with another repository and the URIs in it are
-	 * what that repository builds. If these assertions fail, the two sides have
-	 * stopped naming the same token. */
 	g_assert_cmpstr(XDG_PORTAL_CERTIFICATE_TOKEN_URI, ==, expected);
 
-	/* THE object= IS PART OF THE CONTRACT, because GnuTLS's single-object
-	 * import -- g_tls_certificate_new_from_pkcs11_uris(), and therefore
-	 * WebKitGTK -- refuses a URI that names no object. A cert URI that lost it
-	 * would still enumerate and would still fail every handshake. */
 	g_assert_cmpstr(XDG_PORTAL_CERTIFICATE_CERT_URI, ==, expected_certificate);
 	g_assert_cmpstr(XDG_PORTAL_CERTIFICATE_KEY_URI, ==, expected_key);
 	g_assert_cmpstr(PKCS11_PORTAL_URI_OBJECT_ATTRIBUTE, ==, object_attribute);
 
-	/* ALL THREE OBJECTS carry that label, or the URI names one of them and not
-	 * the pair the consumer asked for. */
 	for (i = 0; i < G_N_ELEMENTS(classes); i++)
 	{
 		g_autoptr(GBytes) label = attribute_of(object_of_class(objects, classes[i]), CKA_LABEL);
@@ -698,26 +646,18 @@ static void test_token_constants_match_the_uris(void)
 		g_assert_cmpstr(label_text, ==, XDG_PORTAL_CERTIFICATE_OBJECT_LABEL);
 	}
 
-	/* CK_TOKEN_INFO's fields are fixed width and are not NUL terminated. */
+	/* CK_TOKEN_INFO fields have fixed width without NUL terminators. */
 	g_assert_cmpuint(strlen(XDG_PORTAL_CERTIFICATE_TOKEN_LABEL), <=, 32);
 	g_assert_cmpuint(strlen(XDG_PORTAL_CERTIFICATE_TOKEN_MANUFACTURER), <=, 32);
 	g_assert_cmpuint(strlen(XDG_PORTAL_CERTIFICATE_TOKEN_MODEL), <=, 16);
 	g_assert_cmpuint(strlen(PKCS11_PORTAL_TOKEN_SERIAL_PREFIX), <, 16);
 
-	/* The p11-kit module NAME is the configuration file's basename without the
-	 * extension, and src/tokens/discovery.c refuses to load a module with that
-	 * name. If the contract renames the file, the refusal must follow. */
 	g_assert_true(g_str_has_prefix(XDG_PORTAL_CERTIFICATE_MODULE_CONFIG,
 	                              PKCS11_PORTAL_MODULE_NAME));
 	g_assert_cmpstr(XDG_PORTAL_CERTIFICATE_MODULE_CONFIG, ==,
 	                PKCS11_PORTAL_MODULE_NAME ".module");
 }
 
-/* THE PROCESSES THIS MODULE REFUSES TO RUN IN, and the ones it must not refuse.
- * The list used to be a prefix match on "xdg-desktop-portal", which kept the
- * module out of xdg-desktop-portal-webauth -- the first consumer it was written
- * for, and a process that enumerates nothing and calls the portal exactly as an
- * application does. Only the frontend and this project's own backend recurse. */
 static void test_excluded_programs_are_exact(void)
 {
 	g_assert_true(portal_program_is_excluded("xdg-desktop-portal"));
@@ -730,9 +670,6 @@ static void test_excluded_programs_are_exact(void)
 	g_assert_false(portal_program_is_excluded(""));
 	g_assert_false(portal_program_is_excluded(NULL));
 
-	/* The test binary is not one of them, so the /proc/self/exe form agrees --
-	 * unless the environment kill switch is set, which is the one way any
-	 * process can be kept out. */
 	g_assert_false(portal_client_self_excluded());
 	g_setenv(PKCS11_PORTAL_ENV_DISABLE, "1", TRUE);
 	g_assert_true(portal_client_self_excluded());

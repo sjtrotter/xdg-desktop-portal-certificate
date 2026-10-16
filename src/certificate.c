@@ -58,7 +58,7 @@ const char* certificate_purpose_to_string(CertificatePurpose purpose)
 
 const char* certificate_purpose_display(CertificatePurpose purpose)
 {
-	/* THIS BACKEND'S OWN WORDS. Never the caller's, never the frontend's. */
+	/* Purpose text is supplied by the backend. */
 	switch (purpose)
 	{
 		case CERTIFICATE_PURPOSE_CLIENT_AUTH:
@@ -103,9 +103,7 @@ CertificateIdentityLevel certificate_identity_level_parse(const char* level)
 	if (g_strcmp0(level, CERTIFICATE_IDENTITY_LEVEL_DERIVED) == 0)
 		return CERTIFICATE_IDENTITY_DERIVED_HOST;
 
-	/* Anything else, including a missing option and a value invented by a
-	 * caller that reached this bus name directly, is the strongest warning.
-	 * Failing safe here means failing loud. */
+	/* Missing or unknown identity levels require the strongest warning. */
 	return CERTIFICATE_IDENTITY_UNKNOWN;
 }
 
@@ -140,7 +138,7 @@ char* certificate_app_display_name(const char* app_id)
 	if (app_id == NULL || *app_id == '\0')
 		return NULL;
 
-	/* An app id is not a path and must not be treated as one. */
+	/* App IDs must not be interpreted as paths. */
 	if (strchr(app_id, '/') != NULL)
 		return NULL;
 
@@ -156,8 +154,6 @@ char* certificate_app_display_name(const char* app_id)
 	return g_strdup(name);
 }
 
-/* Combining marks in a row before the rest of the run is dropped. Four is
- * enough for anything a human language does to one base character. */
 #define CERTIFICATE_SANITIZE_MAX_MARK_RUN 4
 
 char* certificate_sanitize_untrusted_text(const char* text, gsize max_chars)
@@ -173,8 +169,6 @@ char* certificate_sanitize_untrusted_text(const char* text, gsize max_chars)
 	if (text == NULL || *text == '\0')
 		return NULL;
 
-	/* Anything off the wire may be invalid UTF-8, and a GVariant string is not
-	 * checked for anything but a terminating NUL. */
 	valid = g_utf8_make_valid(text, -1);
 	out = g_string_new(NULL);
 
@@ -182,10 +176,7 @@ char* certificate_sanitize_untrusted_text(const char* text, gsize max_chars)
 	{
 		gunichar c = g_utf8_get_char(p);
 
-		/* Control characters, line separators and format characters are how a
-		 * single-line label is turned into several, and how right-to-left
-		 * overrides are used to make text read as something else. None of them
-		 * survive. */
+		/* Remove controls and directional formatting to keep external text within a single display line. */
 		if (g_unichar_iscntrl(c) || g_unichar_type(c) == G_UNICODE_FORMAT ||
 		    g_unichar_type(c) == G_UNICODE_LINE_SEPARATOR ||
 		    g_unichar_type(c) == G_UNICODE_PARAGRAPH_SEPARATOR)
@@ -200,10 +191,7 @@ char* certificate_sanitize_untrusted_text(const char* text, gsize max_chars)
 			continue;
 		}
 
-		/* A LONG RUN OF COMBINING MARKS is how one "character" is made to
-		 * cover the line above it. They are legitimate in small numbers -- an
-		 * accented name is exactly this -- so the run is capped rather than the
-		 * category refused. */
+		/* Cap combining-mark runs to prevent text from overlapping adjacent lines. */
 		switch (g_unichar_type(c))
 		{
 			case G_UNICODE_NON_SPACING_MARK:

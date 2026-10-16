@@ -39,9 +39,7 @@ static void set_x11_parent(GdkSurface* surface, const char* handle)
 	unsigned long xid = 0;
 	char* end = NULL;
 
-	/* GTK4 deprecated the raw-Xlib accessors without replacing them: there is no
-	 * GTK4 way to set transient-for from a foreign XID. libgxdp silences the same
-	 * warnings in the same place. */
+	/* GTK4 lacks a replacement for raw-XID transient parenting. */
 	G_GNUC_BEGIN_IGNORE_DEPRECATIONS
 
 	errno = 0;
@@ -56,9 +54,7 @@ static void set_x11_parent(GdkSurface* surface, const char* handle)
 
 	XSetTransientForHint(xdisplay, GDK_SURFACE_XID(surface), (Window) xid);
 
-	/* GTK4 has no API to set transient-for from a raw XID, so the window
-	 * manager hints are written directly -- which also means saying what kind
-	 * of window this is, or a reparenting WM will decorate it as a top level. */
+	/* Set window-manager hints directly because GTK4 lacks raw-XID transient parenting. */
 	window_type = gdk_x11_get_xatom_by_name_for_display(display, "_NET_WM_WINDOW_TYPE");
 	dialog = gdk_x11_get_xatom_by_name_for_display(display, "_NET_WM_WINDOW_TYPE_DIALOG");
 	XChangeProperty(xdisplay, GDK_SURFACE_XID(surface), window_type, XA_ATOM, 32, PropModeReplace,
@@ -77,11 +73,9 @@ static void set_parent_of(GdkSurface* surface, const char* parent_window)
 #if HAVE_GTK_WAYLAND
 	if (GDK_IS_WAYLAND_DISPLAY(display) && g_str_has_prefix(parent_window, WAYLAND_PREFIX))
 	{
-		/* GDK does the whole xdg_foreign import: this backend binds no Wayland
-		 * protocol of its own. */
 		if (!gdk_wayland_toplevel_set_transient_for_exported(
 		        GDK_TOPLEVEL(surface), parent_window + strlen(WAYLAND_PREFIX)))
-			g_debug("Could not parent to the exported window; showing unparented");
+			g_debug("Parent window import failed; showing unparented");
 		return;
 	}
 #endif
@@ -94,10 +88,8 @@ static void set_parent_of(GdkSurface* surface, const char* parent_window)
 	}
 #endif
 
-	/* A handle for a display server this process is not running on -- an X11
-	 * parent under a Wayland session without the GNOME-private interop
-	 * protocol, say. Unparented is the honest outcome; it is not an error. */
-	g_debug("Unhandled parent window type; showing unparented");
+	/* Unsupported display-server handles fall back to an unparented window. */
+	g_debug("Parent window type is unsupported; showing unparented");
 }
 
 void certificate_external_window_present(GtkWindow* window, const char* parent_window,
@@ -105,8 +97,7 @@ void certificate_external_window_present(GtkWindow* window, const char* parent_w
 {
 	GdkSurface* surface = NULL;
 
-	/* Realize first: the surface does not exist before that, and the parent has
-	 * to be set on a surface. */
+	/* Realization must precede parenting because it creates the surface. */
 	gtk_widget_realize(GTK_WIDGET(window));
 
 	surface = gtk_native_get_surface(GTK_NATIVE(window));
@@ -114,8 +105,6 @@ void certificate_external_window_present(GtkWindow* window, const char* parent_w
 
 	if (activation_token != NULL && *activation_token != '\0')
 	{
-		/* A caller that was given focus by the compositor may pass its token on;
-		 * one that was not does not get to steal focus with it. */
 		gtk_window_set_startup_id(window, activation_token);
 	}
 

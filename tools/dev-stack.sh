@@ -1,90 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
-#
-# dev-stack.sh -- run the experimental Certificate portal end to end: a
-# development xdg-desktop-portal frontend from the branch
-# experimental/integration, this repository's backend, and
-# then tools/certificate-e2e.py against the PUBLIC interface.
-#
-# Two modes.
-#
-#   PRIVATE BUS (the default). Everything runs inside `dbus-run-session`, so
-#   nothing touches the user's real session bus. This is the mode to use for
-#   everything except a run that has to show windows on the real desktop.
-#
-#   --live. Uses the real session bus, starts the frontend with --replace and
-#     the backend with --replace --allow-replacement (a development loop only;
-#     see the comment on BACKEND_ARGS and src/main.c),
-#   taking org.freedesktop.portal.Desktop away from the system one for the
-#   duration. THE SYSTEM PORTAL COMES BACK BY D-BUS ACTIVATION as soon as this
-#   script's frontend exits and something asks for the name again; see
-#   docs/TESTING.md for how to check that it did. Use this when the chooser and
-#   the PIN prompt have to appear on the real display, which is what a run
-#   against a real card needs.
-#
-#     tools/dev-stack.sh                          # private bus, no card expected
-#     tools/dev-stack.sh -- --expect-no-certificate
-#     tools/dev-stack.sh --keep                   # leave it up for manual gdbus
-#     tools/dev-stack.sh --live -- --purpose client_auth
-#     tools/dev-stack.sh --softhsm                # against a SoftHSM fixture token
-#     tools/dev-stack.sh --pin-prompt=gtk         # this backend draws the PIN window
-#     tools/dev-stack.sh --live --pin-prompt=system   # the shell draws it
-#     tools/dev-stack.sh --live --keep --no-e2e       # stack only, no self-test
-#
-#   WHERE THE PIN IS TYPED. --pin-prompt is passed straight to the backend, and
-#   a PRIVATE run defaults it to gtk rather than leaving it at the backend's
-#   own "auto". Auto asks the bus whether org.gnome.keyring.SystemPrompter has
-#   an owner or IS ACTIVATABLE, and dbus-run-session reads the same service
-#   directories the session bus does -- so on a machine with gnome-keyring
-#   installed, org.gnome.keyring.SystemPrompter.service activates
-#   /usr/libexec/gcr-prompter on the private bus and auto picks the system
-#   prompter there too. "No shell" is not "no prompter".
-#
-#   --pin-prompt=system is refused outside --live for the opposite reason: the
-#   prompter it would reach on a private bus is an activated gcr-prompter with
-#   no session to draw in. The system prompter is covered headlessly by
-#   `meson test pin-system` and by `tools/ui-smoke.sh --pin-prompt=system`,
-#   both of which stand up gcr's own server half on their private bus;
-#   docs/TESTING.md says so in one place.
-#
-# WHAT IT NEEDS
-#
-#   $XDP_BUILD   a built xdg-desktop-portal from the branch
-#                experimental/integration. Default:
-#                ../xdg-desktop-portal/build relative to this repository. It
-#                must contain desktop-portal/xdg-desktop-portal and
-#                document-portal/xdg-permission-store.
-#   $BACKEND     this repository's backend binary. Default:
-#                ./build/src/xdg-desktop-portal-certificate
-#   $XDP_ENV     a file to source first, for a frontend built against a scratch
-#                prefix -- LD_LIBRARY_PATH for libdex, PKG_CONFIG_PATH,
-#                GI_TYPELIB_PATH. Default: .xdp-env in this repository if it
-#                exists. The frontend branch's libdex is usually not installed
-#                system wide; see docs/TESTING.md.
-#
-# WHAT IT DOES
-#
-#   1. writes a throwaway $XDG_DESKTOP_PORTAL_DIR holding A SYMLINK TO EVERY
-#      .portal FILE ON THE MACHINE, this repository's certificate.portal, and a
-#      COPY of the machine's effective portals.conf with one line added routing
-#      org.freedesktop.impl.portal.experimental.Certificate1 to this backend.
-#
-#      All of it, and not just ours, because setting XDG_DESKTOP_PORTAL_DIR
-#      makes the frontend ignore every other .portal and portals.conf directory
-#      on the machine (desktop-portal/xdp-portal-config.c, lines 340-344 and
-#      508-516). A directory holding only certificate.portal is not "our
-#      backend as well"; it is our backend and no file chooser, no screenshot
-#      and NO SETTINGS -- which is why the chooser used to come up light on a
-#      dark desktop, and why --live used to take every portal on the session
-#      down for as long as it ran. tools/lib.sh says the same at length.
-#   2. starts xdg-permission-store -- xdg-desktop-portal refuses to start
-#      without it -- on the private bus. In --live mode the session's own is
-#      used.
-#   3. starts this repository's backend, so that its stderr is visible rather
-#      than being swallowed by D-Bus activation.
-#   4. starts the frontend with XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1.
-#   5. runs tools/certificate-e2e.py with whatever came after `--`.
+# XDG_DESKTOP_PORTAL_DIR replaces all portal and configuration search paths; preserve the desktop's full set. See docs/TESTING.md.
 
 set -u
 
@@ -113,10 +30,7 @@ die() {
 # shellcheck source=tools/lib.sh
 . "$REPO/tools/lib.sh"
 
-# mktemp rather than a fixed name plus $$: a pid is guessable, and what goes in
-# here decides which .portal files the frontend reads. tools/lib.sh checks that
-# it is ours, that it is under $TMPDIR, and that it carries this project's
-# marker, because this script `rm -rf`s it.
+# Fixture helpers validate ownership and markers before these directories are used or removed.
 if [ -n "${DEVDIR:-}" ]; then
 	fixture_make "$DEVDIR" dev-stack
 else
@@ -124,7 +38,30 @@ else
 fi
 
 usage() {
-	sed -n '3,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	cat <<EOF
+Usage: ${0##*/} [options] [-- client-options]
+
+Run the development frontend, backend and certificate-e2e.py on a private bus.
+
+Options:
+  --live                  use the session bus and replace its running portal
+  --keep                  keep the stack running after the client exits
+  --no-e2e                skip the client
+  --softhsm               use the tools/softhsm-fixture.sh token
+  --pin-prompt KIND       select auto, gtk or system (also --pin-prompt=KIND)
+  -h, --help              show this help
+
+Private runs default to gtk; system requires --live.
+The session portal returns through D-Bus activation after a live run exits.
+Client options after -- are passed to certificate-e2e.py.
+
+Environment:
+  XDP_BUILD   frontend build directory (default: ../xdg-desktop-portal/build)
+  BACKEND     backend binary (default: build/src/xdg-desktop-portal-certificate)
+  XDP_ENV     environment file to source (default: .xdp-env if present)
+
+See docs/TESTING.md for setup and hardware checks.
+EOF
 	exit 0
 }
 
@@ -187,25 +124,15 @@ write_devdir() {
 }
 
 softhsm_env() {
-	# A software token, for proving the whole path -- chooser, PIN prompt,
-	# C_Login, C_Sign, verification -- without a card. tools/softhsm-fixture.sh
-	# creates it. A test that has only been run against a software token has
-	# not been run; this is the rehearsal, not the performance.
 	[ "$SOFTHSM" = 1 ] || return 0
 
 	: "${SOFTHSM_DIR:=${TMPDIR:-/tmp}/xdp-certificate-softhsm}"
-	# module-path out of this directory is dlopen()ed by the backend, so the
-	# directory is checked before it is trusted: same rule as
-	# tools/softhsm-fixture.sh, same reason.
+	# Validate the fixture before loading its module path into the backend.
 	fixture_check "$SOFTHSM_DIR" softhsm
 	[ -f "$SOFTHSM_DIR/softhsm2.conf" ] ||
 		die "no SoftHSM fixture at $SOFTHSM_DIR; run tools/softhsm-fixture.sh first"
 
 	export SOFTHSM2_CONF="$SOFTHSM_DIR/softhsm2.conf"
-	# SoftHSM IS NOT A HARDWARE TOKEN and the backend's default is hardware
-	# only, so the rehearsal says so out loud. --module alone would be enough --
-	# naming a module is the same act -- but a flag in the command line is what
-	# makes the difference between the rehearsal and a card run readable.
 	BACKEND_ARGS+=(--module "$(cat "$SOFTHSM_DIR/module-path")" --allow-software-tokens)
 	echo "${0##*/}: softhsm fixture $SOFTHSM_DIR"
 }
@@ -214,10 +141,7 @@ start_stack() {
 	export XDG_DESKTOP_PORTAL_DIR="$DEVDIR"
 
 	if [ "$MODE" = private ]; then
-		# THE SESSION'S OWN DESKTOP, not "dev". The portals.conf in $DEVDIR is a
-		# copy of the machine's effective one, so the backends it names are the
-		# ones this desktop uses; telling the frontend it is running under a
-		# desktop nobody has ever heard of would throw that away again.
+		# Preserve the session desktop so the copied configuration selects its normal backends.
 		export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-dev}"
 		"$PERMSTORE_BIN" &
 		PERM_PID=$!
@@ -226,15 +150,7 @@ start_stack() {
 		PERM_PID=""
 	fi
 
-	# THE FRONTEND GOES UP FIRST, and this is not a preference. GTK asks the
-	# settings portal for a theme as soon as the backend initialises it, which
-	# on a private bus ACTIVATES org.freedesktop.portal.Desktop -- and D-Bus
-	# activation finds the system portal at /usr/libexec, which then owns the
-	# name this script's frontend was about to take. The development frontend
-	# quits with "Terminated because dbus name was lost", and the run fails in a
-	# way that reads like a portal configuration problem and is not one.
-	# Captured as well as shown, so that the check after start-up greps a file
-	# rather than telling the reader what to look for.
+	# Start the frontend first because GTK settings lookup can activate the installed system portal.
 	FRONTEND_LOG="$DEVDIR/frontend.log"
 	if [ "$MODE" = live ]; then
 		XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL="$(xdp_experimental_portals Certificate1)" \
@@ -245,11 +161,6 @@ start_stack() {
 	fi
 	FRONTEND_PID=$!
 
-	# WAIT FOR THE NAME, DO NOT SLEEP AND HOPE. Loading the PKCS#11 modules
-	# takes a couple of seconds on a machine with several configured, and the
-	# backend requests its name only after that -- so a fixed sleep raced it and
-	# the frontend's first call came back "was not provided by any .service
-	# files", there being no activation file on a private bus.
 	xdp_wait_for_name org.freedesktop.portal.Desktop "$FRONTEND_PID" ||
 		die "the frontend never took org.freedesktop.portal.Desktop"
 
@@ -260,9 +171,6 @@ start_stack() {
 		die "the backend never took org.freedesktop.impl.portal.desktop.certificate"
 }
 
-# Grep the captured frontend log for the two lines that say this backend was
-# found and routed to. The frontend takes a moment to print them after taking
-# its name.
 check_frontend_log() {
 	local configured="no" provided="no" i
 
@@ -278,7 +186,7 @@ check_frontend_log() {
 	if [ "$configured" = yes ] && [ "$provided" = yes ]; then
 		echo "${0##*/}: frontend: certificate portal provided"
 	else
-		echo "${0##*/}: frontend: certificate portal MISSING (configured=$configured provided=$provided; see $FRONTEND_LOG)"
+		echo "${0##*/}: frontend: certificate portal unavailable (configured=$configured provided=$provided; see $FRONTEND_LOG)"
 	fi
 }
 
@@ -290,25 +198,12 @@ stop_stack() {
 inner() {
 	BACKEND_ARGS=(--verbose)
 
-	# A DEVELOPMENT LOOP, AND ONLY A DEVELOPMENT LOOP. The backend refuses to be
-	# replaced unless it was started with --allow-replacement, because D-Bus
-	# cannot tell "the package manager" from "any process running as this user"
-	# and the thing that would be taken over is the window that asks for a PIN.
-	# On the real bus that means re-running this script would otherwise fail to
-	# get the name off the instance the last run left behind, so --live opts in
-	# to both halves: take the name, and be takeable in turn. The installed
-	# .service file passes neither, and docs/SECURITY.md says why.
+	# Live development enables both replacement flags; installed services permit no replacement. See docs/SECURITY.md.
 	if [ "$MODE" = live ]; then
 		BACKEND_ARGS+=(--replace --allow-replacement)
 	fi
 
-	# ALWAYS EXPLICIT ON A PRIVATE BUS. The backend's own default is "auto",
-	# and auto asks the bus whether org.gnome.keyring.SystemPrompter has an
-	# owner OR IS ACTIVATABLE -- and dbus-run-session reads the same service
-	# directories the session bus does, so the installed
-	# org.gnome.keyring.SystemPrompter.service activates /usr/libexec/gcr-prompter
-	# on a private bus too. "No shell" is not "no prompter", and a private run
-	# left at auto was not testing the window it looked like it was testing.
+	# Private buses share activation directories, so default to GTK instead of auto-activating a system prompter.
 	[ -n "$PIN_PROMPT" ] || [ "$MODE" = live ] || PIN_PROMPT=gtk
 
 	if [ -n "$PIN_PROMPT" ]; then
@@ -341,14 +236,9 @@ inner() {
 	return "$rc"
 }
 
-# Refused before anything is started or written, rather than after: a private
-# bus has no shell to own org.gnome.keyring.SystemPrompter, so the backend
-# would come up, answer no_display at the first Sign, and look like a bug.
 check_pin_prompt() {
 	[ "$PIN_PROMPT" = system ] && [ "$MODE" != live ] &&
-		die "--pin-prompt=system needs a system prompter on the bus, and a private
-bus has no shell to own org.gnome.keyring.SystemPrompter. Use --live, or
-tools/ui-smoke.sh --pin-prompt=system, which brings its own."
+		die "--pin-prompt=system requires --live; use tools/ui-smoke.sh --pin-prompt=system for a private test prompter"
 	return 0
 }
 

@@ -2,17 +2,6 @@
  * SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
  *
  * xdg-desktop-portal-certificate
- *
- * A SYSTEM PROMPTER FOR tools/ui-smoke.sh, and for nothing else.
- *
- * tests/test-pin-system.c drives the same code in-process. The UI smoke run
- * cannot: the backend there is a separate process on a private bus, so the
- * prompter has to be one too. This is main() around tests/pin-prompter.c.
- *
- * IT REFUSES TO RUN WHERE A REAL PROMPTER IS. If anything already owns
- * org.gnome.keyring.SystemPrompter on the bus it was pointed at, this exits
- * rather than competing for the name: the one thing that must never happen is
- * a test fixture standing between a user and a password request.
  */
 
 #include <stdio.h>
@@ -36,8 +25,7 @@ int main(int argc, char** argv)
 	if (pin == NULL)
 	{
 		g_printerr("%s: TEST_PROMPTER_PIN is not set.\n", argv[0]);
-		g_printerr("It goes through the environment rather than argv because "
-		           "/proc/*/cmdline is world readable.\n");
+		g_printerr("Set TEST_PROMPTER_PIN in the environment.\n");
 		return 64;
 	}
 
@@ -63,17 +51,14 @@ int main(int argc, char** argv)
 	if (has_owner)
 	{
 		g_printerr("%s: %s already has an owner on this bus.\n", argv[0], PROMPTER_NAME);
-		g_printerr("That is a real prompter, and this fixture will not compete with it. "
-		           "Run it on a private bus.\n");
+		g_printerr("Use a private bus.\n");
 		return 40;
 	}
 
 	certificate_test_prompter_set_default_password(pin);
 	prompter = certificate_test_prompter_start(connection, PROMPTER_NAME);
 
-	/* The line tools/ui-smoke.sh waits for, flushed so that it is not sitting
-	 * in a pipe buffer while the backend asks the bus whether a prompter is
-	 * there. */
+	/* Flush the readiness line that tools/ui-smoke.sh waits for. */
 	g_print("test-prompter: serving %s\n", PROMPTER_NAME);
 	fflush(stdout);
 

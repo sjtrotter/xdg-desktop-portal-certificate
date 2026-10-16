@@ -1,59 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
-#
-# nss-smoke.sh -- the CLIENT-SIDE PKCS#11 MODULE, driven by NSS, which is the
-# library Firefox, Thunderbird, LibreOffice and Evolution all reach a card
-# through [S54]. tools/module-smoke.sh does the same job for GnuTLS and for
-# OpenSC's pkcs11-tool; this is the half docs/SPIKES.md S1 left open.
-#
-# NSS IS LOADED THE WAY FIREFOX LOADS IT: modutil -add against the built .so
-# itself, not through p11-kit-proxy, because that is what "Security Devices ->
-# Load" does and the module has to work in that configuration.
-#
-#   0  modutil -list, certutil -L over the whole DB   the token is there and
-#                                                     NOTHING it does raises a
-#                                                     chooser
-#   1  certutil -K -h "Portal Certificate"            the private key. NSS's
-#                                                     login path, and the phase
-#                                                     that proves NSS does NOT
-#                                                     take it: no password
-#                                                     callback, so no protected-
-#                                                     authentication dialog
-#   2  certutil -L -h "Portal Certificate"            the certificate list, which
-#                                                     NSS can only ask for as
-#                                                     "everything of this class"
-#                                                     -- so it needs
-#                                                     PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1,
-#                                                     and phase 2 shows both
-#                                                     sides of that switch
-#   3  tstclnt against the python mTLS server         a real TLS client-auth
-#                                                     handshake, NSS end to end
-#
-# WHAT PHASE 1 IS REALLY ASSERTING. The token does not set CKF_LOGIN_REQUIRED
-# (src/module/module.c, C_GetTokenInfo). If it did, NSS would call
-# PK11_Authenticate() before it would list anything on the token, NSS would run
-# the application's password callback, and in Firefox that callback puts a modal
-# alert on the screen that a person has to dismiss by hand before the chooser
-# can appear. certutil's callback instead tries to read the PIN from the
-# terminal and says "Error opening input terminal for read"; that string in
-# certutil's output is the same event, and phase 1 fails if it is there.
-# docs/TESTING.md 2.6 and docs/SOURCES.md S59.
-#
-# WHAT IT NEEDS:
-#
-#   Xvfb, xdotool          as tools/ui-smoke.sh
-#   a SoftHSM fixture      tools/softhsm-fixture.sh
-#   a built frontend       as tools/dev-stack.sh describes
-#   nss-tools              certutil and modutil from $PATH; tstclnt from
-#                          /usr/lib64/nss/unsupported-tools or $TSTCLNT.
-#                          Without root, `dnf download nss-tools` and
-#                          `rpm2cpio ... | cpio -idmu` into a scratch directory
-#                          is enough -- set $NSS_BIN to its /usr/bin.
-#
-#     tools/nss-smoke.sh
-#     tools/nss-smoke.sh --phase 1        # just the private-key/login path
-#     tools/nss-smoke.sh --phase 3        # just the handshake
+# NSS consumer setup and phase expectations are documented in docs/TESTING.md.
 
 set -u
 
@@ -112,8 +60,6 @@ find_nss_tool() {
 		return
 	fi
 
-	# The unsupported-tools directory, and the same layout inside an unpacked
-	# rpm reached through $NSS_BIN.
 	for candidate in "${NSS_BIN:+${NSS_BIN%/bin}/lib64/nss/unsupported-tools/$name}" \
 		/usr/lib64/nss/unsupported-tools/"$name" \
 		/usr/lib/nss/unsupported-tools/"$name"; do
@@ -171,10 +117,7 @@ export G_MESSAGES_DEBUG=pkcs11-portal-certificate
 
 SOFTHSM_MODULE="$(cat "$SOFTHSM_DIR/module-path")"
 
-# The same server tools/module-smoke.sh phase 3 uses, and for the same reason:
-# the fixture certificates are self-signed leaves, which OpenSSL will accept as
-# the peer's own certificate in the trust store and GnuTLS will not accept as an
-# anchor.
+# OpenSSL accepts the self-signed fixture leaf as a peer trust anchor.
 cat >"$LOGDIR/tls-server.py" <<'PYTHON_EOF'
 import socket, ssl, sys
 
@@ -205,8 +148,7 @@ peer = connection.getpeercert()
 subject = dict(x[0] for x in peer["subject"])
 print("client certificate:", subject, flush=True)
 print("protocol:", connection.version(), "cipher:", connection.cipher()[0], flush=True)
-# THE HANDSHAKE IS THE RESULT. tstclnt -Q closes as soon as it completes, so
-# anything after it is best effort and must not decide the phase.
+# tstclnt -Q exits on handshake completion; later I/O must not decide success.
 print("PASS", subject.get("commonName", "?"), flush=True)
 try:
     connection.recv(64)
@@ -217,8 +159,6 @@ except Exception:
 connection.close()
 PYTHON_EOF
 
-# tools/module-smoke.sh's driver, unchanged: each phase is its own process, gets
-# its own grant, and puts up its own chooser and its own PIN prompt.
 cat >"$LOGDIR/driver.sh" <<'DRIVER_EOF'
 #!/bin/bash
 set -u
@@ -306,23 +246,17 @@ inner() {
 		grep -c 'grant-created' "$LOGDIR/backend.log" 2>/dev/null || true
 	}
 
-	# A DATABASE WITH NOTHING IN IT, so that everything the phases find came off
-	# the portal token. --empty-password, because a prompt for the DB's own
-	# password would be a second dialog with nothing to do with this module.
+	# Use an empty fixture database with no password prompt.
 	DB="$LOGDIR/nssdb"
 	(umask 077 && mkdir -p "$DB")
 
-	# STDIN IS /dev/null FOR EVERY NSS TOOL HERE. modutil asks "Type 'q <enter>'
-	# to abort, or <enter> to continue" whenever p11-kit is configured, and
-	# -force does not silence that one; certutil's password callback reads the
-	# terminal. Both block for ever on a pipe that nobody writes to.
+	# Redirect NSS stdin to /dev/null because confirmation and password reads can otherwise block.
 	"$CERTUTIL" -N -d "sql:$DB" --empty-password </dev/null >"$LOGDIR/certutil-N.log" 2>&1 || {
 		echo "nss-smoke: could not create the NSS database"
 		cat "$LOGDIR/certutil-N.log"
 		return 40
 	}
 
-	# THE MODULE IS NAMED DIRECTLY, which is what Firefox's "Load" does.
 	"$MODUTIL" -dbdir "sql:$DB" -add portal -libfile "$MODULE_SO" -force \
 		</dev/null >"$LOGDIR/modutil-add.log" 2>&1 || {
 		echo "nss-smoke: modutil could not add the module"
@@ -333,7 +267,7 @@ inner() {
 	if phase_wanted 0; then
 		local before after
 		echo
-		echo "=== 0  the token is visible, and listing the database asks for nothing ==="
+		echo "=== 0  token listing does not acquire credentials ==="
 		before="$(grants_created)"
 
 		timeout 180 "$MODUTIL" -dbdir "sql:$DB" -list portal \
@@ -361,12 +295,10 @@ inner() {
 	if phase_wanted 1 && [ "$rc" = 0 ]; then
 		local before after
 		echo
-		echo "=== 1  certutil -K: the private key, and NO password callback ==="
+		echo "=== 1  certutil -K lists the private key without a password callback ==="
 		before="$(grants_created)"
 
-		# NO PKCS11_PORTAL_CERTIFICATE_ENUMERATE. NSS asks for private keys with
-		# [CKA_CLASS = CKO_PRIVATE_KEY, CKA_TOKEN], which names a credential on
-		# its own; the opt-in is only for the certificate list in phase 2.
+		# Private-key searches identify the credential without the class-only enumeration opt-in.
 		unset PKCS11_PORTAL_CERTIFICATE_ENUMERATE
 		timeout 180 "$CERTUTIL" -K -d "sql:$DB" -h "$TOKEN_LABEL" \
 			</dev/null >"$LOGDIR/certutil-K.log" 2>&1
@@ -388,7 +320,7 @@ inner() {
 			echo "nss-smoke: expected exactly one chooser for one private-key search"
 			rc=1
 		else
-			echo "nss-smoke: one chooser, one key, and no login was asked for"
+			echo "nss-smoke: Private-key listing acquired one credential without login"
 		fi
 	fi
 
@@ -444,16 +376,11 @@ inner() {
 		done
 		PORT="$(cat "$LOGDIR/port" 2>/dev/null)"
 
-		# -n is token:nickname, which is how NSS names an object on a token, and
-		# it reaches this module as a CKA_LABEL search -- no opt-in needed. -o
-		# overrides validation of the throwaway server certificate: what is
-		# under test is the CLIENT's. -Q quits when the handshake completes;
-		# without it tstclnt spins on a closed stdin for ever, which is a
-		# property of tstclnt and not of the handshake.
 		if [ -z "$PORT" ]; then
 			echo "nss-smoke: the TLS server did not start"
 			cat "$LOGDIR/server.log"
 			rc=1
+		# NSS uses token:nickname; -o skips fixture server validation and -Q stops after the handshake.
 		elif timeout 180 "$TSTCLNT" -h 127.0.0.1 -p "$PORT" \
 			-d "sql:$DB" -n "$TOKEN_LABEL:$CERT_LABEL" -o -Q \
 			</dev/null >"$LOGDIR/tstclnt.log" 2>&1; then

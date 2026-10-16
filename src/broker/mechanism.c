@@ -8,8 +8,7 @@
 
 #include <string.h>
 
-/* RFC 8017 section 9.2, the DigestInfo prefixes for EMSA-PKCS1-v1_5. They are
- * constants, not something to derive at run time. */
+/* DigestInfo prefixes from RFC 8017 section 9.2. */
 static const guint8 digest_info_sha1[] = { 0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e,
 	                                       0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14 };
 static const guint8 digest_info_sha224[] = { 0x30, 0x2d, 0x30, 0x0d, 0x06, 0x09, 0x60,
@@ -25,9 +24,7 @@ static const guint8 digest_info_sha512[] = { 0x30, 0x51, 0x30, 0x0d, 0x06, 0x09,
 	                                         0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
 	                                         0x03, 0x05, 0x00, 0x04, 0x40 };
 
-/* An OAEP label is a domain separator, not a payload. The same number the
- * frontend uses, so that a request it accepted is not refused here for a
- * reason it could have applied itself. */
+/* The OAEP label limit matches the frontend's limit. */
 #define CERTIFICATE_MAX_LABEL_SIZE 256
 
 typedef struct
@@ -72,8 +69,6 @@ gboolean certificate_hash_parse(const char* name, CertificateHash* out)
 
 	for (gsize i = 0; i < G_N_ELEMENTS(hash_table); i++)
 	{
-		/* Accept "SHA-256" as well as "SHA256": the two spellings are both in
-		 * wide use and refusing one of them is a papercut, not a check. */
 		g_autofree char* dashed = g_strdup_printf("SHA-%s", hash_table[i].name + 3);
 
 		if (g_ascii_strcasecmp(name, hash_table[i].name) == 0 ||
@@ -119,17 +114,7 @@ void certificate_mechanism_clear(CertificateMechanism* mechanism)
 	mechanism->digest_info_length = 0;
 }
 
-/* PRESENT WITH THE WRONG TYPE IS AN ERROR, NEVER "ABSENT" -- the same rule the
- * option parsing in certificate-impl.c applies, and for the same reason.
- * g_variant_lookup(..., "&s", ...) cannot tell a missing key from one holding a
- * uint32, so every optional string in this file goes through here: a mistyped
- * `signature_encoding` used to mean "raw", a mistyped `mgf` used to mean "MGF1
- * over the signature hash", and a mistyped `mgf1_hash` used to mean "no need to
- * check it against `hash`". None of those defaults is dangerous on its own; a
- * caller whose parameters were silently discarded rather than refused is.
- *
- * Returns FALSE with @error set for a present non-string. @out is left NULL for
- * a key that is genuinely absent. */
+/* Only absent keys receive defaults; present values must have the expected type. */
 static gboolean lookup_string(GVariant* parameters, const char* key, GVariant** holder,
                               const char** out, GError** error)
 {
@@ -145,7 +130,7 @@ static gboolean lookup_string(GVariant* parameters, const char* key, GVariant** 
 	if (!g_variant_is_of_type(*holder, G_VARIANT_TYPE_STRING))
 	{
 		g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-		            "The '%s' parameter must be a string", key);
+		            "Parameter '%s' must be a string", key);
 		return FALSE;
 	}
 
@@ -188,9 +173,7 @@ static gboolean parse_hash(GVariant* parameters, CertificateHash* out, GError** 
 	if (parameters == NULL || !g_variant_lookup(parameters, "hash", "&s", &text))
 	{
 		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-		                    "A 'hash' parameter is required: this backend signs a digest, "
-		                    "never a message, and OAEP is a hash's worth of padding, so "
-		                    "either way it has to be told which hash");
+		                    "Parameter 'hash' is required");
 		return FALSE;
 	}
 
@@ -203,11 +186,7 @@ static gboolean parse_hash(GVariant* parameters, CertificateHash* out, GError** 
 	return TRUE;
 }
 
-/* An unknown key in `parameters` is refused rather than ignored, and the
- * vocabulary is PER OPERATION: a key that means something for a signature
- * means nothing for a decryption, and a caller sending `salt_length` to
- * Decrypt is either expecting a constraint this backend does not apply or
- * probing for one. Both lists are the whole vocabulary of their side. */
+/* Parameter keys are restricted to the vocabulary for each operation. */
 static gboolean parameters_are_known(GVariant* parameters, gboolean for_decrypt, GError** error)
 {
 	static const char* const sign_keys[] = { "hash", "mgf", "salt_length", "signature_encoding",
@@ -243,7 +222,7 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 	if (name == NULL)
 	{
 		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-		                    "A mechanism is required");
+		                    "Mechanism is required");
 		return FALSE;
 	}
 
@@ -258,28 +237,11 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		g_autoptr(GVariant) mgf1_holder = NULL;
 		g_autoptr(GVariant) label = NULL;
 
-		/* RSA_OAEP AND NOTHING ELSE, and the refusal names the reason rather
-		 * than pretending the mechanism is unknown -- it is not unknown, it is
-		 * a signing mechanism, and a caller that asked for PKCS#1 v1.5
-		 * decryption should be told what it asked for.
-		 *
-		 * WHY V1.5 IS NOT AN OPTION. C_Decrypt answers "padding valid, here is
-		 * the plaintext" or "that failed", and those two answers are
-		 * distinguishable on the wire. Repeated against a key the user
-		 * consented to once, that is Bleichenbacher's attack: it recovers
-		 * plaintext and can forge a signature with the same key, for as long as
-		 * the grant lasts, with no further consent. Sign is constrained to a
-		 * digest of a named length precisely so that it cannot be used that
-		 * way; letting Decrypt hand over the equivalent capability through a
-		 * different door would make that constraint decorative. The interface
-		 * says a backend must not implement v1.5 decryption behind some other
-		 * mechanism name either, and this is the only branch that decrypts. */
+		/* PKCS#1 v1.5 decryption would expose a padding oracle; only RSA_OAEP is permitted. */
 		if (g_strcmp0(name, "RSA_OAEP") != 0)
 		{
 			g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-			            "'%s' may not be used to decrypt; RSA_OAEP is the only decryption "
-			            "mechanism on this interface, because a PKCS#1 v1.5 decryption whose "
-			            "outcome the caller can observe is a padding oracle over the card's key",
+			            "Mechanism '%s' cannot decrypt; RSA_OAEP is required",
 			            name);
 			return FALSE;
 		}
@@ -297,10 +259,7 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		entry = hash_entry(out->hash);
 		g_assert(entry != NULL);
 
-		/* PKCS#1 lets MGF1 use a different hash than OAEP itself. Nothing asks
-		 * for that on purpose, the value goes straight into the module's
-		 * mechanism parameter, and the frontend already refuses a mismatch --
-		 * so this refuses it too rather than trusting that it did. */
+		/* The frontend requires MGF1 to use the OAEP hash. */
 		if (!lookup_string(parameters, "mgf1_hash", &mgf1_holder, &mgf1_name, error))
 			return FALSE;
 
@@ -316,14 +275,12 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 			if (mgf1_hash != out->hash)
 			{
 				g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-				            "The 'mgf1_hash' must name the same hash as 'hash', not '%s'",
+				            "mgf1_hash '%s' must match hash",
 				            mgf1_name);
 				return FALSE;
 			}
 		}
 
-		/* The OAEP label is a domain separator, not a payload: 256 bytes is
-		 * the frontend's cap and there is no reason to allow more here. */
 		if (parameters != NULL)
 		{
 			label = g_variant_lookup_value(parameters, "label", NULL);
@@ -331,7 +288,7 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 			if (label != NULL && !g_variant_is_of_type(label, G_VARIANT_TYPE_BYTESTRING))
 			{
 				g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-				                    "The 'label' must be a byte array");
+				                    "label must be a byte array");
 				return FALSE;
 			}
 
@@ -345,9 +302,7 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 			}
 		}
 
-		/* RFC 8017 7.1.2 step 1b: an OAEP ciphertext is exactly one modulus
-		 * long, and mLen <= k - 2hLen - 2 has to be satisfiable at all. The
-		 * frontend can check neither: it does not know the modulus size. */
+		/* RFC 8017 section 7.1.2 requires a modulus-sized ciphertext and room for OAEP overhead. */
 		if ((gsize) (key_size / 8) < 2 * entry->length + 2)
 		{
 			g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
@@ -363,9 +318,7 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		out->oaep.hashAlg = entry->ck_hash;
 		out->oaep.mgf = entry->mgf;
 
-		/* CKZ_DATA_SPECIFIED is the only source type PKCS#11 defines, and it
-		 * is correct with no label too: pSourceData NULL and a length of zero
-		 * is the empty label, which is what OAEP's default is. */
+		/* PKCS#11 uses CKZ_DATA_SPECIFIED for an empty OAEP label too. */
 		out->oaep.source = CKZ_DATA_SPECIFIED;
 		if (label != NULL && g_variant_get_size(label) > 0)
 		{
@@ -401,8 +354,7 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		entry = hash_entry(out->hash);
 		g_assert(entry != NULL);
 
-		/* RFC 8017 9.2 step 3: the encoded message must fit, with at least
-		 * eight bytes of padding and the leading 0x00 0x01. */
+		/* RFC 8017 section 9.2 requires at least eight padding bytes and the leading 0x00 0x01. */
 		if ((gsize) (key_size / 8) < entry->digest_info_length + entry->length + 11)
 		{
 			g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
@@ -442,8 +394,6 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		g_assert(entry != NULL);
 		mgf_hash = out->hash;
 
-		/* An MGF that is not MGF1-over-a-hash-this-backend-knows is refused,
-		 * not passed through: pParameter goes straight into the module. */
 		if (!lookup_string(parameters, "mgf", &mgf_holder, &mgf_name, error))
 			return FALSE;
 
@@ -451,10 +401,7 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 		{
 			const char* rest = NULL;
 
-			/* THE SPELLING IS THE INTERFACE'S: "MGF1-<hash>", or plain "MGF1"
-			 * meaning MGF1 over `hash`. A bare hash name used to be accepted
-			 * too, which was leniency the interface does not describe and a
-			 * second backend would not implement. */
+			/* The interface accepts MGF1 or MGF1-<hash>. */
 			if (g_ascii_strncasecmp(mgf_name, "MGF1-", 5) == 0)
 				rest = mgf_name + 5;
 			else if (g_ascii_strcasecmp(mgf_name, "MGF1") == 0)
@@ -487,13 +434,8 @@ gboolean certificate_mechanism_parse(const char* name, GVariant* parameters, con
 			}
 		}
 
-		/* RFC 8017 9.1.1 step 3: emLen >= hLen + sLen + 2, with
-		 * emLen = ceil((modBits - 1) / 8). The frontend cannot check this: it
-		 * does not know the modulus size. */
-		/* guint64 ON BOTH SIDES, not gsize: gsize is 32 bits on a 32-bit build,
-		 * so entry->length + salt_length + 2 wraps there for salt_length near
-		 * G_MAXUINT32, and a wrapped sum passes the check and sends
-		 * sLen = 0xFFFFFFFF into the module. */
+		/* RFC 8017 section 9.1.1 requires emLen >= hLen + sLen + 2, with emLen = ceil((modBits - 1) / 8). */
+		/* Use 64-bit arithmetic to prevent salt_length overflow on 32-bit builds. */
 		em_length = (key_size - 1 + 7) / 8;
 		if ((guint64) em_length < (guint64) entry->length + (guint64) salt_length + 2)
 		{
@@ -564,12 +506,7 @@ GBytes* certificate_mechanism_prepare(const CertificateMechanism* mechanism, GBy
 
 	if (mechanism->expected_input != 0 && size != mechanism->expected_input)
 	{
-		/* An RSA ciphertext is exactly one modulus long -- there is no other
-		 * length one can have -- and a digest is exactly the length its hash
-		 * produces. Neither fact is secret, so saying which was expected leaks
-		 * nothing; what must not be distinguishable is which way a decryption
-		 * of the RIGHT length failed, and that is handled in broker/operations.c
-		 * where the module's answer comes back. */
+		/* Input length is public; decryption failures for valid lengths share one response in broker/operations.c. */
 		if (mechanism->has_oaep)
 			g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
 			            "An RSA-OAEP ciphertext must be exactly %" G_GSIZE_FORMAT
@@ -597,8 +534,7 @@ GBytes* certificate_mechanism_prepare(const CertificateMechanism* mechanism, GBy
 	}
 }
 
-/* DER INTEGER from a big-endian unsigned value: strip leading zeroes, then add
- * one back if the top bit is set, because DER integers are signed. */
+/* DER integers are signed, so a leading zero protects a set high bit. */
 static void append_der_integer(GByteArray* out, const guint8* value, gsize length)
 {
 	gsize start = 0;
@@ -653,17 +589,14 @@ GBytes* certificate_ecdsa_raw_to_der(const guint8* raw, gsize length, GError** e
 	}
 	else if (body->len <= 0xff)
 	{
-		/* A P-521 signature body is over 127 bytes, so the one-byte long form
-		 * is reachable with the curves this backend supports. */
+		/* P-521 signatures require the long-form DER length. */
 		guint8 header[2] = { 0x81, (guint8) body->len };
 
 		g_byte_array_append(out, header, 2);
 	}
 	else
 	{
-		/* Not reachable with any curve in use, but truncating a length into a
-		 * guint8 here would silently produce malformed DER the first time a
-		 * module returned an oversized raw signature. */
+		/* Signature bodies larger than 255 bytes use two DER length bytes. */
 		guint8 header[3] = { 0x82, (guint8) (body->len >> 8), (guint8) (body->len & 0xff) };
 
 		g_byte_array_append(out, header, 3);
