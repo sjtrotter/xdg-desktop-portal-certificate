@@ -58,6 +58,8 @@ static const GOptionEntry entries[] = {
 	  "Also offer tokens whose slot does not set CKF_HW_SLOT", NULL },
 	{ "login-timeout", 0, 0, G_OPTION_ARG_INT, &opt_login_timeout,
 	  "Hide the PIN prompt after N seconds of C_Login (default 60; 0 disables)", "N" },
+	{ "pin-prompt", 0, 0, G_OPTION_ARG_STRING, &opt_pin_prompt,
+	  "Where the PIN is typed: auto (default), gtk, or system (requires gcr-4)", "WHICH" },
 	{ "list-tokens", 0, 0, G_OPTION_ARG_NONE, &opt_list_tokens,
 	  "List the security tokens visible to this user and exit", NULL },
 	{ "no-activate", 0, 0, G_OPTION_ARG_NONE, &opt_no_activate,
@@ -67,14 +69,6 @@ static const GOptionEntry entries[] = {
 	{ "version", 0, 0, G_OPTION_ARG_NONE, &opt_version, "Print the version and exit", NULL },
 	{ NULL, 0, 0, 0, NULL, NULL, NULL },
 };
-
-#if HAVE_GCR
-static const GOptionEntry gcr_entries[] = {
-	{ "pin-prompt", 0, 0, G_OPTION_ARG_STRING, &opt_pin_prompt,
-	  "Where the PIN is typed: auto (default), gtk, or system", "WHICH" },
-	{ NULL, 0, 0, 0, NULL, NULL, NULL },
-};
-#endif
 
 static const char* description =
     "Certificate backend for xdg-desktop-portal, started through D-Bus activation.\n"
@@ -91,6 +85,8 @@ static const char* description =
     "Hardware slots are offered by default. --allow-software-tokens includes\n"
     "software tokens; --module also overrides this filter for selected modules.\n"
     "Hardware flags are module claims. --list-tokens includes skip reasons.\n"
+    "\n"
+    "Without gcr-4, --pin-prompt=auto uses GTK; --pin-prompt=system is unavailable.\n"
     "\n"
     "Exit codes: 0 clean shutdown, 40 unavailable, 64 usage, 70 internal error.\n"
     "See docs/TESTING.md for development setup and hardware checks.";
@@ -365,9 +361,6 @@ int main(int argc, char** argv)
 
 	context = g_option_context_new("- a backend for the experimental Certificate portal");
 	g_option_context_add_main_entries(context, entries, NULL);
-#if HAVE_GCR
-	g_option_context_add_main_entries(context, gcr_entries, NULL);
-#endif
 	g_option_context_set_description(context, description);
 
 	if (!g_option_context_parse(context, &argc, &argv, &error))
@@ -376,6 +369,15 @@ int main(int argc, char** argv)
 		g_printerr("Try 'xdg-desktop-portal-certificate --help'.\n");
 		return CERTIFICATE_EXIT_USAGE;
 	}
+
+#if !HAVE_GCR
+	if (opt_pin_prompt != NULL && g_ascii_strcasecmp(opt_pin_prompt, "system") == 0)
+	{
+		g_printerr("xdg-desktop-portal-certificate: "
+		           "--pin-prompt=system requires a build with gcr-4\n");
+		return CERTIFICATE_EXIT_USAGE;
+	}
+#endif
 
 	harden();
 

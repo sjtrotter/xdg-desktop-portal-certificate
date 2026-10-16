@@ -52,13 +52,13 @@ tokens are offered by default; `--allow-software-tokens` adds software tokens, a
 `--module PATH` loads only the named PKCS#11 module.
 
 Build dependencies are GLib/GIO, GTK 4, libadwaita, p11-kit and GnuTLS. gcr-4 is optional
-(`-Dgcr=auto`) and adds `--pin-prompt=system`, which uses the PIN prompt drawn by the desktop
-shell. `-Dp11_module_path=` and `-Dp11_module_configs=` set where the PKCS#11 module and its
-p11-kit configuration are installed.
+(`-Dgcr=auto`) and enables `--pin-prompt=system`, which uses the PIN prompt drawn by the desktop
+shell. Without gcr-4, `--pin-prompt=gtk` and `auto` use the backend's GTK window;
+`system` exits with a usage error (64). `-Dp11_module_path=` and `-Dp11_module_configs=` set
+where the PKCS#11 module and its p11-kit configuration are installed.
 
-To run the whole stack on a private bus with a software token, build the frontend branch, build
-the backend with gcr-4 (`-Dgcr=enabled`; the scripts pass `--pin-prompt`, which needs it,
-[#8](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/8)), and run:
+To run the whole stack on a private bus with a software token, build the frontend branch and
+the backend, then run:
 
 ```console
 $ tools/softhsm-fixture.sh
@@ -85,7 +85,7 @@ prerequisites and runs with a real card.
 | KDE, translations, packaging | missing | |
 | Independent security review | missing | |
 
-Tests: 15 Meson tests with gcr-4 (14 without), an ASan/UBSan build, and a DER corpus replay.
+Tests: 16 Meson tests with gcr-4 (15 without), an ASan/UBSan build, and a DER corpus replay.
 
 Sign operation logs include the session handle and the supplied `operation_id`, or `(none)`
 when the operation id is absent. Both follow the [log field rules](docs/SECURITY.md#logging).

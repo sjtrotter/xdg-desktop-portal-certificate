@@ -93,7 +93,7 @@ certificate_service_dep = declare_dependency(
 
 subdir('module')
 
-executable(
+certificate_backend = executable(
   'xdg-desktop-portal-certificate',
   ['main.c'],
   dependencies: [certificate_service_dep],

@@ -1,7 +1,7 @@
 # Tests
 
-`meson test -C build` runs the tests registered in [meson.build](meson.build): 15 with gcr-4,
-14 without. SoftHSM-dependent cases skip without a fixture; display-dependent cases skip when
+`meson test -C build` runs the tests registered in [meson.build](meson.build): 16 with gcr-4,
+15 without. SoftHSM-dependent cases skip without a fixture; display-dependent cases skip when
 GTK cannot initialize. [Testing commands](../docs/TESTING.md) cover setup, sanitizer builds,
 frontend export conditions, smoke tests and hardware runs.
 
@@ -23,6 +23,7 @@ frontend export conditions, smoke tests and hardware runs.
 | `module-portal` | Installed shared object's function table and D-Bus client: chooser lock release, finalization and reinitialization during waits, late replies, refused requests, shared chooser, session closure, timeout cancellation and caller-provided lengths | Mock portal on private `GTestDBus` |
 | `fuzz-der` | Corpus replay of TLV, DigestInfo, certificate objects and hostile attribute templates in `fixtures/fuzz-corpus` | Always built; sanitizers only when configured |
 | `tools-lib` | Effective per-interface `portals.conf` resolution across config directories, preservation of `none`, Certificate override, private-only Secret disabling; fixture marker, symlink, ancestor ownership and mode checks | No hardware |
+| `cli` | Help lists `--pin-prompt`; `gtk` and `auto` accept both argument forms; `system` requires gcr-4 and otherwise exits 64 with a usage error | No hardware, display or bus |
 | `pin-system` | Prompt selection and supplied display fields; no remember/new-password choice; wrong-PIN warning on the same prompt; empty PIN refusal; three-attempt cap; cancel and external close; shell cancel after submission; prompter loss during open/password/confirmation; gcr double-completion race; final-try confirmation including protected path; retry flags without invented counts; login timeout and abandonment; null-PIN path without password rounds | gcr-4; scripted prompter on private `GTestDBus`, no operator shell or display |
 
 Decryption tests exercise the [internal implementation](../docs/IMPL-INTERFACE.md#decryption-implementation).
