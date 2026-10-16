@@ -173,7 +173,9 @@ The prefix is caller-chosen and affects only display text; `reason` remains sepa
 
 ### PIN UI and broker
 
-[`ui/pin.h`](../src/ui/pin.h) supplies PIN interaction at first private-key use.
+[`ui/pin.h`](../src/ui/pin.h) supplies PIN interaction at first private-key use and for each
+operation on keys with `CKA_ALWAYS_AUTHENTICATE`. Context-specific login follows operation
+initialization; operations on the same session remain serialized during PIN entry.
 The backend logs into its own session; protected-path tokens collect the secret on the token
 or reader. PIN memory, retries, serialization, cancellation and system-prompter transport
 are specified in [SECURITY.md](SECURITY.md#pin-handling).

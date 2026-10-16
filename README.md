@@ -78,7 +78,7 @@ the portal chooser and PIN prompt without Firefox's certificate picker.
 |---|---|---|
 | Token discovery, certificate parsing, `purpose` rules, `certificate_filter` | done | unit tests against fixture certificates |
 | Chooser and PIN prompt | done | GTK window, or the shell's prompter through gcr-4 |
-| Signing: `RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA` | done | all three against SoftHSM; the RSA mechanisms against a PIV card |
+| Signing: `RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA` | done | all three against SoftHSM; per-signature PIN for `CKA_ALWAYS_AUTHENTICATE`; the RSA mechanisms against a PIV card |
 | Token removal, `SessionInvalidated` | done | polled; never tested with a card pulled mid-operation |
 | PKCS#11 module | done | one token and one credential per process; used by GnuTLS, NSS and WebKitGTK |
 | Certificate chain | partial | `chain_status` is always `leaf_only` |

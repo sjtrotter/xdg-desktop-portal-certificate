@@ -103,8 +103,34 @@ gboolean certificate_device_login(CertificateDevice* device,
 	return TRUE;
 }
 
+gboolean certificate_device_login_context(CertificateDevice* device, const char* pin,
+                                          GError** error)
+{
+	CK_RV rv;
+
+	if (device->module == NULL || device->session == CK_INVALID_HANDLE)
+	{
+		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR,
+		                    CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
+		                    "The security token is no longer present");
+		return FALSE;
+	}
+
+	rv = device->module->C_Login(device->session, CKU_CONTEXT_SPECIFIC,
+	                             pin != NULL ? (CK_UTF8CHAR_PTR) pin : NULL,
+	                             pin != NULL ? (CK_ULONG) strlen(pin) : 0);
+	if (rv != CKR_OK)
+	{
+		certificate_pkcs11_set_error(error, rv, "C_Login");
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
 GBytes* certificate_device_perform(CertificateDevice* device, gboolean decrypt,
                                    CertificateMechanism* mechanism, GBytes* payload,
+                                   CertificateDeviceAuthenticate authenticate, gpointer auth_data,
                                    GError** error)
 {
 	CK_MECHANISM ck_mechanism;
@@ -113,6 +139,7 @@ GBytes* certificate_device_perform(CertificateDevice* device, gboolean decrypt,
 	g_autofree CK_BYTE* buffer = NULL;
 	CK_ULONG length = 0;
 	CK_RV rv;
+	gboolean always_authenticate;
 
 	if (device->module == NULL)
 	{
@@ -131,6 +158,9 @@ GBytes* certificate_device_perform(CertificateDevice* device, gboolean decrypt,
 		return NULL;
 	}
 
+	always_authenticate = certificate_pkcs11_get_bool(device->module, device->session,
+	                                                  device->private_key,
+	                                                  CKA_ALWAYS_AUTHENTICATE, FALSE);
 	certificate_mechanism_to_ck(mechanism, &ck_mechanism);
 
 	if (decrypt)
@@ -142,6 +172,21 @@ GBytes* certificate_device_perform(CertificateDevice* device, gboolean decrypt,
 	{
 		certificate_pkcs11_set_error(error, rv, decrypt ? "C_DecryptInit" : "C_SignInit");
 		return NULL;
+	}
+
+	if (always_authenticate)
+	{
+		if (authenticate == NULL)
+			g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR,
+			                    CERTIFICATE_PKCS11_ERROR_FAILED,
+			                    "Key requires authentication for this operation");
+
+		if (authenticate == NULL || !authenticate(auth_data, error))
+		{
+			/* Closing the session discards the initialized operation and any late authentication. */
+			certificate_device_close(device);
+			return NULL;
+		}
 	}
 
 	if (decrypt)
