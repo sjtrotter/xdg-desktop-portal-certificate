@@ -188,15 +188,21 @@ chain construction is a [roadmap item](ROADMAP.md).
 
 ### Capabilities and absence
 
-With no token, `GetCapabilities` reports all mechanisms the backend can drive. With a token,
-it narrows that list to advertised mechanisms. `AcquireCredential` reports missing usable
-candidates or no filter match. Its internal diagnostic names are `no_token` and
-`no_matching_certificate`; these do not establish physical reader presence.
+`GetCapabilities` reports backend support, independent of inserted tokens and reader flags.
+`mechanisms` lists all mechanisms the backend can drive; `protected_authentication_path=true`
+means the backend supports readers with a protected authentication path. Chosen-key support
+is returned as `supported_mechanisms` after consent.
+
+After successful enumeration, forbidden interaction always returns `2`/`interaction_required`;
+otherwise no display always returns `2`/`no_display`, independent of purpose/filter matches.
+With a display, acquisition always opens the chooser. An empty list says "Insert your security
+token"; usable tokens without matches add a dialog-only explanation. Token events re-enumerate on a worker and reapply
+the request filter. Cancelling an empty or populated chooser returns `1`.
 
 ### Failure results
 
-Response `2` includes an internal `error` key: `no_token`, `no_matching_certificate`,
-`no_such_session`, `invalid_purpose`, `invalid_filter`, `interaction_required`, `no_display`,
+Response `2` includes an internal `error` key: `no_such_session`, `invalid_purpose`,
+`invalid_filter`, `interaction_required`, `no_display`,
 `device_error`, `token_removed`, `pin_locked`, `invalid_request`, `cancelled`, `owner_gone`,
 `backend_gone`. The frontend only forwards recognized results and drops `error`. This diagnostic
 is available to direct impl tests and the journal; application-visible reasons belong to the

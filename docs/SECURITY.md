@@ -69,6 +69,7 @@ experimental export conditions.
 | Full serials are excluded from logs and all serials from `token_display` | `src/redact.c`, `src/certificate-impl.c` |
 | Runtime PKCS#11 calls run off the main thread | `src/broker/`, `src/tokens/discovery.c`, `src/certificate-impl.c`, `src/session-impl.c`; includes capabilities and asynchronous release via `certificate_impl_session_release_device_async()` |
 | Requests share one cancellation source | `src/request-impl.c`, `src/certificate-impl.c`; `Close()` cancels it, cancelled operations answer `1`; `test-cancellation.c` |
+| Inventory stays behind consent | `on_enumerated()` always opens the chooser, including empty results; forbidden interaction and no display answer uniformly; capabilities report backend support |
 | Discovery does not log in | `src/tokens/discovery.c`, `test-broker-device.c` |
 | Hardware-only selection is the default | `token_skip_reason()`, `CKF_HW_SLOT` [[S11](SOURCES.md)]; `--allow-software-tokens` or explicit `--module` permits software tokens; `--list-tokens` prints skipped reasons. Loaded modules supply these flags, so this is not isolation |
 | Windows follow desktop color scheme | `follow_colour_scheme()` reads GSettings because process hardening prevents portal identification; see PIN handling |
@@ -87,7 +88,7 @@ asynchronous close holds a reference until completion, preventing a finalizer/wo
 |---|---|
 | Served PKCS#11 facade | Unimplemented; no `OpenPkcs11Endpoint`. Consumers use the client module ([0011](decisions/0011-client-side-pkcs11-module.md)); future acceptance criteria are under Grant scoping |
 | Multiple grants per module process | One credential per process; [0006](decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) failure mode 8 remains open |
-| Rate limiting | Neither frontend nor backend counts requests by caller or time; the prompt's three-attempt cap cannot provide that |
+| Rate limiting | Neither frontend nor backend counts requests by caller or time; the prompt's three-attempt cap cannot provide that. The client module suppresses reacquisition for 10 seconds after any chooser cancellation, including an empty list |
 | Per-operation signing consent | Consent is per grant for every purpose; a separate signing confirmation is unimplemented |
 | Chain construction | Empty chain and `leaf_only` |
 | Stronger host access policy | No shipped D-Bus policy separating the portal from other same-UID processes |
@@ -117,7 +118,7 @@ and card authentication; consent additionally identifies the caller, purpose, sc
 | PIN | Card use by someone also holding the physical card |
 | Retry counter | Card blocking and denial of service |
 | Trusted dialog | Spoofed or inconsistent UI can mislead consent |
-| Certificate/token inventory | Employer, issuance and potentially clearance information |
+| Certificate/token inventory | Employer, issuance and potentially clearance information; chooser required even when empty, uniform noninteractive answers, token-independent capabilities |
 | Attribution | Loss of caller-specific audit and revocation information |
 
 ## Caller identity
@@ -439,6 +440,14 @@ serials, subjects, PINs, URIs, labels, key ids, signed data, plaintext and `reas
 excluded. Library error text is truncated before embedded URIs, which can contain `pin-value`.
 Structured logging entry points restrict fields without a free-form format string. Verbose mode
 adds diagnostic events without sensitive data.
+
+## Pre-consent residuals
+
+Enumeration duration differs with and without a token; no artificial delays are added.
+Middleware enumeration failures remain visible as response `2`/`device_error`; failed
+middleware can therefore differ from successful enumeration before consent.
+Tokens without serials remain refused with `device_error` after selection.
+Candidate and match counts remain in the journal; dialog-only absence details never reach callers.
 
 ## Open problems
 

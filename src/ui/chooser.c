@@ -17,7 +17,7 @@
 
 #define CERTIFICATE_REASON_MAX_CHARS 160
 
-typedef struct
+struct CertificateChooser
 {
 	/* Cancellation and idle references may be released on different threads. */
 	gint refs;
@@ -35,17 +35,23 @@ typedef struct
 
 	GtkWindow* window;
 	GtkWidget* list;
+	GtkWidget* empty;
+	GtkWidget* empty_detail;
 	GtkWidget* use_button;
 	GtkWidget* cancel_button;
 	GtkEventController* keys;
+	char* announcement;
 
 	gboolean finished;
-} Chooser;
+};
+
+typedef CertificateChooser Chooser;
 
 static void chooser_free(Chooser* chooser)
 {
 	g_clear_pointer(&chooser->candidates, g_ptr_array_unref);
 	g_free(chooser->app_id);
+	g_free(chooser->announcement);
 	g_clear_object(&chooser->cancellable);
 	g_free(chooser);
 }
@@ -422,10 +428,111 @@ static GtkWidget* build_row(CertificateCandidate* candidate, gint64 now)
 	return row;
 }
 
-void certificate_chooser_show(const char* parent_window, const char* activation_token,
-                              GPtrArray* candidates, const CertificateChooserRequest* request,
-                              GCancellable* cancellable, CertificateChooserDone done,
-                              gpointer user_data)
+static CertificateChooserAnnounceHook announce_hook = NULL;
+static gpointer announce_hook_data = NULL;
+
+void certificate_chooser_set_announce_hook(CertificateChooserAnnounceHook hook, gpointer user_data)
+{
+	announce_hook = hook;
+	announce_hook_data = user_data;
+}
+
+static void announce_accessible(GtkAccessible* accessible, const char* text)
+{
+#if GTK_CHECK_VERSION(4, 14, 0)
+	GtkATContext* context = gtk_accessible_get_at_context(accessible);
+
+	/* GTK's test/stub contexts lack the announce vfunc. */
+	if (context != NULL)
+	{
+		if (g_strcmp0(G_OBJECT_TYPE_NAME(context), "GtkAtSpiContext") == 0)
+			gtk_accessible_announce(accessible, text, GTK_ACCESSIBLE_ANNOUNCEMENT_PRIORITY_MEDIUM);
+		g_object_unref(context);
+	}
+#endif
+}
+
+static void announce_empty_state(GtkWidget* window, gpointer user_data)
+{
+	Chooser* chooser = user_data;
+
+	if (chooser->announcement == NULL || !gtk_widget_get_mapped(window))
+		return;
+	if (announce_hook != NULL)
+		announce_hook(chooser->announcement, announce_hook_data);
+	announce_accessible(GTK_ACCESSIBLE(window), chooser->announcement);
+}
+
+void certificate_chooser_update(CertificateChooser* chooser, GPtrArray* candidates,
+                                gboolean tokens_present)
+{
+	g_autoptr(CertificateCandidate) selected = NULL;
+	GtkListBoxRow* selected_row = NULL;
+	GtkWidget* child = NULL;
+	GtkWidget* focus = NULL;
+	gboolean list_focused = FALSE;
+	gint64 now = g_get_real_time() / G_USEC_PER_SEC;
+	const char* empty_text = "Insert your security token";
+	const char* detail = "No certificate on the inserted token can be used for this request";
+
+	if (chooser->finished)
+		return;
+
+	focus = gtk_root_get_focus(GTK_ROOT(chooser->window));
+	list_focused = focus != NULL && (focus == chooser->list ||
+	                                 gtk_widget_is_ancestor(focus, chooser->list));
+	if (selected_candidate(chooser) != NULL)
+		selected = certificate_candidate_ref(selected_candidate(chooser));
+	while ((child = gtk_widget_get_first_child(chooser->list)) != NULL)
+		gtk_list_box_remove(GTK_LIST_BOX(chooser->list), child);
+	g_clear_pointer(&chooser->candidates, g_ptr_array_unref);
+	chooser->candidates = g_ptr_array_ref(candidates);
+
+	for (guint i = 0; i < candidates->len; i++)
+	{
+		CertificateCandidate* candidate = g_ptr_array_index(candidates, i);
+		GtkWidget* row = build_row(candidate, now);
+
+		gtk_list_box_append(GTK_LIST_BOX(chooser->list), row);
+		if (certificate_candidate_same(selected, candidate))
+			selected_row = GTK_LIST_BOX_ROW(row);
+	}
+	gtk_list_box_select_row(GTK_LIST_BOX(chooser->list), selected_row);
+	gtk_widget_set_sensitive(chooser->use_button, selected_row != NULL);
+	/* Removing rows drops keyboard focus; return it to the list or to Cancel. */
+	if (list_focused)
+	{
+		if (selected_row != NULL)
+			gtk_widget_grab_focus(GTK_WIDGET(selected_row));
+		else if (candidates->len > 0)
+			gtk_widget_grab_focus(chooser->list);
+		else
+			gtk_widget_grab_focus(chooser->cancel_button);
+	}
+	gtk_widget_set_visible(chooser->empty, candidates->len == 0);
+	gtk_widget_set_visible(chooser->empty_detail, candidates->len == 0 && tokens_present);
+	g_clear_pointer(&chooser->announcement, g_free);
+	if (candidates->len == 0)
+	{
+		chooser->announcement = tokens_present
+		    ? g_strdup_printf("%s. %s", empty_text, detail) : g_strdup(empty_text);
+
+		gtk_accessible_update_property(GTK_ACCESSIBLE(chooser->list),
+		                               GTK_ACCESSIBLE_PROPERTY_LABEL, chooser->announcement, -1);
+		announce_empty_state(GTK_WIDGET(chooser->window), chooser);
+	}
+	else
+		gtk_accessible_update_property(GTK_ACCESSIBLE(chooser->list),
+		                               GTK_ACCESSIBLE_PROPERTY_LABEL,
+		                               "Certificates available on your security tokens", -1);
+}
+
+CertificateChooser* certificate_chooser_show(const char* parent_window,
+                                             const char* activation_token,
+                                             GPtrArray* candidates,
+                                             const CertificateChooserRequest* request,
+                                             GCancellable* cancellable,
+                                             CertificateChooserDone done, gpointer user_data)
 {
 	Chooser* chooser = NULL;
 	GtkWidget* window = NULL;
@@ -438,14 +545,13 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	GtkEventController* keys = NULL;
 	g_autofree char* reason = NULL;
 	g_autofree char* lifetime = NULL;
-	gint64 now = g_get_real_time() / G_USEC_PER_SEC;
 
 	if (!certificate_ui_has_display())
 	{
 		CertificateChooserResult result = { NULL };
 
 		done(&result, user_data);
-		return;
+		return NULL;
 	}
 
 	chooser = g_new0(Chooser, 1);
@@ -518,13 +624,15 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	gtk_accessible_update_property(GTK_ACCESSIBLE(chooser->list), GTK_ACCESSIBLE_PROPERTY_LABEL,
 	                               "Certificates available on your security tokens", -1);
 
-	for (guint i = 0; i < candidates->len; i++)
-	{
-		CertificateCandidate* candidate = g_ptr_array_index(candidates, i);
-		GtkWidget* row = build_row(candidate, now);
-
-		gtk_list_box_append(GTK_LIST_BOX(chooser->list), row);
-	}
+	chooser->empty = gtk_label_new("Insert your security token");
+	gtk_label_set_wrap(GTK_LABEL(chooser->empty), TRUE);
+	gtk_widget_add_css_class(chooser->empty, "heading");
+	gtk_box_append(GTK_BOX(content), chooser->empty);
+	chooser->empty_detail = gtk_label_new(
+	    "No certificate on the inserted token can be used for this request");
+	gtk_label_set_wrap(GTK_LABEL(chooser->empty_detail), TRUE);
+	gtk_widget_add_css_class(chooser->empty_detail, "dim-label");
+	gtk_box_append(GTK_BOX(content), chooser->empty_detail);
 
 	scroller = gtk_scrolled_window_new();
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller), GTK_POLICY_NEVER,
@@ -581,6 +689,7 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	gtk_widget_add_controller(window, keys);
 
 	g_signal_connect(window, "close-request", G_CALLBACK(on_close_request), chooser);
+	g_signal_connect_after(window, "map", G_CALLBACK(announce_empty_state), chooser);
 
 	if (chooser->cancellable != NULL)
 		chooser->cancel_id =
@@ -590,7 +699,9 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	                         certificate_identity_level_to_string(request->caller->level),
 	                         certificate_purpose_to_string(request->purpose), FALSE);
 
+	certificate_chooser_update(chooser, candidates, request->tokens_present);
 	certificate_external_window_present(GTK_WINDOW(window), parent_window, activation_token);
 
-	gtk_widget_grab_focus(chooser->list);
+	gtk_widget_grab_focus(candidates->len == 0 ? cancel : chooser->list);
+	return chooser;
 }

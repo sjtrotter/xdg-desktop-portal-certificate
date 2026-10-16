@@ -4,6 +4,7 @@
  * xdg-desktop-portal-certificate
  */
 
+#include <adwaita.h>
 #include <gio/gio.h>
 #include <glib.h>
 #include <string.h>
@@ -12,6 +13,7 @@
 #include "fixture-util.h"
 #include "request-impl.h"
 #include "session-impl.h"
+#include "tokens/filter.h"
 #include "ui/pin.h"
 
 #define FRONTEND_NAME "org.freedesktop.portal.Desktop"
@@ -33,10 +35,12 @@ typedef struct
 	guint owner_id;
 	CertificateTokens* tokens;
 	CertificateImpl* impl;
+	gboolean has_softhsm;
 } Fixture;
 
 /* Address the backend by its unique connection name; no well-known backend name is owned. */
 static const char* backend_name = NULL;
+static gboolean has_display = FALSE;
 
 /* Use a fresh connection because the session-bus singleton outlives individual GTestDBus fixtures. */
 static GDBusConnection* open_connection(GTestDBus* bus)
@@ -105,6 +109,7 @@ static void fixture_set_up(Fixture* fixture, gconstpointer user_data)
 		{
 			g_setenv("SOFTHSM2_CONF", config, TRUE);
 			modules[0] = module;
+			fixture->has_softhsm = TRUE;
 		}
 	}
 
@@ -558,6 +563,119 @@ static void test_capabilities(Fixture* fixture, gconstpointer user_data)
 	g_assert_false(g_strv_contains((const char* const*) operations, "decrypt"));
 }
 
+/* Use an explicit empty module list so installed host modules cannot affect absence cases. */
+static void use_empty_modules(Fixture* fixture)
+{
+	const char* modules[] = { NULL };
+	g_autoptr(GError) error = NULL;
+
+	certificate_impl_shutdown(fixture->impl);
+	certificate_impl_free(fixture->impl);
+	certificate_tokens_free(fixture->tokens);
+	fixture->tokens = certificate_tokens_new(modules, &error);
+	g_assert_no_error(error);
+	fixture->impl = certificate_impl_new(fixture->backend, fixture->tokens, &error);
+	g_assert_no_error(error);
+}
+
+static gboolean require_matching_fixture(Fixture* fixture)
+{
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GPtrArray) candidates = NULL;
+	g_autoptr(GPtrArray) matching = NULL;
+	g_autoptr(GVariant) options = acquire_options(NULL);
+	CertificateFilter filter = { 0 };
+
+	if (!fixture->has_softhsm)
+	{
+		g_test_skip("SoftHSM fixture unavailable");
+		return FALSE;
+	}
+	candidates = certificate_tokens_enumerate(fixture->tokens, NULL, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(candidates);
+	if (candidates->len == 0)
+	{
+		g_test_skip("the SoftHSM fixture has no certificates; rebuild it");
+		return FALSE;
+	}
+	g_assert_true(certificate_filter_parse(options, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+	                                       CERTIFICATE_OPERATION_SIGN, &filter, &error));
+	g_assert_no_error(error);
+	matching = certificate_filter_apply(candidates, &filter);
+	certificate_filter_clear(&filter);
+	g_assert_cmpuint(matching->len, >, 0);
+	return TRUE;
+}
+
+static void assert_acquire_code(Fixture* fixture, const char* extra, const char* expected)
+{
+	guint32 response = 0;
+	g_autofree char* code = NULL;
+
+	acquire(fixture, SESSION_PATH, APP_A, acquire_options(extra), &response, &code);
+	g_assert_cmpuint(response, ==, 2);
+	g_assert_cmpstr(code, ==, expected);
+}
+
+static void test_preconsent_uniform(Fixture* fixture, gconstpointer user_data)
+{
+	gboolean forbidden = GPOINTER_TO_INT(user_data);
+	const char* mode = forbidden ? "'interaction_mode': <'forbidden'>" : NULL;
+	const char* no_match = forbidden
+	    ? "'interaction_mode': <'forbidden'>, "
+	      "'certificate_filter': <{'token_label': <'absent-issue-29-token'>}>"
+	    : "'certificate_filter': <{'token_label': <'absent-issue-29-token'>}>";
+	const char* expected = forbidden ? "interaction_required" : "no_display";
+
+	if (!require_matching_fixture(fixture))
+		return;
+	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
+	assert_acquire_code(fixture, mode, expected);
+	assert_acquire_code(fixture, no_match, expected);
+
+	use_empty_modules(fixture);
+	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
+	assert_acquire_code(fixture, mode, expected);
+	assert_acquire_code(fixture, no_match, expected);
+}
+
+static GVariant* get_capabilities(Fixture* fixture)
+{
+	g_autoptr(GError) error = NULL;
+	GVariant* reply = impl_call(fixture->frontend, "GetCapabilities",
+	                            g_variant_new("(s@a{sv})", APP_A, empty_options()), &error);
+
+	g_assert_no_error(error);
+	g_assert_nonnull(reply);
+	return reply;
+}
+
+static void test_capabilities_uniform(Fixture* fixture, gconstpointer user_data)
+{
+	g_autoptr(GVariant) present = NULL;
+	g_autoptr(GVariant) absent = NULL;
+	g_autoptr(GVariant) capabilities = NULL;
+	g_auto(GStrv) mechanisms = NULL;
+	gboolean protected_path = FALSE;
+	static const char* const expected[] = {
+		"RSA_PKCS1_V1_5", "RSA_PSS", "RSA_OAEP", "ECDSA", NULL
+	};
+
+	if (!require_matching_fixture(fixture))
+		return;
+	present = get_capabilities(fixture);
+	use_empty_modules(fixture);
+	absent = get_capabilities(fixture);
+	g_assert_true(g_variant_equal(present, absent));
+	g_variant_get(present, "(@a{sv})", &capabilities);
+	g_assert_true(g_variant_lookup(capabilities, "mechanisms", "^as", &mechanisms));
+	g_assert_cmpstrv((const char* const*) mechanisms, expected);
+	g_assert_true(g_variant_lookup(capabilities, "protected_authentication_path", "b",
+	                               &protected_path));
+	g_assert_true(protected_path);
+}
+
 /* A synchronous bus round trip proves earlier messages were routed without dispatching the backend's main context. */
 static void bus_round_trip(GDBusConnection* connection)
 {
@@ -731,9 +849,171 @@ static void test_close_mid_flight(Fixture* fixture, gconstpointer user_data)
 	g_variant_unref(call.reply);
 }
 
+typedef struct
+{
+	GMutex lock;
+	GCond cond;
+	gint entered;
+	gboolean released;
+} EnumerateGate;
+
+static void hold_enumeration(gpointer user_data)
+{
+	EnumerateGate* gate = user_data;
+	gint64 deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
+
+	g_mutex_lock(&gate->lock);
+	g_atomic_int_set(&gate->entered, TRUE);
+	while (!gate->released)
+		g_assert_true(g_cond_wait_until(&gate->cond, &gate->lock, deadline));
+	g_mutex_unlock(&gate->lock);
+}
+
+static GtkWidget* find_chooser_list(GtkWidget* widget)
+{
+	if (GTK_IS_LIST_BOX(widget))
+		return widget;
+	for (GtkWidget* child = gtk_widget_get_first_child(widget); child != NULL;
+	     child = gtk_widget_get_next_sibling(child))
+	{
+		GtkWidget* list = find_chooser_list(child);
+
+		if (list != NULL)
+			return list;
+	}
+	return NULL;
+}
+
+typedef enum
+{
+	DEFERRED_CLOSE,
+	DEFERRED_REMOVAL,
+	DEFERRED_SUCCESS
+} DeferredOutcome;
+
+static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
+{
+	DeferredOutcome outcome = GPOINTER_TO_INT(user_data);
+	EnumerateGate gate = { 0 };
+	Call call = { 0 };
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GVariant) closed = NULL;
+	g_autoptr(GVariant) results = NULL;
+	g_autoptr(GVariant) options = NULL;
+	g_autofree char* code = NULL;
+	g_autoptr(GtkWindow) window = NULL;
+	g_autoptr(CertificateToken) token = NULL;
+	GtkWidget* list;
+	GtkListBoxRow* row;
+	CertificateCandidate* candidate;
+	guint32 response = 99;
+	gint64 deadline;
+
+	if (!has_display)
+	{
+		g_test_skip("no display: the chooser window cannot be opened");
+		return;
+	}
+	if (!require_matching_fixture(fixture))
+		return;
+	certificate_ui_set_has_display(TRUE);
+	certificate_tokens_stop_watch(fixture->tokens);
+	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
+	options = acquire_options(NULL);
+	g_dbus_connection_call(fixture->frontend, backend_name, IMPL_PATH, IMPL_INTERFACE,
+	                       "AcquireCredential",
+	                       g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "", options),
+	                       NULL, G_DBUS_CALL_FLAGS_NONE, 20000, NULL, on_call_done, &call);
+	deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+	while (g_list_model_get_n_items(gtk_window_get_toplevels()) == 0 && !call.done &&
+	       g_get_monotonic_time() < deadline)
+		g_main_context_iteration(NULL, FALSE);
+	g_assert_false(call.done);
+	g_assert_cmpuint(g_list_model_get_n_items(gtk_window_get_toplevels()), ==, 1);
+	window = g_list_model_get_item(gtk_window_get_toplevels(), 0);
+	list = find_chooser_list(GTK_WIDGET(window));
+	g_assert_nonnull(list);
+	row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0);
+	g_assert_nonnull(row);
+	candidate = g_object_get_data(G_OBJECT(row), "candidate");
+	g_assert_nonnull(candidate);
+	token = certificate_token_ref(candidate->token);
+
+	g_mutex_init(&gate.lock);
+	g_cond_init(&gate.cond);
+	certificate_tokens_set_enumerate_gate(hold_enumeration, &gate);
+	certificate_tokens_emit_event(fixture->tokens, token, TRUE);
+	deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+	while (!g_atomic_int_get(&gate.entered) && g_get_monotonic_time() < deadline)
+		g_main_context_iteration(NULL, FALSE);
+	g_assert_true(g_atomic_int_get(&gate.entered));
+	gtk_list_box_select_row(GTK_LIST_BOX(list), row);
+	g_signal_emit_by_name(list, "row-activated", row);
+	g_assert_cmpuint(g_list_model_get_n_items(gtk_window_get_toplevels()), ==, 0);
+	g_assert_false(call.done);
+
+	if (outcome == DEFERRED_CLOSE)
+	{
+		closed = call_sync(fixture->frontend, REQUEST_PATH, "org.freedesktop.impl.portal.Request",
+		                   "Close", NULL, &error);
+		g_assert_no_error(error);
+		g_assert_nonnull(closed);
+	}
+	else if (outcome == DEFERRED_REMOVAL)
+		certificate_tokens_emit_event(fixture->tokens, token, FALSE);
+	g_assert_false(call.done);
+
+	g_mutex_lock(&gate.lock);
+	gate.released = TRUE;
+	g_cond_broadcast(&gate.cond);
+	g_mutex_unlock(&gate.lock);
+	deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+	while (!call.done && g_get_monotonic_time() < deadline)
+		g_main_context_iteration(NULL, FALSE);
+	g_assert_true(call.done);
+	g_assert_no_error(call.error);
+	g_variant_get(call.reply, "(u@a{sv})", &response, &results);
+	g_variant_lookup(results, "error", "s", &code);
+	if (outcome == DEFERRED_CLOSE)
+	{
+		g_assert_cmpuint(response, ==, CERTIFICATE_RESPONSE_CANCELLED);
+		g_assert_cmpuint(g_variant_n_children(results), ==, 0);
+	}
+	else if (outcome == DEFERRED_REMOVAL)
+	{
+		g_assert_cmpuint(response, ==, CERTIFICATE_RESPONSE_OTHER);
+		g_assert_cmpstr(code, ==, "token_removed");
+	}
+	else
+	{
+		g_autoptr(GVariant) der = g_variant_lookup_value(results, "certificate_der",
+		                                               G_VARIANT_TYPE("ay"));
+
+		g_assert_cmpuint(response, ==, CERTIFICATE_RESPONSE_SUCCESS);
+		g_assert_nonnull(der);
+	}
+	certificate_tokens_set_enumerate_gate(NULL, NULL);
+	g_mutex_clear(&gate.lock);
+	g_cond_clear(&gate.cond);
+	g_variant_unref(call.reply);
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	/* Keep toolkit settings and accessibility off the private service bus. */
+	g_setenv("GTK_A11Y", "test", TRUE);
+	g_setenv("ADW_DISABLE_PORTAL", "1", TRUE);
+	g_setenv("GSETTINGS_BACKEND", "memory", TRUE);
+	/* gvfs would hold a connection to the private bus past g_test_dbus_down(). */
+	g_setenv("GIO_USE_VFS", "local", TRUE);
+	/* GTestDBus forks a watcher; Mesa's exit handlers deadlock in a forked child. */
+	g_setenv("GDK_DISABLE", "gl,egl,vulkan", TRUE);
+	g_setenv("GSK_RENDERER", "cairo", TRUE);
+	/* Initialize GTK before GTestDBus changes the session bus environment. */
+	has_display = gtk_init_check();
+	if (has_display)
+		adw_init();
 
 #define ADD(path, function) \
 	g_test_add(path, Fixture, NULL, fixture_set_up, function, fixture_tear_down)
@@ -753,6 +1033,18 @@ int main(int argc, char** argv)
 	ADD("/impl/frontend-vanishing-answers-pending-calls",
 	    test_frontend_vanishing_answers_pending_calls);
 	ADD("/impl/shutdown-reason-is-in-the-vocabulary", test_shutdown_reason_is_in_the_vocabulary);
+
+	g_test_add("/impl/preconsent-forbidden", Fixture, GINT_TO_POINTER(TRUE),
+	           fixture_set_up, test_preconsent_uniform, fixture_tear_down);
+	g_test_add("/impl/preconsent-no-display", Fixture, GINT_TO_POINTER(FALSE),
+	           fixture_set_up, test_preconsent_uniform, fixture_tear_down);
+	ADD("/impl/capabilities-uniform", test_capabilities_uniform);
+	g_test_add("/impl/deferred-consent-close", Fixture, GINT_TO_POINTER(DEFERRED_CLOSE),
+	           fixture_set_up, test_deferred_consent, fixture_tear_down);
+	g_test_add("/impl/deferred-consent-removal", Fixture, GINT_TO_POINTER(DEFERRED_REMOVAL),
+	           fixture_set_up, test_deferred_consent, fixture_tear_down);
+	g_test_add("/impl/deferred-consent-success", Fixture, GINT_TO_POINTER(DEFERRED_SUCCESS),
+	           fixture_set_up, test_deferred_consent, fixture_tear_down);
 
 #undef ADD
 
