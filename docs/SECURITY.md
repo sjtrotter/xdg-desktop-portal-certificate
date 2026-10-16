@@ -273,6 +273,16 @@ existence, liveness, owner and allowed operations/mechanisms before calling the 
 backend checks app id, non-increasing identity, expiry, mechanism and parameters against the key,
 and uses its own device session. Rate limits and per-operation signing consent are missing.
 
+A grant is a signing capability. During its lifetime the portal signs any digest the application
+sends with the granted key, using a permitted mechanism. The portal cannot tell a TLS
+CertificateVerify from a document signature, and nothing binds the grant to a server or origin;
+`purpose` selects candidates and consent wording only. A compromised application that holds a
+grant can produce arbitrary signatures with that key until the grant expires. This is accepted for
+version 1 ([#12](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/12)): what the
+portal protects is the PIN, card administration, other keys, and time. The frontend sets the
+lifetime: 300 seconds by default, at most 3600. Deployments that need confirmation per signature
+should not raise the lifetime; a per-operation confirmation option is future work.
+
 A served facade is unimplemented; [ADR 0011](decisions/0011-client-side-pkcs11-module.md)
 defines the client module. A future fd-returning facade would have to:
 
@@ -426,12 +436,11 @@ adds diagnostic events without sensitive data.
 
 ## Open problems
 
-WebAuthentication and Certificate share a frontend process but do not yet propagate the original
-web-authentication caller's identity in-process. The certificate backend sees its immediate consumer.
-Authenticated IPC or a frontend-issued capability could also support delegation if the frontend
-independently identifies each peer. Caller-supplied third-party app ids cannot establish identity.
-See [0005](decisions/0005-first-consumer-is-the-web-auth-service.md) and
-[0010](decisions/0010-backend-only-frontend-lives-upstream.md).
+Propagating an original caller's identity through an intermediary is no longer a goal: applications
+load the module themselves and no service acquires credentials on their behalf
+([#14](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/14),
+[ARCHITECTURE.md](ARCHITECTURE.md#scope-limits)). Caller-supplied third-party app ids cannot
+establish identity.
 
 Endpoint loading, concurrency and fd lifetime remain questions for a served facade; the client
 module already serves PKCS#11 consumers. [SPIKES.md](SPIKES.md) S3 lists remaining browser tests.

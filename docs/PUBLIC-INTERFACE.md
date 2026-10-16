@@ -31,7 +31,7 @@ copy in this repository. The public XML belongs only to the frontend.
 The frontend exports the interface only with a configured backend for
 `org.freedesktop.impl.portal.experimental.Certificate1` and `Certificate1` listed in
 `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` at startup. Values are comma separated with no
-spaces, for example `Certificate1,WebAuthentication1`. Without both conditions, the interface
+spaces. Without both conditions, the interface
 is absent from introspection and `Properties.Get` fails. Breaking changes increment the
 trailing interface number; compatible changes increment `version`.
 

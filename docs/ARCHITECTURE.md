@@ -219,7 +219,8 @@ then displays a modal alert.
 `CKA_LABEL` is constant so applications can construct a single-object URI in advance.
 GnuTLS requires `object=` or `id=` [[S17](SOURCES.md)]. The shared
 [`portal-token.h`](../src/module/portal-token.h) contract includes
-`;object=Portal%20Certificate` and is copied verbatim into the web-auth backend.
+`;object=Portal%20Certificate`; an identical copy lives in xdg-desktop-portal-webauth, whose
+development has stopped.
 
 `CKM_RSA_PKCS` input is parsed as DigestInfo; `CKM_SHA*_` mechanisms hash locally.
 `CKM_RSA_PKCS_PSS` maps parameters to `mgf` and `salt_length`. `CKM_ECDSA` infers the hash
@@ -264,6 +265,12 @@ package with its own `.portal` file, selected by `portals.conf`. KDE support and
 PIN integration remain unimplemented.
 
 ## Scope limits
+
+Applications load the PKCS#11 module themselves, so the portal identifies the application that
+holds a grant. No service acquires credentials on another application's behalf: the portal
+identifies its D-Bus caller, so an intermediary would make the chooser and the grant name the
+intermediary instead of the application
+([#14](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/14)).
 
 The frontend branch owns the public XML; the impl XML here tracks it. The backend performs
 no TLS handshakes, cipher selection or chain trust validation. `purpose` cannot attest what

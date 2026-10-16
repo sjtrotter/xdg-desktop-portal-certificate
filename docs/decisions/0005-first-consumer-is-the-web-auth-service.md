@@ -3,7 +3,10 @@
 Date: 2026-09-03
 Status: accepted (for the sketch), amended by [0010](0010-backend-only-frontend-lives-upstream.md)
 
-Superseded in part by [ADR 0012](0012-merged-experimental-portal-convention.md).
+Superseded in part by [ADR 0012](0012-merged-experimental-portal-convention.md). Historical:
+development of the web-auth backend stopped on 2026-10-16, and the delegation proposed here is
+not pursued; applications load the module themselves
+([#14](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/14)).
 
 ## Context
 

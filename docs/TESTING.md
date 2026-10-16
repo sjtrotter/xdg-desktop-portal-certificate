@@ -593,7 +593,7 @@ also removes that exported launcher.
 
 ### 2.8 Chrome Flatpak
 
-Untested so far. This procedure targets Flathub `com.google.Chrome` and requires the built
+Tested once on 2026-10-16 with a PIV card; results are at the end of this section. This procedure targets Flathub `com.google.Chrome` and requires the built
 portal module, the live portal stack from §2.7, a card and host `nss-tools` for `modutil`.
 Set `MODUTIL=/path/to/modutil` if it is not on `PATH`. Chrome has no module-loading UI;
 the helper registers the module with `modutil -dbdir sql:<database-directory> -add`.
@@ -642,8 +642,8 @@ was given. Chrome can still show its picker until the policy is installed and lo
 Chrome M146 and later use `$HOME/.local/share/pki/nssdb`, while an existing `$HOME/.pki/nssdb`
 still takes precedence. The helper discovers the persistent Flatpak database rather than
 assuming either location. No database produces `start Chrome once to create its profile`;
-multiple databases stop setup and print their paths. The database selected by Chrome inside
-this Flatpak and the copied library's absolute sandbox path still need live confirmation.
+multiple databases stop setup and print their paths. In the 2026-10-16 run Chrome used
+`~/.var/app/com.google.Chrome/data/pki/nssdb` and loaded the copied library from there.
 
 Open `chrome://policy`, reload policies and confirm `AutoSelectCertificateForUrls` has the
 intended pattern and no errors. Visit the matching client-certificate site. Expect the portal
@@ -669,7 +669,22 @@ tools/chrome-flatpak.sh --keep-devices --url https://mtls.example.org
 `--keep-devices` keeps device access while removing the pcsc socket. `--keep-pcsc` retains both
 installed permissions for comparison. `--module PATH` selects another built module.
 The current manifest uses `org.freedesktop.Platform//25.08`, as in the Firefox module-loading
-run; Chrome module loading and automatic selection remain unverified.
+run.
+
+Results 2026-10-16 (PIV card, default launch without the pcsc socket or devices):
+
+- Without a matching policy, Chrome shows its own picker after the portal chooser.
+- `chrome://policy` listed the policy as Platform, Machine, Mandatory, OK. The pattern must
+  match the host that requests the client certificate. For the tested site that was a separate
+  Microsoft certificate-login host, not the site's own domain. With that host in the pattern,
+  the flow was portal chooser, portal PIN prompt, successful sign-in, with no Chrome picker.
+- Within the grant lifetime, a second site and a private window reused the grant (no chooser,
+  no PIN) but showed Chrome's picker, because their hosts were outside the pattern. After the
+  grant expired, a new private window showed the chooser and PIN prompt again.
+- `https://client.badssl.com/`: portal chooser only, then rejection; no Chrome picker and no
+  PIN prompt, since the card's certificate does not match the server's CA list.
+- Per-host patterns are workable only in managed deployments. A `"*"` pattern with an issuer
+  filter, the equivalent of Firefox's "Select Automatically", is untested.
 
 ## 3. Real PIV card
 
