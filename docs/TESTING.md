@@ -233,7 +233,8 @@ Color-scheme values are `1` for prefer-dark, `2` for prefer-light and `0` for no
 
 ### Theme and headless dependencies
 
-Process hardening prevents the settings portal identifying the backend. It reads
+Process hardening prevents the settings portal identifying the backend. The backend sets
+`GDK_DEBUG=no-portals` and `ADW_DISABLE_PORTAL=1` before GTK initialization and reads
 `org.gnome.desktop.interface color-scheme` through GSettings; see
 [PIN handling](SECURITY.md#pin-handling). Test the dark setting and inspect verbose output:
 
@@ -889,7 +890,6 @@ and `operation=<operation_id>` for correlation with the frontend journal. An abs
 | Experimental Certificate interface absent | Frontend branch `experimental/integration`, configured impl backend and startup `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1`; introspect the desktop path |
 | No frontend Certificate routing log | `.portal` interface, `XDG_DESKTOP_PORTAL_DIR` and `portals.conf` |
 | Backend disconnected without replying | Crash; hardening disables dumps. Use `--debug-allow-core` only for development debugging, using a disposable fixture |
-| Settings-portal `/proc/<pid>/root` warning | Expected consequence of non-dumpable hardening; GSettings supplies the theme |
 | Wrong window theme | Compare `--verbose` `colour-scheme` with `gsettings get org.gnome.desktop.interface color-scheme`; inspect `follow_colour_scheme()` if they disagree |
 | `--pin-prompt=system` requires gcr-4 | Rebuild with `-Dgcr=enabled`, or use `--pin-prompt=gtk` or `auto` |
 | System prompt unavailable | Check the prompter on the backend's bus; failure is `no_display`, with `pin-prompt-failed detail=system-prompter-unreachable`. A private bus may activate a fallback, but has no shell |

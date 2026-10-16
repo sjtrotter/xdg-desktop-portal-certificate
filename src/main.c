@@ -355,7 +355,9 @@ int main(int argc, char** argv)
 
 	/* Backend dialogs must not recurse through the portal. */
 	g_unsetenv("GTK_USE_PORTAL");
-	g_unsetenv("GDK_DEBUG");
+	/* Non-dumpable hardening prevents Settings portal identification; GSettings supplies the colour scheme. */
+	g_setenv("GDK_DEBUG", "no-portals", TRUE);
+	g_setenv("ADW_DISABLE_PORTAL", "1", TRUE);
 
 	g_set_prgname("xdg-desktop-portal-certificate");
 
