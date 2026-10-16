@@ -12,6 +12,8 @@ impl_dbus_sources = gnome.gdbus_codegen(
   namespace: 'XdpImpl',
 )
 
+certificate_log_args = ['-DG_LOG_DOMAIN="xdg-desktop-portal-certificate"']
+
 # Core headers must remain free of GTK, libadwaita and gcr dependencies for headless tests.
 certificate_core_sources = files(
   'certificate.c',
@@ -61,6 +63,7 @@ endif
 certificate_core = static_library(
   'certificate-core',
   certificate_core_sources + impl_dbus_sources,
+  c_args: certificate_log_args,
   dependencies: certificate_deps,
   include_directories: config_inc,
   install: false,
@@ -77,6 +80,7 @@ certificate_core_dep = declare_dependency(
 certificate_service = static_library(
   'certificate-service',
   certificate_ui_sources,
+  c_args: certificate_log_args,
   link_with: certificate_core,
   dependencies: certificate_deps + certificate_ui_deps,
   include_directories: config_inc,
@@ -96,6 +100,7 @@ subdir('module')
 certificate_backend = executable(
   'xdg-desktop-portal-certificate',
   ['main.c'],
+  c_args: certificate_log_args,
   dependencies: [certificate_service_dep],
   include_directories: config_inc,
   install: true,

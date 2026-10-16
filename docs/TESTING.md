@@ -872,7 +872,13 @@ grant-invalidated     detail says why
 token-removed
 ```
 
-`--verbose` adds diagnostic events. Sign operation logs include `session=<session_handle>`
+`--verbose` enables diagnostic events for `xdg-desktop-portal-certificate` and
+`pkcs11-portal-certificate`. Library debug output, including `Gcr`, stays disabled unless
+requested through `G_MESSAGES_DEBUG`, which works with or without `--verbose`. For example,
+`G_MESSAGES_DEBUG=Gdk` adds GDK output. Gcr debug output can contain secret-exchange payloads,
+including the encrypted PIN transfer.
+
+Sign operation logs include `session=<session_handle>`
 and `operation=<operation_id>` for correlation with the frontend journal. An absent
 `operation_id` appears as `(none)`. Both ids follow the [log field rules](SECURITY.md#logging).
 

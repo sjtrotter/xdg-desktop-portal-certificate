@@ -127,9 +127,50 @@ static void test_logging_entry_points_are_structural(void)
 
 static void test_logged_fields_are_escaped(void)
 {
-	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE, "*app_id=org.example.App\\x0aMESSAGE:*");
+	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, "*app_id=org.example.App\\x0aMESSAGE:*");
 	certificate_log_decision("test", "org.example.App\nMESSAGE: forged", NULL, NULL, TRUE);
 	g_test_assert_expected_messages();
+}
+
+static void test_verbose_log_domains(gconstpointer user_data)
+{
+	const char* requested = user_data;
+	g_auto(GStrv) env = NULL;
+
+	if (g_test_subprocess())
+	{
+		gboolean all = g_strcmp0(requested, "all") == 0;
+
+		g_log_set_debug_enabled(FALSE);
+		for (int verbose = FALSE; verbose <= TRUE; verbose++)
+		{
+			certificate_log_set_verbose(verbose);
+			g_assert_cmpint(g_log_writer_default_would_drop(G_LOG_LEVEL_DEBUG, "Gcr"),
+			                ==, requested == NULL);
+			g_assert_cmpint(g_log_writer_default_would_drop(G_LOG_LEVEL_DEBUG, "Gdk"),
+			                ==, requested == NULL);
+			g_assert_cmpint(g_log_writer_default_would_drop(G_LOG_LEVEL_DEBUG, "Vulkan"),
+			                ==, !all);
+			g_assert_cmpint(g_log_writer_default_would_drop(G_LOG_LEVEL_DEBUG, "GLib-GIO"),
+			                ==, !all);
+			g_assert_cmpint(g_log_writer_default_would_drop(G_LOG_LEVEL_DEBUG, G_LOG_DOMAIN),
+			                ==, !(verbose || all));
+			g_assert_cmpint(g_log_writer_default_would_drop(G_LOG_LEVEL_DEBUG,
+			                                              "pkcs11-portal-certificate"),
+			                ==, !(verbose || all));
+		}
+		return;
+	}
+
+	env = g_get_environ();
+	env = g_environ_unsetenv(env, "DEBUG_INVOCATION");
+	if (requested != NULL)
+		env = g_environ_setenv(env, "G_MESSAGES_DEBUG", requested, TRUE);
+	else
+		env = g_environ_unsetenv(env, "G_MESSAGES_DEBUG");
+
+	g_test_trap_subprocess_with_envp(NULL, (const char* const*) env, 0, 0);
+	g_test_trap_assert_passed();
 }
 
 static void test_combining_mark_runs_are_capped(void)
@@ -198,6 +239,9 @@ int main(int argc, char** argv)
 	g_test_add_func("/redact/untrusted-text-invalid-utf8", test_invalid_utf8_does_not_escape);
 	g_test_add_func("/redact/logging-is-structural", test_logging_entry_points_are_structural);
 	g_test_add_func("/redact/logged-fields-escaped", test_logged_fields_are_escaped);
+	g_test_add_data_func("/redact/verbose-log-domains", NULL, test_verbose_log_domains);
+	g_test_add_data_func("/redact/user-debug-domains", "Gcr Gdk", test_verbose_log_domains);
+	g_test_add_data_func("/redact/user-all-domains", "all", test_verbose_log_domains);
 	g_test_add_func("/redact/combining-mark-runs", test_combining_mark_runs_are_capped);
 	g_test_add_func("/redact/display-text-fallback", test_display_text_falls_back);
 

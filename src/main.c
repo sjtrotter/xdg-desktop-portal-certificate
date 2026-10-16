@@ -391,18 +391,6 @@ int main(int argc, char** argv)
 
 	certificate_log_set_verbose(opt_verbose);
 
-	/* GLib drops g_debug() output unless its domain is enabled. */
-	if (opt_verbose)
-	{
-		const char* domains[] = { "all", NULL };
-
-		g_log_writer_default_set_debug_domains(domains);
-	}
-	else
-	{
-		g_log_writer_default_set_debug_domains(NULL);
-	}
-
 	if (!certificate_pin_set_prompt_kind(opt_pin_prompt != NULL ? opt_pin_prompt : "auto",
 	                                     &error))
 	{

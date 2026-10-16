@@ -11,7 +11,7 @@ frontend export conditions, smoke tests and hardware runs.
 |---|---|---|
 | `filter` | Purpose, EKU, key usage, issuer DN, PIV slot and key-algorithm matching against fixture certificates; expired and not-yet-valid handling; portal-module recursion rejection by name and explicit path | No hardware |
 | `mechanism` | Portal-to-`CKM_*` mapping, DigestInfo construction, digest length, raw/DER ECDSA, PSS MGF/hash/salt validation, wrong-typed optional strings, OAEP parameters and sign/decrypt mechanism separation | No hardware |
-| `redact` | URI, `pin-value` and `pin-source` truncation; display sanitizing; newline journal-injection refusal | No hardware |
+| `redact` | URI, `pin-value` and `pin-source` truncation; display sanitizing; newline journal-injection refusal; verbose log-domain filtering and `G_MESSAGES_DEBUG` overrides | No hardware |
 | `discovery-limits` | Attribute-length bounds and RSA-PSS arithmetic limits, including 32-bit overflow boundaries | No hardware |
 | `chooser` | App and token text cannot inject lines, ANSI escapes or direction overrides; length limits and textual expiry warnings | No display |
 | `broker-device` | Discovery without login, `C_OpenSession`, `C_Login`, RSA v1.5/PSS and ECDSA with verification against returned certificate; wrong PIN preserved; device rebinding discards login/key; RSA-OAEP round trip and ciphertext-length refusal | SoftHSM; `openssl(1)` for OAEP; skips missing prerequisites |

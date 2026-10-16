@@ -150,10 +150,10 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	g_assert_true(certificate_device_login(&session->device, first, FIXTURE_PIN, &error));
 	g_assert_no_error(error);
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
+	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
 	                      "request-received session=/org/freedesktop/portal/desktop/session/t/regrant "
 	                      "operation=sign-1 mechanism=RSA_PKCS1_V1_5");
-	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
+	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
 	                      "operation-completed session=/org/freedesktop/portal/desktop/session/t/regrant "
 	                      "operation=sign-1 mechanism=RSA_PKCS1_V1_5");
 	run_and_wait(tokens, session, "RSA_PKCS1_V1_5", "SHA256", data, &probe);
@@ -250,7 +250,7 @@ static void test_sign_logs_ids(void)
 		    "operation-refused session=%s operation=%s mechanism=RSA_PKCS1_V1_5",
 		    session->id, cases[i].logged_id);
 
-		g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE, expected);
+		g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, expected);
 		certificate_broker_perform(NULL, session, FALSE, cases[i].operation_id, "RSA_PKCS1_V1_5",
 		                           NULL, NULL, NULL, "Test application", NULL, on_done, &probe);
 		g_test_assert_expected_messages();
