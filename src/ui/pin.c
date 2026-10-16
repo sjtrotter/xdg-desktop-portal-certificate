@@ -228,6 +228,7 @@ static void pin_prompt_free(PinPrompt* prompt)
 	pin_buffer_free(prompt->buffer_opaque);
 	prompt->buffer_opaque = NULL;
 	g_clear_pointer(&prompt->token, certificate_token_unref);
+	g_free(prompt->session_id);
 	g_free(prompt->parent_window);
 	g_free(prompt->caller_display);
 	g_free(prompt->purpose_display);
@@ -293,7 +294,7 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 			certificate_log_grant(outcome == CERTIFICATE_PIN_TIMED_OUT
 			                          ? CERTIFICATE_REASON_PIN_TIMEOUT
 			                          : CERTIFICATE_REASON_CHOOSER_CANCELLED,
-			                      NULL, "deferred-login-in-flight");
+			                      prompt->session_id, "deferred-login-in-flight");
 		}
 
 		return;
@@ -346,7 +347,8 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 	/* After done(), abandon a successful cancelled login so it cannot authorize later operations. */
 	if (abandon != NULL)
 	{
-		certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, NULL, "abandoning-cancelled-login");
+		certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, prompt->session_id,
+		                      "abandoning-cancelled-login");
 		abandon(login_data);
 	}
 
@@ -461,7 +463,7 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 		prompt->cancel_deferred = FALSE;
 
 		if (ok)
-			certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, NULL,
+			certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, prompt->session_id,
 			                      prompt->deferred_outcome == CERTIFICATE_PIN_TIMED_OUT
 			                          ? "login-landed-after-timeout"
 			                          : "cancelled-after-login");
@@ -475,7 +477,7 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 	if (ok)
 	{
-		certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, NULL, "pin-accepted");
+		certificate_log_grant(CERTIFICATE_REASON_LOGIN_OK, prompt->session_id, "pin-accepted");
 		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_OK);
 		return;
 	}
@@ -484,13 +486,13 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 	if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT))
 	{
-		certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, NULL, "retry-offered");
+		certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, prompt->session_id, "retry-offered");
 
 		prompt->final_try_confirmed = FALSE;
 
 		if (prompt->token->pin_locked)
 		{
-			certificate_log_grant(CERTIFICATE_REASON_PIN_LOCKED, NULL, "terminal");
+			certificate_log_grant(CERTIFICATE_REASON_PIN_LOCKED, prompt->session_id, "terminal");
 			certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_LOCKED);
 			return;
 		}
@@ -504,7 +506,7 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 		if (prompt->attempts >= PIN_MAX_ATTEMPTS)
 		{
-			certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, NULL, "attempt-cap");
+			certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, prompt->session_id, "attempt-cap");
 			certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_INCORRECT);
 			return;
 		}
@@ -517,7 +519,7 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 	if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_PIN_LOCKED))
 	{
-		certificate_log_grant(CERTIFICATE_REASON_PIN_LOCKED, NULL, "terminal");
+		certificate_log_grant(CERTIFICATE_REASON_PIN_LOCKED, prompt->session_id, "terminal");
 		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_LOCKED);
 		return;
 	}
@@ -540,7 +542,7 @@ static gboolean on_login_timeout(gpointer user_data)
 	if (!prompt->login_in_flight)
 		return G_SOURCE_REMOVE;
 
-	certificate_log_grant(CERTIFICATE_REASON_PIN_TIMEOUT, NULL, "login-did-not-return");
+	certificate_log_grant(CERTIFICATE_REASON_PIN_TIMEOUT, prompt->session_id, "login-did-not-return");
 	certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_TIMED_OUT);
 	return G_SOURCE_REMOVE;
 }
@@ -631,13 +633,14 @@ static void pin_prompt_start(PinPrompt* prompt)
 {
 	pin_active = prompt;
 
-	certificate_log_grant(CERTIFICATE_REASON_PIN_PROMPTED, NULL,
+	certificate_log_grant(CERTIFICATE_REASON_PIN_PROMPTED, prompt->session_id,
 	                      prompt->protected_path ? "protected-path" : "on-screen");
 
 	prompt->impl->start(prompt);
 }
 
-void certificate_pin_login_full(CertificateToken* token, const char* parent_window,
+void certificate_pin_login_full(CertificateToken* token, const char* session_id,
+                                const char* parent_window,
                                 const char* caller_display, const char* purpose_display,
                                 CertificatePinLoginFunc login, CertificatePinRefreshFunc refresh,
                                 CertificatePinAbandonFunc abandon, gpointer login_data,
@@ -672,6 +675,7 @@ void certificate_pin_login_full(CertificateToken* token, const char* parent_wind
 	prompt->refs = 1;
 	prompt->impl = impl;
 	prompt->token = certificate_token_ref(token);
+	prompt->session_id = g_strdup(session_id);
 	prompt->protected_path = token->protected_authentication_path;
 	prompt->parent_window = g_strdup(parent_window);
 	prompt->caller_display = g_strdup(caller_display);
@@ -714,6 +718,6 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
                            GCancellable* cancellable, CertificatePinDone done,
                            gpointer user_data)
 {
-	certificate_pin_login_full(token, parent_window, caller_display, purpose_display, login,
+	certificate_pin_login_full(token, NULL, parent_window, caller_display, purpose_display, login,
 	                           refresh, abandon, login_data, NULL, cancellable, done, user_data);
 }

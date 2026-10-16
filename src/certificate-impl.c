@@ -1004,6 +1004,7 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	CertificateImplSession* session = NULL;
 	const char* code = NULL;
 	g_autofree char* mechanism = NULL;
+	g_autofree char* operation_id = NULL;
 	g_autoptr(GVariant) parameters = NULL;
 	g_autoptr(GVariant) payload = NULL;
 	g_autoptr(GBytes) data = NULL;
@@ -1031,6 +1032,7 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	transaction->session = g_object_ref(session);
 	transaction->parent_window = g_strdup(arg_parent_window);
 
+	option_take_string(arg_options, "operation_id", &operation_id, &bad);
 	if (!option_take_string(arg_options, "mechanism", &mechanism, &bad) || bad)
 	{
 		transaction_respond(transaction, TRANSACTION_OPERATION, CERTIFICATE_RESPONSE_OTHER,
@@ -1076,7 +1078,7 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	caller_display = certificate_app_display_name(arg_app_id);
 
 	certificate_broker_perform(
-	    impl->tokens, session, FALSE, mechanism, parameters, data, arg_parent_window,
+	    impl->tokens, session, FALSE, operation_id, mechanism, parameters, data, arg_parent_window,
 	    caller_display != NULL ? caller_display : arg_app_id,
 	    certificate_impl_request_get_cancellable(transaction->request), on_operation_done,
 	    transaction);

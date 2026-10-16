@@ -56,13 +56,15 @@ static void run_and_wait(CertificateTokens* tokens, CertificateImplSession* sess
 	g_autofree char* text = g_strdup_printf("{'hash': <'%s'>}", hash);
 	g_autoptr(GVariant) parameters =
 	    g_variant_parse(G_VARIANT_TYPE_VARDICT, text, NULL, NULL, NULL);
+	g_autofree char* operation_id = g_strdup("sign-1");
 	gint64 deadline;
 
 	probe->calls = 0;
 	g_clear_pointer(&probe->signature, g_bytes_unref);
 
-	certificate_broker_perform(tokens, session, FALSE, mechanism, parameters, data, NULL,
+	certificate_broker_perform(tokens, session, FALSE, operation_id, mechanism, parameters, data, NULL,
 	                           "Test application", NULL, on_done, probe);
+	g_clear_pointer(&operation_id, g_free);
 
 	deadline = g_get_monotonic_time() + 20 * G_TIME_SPAN_SECOND;
 	while (probe->calls == 0 && g_get_monotonic_time() < deadline)
@@ -148,7 +150,14 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	g_assert_true(certificate_device_login(&session->device, first, FIXTURE_PIN, &error));
 	g_assert_no_error(error);
 
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
+	                      "request-received session=/org/freedesktop/portal/desktop/session/t/regrant "
+	                      "operation=sign-1 mechanism=RSA_PKCS1_V1_5");
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
+	                      "operation-completed session=/org/freedesktop/portal/desktop/session/t/regrant "
+	                      "operation=sign-1 mechanism=RSA_PKCS1_V1_5");
 	run_and_wait(tokens, session, "RSA_PKCS1_V1_5", "SHA256", data, &probe);
+	g_test_assert_expected_messages();
 	g_assert_false(probe.failed);
 	g_assert_nonnull(probe.signature);
 	certificate_test_verify_signature(first, GNUTLS_SIGN_RSA_SHA256, digest, digest_length,
@@ -211,6 +220,47 @@ static void test_grant_expiry_is_monotonic(void)
 	g_object_unref(session);
 }
 
+static void test_sign_logs_ids(void)
+{
+	g_autoptr(CertificateCandidate) candidate =
+	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
+	g_autoptr(CertificateImplSession) session = certificate_impl_session_new(
+	    "/org/freedesktop/portal/desktop/session/t/logging", "org.example.App");
+	g_autofree char* long_id = g_strnfill(200, 'x');
+	g_autofree char* prefix = g_strnfill(128, 'x');
+	g_autofree char* capped_id = g_strconcat(prefix, "...", NULL);
+	struct
+	{
+		const char* operation_id;
+		const char* logged_id;
+	} cases[] = {
+		{ NULL, "(none)" },
+		{ "sign-1", "sign-1" },
+		{ "sign-2\nMESSAGE: forged", "sign-2\\x0aMESSAGE: forged" },
+		{ long_id, capped_id },
+	};
+
+	certificate_impl_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, FALSE,
+	                               FALSE, 300);
+
+	for (gsize i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		Probe probe = { 0 };
+		g_autofree char* expected = g_strdup_printf(
+		    "operation-refused session=%s operation=%s mechanism=RSA_PKCS1_V1_5",
+		    session->id, cases[i].logged_id);
+
+		g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE, expected);
+		certificate_broker_perform(NULL, session, FALSE, cases[i].operation_id, "RSA_PKCS1_V1_5",
+		                           NULL, NULL, NULL, "Test application", NULL, on_done, &probe);
+		g_test_assert_expected_messages();
+		g_assert_cmpuint(probe.calls, ==, 1);
+		g_assert_true(probe.failed);
+	}
+
+	certificate_impl_session_close(session);
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -218,6 +268,7 @@ int main(int argc, char** argv)
 	g_test_add_func("/regrant/signs-with-the-new-certificate",
 	                test_regrant_signs_with_the_new_certificate);
 	g_test_add_func("/regrant/expiry-is-monotonic", test_grant_expiry_is_monotonic);
+	g_test_add_func("/broker/sign-logs-ids", test_sign_logs_ids);
 
 	return g_test_run();
 }

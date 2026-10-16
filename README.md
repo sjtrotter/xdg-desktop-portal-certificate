@@ -87,6 +87,9 @@ prerequisites and runs with a real card.
 
 Tests: 15 Meson tests with gcr-4 (14 without), an ASan/UBSan build, and a DER corpus replay.
 
+Sign operation logs include the session handle and the supplied `operation_id`, or `(none)`
+when the operation id is absent. Both follow the [log field rules](docs/SECURITY.md#logging).
+
 Hardware evidence, all with one PIV card, one reader, OpenSC, and GNOME 50 on Wayland:
 
 - 2026-09-04: discovery, sign, cancel and a session-bus run through both PIN prompts
@@ -113,8 +116,6 @@ operation, a PIN-pad reader, a second card model, KDE and the OpenSSL 3 provider
 - With no portal or backend running, `C_Initialize` succeeds and the module reports no slots.
 - The shell's PIN prompter hands the PIN to this backend for `C_Login`; the backend keeps it in
   wiped, non-dumpable memory ([PIN handling](docs/SECURITY.md#pin-handling)).
-- Operation log lines carry no session or operation id
-  ([#6](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/6)).
 
 ## Documentation
 

@@ -21,6 +21,7 @@ typedef struct
 	CertificateTokens* tokens;
 	CertificateImplSession* session;
 	gboolean decrypt;
+	char* operation_id;
 	CertificateMechanism mechanism;
 	GBytes* payload;
 	char* parent_window;
@@ -41,6 +42,7 @@ static void operation_free(Operation* operation)
 	g_clear_pointer(&operation->payload, g_bytes_unref);
 	g_clear_object(&operation->session);
 	g_clear_object(&operation->cancellable);
+	g_free(operation->operation_id);
 	g_free(operation->parent_window);
 	g_free(operation->caller_display);
 	g_free(operation->purpose_display);
@@ -270,7 +272,8 @@ static void sign_thread(GTask* task, gpointer source, gpointer task_data,
 		/* Decryption failures share one response; timing remains token-dependent and query counts are bounded per grant. */
 		if (operation->decrypt)
 		{
-			certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL,
+			certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, session->id,
+			                          operation->operation_id,
 			                          operation->mechanism.name);
 			g_debug("Decryption failed: %s", error->message);
 			g_clear_error(&error);
@@ -311,13 +314,15 @@ static void on_signed(GObject* source, GAsyncResult* result, gpointer user_data)
 			return;
 		}
 
-		certificate_log_operation(CERTIFICATE_REASON_OPERATION_COMPLETED, NULL, NULL,
+		certificate_log_operation(CERTIFICATE_REASON_OPERATION_COMPLETED, operation->session->id,
+		                          operation->operation_id,
 		                          operation->mechanism.name);
 		operation_succeed(operation, der);
 		return;
 	}
 
-	certificate_log_operation(CERTIFICATE_REASON_OPERATION_COMPLETED, NULL, NULL,
+	certificate_log_operation(CERTIFICATE_REASON_OPERATION_COMPLETED, operation->session->id,
+	                          operation->operation_id,
 	                          operation->mechanism.name);
 	operation_succeed(operation, g_steal_pointer(&signature));
 }
@@ -568,7 +573,7 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 		return;
 
 	/* The prompt and on_pin_done() each own a reference until their callbacks finish. */
-	certificate_pin_login_full(session->candidate->token, operation->parent_window,
+	certificate_pin_login_full(session->candidate->token, session->id, operation->parent_window,
 	                           operation->caller_display, operation->purpose_display, do_login,
 	                           do_refresh_flags, do_abandon, interaction,
 	                           login_interaction_unref, prompt_cancellable, on_pin_done,
@@ -576,7 +581,8 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 }
 
 void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSession* session,
-                                gboolean decrypt, const char* mechanism_name,
+                                gboolean decrypt, const char* operation_id,
+                                const char* mechanism_name,
                                 GVariant* parameters, GBytes* data, const char* parent_window,
                                 const char* caller_display, GCancellable* cancellable,
                                 CertificateBrokerDone done, gpointer user_data)
@@ -614,7 +620,7 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 	/* Decryption queries are bounded per grant; see docs/SECURITY.md. */
 	if (decrypt && certificate_broker_decrypts_spent(session))
 	{
-		certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL,
+		certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, session->id, operation_id,
 		                          mechanism_name);
 		g_set_error(&error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED,
 		            "Grant decryption limit reached (%d); acquire a new grant",
@@ -625,7 +631,7 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 
 	if (decrypt ? !session->may_decrypt : !session->may_sign)
 	{
-		certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL,
+		certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, session->id, operation_id,
 		                          mechanism_name);
 		g_set_error(&error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED,
 		            "Grant does not permit %s", decrypt ? "decryption" : "signing");
@@ -636,7 +642,7 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 	if (!certificate_mechanism_parse(mechanism_name, parameters, session->candidate->key_type,
 	                                 session->candidate->key_size, decrypt, &mechanism, &error))
 	{
-		certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL,
+		certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, session->id, operation_id,
 		                          mechanism_name);
 		done(NULL, error, user_data);
 		return;
@@ -646,7 +652,7 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 	if (payload == NULL)
 	{
 		certificate_mechanism_clear(&mechanism);
-		certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL,
+		certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, session->id, operation_id,
 		                          mechanism_name);
 		done(NULL, error, user_data);
 		return;
@@ -657,6 +663,7 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 	operation->tokens = tokens;
 	operation->session = g_object_ref(session);
 	operation->decrypt = decrypt;
+	operation->operation_id = g_strdup(operation_id);
 	operation->mechanism = mechanism;
 	operation->payload = g_steal_pointer(&payload);
 	operation->parent_window = g_strdup(parent_window);
@@ -679,7 +686,7 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 
 		if (spent)
 		{
-			certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, NULL, NULL,
+			certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, session->id, operation_id,
 			                          mechanism.name);
 			operation_fail(operation,
 			               g_error_new(CERTIFICATE_PKCS11_ERROR,
@@ -691,7 +698,8 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 		}
 	}
 
-	certificate_log_operation(CERTIFICATE_REASON_REQUEST_RECEIVED, NULL, NULL, mechanism.name);
+	certificate_log_operation(CERTIFICATE_REASON_REQUEST_RECEIVED, session->id, operation_id,
+	                          mechanism.name);
 
 	task = g_task_new(NULL, operation->cancellable, on_opened, operation);
 	g_task_set_task_data(task, operation_ref(operation), operation_unref);

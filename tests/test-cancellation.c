@@ -585,7 +585,7 @@ static void test_cancel_during_sign(void)
 	g_cond_init(&sign_gate.cond);
 	certificate_broker_set_gate(sign_gate_hold, NULL);
 
-	certificate_broker_perform(tokens, session, FALSE, "RSA_PKCS1_V1_5", parameters, data, NULL,
+	certificate_broker_perform(tokens, session, FALSE, NULL, "RSA_PKCS1_V1_5", parameters, data, NULL,
 	                           "Test application", cancellable, on_operation_done, &probe);
 
 	/* Iterate the main loop so open_thread's completion can start the gated signing worker. */
@@ -713,7 +713,7 @@ static void test_one_waiter_cancels_alone(void)
 	parameters = g_variant_parse(G_VARIANT_TYPE_VARDICT, "{'hash': <'SHA256'>}", NULL, NULL,
 	                             NULL);
 
-	certificate_broker_perform(tokens, session, FALSE, "RSA_PKCS1_V1_5", parameters, data, NULL,
+	certificate_broker_perform(tokens, session, FALSE, NULL, "RSA_PKCS1_V1_5", parameters, data, NULL,
 	                           "First application", first_cancellable, on_operation_done, &first);
 
 	deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
@@ -722,7 +722,7 @@ static void test_one_waiter_cancels_alone(void)
 
 	g_assert_true(pin_window_is_up());
 
-	certificate_broker_perform(tokens, session, FALSE, "RSA_PKCS1_V1_5", parameters, data, NULL,
+	certificate_broker_perform(tokens, session, FALSE, NULL, "RSA_PKCS1_V1_5", parameters, data, NULL,
 	                           "Second application", second_cancellable, on_operation_done,
 	                           &second);
 
@@ -829,7 +829,7 @@ static void test_broker_cancelled_login_is_abandoned(void)
 	parameters = g_variant_parse(G_VARIANT_TYPE_VARDICT, "{'hash': <'SHA256'>}", NULL, NULL,
 	                             NULL);
 
-	certificate_broker_perform(tokens, session, FALSE, "RSA_PKCS1_V1_5", parameters, data, NULL,
+	certificate_broker_perform(tokens, session, FALSE, NULL, "RSA_PKCS1_V1_5", parameters, data, NULL,
 	                           "Test application", NULL, on_operation_done, &probe);
 
 	deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;

@@ -407,11 +407,12 @@ across all purposes and filters. It must only preselect and cannot bypass consen
 ## Logging
 
 The frontend records caller decisions and backend selection; the backend records card events.
-Operation logs lack session and operation ids: call sites in
-[`src/broker/operations.c`](../src/broker/operations.c) pass null ids, which
-[`src/redact.c`](../src/redact.c) renders as `(none)`. Correlation between journals remains
-an implementation gap tracked in
-[issue #6](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/6).
+Sign operation logs in [`src/broker/operations.c`](../src/broker/operations.c) include the
+session handle and the caller's optional `operation_id` for correlation with the frontend
+journal. An absent operation id is logged as `(none)`.
+PIN grant logs carry the same session handle.
+[`src/redact.c`](../src/redact.c) escapes control characters and caps each id at 128 input
+bytes, followed by `...` when truncated.
 Allowed fields are counts, stable reason codes, purposes, supplied identity and level, ids,
 mechanism names, token presence and timings. Full
 serials, subjects, PINs, URIs, labels, key ids, signed data, plaintext and `reason` contents are
