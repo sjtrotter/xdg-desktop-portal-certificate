@@ -118,6 +118,14 @@ CertificateCandidate* certificate_candidate_ref(CertificateCandidate* candidate)
 	return candidate;
 }
 
+gboolean certificate_candidate_same(const CertificateCandidate* a, const CertificateCandidate* b)
+{
+	return a != NULL && b != NULL && certificate_token_same(a->token, b->token) &&
+	       g_strcmp0(a->certificate_id, b->certificate_id) == 0 &&
+	       a->cka_id != NULL && b->cka_id != NULL && a->cka_id->len == b->cka_id->len &&
+	       memcmp(a->cka_id->data, b->cka_id->data, a->cka_id->len) == 0;
+}
+
 void certificate_candidate_unref(CertificateCandidate* candidate)
 {
 	if (candidate == NULL)
@@ -478,7 +486,7 @@ CertificateTokens* certificate_tokens_new(const char* const* module_paths, GErro
 	tokens->explicit_modules = g_ptr_array_new();
 	tokens->module_names = g_hash_table_new_full(NULL, NULL, NULL, g_free);
 
-	if (module_paths != NULL && module_paths[0] != NULL)
+	if (module_paths != NULL)
 	{
 		for (gsize i = 0; module_paths[i] != NULL; i++)
 		{
@@ -852,8 +860,8 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 	module->C_CloseSession(session);
 }
 
-GPtrArray* certificate_tokens_enumerate(CertificateTokens* tokens, GCancellable* cancellable,
-                                        GError** error)
+static GPtrArray* enumerate(CertificateTokens* tokens, GCancellable* cancellable,
+                             gboolean* tokens_present, GError** error)
 {
 	GPtrArray* candidates = g_ptr_array_new_with_free_func((GDestroyNotify) certificate_candidate_unref);
 	g_autoptr(GPtrArray) modules = NULL;
@@ -893,14 +901,32 @@ GPtrArray* certificate_tokens_enumerate(CertificateTokens* tokens, GCancellable*
 	}
 	g_mutex_unlock(&tokens->lock);
 
+	if (tokens_present != NULL)
+		*tokens_present = token_count > 0;
 	certificate_log_counts(CERTIFICATE_REASON_DISCOVERY_RESULT, token_count, candidates->len);
 	return candidates;
+}
+
+GPtrArray* certificate_tokens_enumerate(CertificateTokens* tokens, GCancellable* cancellable,
+                                        GError** error)
+{
+	return enumerate(tokens, cancellable, NULL, error);
 }
 
 typedef struct
 {
 	CertificateTokens* tokens;
+	gboolean tokens_present;
 } EnumerateData;
+
+static CertificateEnumerateGate enumerate_gate = NULL;
+static gpointer enumerate_gate_data = NULL;
+
+void certificate_tokens_set_enumerate_gate(CertificateEnumerateGate gate, gpointer user_data)
+{
+	enumerate_gate = gate;
+	enumerate_gate_data = user_data;
+}
 
 static void enumerate_thread(GTask* task, gpointer source, gpointer task_data,
                              GCancellable* cancellable)
@@ -909,7 +935,9 @@ static void enumerate_thread(GTask* task, gpointer source, gpointer task_data,
 	g_autoptr(GError) error = NULL;
 	GPtrArray* candidates = NULL;
 
-	candidates = certificate_tokens_enumerate(data->tokens, cancellable, &error);
+	candidates = enumerate(data->tokens, cancellable, &data->tokens_present, &error);
+	if (enumerate_gate != NULL)
+		enumerate_gate(enumerate_gate_data);
 	if (candidates == NULL)
 		g_task_return_error(task, g_steal_pointer(&error));
 	else
@@ -932,8 +960,12 @@ void certificate_tokens_enumerate_async(CertificateTokens* tokens, GCancellable*
 }
 
 GPtrArray* certificate_tokens_enumerate_finish(CertificateTokens* tokens, GAsyncResult* result,
-                                               GError** error)
+                                               gboolean* tokens_present, GError** error)
 {
+	EnumerateData* data = g_task_get_task_data(G_TASK(result));
+
+	if (tokens_present != NULL)
+		*tokens_present = data->tokens_present;
 	return g_task_propagate_pointer(G_TASK(result), error);
 }
 
@@ -1079,64 +1111,15 @@ void certificate_tokens_refresh_flags(CertificateTokens* tokens, CertificateToke
 void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanisms_out,
                                      gboolean* protected_path_out)
 {
-	g_autoptr(GStrvBuilder) builder = g_strv_builder_new();
-	g_autoptr(GPtrArray) modules = NULL;
-	gboolean rsa_pkcs = FALSE;
-	gboolean rsa_pss = FALSE;
-	gboolean rsa_oaep = FALSE;
-	gboolean ecdsa = FALSE;
-	gboolean protected_path = FALSE;
-	gboolean any_token = FALSE;
+	static const char* const mechanisms[] = {
+		"RSA_PKCS1_V1_5", "RSA_PSS", "RSA_OAEP", "ECDSA", NULL
+	};
 
-	g_mutex_lock(&tokens->lock);
-	modules = module_list(tokens);
-
-	for (guint m = 0; m < modules->len; m++)
-	{
-		CK_FUNCTION_LIST* module = g_ptr_array_index(modules, m);
-		g_autoptr(GPtrArray) slots = slots_with_token(module);
-
-		for (guint s = 0; s < slots->len; s++)
-		{
-			CK_SLOT_ID slot = (CK_SLOT_ID) GPOINTER_TO_SIZE(g_ptr_array_index(slots, s));
-			g_autoptr(CertificateToken) token = token_from_slot(tokens, module, slot);
-
-			if (token == NULL || token_skip_reason(tokens, token) != NULL)
-				continue;
-
-			any_token = TRUE;
-			protected_path = protected_path || token->protected_authentication_path;
-			rsa_pkcs = rsa_pkcs || certificate_pkcs11_has_mechanism(module, slot, CKM_RSA_PKCS);
-			rsa_pss = rsa_pss || certificate_pkcs11_has_mechanism(module, slot, CKM_RSA_PKCS_PSS);
-			rsa_oaep =
-			    rsa_oaep || certificate_pkcs11_has_mechanism(module, slot, CKM_RSA_PKCS_OAEP);
-			ecdsa = ecdsa || certificate_pkcs11_has_mechanism(module, slot, CKM_ECDSA);
-		}
-	}
-	g_mutex_unlock(&tokens->lock);
-
-	/* Without a token, report backend-supported mechanisms so capability discovery remains useful. */
-	if (!any_token)
-	{
-		rsa_pkcs = TRUE;
-		rsa_pss = TRUE;
-		rsa_oaep = TRUE;
-		ecdsa = TRUE;
-	}
-
-	if (rsa_pkcs)
-		g_strv_builder_add(builder, "RSA_PKCS1_V1_5");
-	if (rsa_pss)
-		g_strv_builder_add(builder, "RSA_PSS");
-	if (rsa_oaep)
-		g_strv_builder_add(builder, "RSA_OAEP");
-	if (ecdsa)
-		g_strv_builder_add(builder, "ECDSA");
-
+	/* Backend support is independent of inserted tokens and reader flags. */
 	if (mechanisms_out != NULL)
-		*mechanisms_out = g_strv_builder_end(builder);
+		*mechanisms_out = g_strdupv((char**) mechanisms);
 	if (protected_path_out != NULL)
-		*protected_path_out = protected_path;
+		*protected_path_out = TRUE;
 }
 
 typedef struct
@@ -1150,10 +1133,16 @@ static gboolean watch_dispatch(gpointer user_data)
 {
 	WatchEvent* event = user_data;
 
-	if (event->tokens->watch_event != NULL)
-		event->tokens->watch_event(event->token, event->added, event->tokens->watch_data);
+	certificate_tokens_emit_event(event->tokens, event->token, event->added);
 
 	return G_SOURCE_REMOVE;
+}
+
+void certificate_tokens_emit_event(CertificateTokens* tokens, CertificateToken* token,
+                                   gboolean added)
+{
+	if (tokens->watch_event != NULL)
+		tokens->watch_event(token, added, tokens->watch_data);
 }
 
 static void watch_event_free(gpointer user_data)

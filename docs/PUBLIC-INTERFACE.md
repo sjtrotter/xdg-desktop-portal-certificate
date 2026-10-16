@@ -85,6 +85,10 @@ reason `backend_protocol_error`.
 `GetCapabilities` returns `purposes`, `operations`, `mechanisms`,
 `protected_authentication_path`, `has_display` and `max_grant_lifetime`. The frontend
 intersects the three lists with its own policy and forwards the booleans.
+`mechanisms` describes the full backend mechanism support, independent of inserted tokens;
+chosen-key support is returned as `supported_mechanisms` after consent.
+`protected_authentication_path=true` means the backend supports protected-path readers,
+independent of the attached reader's flags.
 
 ## Lifetime
 
@@ -106,7 +110,10 @@ path contains its unique bus name. Sessions with no acquired credential close wi
 The backend owns the chooser and PIN interaction. Required behavior includes AT-SPI exposure,
 keyboard operation, meaningful focus order, screen-reader announcement of caller, purpose and
 operation class, scalable text, high contrast, reduced animation, textual state indicators, accessible errors and
-cancellation, and focus restoration to the caller. PIN entry must hide its contents from AT-SPI;
+cancellation, and focus restoration to the caller. The empty chooser announces "Insert your
+security token", keeps Cancel keyboard reachable and disables Use. Token changes update the
+list; removal clears a disappearing selection. Empty-state details stay inside the dialog.
+PIN entry must hide its contents from AT-SPI;
 errors and retry warnings must be announced. See [ARCHITECTURE.md](ARCHITECTURE.md) and
 [SECURITY.md](SECURITY.md).
 

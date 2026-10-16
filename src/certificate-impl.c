@@ -312,6 +312,11 @@ typedef struct
 	guint32 lifetime;
 	gboolean may_sign;
 	gboolean interaction_forbidden;
+	CertificateChooser* chooser;
+	gboolean enumerating;
+	gboolean enumerate_again;
+	gboolean chooser_completed;
+	CertificateCandidate* pending_chosen;
 } Transaction;
 
 typedef enum
@@ -332,6 +337,7 @@ static void transaction_free(Transaction* transaction)
 
 	certificate_caller_identity_clear(&transaction->caller);
 	certificate_filter_clear(&transaction->filter);
+	g_clear_pointer(&transaction->pending_chosen, certificate_candidate_unref);
 	g_clear_object(&transaction->request);
 	g_clear_object(&transaction->session);
 	g_free(transaction->parent_window);
@@ -677,11 +683,22 @@ static void on_chooser_done(const CertificateChooserResult* result, gpointer use
 {
 	Transaction* transaction = user_data;
 
-	if (result->chosen == NULL)
+	transaction->chooser = NULL;
+	/* A refresh worker retains the transaction until its callback has run. */
+	if (transaction->enumerating)
 	{
-		if (respond_if_owner_gone(transaction, TRANSACTION_ACQUIRE))
-			return;
+		transaction->chooser_completed = TRUE;
+		transaction->pending_chosen = result->chosen != NULL
+		    ? certificate_candidate_ref(result->chosen) : NULL;
+		return;
+	}
 
+	if (respond_if_owner_gone(transaction, TRANSACTION_ACQUIRE))
+		return;
+
+	if (result->chosen == NULL ||
+	    g_cancellable_is_cancelled(certificate_impl_request_get_cancellable(transaction->request)))
+	{
 		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_CANCELLED,
 		                    empty_results());
 		return;
@@ -690,6 +707,8 @@ static void on_chooser_done(const CertificateChooserResult* result, gpointer use
 	finish_acquire(transaction, result->chosen);
 }
 
+static void start_enumeration(Transaction* transaction);
+
 static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_data)
 {
 	Transaction* transaction = user_data;
@@ -697,8 +716,56 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 	g_autoptr(GPtrArray) candidates = NULL;
 	g_autoptr(GPtrArray) matching = NULL;
 	CertificateChooserRequest request;
+	gboolean tokens_present = FALSE;
 
-	candidates = certificate_tokens_enumerate_finish(NULL, result, &error);
+	candidates = certificate_tokens_enumerate_finish(NULL, result, &tokens_present, &error);
+	transaction->enumerating = FALSE;
+
+	if (transaction->chooser_completed)
+	{
+		CertificateChooserResult completed = { transaction->pending_chosen };
+
+		if (transaction->cancelled_code != NULL || completed.chosen == NULL ||
+		    g_cancellable_is_cancelled(certificate_impl_request_get_cancellable(transaction->request)))
+		{
+			on_chooser_done(&completed, transaction);
+			return;
+		}
+		if (candidates == NULL)
+		{
+			transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
+			                    error_results("device_error"));
+			return;
+		}
+		if (transaction->enumerate_again)
+		{
+			start_enumeration(transaction);
+			return;
+		}
+		matching = certificate_filter_apply(candidates, &transaction->filter);
+		for (guint i = 0; i < matching->len; i++)
+		{
+			CertificateCandidate* candidate = g_ptr_array_index(matching, i);
+
+			if (certificate_candidate_same(completed.chosen, candidate))
+			{
+				completed.chosen = candidate;
+				on_chooser_done(&completed, transaction);
+				return;
+			}
+		}
+		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
+		                    error_results("token_removed"));
+		return;
+	}
+
+	if (transaction->chooser != NULL && candidates == NULL)
+	{
+		if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+			transaction->cancelled_code = "device_error";
+		g_cancellable_cancel(certificate_impl_request_get_cancellable(transaction->request));
+		return;
+	}
 
 	if (candidates == NULL)
 	{
@@ -714,18 +781,6 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 
 		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
 		                    error_results("device_error"));
-		return;
-	}
-
-	matching = certificate_filter_apply(candidates, &transaction->filter);
-
-	if (matching->len == 0)
-	{
-		const char* code = candidates->len == 0 ? "no_token" : "no_matching_certificate";
-
-		certificate_log_counts(CERTIFICATE_REASON_NO_MATCHING_CERT, candidates->len, 0);
-		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
-		                    error_results(code));
 		return;
 	}
 
@@ -746,7 +801,24 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 		return;
 	}
 
+	if (transaction->enumerate_again)
+	{
+		start_enumeration(transaction);
+		return;
+	}
+
+	matching = certificate_filter_apply(candidates, &transaction->filter);
+	if (matching->len == 0)
+		certificate_log_counts(CERTIFICATE_REASON_NO_MATCHING_CERT, candidates->len, 0);
+
+	if (transaction->chooser != NULL)
+	{
+		certificate_chooser_update(transaction->chooser, matching, tokens_present);
+		return;
+	}
+
 	memset(&request, 0, sizeof(request));
+	request.tokens_present = tokens_present;
 	request.caller = &transaction->caller;
 	request.purpose = transaction->purpose;
 	request.may_sign = transaction->may_sign;
@@ -756,10 +828,19 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 	request.request_handle =
 	    g_dbus_interface_skeleton_get_object_path(G_DBUS_INTERFACE_SKELETON(transaction->request));
 
-	certificate_chooser_show(transaction->parent_window, transaction->activation_token, matching,
-	                         &request,
-	                         certificate_impl_request_get_cancellable(transaction->request),
-	                         on_chooser_done, transaction);
+	transaction->chooser = certificate_chooser_show(
+	    transaction->parent_window, transaction->activation_token, matching, &request,
+	    certificate_impl_request_get_cancellable(transaction->request), on_chooser_done,
+	    transaction);
+}
+
+static void start_enumeration(Transaction* transaction)
+{
+	transaction->enumerating = TRUE;
+	transaction->enumerate_again = FALSE;
+	certificate_tokens_enumerate_async(transaction->impl->tokens,
+	                                   certificate_impl_request_get_cancellable(transaction->request),
+	                                   on_enumerated, transaction);
 }
 
 static gboolean parse_acquire_options(Transaction* transaction, GVariant* options,
@@ -940,10 +1021,7 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate1* objec
 	                         certificate_identity_level_to_string(transaction->caller.level),
 	                         certificate_purpose_to_string(purpose), FALSE);
 
-	certificate_tokens_enumerate_async(impl->tokens,
-	                                   certificate_impl_request_get_cancellable(
-	                                       transaction->request),
-	                                   on_enumerated, transaction);
+	start_enumeration(transaction);
 
 	return TRUE;
 }
@@ -1113,7 +1191,7 @@ static void capabilities_query_free(gpointer data)
 	g_free(query);
 }
 
-/* Capability enumeration calls PKCS#11 and must run off the main thread. */
+/* Report backend support without inspecting token presence. */
 static void capabilities_thread(GTask* task, gpointer source, gpointer task_data,
                                 GCancellable* cancellable)
 {
@@ -1177,6 +1255,39 @@ static void on_token_event(CertificateToken* token, gboolean added, gpointer use
 	certificate_log_counts(added ? CERTIFICATE_REASON_DISCOVERY_RESULT
 	                             : CERTIFICATE_REASON_TOKEN_REMOVED,
 	                       1, 0);
+
+	for (guint i = 0; i < impl->transactions->len; i++)
+	{
+		Transaction* transaction = g_ptr_array_index(impl->transactions, i);
+
+		if (transaction->chooser_completed)
+		{
+			if (!added && transaction->pending_chosen != NULL &&
+			    certificate_token_same(transaction->pending_chosen->token, token) &&
+			    !g_cancellable_is_cancelled(certificate_impl_request_get_cancellable(transaction->request)))
+			{
+				/* Consent cannot outlive removal, even if the worker already took its snapshot. */
+				transaction->cancelled_code = "token_removed";
+				g_cancellable_cancel(certificate_impl_request_get_cancellable(transaction->request));
+			}
+			else if (transaction->pending_chosen != NULL)
+				transaction->enumerate_again = TRUE;
+			continue;
+		}
+		if (transaction->chooser == NULL && !transaction->enumerating)
+			continue;
+		if (!added && transaction->chooser != NULL)
+		{
+			g_autoptr(GPtrArray) empty = g_ptr_array_new();
+
+			/* Removal disables stale rows before the worker can finish. */
+			certificate_chooser_update(transaction->chooser, empty, FALSE);
+		}
+		if (transaction->enumerating)
+			transaction->enumerate_again = TRUE;
+		else
+			start_enumeration(transaction);
+	}
 
 	if (added)
 		return;

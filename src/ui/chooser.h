@@ -23,6 +23,7 @@ typedef struct
 	guint32 lifetime_seconds;
 	const char* reason; /**< Untrusted subordinate text; never logged. */
 	const char* request_handle;
+	gboolean tokens_present;
 } CertificateChooserRequest;
 
 typedef struct
@@ -32,11 +33,23 @@ typedef struct
 
 typedef void (*CertificateChooserDone)(const CertificateChooserResult* result, gpointer user_data);
 
+typedef struct CertificateChooser CertificateChooser;
+
 /** Invalid or expired parent handles fall back to an unparented backend window. */
-void certificate_chooser_show(const char* parent_window, const char* activation_token,
-                              GPtrArray* candidates, const CertificateChooserRequest* request,
-                              GCancellable* cancellable, CertificateChooserDone done,
-                              gpointer user_data);
+CertificateChooser* certificate_chooser_show(const char* parent_window,
+                                             const char* activation_token,
+                                             GPtrArray* candidates,
+                                             const CertificateChooserRequest* request,
+                                             GCancellable* cancellable,
+                                             CertificateChooserDone done, gpointer user_data);
+
+/** Main-thread list replacement; the borrowed chooser is valid until done is called. */
+void certificate_chooser_update(CertificateChooser* chooser, GPtrArray* candidates,
+                                gboolean tokens_present);
+
+/** Main-thread test hook observes announcements after the window maps. */
+typedef void (*CertificateChooserAnnounceHook)(const char* text, gpointer user_data);
+void certificate_chooser_set_announce_hook(CertificateChooserAnnounceHook hook, gpointer user_data);
 
 /* Display helpers sanitize and cap external fields. */
 

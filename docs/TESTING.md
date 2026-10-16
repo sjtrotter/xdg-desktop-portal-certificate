@@ -121,22 +121,31 @@ Backend output for an empty discovery result includes:
 ** Message: no-matching-certificate tokens=0 candidates=0
 ```
 
-The client reports signing capabilities and a refused acquisition:
+The empty chooser says "Insert your security token" and disables Use. Cancel it; the client
+reports signing capabilities and user cancellation:
 
 ```
 GetCapabilities:
   max_grant_lifetime               3600
   mechanisms                       ['RSA_PKCS1_V1_5', 'RSA_PSS', 'ECDSA']
   operations                       ['sign']
-  protected_authentication_path    False
+  protected_authentication_path    True
   purposes                         ['client_auth', 'signing', 'email', 'ssh']
 
-PASS no-certificate: AcquireCredential answered 2, no grant
+PASS no-certificate: AcquireCredential answered 1, no grant
 ```
 
 The Python client on a private bus is unidentified; `app_id=(none)` and
 `identity=unidentified` are expected. Capabilities do not require a present card. The frontend
-filters the backend's mechanism list to its signing allowlist.
+filters the backend's mechanism list to its signing allowlist. Both capability fields describe
+backend support, independent of inserted tokens and reader flags.
+
+With no card, cancel the chooser and repeat browser enumeration within 10 seconds; the module
+must return no objects without opening another chooser. Insert/remove a card while the chooser
+is open; the purpose/filter is reapplied, and a disappearing selection disables Use.
+`test-impl-dbus.c` compares forbidden/no-display outcomes and capabilities with SoftHSM and an
+empty module list; `test-chooser.c` covers empty states and list replacement. Missing fixtures
+or display skip the corresponding cases.
 
 For manual calls, keep the stack running:
 
@@ -937,8 +946,10 @@ and `operation=<operation_id>` for correlation with the frontend journal. An abs
 | Marker mode 644 | Set a valid fixture marker to 0600 or recreate with its script |
 | Login timeout | Submitted attempt cannot be cancelled. Configure the backend's `--login-timeout` or `--login-timeout 0` for slow middleware; late success is abandoned |
 | Every impl call gets `AccessDenied` | Caller must own `org.freedesktop.portal.Desktop` |
-| Internal `no_token` | Discovery produced no usable candidates; not proof of physical reader absence |
-| Internal `no_matching_certificate` | Candidates exist but none satisfies purpose/filter; inspect `--list-tokens` |
+| Internal `interaction_required` | Interaction forbidden after successful enumeration; identical for no token, no match and match |
+| Internal `no_display` | No usable display after successful enumeration; identical for no token, no match and match |
+| Empty chooser | Insert a token; watch the filtered list update. Use stays disabled without a selection; Cancel answers `1` |
+| Internal `device_error` | Middleware failure remains visible; serial-less tokens are refused after selection |
 | `Sign` with `invalid_request` | Mechanism, parameter type or digest length; see [IMPL-INTERFACE.md](IMPL-INTERFACE.md) |
 | Existing session gives `no_such_session` | Different `app_id` or increased identity level |
 | Reused session path rejected | A live session occupies it; close first. Closed entries are replaceable |

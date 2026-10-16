@@ -1377,11 +1377,15 @@ static void test_cancel_suppresses_different_templates(void)
 	g_mutex_lock(&fake.lock);
 	fake.acquire_mode = ACQUIRE_ANSWER;
 	g_mutex_unlock(&fake.lock);
-	search_init_by_label(&second, open_session());
-	g_assert_cmpuint(find_count(second.session, second.templ, second.count), ==, 0);
-	g_assert_cmpuint(fake_acquire_count(), ==, 1);
+	/* Response 1 carries no certificate, including cancellation of an empty chooser. */
+	for (guint i = 0; i < 3; i++)
+	{
+		search_init_by_label(&second, open_session());
+		g_assert_cmpuint(find_count(second.session, second.templ, second.count), ==, 0);
+		g_assert_cmpuint(fake_acquire_count(), ==, 1);
+		search_clear(&second);
+	}
 	search_clear(&first);
-	search_clear(&second);
 	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
 }
 

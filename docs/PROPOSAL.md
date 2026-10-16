@@ -42,10 +42,10 @@ compositor are trusted. The user is present.
 The portal does not protect against a compromised application signing arbitrary data with a
 key it holds a grant for. A signature grant over a digest cannot attest what the digest is;
 the grant's lifetime is the limit (under the proposed changes below, the application
-instance's lifetime). A caller can also learn, without a prompt, whether a
-token is present and whether a certificate matches its filter
-([#29](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/29)); that is a bug
-to fix in the prototype and a requirement for the new interface.
+instance's lifetime). The prototype now answers uniformly before consent for token presence
+and certificate-filter matches
+([#29](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/29)); this remains
+a requirement for the new interface.
 [SECURITY.md](SECURITY.md) has the full model,
 including PIN memory handling and the attacks a same-UID host process can still make.
 

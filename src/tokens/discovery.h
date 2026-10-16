@@ -89,6 +89,9 @@ CertificateCandidate* certificate_candidate_ref(CertificateCandidate* candidate)
 void certificate_candidate_unref(CertificateCandidate* candidate);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(CertificateCandidate, certificate_candidate_unref)
 
+/** Match a certificate and key on the same stable token identity. */
+gboolean certificate_candidate_same(const CertificateCandidate* a, const CertificateCandidate* b);
+
 /** Parses certificate-derived fields only; the caller fills token-derived fields. */
 CertificateCandidate* certificate_candidate_new_from_der(const guint8* der, gsize length,
                                                          GError** error);
@@ -98,7 +101,7 @@ gboolean certificate_candidate_is_not_yet_valid(const CertificateCandidate* cand
 
 typedef struct CertificateTokens CertificateTokens;
 
-/** Explicit module paths replace configured loading; the portal's own client module is always refused. */
+/** Explicit paths replace configured loading; an empty list loads no modules. */
 CertificateTokens* certificate_tokens_new(const char* const* module_paths, GError** error);
 
 /** Reject the portal client module even when explicitly selected to prevent recursive backend calls. */
@@ -113,7 +116,11 @@ GPtrArray* certificate_tokens_enumerate(CertificateTokens* tokens, GCancellable*
 void certificate_tokens_enumerate_async(CertificateTokens* tokens, GCancellable* cancellable,
                                         GAsyncReadyCallback callback, gpointer user_data);
 GPtrArray* certificate_tokens_enumerate_finish(CertificateTokens* tokens, GAsyncResult* result,
-                                               GError** error);
+                                               gboolean* tokens_present, GError** error);
+
+/** The test gate runs on a worker after enumeration, without locks held. */
+typedef void (*CertificateEnumerateGate)(gpointer user_data);
+void certificate_tokens_set_enumerate_gate(CertificateEnumerateGate gate, gpointer user_data);
 
 GPtrArray* certificate_tokens_list(CertificateTokens* tokens, GError** error);
 
@@ -135,9 +142,14 @@ void certificate_tokens_watch(CertificateTokens* tokens, CertificateTokenEvent e
                               gpointer user_data);
 void certificate_tokens_stop_watch(CertificateTokens* tokens);
 
+/** Main-context test hook delivers a presence event through the active watch callback. */
+void certificate_tokens_emit_event(CertificateTokens* tokens, CertificateToken* token,
+                                   gboolean added);
+
 /** Refresh PIN flags after each refused login because that attempt may set FINAL_TRY. */
 void certificate_tokens_refresh_flags(CertificateTokens* tokens, CertificateToken* token);
 
+/** Backend support only; never inspect inserted tokens or reader flags. */
 void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanisms_out,
                                      gboolean* protected_path_out);
 
