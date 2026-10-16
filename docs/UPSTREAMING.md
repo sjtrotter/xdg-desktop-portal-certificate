@@ -71,6 +71,8 @@ consumer and a design. There are no public token-presence signals or `grant_id` 
 
 ## Before proposing the portal
 
+The proposal for review is [PROPOSAL.md](PROPOSAL.md).
+
 Open an upstream new-portal discussion identifying the protected resource: use of a
 hardware-backed private key and trusted consent/PIN interaction, replacing blanket
 `--socket=pcsc` access with scoped, revocable grants. The author announced the work on
