@@ -13,7 +13,7 @@ frontend export conditions, smoke tests and hardware runs.
 | `mechanism` | Portal-to-`CKM_*` mapping, DigestInfo construction, digest length, raw/DER ECDSA, PSS MGF/hash/salt validation, wrong-typed optional strings, OAEP parameters and sign/decrypt mechanism separation | No hardware |
 | `redact` | URI, `pin-value` and `pin-source` truncation; display sanitizing; newline journal-injection refusal; verbose log-domain filtering and `G_MESSAGES_DEBUG` overrides | No hardware |
 | `discovery-limits` | Attribute-length bounds and RSA-PSS arithmetic limits, including 32-bit overflow boundaries | No hardware |
-| `chooser` | App and token text cannot inject lines, ANSI escapes or direction overrides; length limits and textual expiry warnings | No display |
+| `chooser` | Neutral module wording and purpose-specific native wording; app and token text cannot inject lines, ANSI escapes or direction overrides; length limits and textual expiry warnings | No display |
 | `broker-device` | Discovery without login, `C_OpenSession`, `C_Login`, RSA v1.5/PSS and ECDSA with verification against returned certificate; wrong PIN preserved; device rebinding discards login/key; RSA-OAEP round trip and ciphertext-length refusal | SoftHSM; `openssl(1)` for OAEP; skips missing prerequisites |
 | `broker-decrypt` | Distinct internal decryption failures produce the same external error; grant budget counts attempts | SoftHSM, otherwise skips |
 | `broker-regrant` | Reacquisition on a live impl session rejects intervening operations, discards login and verifies subsequent signatures against the new certificate; expiry clock behavior | SoftHSM with RSA and EC, otherwise skips |

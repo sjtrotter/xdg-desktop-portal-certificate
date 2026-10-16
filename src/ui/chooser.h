@@ -22,6 +22,7 @@ typedef struct
 	gboolean may_decrypt;
 	guint32 lifetime_seconds;
 	const char* reason; /**< Untrusted subordinate text; never logged. */
+	const char* request_handle;
 } CertificateChooserRequest;
 
 typedef struct
@@ -37,9 +38,13 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
                               GCancellable* cancellable, CertificateChooserDone done,
                               gpointer user_data);
 
-/* Display helpers return owned strings with external fields sanitized and capped. */
+/* Display helpers sanitize and cap external fields. */
 
 char* certificate_chooser_display_name(const CertificateCallerIdentity* caller);
+
+char* certificate_chooser_format_purpose(const CertificateChooserRequest* request);
+
+const char* certificate_chooser_purpose_detail(const CertificateChooserRequest* request);
 
 /** Lifetime is positive before display formatting. */
 char* certificate_chooser_format_lifetime(guint32 seconds);

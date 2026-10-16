@@ -9,6 +9,8 @@
 #include <adwaita.h>
 #include <gtk/gtk.h>
 
+#include <string.h>
+
 #include "../redact.h"
 #include "external-window.h"
 #include "pin.h"
@@ -268,6 +270,38 @@ static GtkWidget* build_identity(const CertificateCallerIdentity* caller)
 	return box;
 }
 
+static gboolean is_module_request(const CertificateChooserRequest* request)
+{
+	static const char prefix[] = "/org/freedesktop/portal/desktop/request/";
+	const char* token = NULL;
+
+	if (request->request_handle == NULL || !g_str_has_prefix(request->request_handle, prefix))
+		return FALSE;
+
+	token = strchr(request->request_handle + strlen(prefix), '/');
+
+	/* The module's request-token prefix selects wording only, not permissions or identity. */
+	return token != NULL && g_str_has_prefix(token + 1, "pkcs11a");
+}
+
+char* certificate_chooser_format_purpose(const CertificateChooserRequest* request)
+{
+	if (is_module_request(request))
+		return g_strdup("is asking to use a certificate on your security token.");
+
+	return g_strdup_printf("wants to use a certificate on your security token to %s.",
+	                       certificate_purpose_display(request->purpose));
+}
+
+const char* certificate_chooser_purpose_detail(const CertificateChooserRequest* request)
+{
+	if (is_module_request(request))
+		return "The application will be able to use this key until the "
+		       "grant expires. It cannot read the private key.";
+
+	return certificate_purpose_detail(request->purpose);
+}
+
 char* certificate_chooser_format_lifetime(guint32 seconds)
 {
 	if (seconds < 120)
@@ -442,9 +476,7 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	gtk_box_append(GTK_BOX(content), build_identity(request->caller));
 
 	{
-		g_autofree char* text =
-		    g_strdup_printf("wants to use a certificate on your security token to %s.",
-		                    certificate_purpose_display(request->purpose));
+		g_autofree char* text = certificate_chooser_format_purpose(request);
 		GtkWidget* label = gtk_label_new(text);
 
 		gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
@@ -506,7 +538,7 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 		g_autofree char* text = g_strdup_printf(
 		    "%s\n\nThis grant lasts %s. %s You will be asked for your PIN the first time the "
 		    "key is used.",
-		    certificate_purpose_detail(request->purpose), lifetime,
+		    certificate_chooser_purpose_detail(request), lifetime,
 		    request->may_sign && request->may_decrypt ? "It allows signing and decryption."
 		    : request->may_decrypt                    ? "It allows decryption only."
 		    : request->may_sign                       ? "It allows signing only."
