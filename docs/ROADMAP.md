@@ -1,224 +1,140 @@
 # Roadmap
 
-Status: EXPERIMENTAL. **The backend is built.** What works, what is partial and what is not started
-is the table in [README.md](../README.md#status); read it before the effort figures below, because
-the figures were written when none of this existed and have not been re-derived.
+[README.md](../README.md#status) records experimental implementation status.
+The frontend is the xdg-desktop-portal fork's `experimental/integration` branch;
+[ADR 0010](decisions/0010-backend-only-frontend-lives-upstream.md) assigns ownership and
+[UPSTREAMING.md](UPSTREAMING.md) lists proposal work.
 
-**What has changed since this document was last honest about its own scope:** the frontend is no
-longer this project's to build. It is an xdg-desktop-portal branch
-([0010](decisions/0010-backend-only-frontend-lives-upstream.md),
-[UPSTREAMING.md](UPSTREAMING.md)), written and passing its own test suite. Every "the
-frontend/backend split itself" line below is therefore work that is *done, elsewhere, by the same
-author*, and what is left in this repository is the backend. The effort figures have not been
-re-derived from scratch; the split's line is struck through in the table instead, which is honest
-about where the saving landed without pretending the rest of the numbers got any better.
+The client module supports GnuTLS and WebKitGTK, with NSS evidence dated 2026-09-06
+([SPIKES.md](SPIKES.md) S2, [TESTING.md](TESTING.md) §2.56).
+[ADR 0011](decisions/0011-client-side-pkcs11-module.md) defines that compatibility path.
+Remaining work includes hardware breadth, sharing a grant across an application's processes,
+packaging, independent review and another maintainer.
 
-## Where the code actually is
+## Effort estimates and assumptions
 
-**In one table, in [README.md](../README.md#status)**, and nowhere else. This document used to keep
-a second one; two lists of what works is how a project ends up claiming both that hardware is
-untested and that a card passed. The README's table is the authority and this paragraph is the
-pointer to it.
+The total-work estimates assume one experienced Linux security/C developer familiar with
+PKCS#11 and the Remmina chooser/PIN work. Remaining effort and a distribution-ready release
+are unestimated.
 
-What that table means for the plan below: the brokered path is built and works, which was never
-the doubtful half. S1 and S3 — can a consumer that speaks only PKCS#11 use this, and can a browser
-— are answered for GnuTLS and WebKitGTK by the client-side module
-([0011](decisions/0011-client-side-pkcs11-module.md)) and, since 2026-09-06, for NSS
-(SPIKES.md S2, TESTING.md §2.56). What is left is
-hardware breadth, the two-chooser problem, and an owner who is not the author.
+Assumptions are full-time work by one developer, OpenSC-compatible PIV only, hardware available
+throughout (including a card that can be blocked, a PIN-pad reader and two readers), GNOME/Wayland
+first and KDE later. Additional card stacks and application integration need separate estimates.
+The feasibility gates below must pass before depending on the interface.
 
-## Effort figures and their assumptions
-
-Person-weeks for **one experienced Linux security/C developer**, already familiar with PKCS#11 and
-with the working Remmina chooser/PIN patches. They describe a *credible* result, not a
-distribution-ready one. State the assumptions plainly, because effort numbers travel further than
-their caveats:
-
-- one developer, not a team, and not part-time;
-- PIV cards through OpenSC only — every additional card stack is separate work;
-- real hardware available throughout, including a card the author is willing to **block**, a PIN-pad
-  reader, and two readers at once;
-- GNOME/Wayland as the primary target, with KDE testing later;
-- **no browser integration**, which is separate work in someone else's tree;
-- the figures assume S1 and S3 **pass**. If they fail the project gets smaller, not later;
-- the frontend/backend split was in these figures at two to three person-weeks. It is now **out**,
-  because the frontend is upstream's code on an xdg-desktop-portal branch and the "half of it that
-  is plumbing xdg-desktop-portal already has" is no longer written twice
-  ([0010](decisions/0010-backend-only-frontend-lives-upstream.md)). What remains of that line is
-  keeping this backend's impl XML in step with the branch, which is not measured in weeks;
-- the frontend's own hardware-independent testing is done and green (49 parametrised cases across
-  26 test functions for this portal, against a python-dbusmock backend, each run against a host and
-  a Flatpak caller identity — 98 runs total), which removes some of phase 0 item 10 below but none
-  of the hardware items.
-
-| | |
+| Work | Estimate |
 |---|---|
-| Feasibility spike (phase 0) | **2–4 weeks** |
-| ~~The frontend/backend split itself: two services, the impl interface, app-id derivation, permission store, backend discovery~~ | ~~2–3 weeks~~ — done upstream, on a branch |
-| Chooser, enumeration, D-Bus request lifecycle, basic brokered signing | 4–7 weeks |
-| PIN agent, protected path, removal, concurrency, lifecycle hardening | 3–5 weeks |
-| The restricted synthetic PKCS#11 facade | 5–9 weeks |
-| WebKitGTK/GnuTLS integration and distro testing | 3–6 weeks |
-| Packaging, fuzzing, documentation, accessibility, security review | 4–7 weeks |
-| **A useful brokered-signing prototype** | **10–15 person-weeks** |
-| **A credible release including the experimental facade** | **20–33 person-weeks** |
+| Feasibility checks, phase 0 | 2–4 weeks |
+| Frontend/backend plumbing | 2–3 weeks in the total-work estimate; implemented on the frontend branch |
+| Chooser, enumeration, request lifecycle and brokered signing | 4–7 weeks |
+| PIN interaction, protected path, removal, concurrency and lifecycle hardening | 3–5 weeks |
+| Optional served synthetic PKCS#11 facade | 5–9 weeks |
+| WebKitGTK/GnuTLS integration and distribution testing | 3–6 weeks |
+| Packaging, fuzzing, documentation, accessibility and security review | 4–7 weeks |
+| Brokered-signing prototype | 10–15 person-weeks total |
+| Release including a served facade | 20–33 person-weeks total |
 
-Firefox, Chromium, NSS, VPN clients, mail clients, SSH and PDF signing are **more** on top of that,
-each in its own tree, each needing its own maintainers to agree.
+The optional served-facade estimate covers a separate design from the
+[implemented client module](decisions/0011-client-side-pkcs11-module.md). Firefox, Chromium, NSS,
+VPN, mail, SSH and PDF integrations each need their maintainers' agreement and work in their
+own trees. Frontend mock tests cover
+hardware-independent policy and lifecycle; they cannot replace card tests.
 
----
+## Phase 0: feasibility gates
 
-## Phase 0 — Time-boxed feasibility spike — **2–4 weeks**
+Allow 2–4 weeks for focused experiments. Disposable experiment code should answer a question
+without becoming a product dependency. [SPIKES.md](SPIKES.md) records the detailed checks.
+Interface stability requires evidence for:
 
-Not a build. A disposable experiment that answers [SPIKES.md](SPIKES.md) S1, S2 and S3 and either
-justifies the rest of this document or ends it. The code is thrown away.
+1. A real GnuTLS mutual-TLS handshake through brokered `Sign`.
+2. A real WebKitGTK client-certificate handshake through the web-auth backend. The module must
+   be configured in each process that uses GLib's PKCS#11 URI constructor, which has no module
+   parameter. The web-auth backend's client-certificate path uses this portal module.
+3. Wrong PIN and final retry on hardware that can be unblocked.
+4. Protected authentication path on a PIN-pad reader without an emulated entry.
+5. Card removal during signing.
+6. Simultaneous credentials in one consumer process.
+7. Hostile-client tests for any served facade, including v3 tables and administration refusals.
+8. Caller disconnect during an operation.
+9. Mechanism-parameter tests and fuzzing of any served RPC surface.
+10. Frontend/backend cancellation, result clamping and hardware runs; fd relay tests if an
+    endpoint method is proposed. Frontend mock tests cover cancellation and clamping.
 
-While it runs, `xdg-desktop-portal-webauth` has no in-process certificate chooser or PIN prompt of
-its own; its only client-certificate path is this backend's `portal` provider. Nothing
-depends on this project until the spike passes.
+GnuTLS and WebKitGTK have dated evidence in [TESTING.md](TESTING.md). Hardware breadth and
+remaining gates are open. Facade-specific gates apply only if that design is pursued.
 
-**Gate: the D-Bus API is not stabilised, and this repository is not published as anyone's
-dependency, until all of the following exist.**
+## Phase 1: brokered-signing backend
 
-1. One real **GnuTLS mutual-TLS client** handshake through brokered `Sign`.
-2. One real **WebKitGTK client-certificate handshake** — joint with `xdg-desktop-portal-webauth`, and the
-   weakest link in the design. Module loading is the specific unknown:
-   `g_tls_certificate_new_from_pkcs11_uris()` has no module parameter and a URI cannot name a
-   socket. **The likely architecture is one permanently registered broker module exposing synthetic
-   grant-bound slots**, not a new module per grant; the spike is what decides.
-3. **Wrong-PIN and final-retry** behaviour, on a card the author is prepared to block.
-4. **Protected authentication path** on a PIN-pad reader, with no emulated PIN field.
-5. **Card removal during signing.**
-6. **Simultaneous grants** in one consumer process.
-7. **Hostile-client PKCS#11 call tests** against the facade — every administrative and
-   key-management entry point refused, including through the PKCS#11 v3 interface tables. (Blocked
-   on there *being* a facade: `OpenPkcs11Endpoint` is on neither interface, having been deferred as
-   a follow-up in the frontend branch.)
-8. **Caller disconnect** tests.
-9. **Fuzzing** of the facade's RPC surface and **mechanism-parameter validation** tests, RSA-PSS
-   included.
-10. **The frontend/backend boundary** ([SPIKES.md](SPIKES.md) S5). Three of its four questions are
-    already answered by the branch's pytest suite against a mock backend — `Close()` reaching the
-    impl Request and a backend that over-claims being clamped — so what is
-    left is the fd relay (which needs a method that does not exist) and the same tests against a
-    backend that talks to real hardware.
+The total prototype estimate is 10–15 person-weeks. Scope is the GTK backend's chooser, PIN
+interaction, discovery and broker; the frontend owns identity, policy, grants, lifecycle and
+backend selection.
 
----
+Requirements include OpenSC-compatible PIV cards, p11-kit API enumeration and filtering,
+trusted accessible dialogs, verified Flatpak identities and labelled host callers, short-lived
+independent grants, removal/invalidation, and separate `client_auth` and `signing` consent
+policies. The mechanisms are RSA PKCS#1 v1.5, RSA-PSS and ECDSA as supported by tested cards.
+The first consumer is `xdg-desktop-portal-webauth`, through the client-side PKCS#11 module.
 
-## Phase 1 — Brokered-signing frontend and backend — **10–15 person-weeks**
+Complete [chain construction](IMPL-INTERFACE.md#token-display-and-chain) with best-effort
+intermediates and `complete`/`partial`/`leaf_only` reporting. Add idle exit with no sessions and
+[per-operation signing consent](SECURITY.md#missing-controls-and-evidence).
+[Selection memory](SECURITY.md#selection-memory) needs a frontend design; the interface has no
+`certificate` permission-store table.
 
-Assuming the spike passed. A working service on the machines the author controls. Not packaged for
-the world, not proposed to anyone, **facade not included**.
+PIN storage, decryption, SSH-agent and S/MIME protocols, remembered authorization, raw PC/SC
+forwarding and stock-token forwarding described as certificate scoping are outside this phase.
+Browser experiments in the test record do not establish packaging or general browser support.
 
-**Scope, deliberately narrow:**
+## Phase 2: packaging and compatibility
 
-- **one process here**: the GTK backend (chooser, PIN, discovery, brokered signing), answering the
-  impl interface. The frontend half — identity, policy, permissions, request and session lifecycle,
-  backend discovery — exists already, upstream, on a branch;
-- OpenSC-compatible **PIV cards only**;
-- certificate enumeration and filtering, with the Remmina hardware edge-case list as acceptance
-  criteria, using the p11-kit API rather than a `p11tool` subprocess;
-- one selected certificate; leaf DER plus best-effort intermediates, labelled `complete`/`partial`/
-  `leaf_only`;
-- the trusted chooser and the PIN / protected-path UI, with accessibility as acceptance criteria;
-- verified Flatpak application identity **derived in the frontend and rendered by this backend**,
-  with clearly marked unsandboxed callers — the derivation is xdg-desktop-portal's and is done;
-- remembered certificate selection in the real `org.freedesktop.impl.portal.PermissionStore`, table
-  `certificate`, and nothing else in it — also the frontend's, also done;
-- **`client_auth` and `signing` as separate purposes**, with separate consent policies;
-- short-lived grants, multiple independent grants, removal and invalidation signals;
-- brokered `Sign`, with RSA PKCS#1 v1.5, RSA-PSS and ECDSA **only as the tested cards require**;
-- `xdg-desktop-portal-webauth` as the first consumer, through brokered signing where its TLS stack
-  permits — which, with no `OpenPkcs11Endpoint` on the interface, is the only path there is.
+Package the backend and module, test GNOME and KDE on Wayland including parenting and activation,
+and obtain a consumer independent of the web-auth backend. A KDE chooser and PIN implementation
+would be a separate backend package with its own `.portal` file
+([ADR 0008](decisions/0008-build-to-the-upstream-shape.md)); no KDE system-prompter equivalent
+is integrated here.
 
-**Explicitly not in phase 1:** no PIN storage; no decryption; no SSH-agent protocol; no S/MIME
-integration; no browser integration claims; no remembered authorisation; no raw PC/SC forwarding;
-**and no stock-token forwarding presented as object scoping**.
+A served synthetic facade is optional future work. It needs an `OpenPkcs11Endpoint` proposal in
+the frontend, endpoint versioning and capabilities, synthetic handle mapping, administrative
+refusals, mechanism validation, process isolation, fd-transfer review and RPC fuzzing. Its
+20–33 person-week cumulative estimate applies only to that larger scope. Firefox and Chromium
+packaging, sandbox and lifecycle integration are separate projects, beyond this milestone.
 
----
+## Phase 3: interface agreement
 
-## Phase 2 — The experimental PKCS#11 facade — to **20–33 person-weeks** cumulative
+Discuss certificate-backed signing with the credentials-portal developers before freezing names
+or signatures. It may fit as a credential type sharing identity and consent machinery while
+remaining independently deployable. [ADR 0003](decisions/0003-own-namespace-before-freedesktop.md)
+lists the conversation order. `Certificate` remains an incubation name.
 
-The compatibility milestone, and the one with the security-sensitive engineering in it: the
-synthetic module, its refusals, its handle mapping, its mechanism validation, its process isolation,
-its fuzzing. `OpenPkcs11Endpoint` appears here — and note that it now has to be **added to the
-frontend branch first**, as the follow-up that commit's message promises, before this repository has
-anything to answer. Marked experimental, versioned by `endpoint_version`, and reported by
-`GetCapabilities` so no caller has to probe by failing.
+1. Working implementation and published introspection XML.
+2. Documented threat model, consent policy, identity, scoping and UI security.
+3. Two consumers, including one independent of `xdg-desktop-portal-webauth`; the first consumer
+   is a private tool with additional governance obligations.
+4. GNOME and KDE/Wayland testing, including parenting and activation.
+5. An upstream new-portal issue identifying the protected host resource: hardware-backed private
+   key use and trusted consent/PIN interaction, replacing blanket `--socket=pcsc` access.
+6. Agreement on the public API and frontend enforcement, including backend-owned device access
+   and Request-shaped `Sign`; round-trip latency remains unmeasured.
+7. Frontend routing and an impl interface. Both exist on the unmerged fork branch without
+   implying maintainer agreement. `Session.Close()` releases grants; `GrantInvalidated` gives reasons.
+8. A backend implementation and interest from a second desktop.
+9. Conformance tests and documentation before retiring the incubation name.
 
-Also here: distro packaging **of this backend**, which is one package rather than two now; GNOME
-**and KDE** Wayland testing, including
-parenting and activation (a KDE chooser and PIN prompt is a prerequisite for phase 3 — and is now a
-second *backend package* with its own `.portal` file rather than a second code path in one binary,
-which is the main practical dividend of [0008](decisions/0008-build-to-the-upstream-shape.md); there
-is still no KDE equivalent of gcr's prompter to defer to); and the first consumer that is not
-`xdg-desktop-portal-webauth`, chosen for being *willing* rather than for being popular.
+## Deferred work
 
-**Firefox and Chromium are not this phase's consumers.** Their sandboxing, module lifecycle, browser
-UI and client-certificate selection paths all differ, and each needs explicit integration work in its
-own tree by people who are not the author of this project. They are the long-term case for the
-project, not a phase-2 deliverable.
-
----
-
-## Phase 3 — Talk to the credentials people, then to freedesktop
-
-**In that order, and note that step 7 has already been done in the wrong order.** The frontend
-exists, as an unproposed branch. That is the sanctioned way to write an experimental portal
-([UPSTREAMING.md](UPSTREAMING.md)) but it is not a substitute for opening the conversation, and it
-must not be presented as one. Who to talk to, and why, is
-[0003](decisions/0003-own-namespace-before-freedesktop.md) under "The order of conversations". The
-question to ask them, before freezing any name or D-Bus signature, is: **does certificate-backed
-signing belong as a credential type under the credentials portal proposal**, sharing its request,
-identity and consent machinery, while remaining independently deployable? The name in this
-repository is expected to change.
-
-Only then, the acceptance path:
-
-1. A working implementation with published introspection XML — done in phases 1–2.
-2. Documented threat model, consent policy, caller identity model, scoping guarantees, and UI
-   security chrome — this repository's `docs/`, once they describe something real.
-3. **Two consumers**, one of them unrelated to `xdg-desktop-portal-webauth`. One consumer is a private tool
-   with extra governance obligations.
-4. Tested on GNOME **and** KDE/Wayland, including parenting and activation.
-5. A design discussion opened in `flatpak/xdg-desktop-portal`, where the project directs requests for
-   new portals — with the answer to "what protected host resource is being mediated?" written down
-   first. The answer: **use of a hardware-backed private key, and the trusted consent and
-   PIN UI around it**, replacing a blanket `--socket=pcsc` grant with a scoped, revocable,
-   attributable one.
-6. Agreement on the public interface and on what the frontend enforces.
-7. Frontend routing plus an `org.freedesktop.impl.portal.*` backend interface. **Both already
-   exist**, in the `experimental` namespace, on an unproposed xdg-desktop-portal branch with a
-   passing test suite — which is a patch to argue with rather than a design to start. It is
-   emphatically not a claim that the shape is agreed: which side opens the device, `Sign` returning
-   a `Request`, and the duplicated `ReleaseGrant`/`GrantInvalidated` are still questions for
-   maintainers, and the answers may change the interface.
-8. At least one backend implementation, and interest from a second desktop.
-9. Conformance tests and documentation before the incubating name is declared obsolete.
-
-This is long on purpose. The failure mode is a name claimed early and an interface frozen before it
-was understood.
-
----
-
-## Deferred, with reasons
-
-| | Why not now |
+| Item | Requirement or constraint |
 |---|---|
-| **The PKCS#11 endpoint** | Deferred by the frontend branch, not by this repository: an fd-returning method needs its own review, and the mock backend the frontend is tested against cannot produce a usable fd. Until it is added there, every consumer that can only speak PKCS#11 is unserved. |
-| **Decryption** | A different and larger consent question — it exposes confidential data rather than producing an authentication artefact — and it needs per-operation policy that `Sign` does not. |
-| **SSH agent protocol** | Its own purpose, its own policy, its own long-lived-agent expectations. Not "signing with extra steps". |
-| **S/MIME integration** | Needs a mail client's maintainers, not this project's. |
-| **Enrolment, key generation, PIN change and unblock, certificate import** | Each is a different consent question with a different UI, and a service that mediates *use* should not be able to perform *administration*. The facade refuses these functions outright. |
-| **PIN caching policy** | There is no PIN caching, so there is no policy. Token-level login caching is hardware behaviour this project does not control and must not present as a feature. |
-| **Windows-style minidriver semantics** | Certificate propagation into a system store, a device-level PIN cache, a CSP/KSP layer every application uses implicitly. It is the right long-term shape and it presumes an OS-wide credential API that Linux does not have. Building one on top of a D-Bus service nobody has adopted is a way to have neither. |
-| **Non-PIV card stacks** | Each is separate testing on hardware the author does not have. |
-| **Raw PC/SC forwarding** | That is `--socket=pcsc` with extra steps, and it is what this exists to replace. |
+| Served PKCS#11 endpoint | Separate fd-returning API review and tests capable of returning a usable endpoint; client module already serves PKCS#11 consumers |
+| Decryption | Consumer and per-operation consent design for confidential-data release |
+| SSH-agent protocol | Independent purpose, policy and long-lived-agent expectations |
+| S/MIME integration | Mail-client maintainer participation |
+| Enrolment, key generation, PIN change/unblock, import | Separate administrative consent and UI; absent from this interface |
+| PIN caching | No storage; token-level login caching is uncontrolled hardware behavior |
+| Windows-style minidriver semantics | Certificate propagation, device-level caching and a CSP/KSP-like OS-wide API would require broader platform work |
+| Non-PIV stacks | Hardware and middleware testing for each stack |
+| Raw PC/SC forwarding | Grants direct device access outside certificate-scoped mediation |
 
----
+## Email operation matching
 
-## Open questions
-
-| | |
-|---|---|
-| **~~A decryption-only certificate matches no purpose~~** | **Settled.** `email` now matches a certificate whose extended key usage permits `emailProtection` (or carries none) and whose key usage permits `digitalSignature` **or** `keyEncipherment`, and the half it matched decides which operations it can serve. A decrypt-only certificate — a PIV "key management" certificate — is offered for `email` only when the request's `operation_policy` permits `decrypt`, and its grant then permits `decrypt` alone. The purpose vocabulary stayed at four. Commit `7635aa8`, which would have added a sign/decrypt split to `operation_policy`, is on no branch: this behaviour is backend-only and is not in the proposed interface, whose `operation_policy` permits only `sign`. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md#email-is-the-one-purpose-that-does-not-end-in-a-signature). |
+[Email-purpose matching](IMPL-INTERFACE.md#email-purpose-matching) uses the existing
+four-purpose vocabulary for the internal signing/decryption split.

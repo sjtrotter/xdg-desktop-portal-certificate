@@ -1,43 +1,18 @@
 # Security
 
-The security model, threat model, PIN handling rules, grant scoping requirements, caller identity
-model and logging rules live in **[docs/SECURITY.md](docs/SECURITY.md)**.
+This project is experimental and has no independent security review. The backend loads
+PKCS#11 modules, displays consent and PIN prompts, holds logged-in token sessions and signs
+on request. Hardware evidence covers one PIV card and reader; dated results and unrun checks
+are in [docs/TESTING.md](docs/TESTING.md).
 
-Three things are worth saying here, where people look first.
+The [security model](docs/SECURITY.md) distinguishes implemented controls from requirements
+and records threat assumptions, PIN handling, grant scoping, caller identity and logging.
+See [the impl contract](docs/IMPL-INTERFACE.md) and
+[ADR 0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md).
 
-**This is experimental, and it now has an attack surface.** The backend is implemented: it loads
-PKCS#11 modules, draws a consent window and a PIN prompt, holds a logged-in card session, and
-performs signatures. `docs/SECURITY.md` opens with a checklist of which of its rules are enforced by
-code today and which are still intentions. Nothing in it has been reviewed by anyone but its
-authors, and **exactly one real smart card has ever been read by this code**: one PIV card in one
-reader, on 2026-09-04, through [docs/TESTING.md](docs/TESTING.md) tiers 3.1–3.4. That is a first
-run rather than a hardware claim, and the rest of tier 3 is unrun.
+[The threat model](docs/SECURITY.md#boundary-and-threat-model) describes sandbox containment
+and the limits of protection against hostile host processes.
 
-**There are two processes, and only one of them is in this repository.** The frontend is
-xdg-desktop-portal — specifically the branch `experimental/integration` — and it
-establishes who is calling and applies policy. This repository is the backend: it draws the chooser
-and the PIN prompt and holds the token. Applications talk only to xdg-desktop-portal, and the app
-id this backend displays is one it was *given* rather than one it guessed, which is the point of
-the arrangement. See [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) for how the private interface
-between them is kept private, including what that does *not* protect against, and
-[docs/decisions/0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md) for why the
-frontend is not here.
-
-**The interface is experimental.** The public side is exported on
-`/org/freedesktop/portal/desktop` when a certificate backend is configured and the frontend
-starts with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1`. Installing this backend
-on a machine whose portal does not know the interface adds no attack surface: the `.portal` file names an interface nothing matches, and this process is
-never activated.
-
-**The boundary this intends to provide is narrower than it sounds.** For **sandboxed** applications
-it can be a strong boundary. For ordinary **host** applications it is a useful identity-and-consent
-boundary. It is **not** absolute same-UID isolation, and this project must never claim otherwise: a
-hostile unsandboxed process running as the user may be able to inspect other processes, manipulate
-their environment, reach runtime files or inject input, depending on how the system is hardened.
-Splitting the design into two processes does not change that: both run as the user.
-
-**Reporting.** Report security issues privately to the repository owner rather
-than in a public issue. Until then, the most valuable report is a hole in the design — especially in
-[docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md),
-which exists because an independent review found that this project's founding claim was wrong. That
-kind of correction is worth more than a bug.
+Report vulnerabilities privately to the repository owner. Design flaws are security issues;
+[ADR 0006](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) records risks in
+PKCS#11 forwarding.

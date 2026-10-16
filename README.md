@@ -1,170 +1,44 @@
 # xdg-desktop-portal-certificate
 
-## Why a portal
+A backend for an experimental xdg-desktop-portal interface that lets applications sign with a
+certificate on a smart card without loading the card's driver or seeing the PIN. The user picks
+a certificate in a portal window and enters the PIN in a portal prompt; the application gets a
+time-limited grant and asks the portal for signatures. The private key stays on the card.
 
-Today every Linux application that uses a smart card loads PKCS#11 itself, draws its own
-certificate chooser and its own PIN prompt. The user types the PIN into whichever window asks for
-it, with nothing distinguishing one asking window from another, and a sandboxed application needs a
-blanket hole to the `pcscd` socket before it can ask at all. A Certificate portal moves selection,
-consent and PIN entry into one process the desktop owns. The application gets back a scoped grant
-naming one certificate, and the portal signs on its behalf. The private key and the PIN never enter
-the application, and the sandbox hole closes: the application talks to
-`org.freedesktop.portal.Desktop` and to nothing else.
+A PKCS#11 module in the same repository puts that grant behind the PKCS#11 API, so applications
+that already speak PKCS#11 (Firefox, GnuTLS clients, WebKitGTK) can use the portal unchanged.
 
-## What this repository is
+The interface is experimental and not merged upstream. The frontend lives on a branch of a
+fork of xdg-desktop-portal; see [Upstreaming](docs/UPSTREAMING.md).
 
-An xdg-desktop-portal **backend** for the experimental
-`org.freedesktop.impl.portal.experimental.Certificate1` interface, plus a **client-side PKCS#11
-module** for applications that cannot call D-Bus. Two interfaces are in play throughout: the
-**public interface** is what applications call on xdg-desktop-portal, and the **impl interface** is
-what xdg-desktop-portal calls on a backend such as this one. The backend discovers PKCS#11 tokens,
-draws the certificate chooser and the PIN prompt, and performs private-key operations when
-xdg-desktop-portal asks it to. The PIN never reaches the application, the private key never leaves
-the card, and the application never holds a handle on the hardware token. The public interface is
-defined by a branch of xdg-desktop-portal itself, not by this repository.
+## Components
 
-## Status
-
-Experimental. Nothing here has been proposed upstream: no issue and no pull request. The author
-posted two comments announcing the work on 2026-09-05, on flatpak/xdg-desktop-portal#662 and
-FreeRDP/FreeRDP#13328.
-
-| | State | |
+| Part | Where | Role |
 |---|---|---|
-| Token discovery, X.509 parsing, `purpose` rules (`client_auth`, `signing`, `email`, `ssh`), `certificate_filter` | Implemented | unit-tested against fixture certificates; `--list-tokens` prints what it found |
-| Chooser and PIN prompt | Implemented | own GTK window, or the system prompter, the PIN dialog the shell itself draws, reached through gcr-4, GNOME's crypto UI library (`--pin-prompt=auto\|gtk\|system`) |
-| Brokered `Sign`: `RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA` | Implemented | all three verified against SoftHSM, a software PKCS#11 token used as a test fixture; `RSA_PKCS1_V1_5` and `RSA_PSS` also against a PIV card |
-| Token insertion and removal watching, `SessionInvalidated` | Implemented | polled and debounced; never exercised with a card leaving a reader |
-| Client-side PKCS#11 module | Implemented | one token, one credential per process; driven by GnuTLS, NSS and WebKitGTK |
-| Test suites | Implemented | 13 meson suites with gcr-4, 12 without; an ASan/UBSan build and a DER corpus replay |
-| Real hardware | Partial | see below |
-| Chain building | Partial | `chain_status` is always `leaf_only`, and says so |
-| Decryption | Not on the interface | `RSA_OAEP` code in the broker and the module; no `Decrypt` method on either interface, so it should be removed or proposed rather than left |
-| One grant across an application's processes | Not implemented | a grant belongs to the D-Bus peer that acquired it, so one WebKitGTK handshake raises two choosers |
-| The synthetic PKCS#11 facade (`OpenPkcs11Endpoint`) | Not implemented | on neither interface; [0011](docs/decisions/0011-client-side-pkcs11-module.md) replaced it |
-| Two concurrent grants in one process, rate limiting, fork safety in the module | Not implemented | `module.c` claims none |
-| Attesting what a signature is *for* | Not implemented | `purpose` constrains selection and consent language and proves nothing about use |
-| A Flatpak consumer | Proven 2026-09-07 | Firefox from Flathub with its pcsc socket and device access removed: one chooser naming `org.mozilla.firefox` as a sandboxed caller, one PIN, an RSA-PSS signature from the card; `tools/firefox-flatpak.sh`, [docs/TESTING.md](docs/TESTING.md) §2.7 |
-| KDE, translation, packaging | Not implemented | installing the module inside a runtime, its ABI, and a browser's inner sandbox are all unproven |
-| Independent security review, a second maintainer, a second card stack | Not done | |
+| Frontend | branch [`experimental/integration`](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration) of a fork of xdg-desktop-portal | identifies the caller, validates options, owns grants and their expiry |
+| Backend | this repository, `src/` | discovers tokens, shows the chooser and PIN prompt, signs through PKCS#11 |
+| PKCS#11 module | this repository, `src/module/` | loaded by applications; turns PKCS#11 calls into portal calls |
 
-**The hardware evidence is one card.** One PIV card, one reader, OpenSC, GNOME 50 on Wayland.
+Applications call `org.freedesktop.portal.experimental.Certificate1` on
+`org.freedesktop.portal.Desktop`. The frontend calls this backend's
+`org.freedesktop.impl.portal.experimental.Certificate1` on
+`org.freedesktop.impl.portal.desktop.certificate`. Both use the object path
+`/org/freedesktop/portal/desktop`. The public methods are `CreateSession`,
+`AcquireCredential`, `Sign` and `GetCapabilities`; closing the session ends the grant.
 
-- **2026-09-04**. [docs/TESTING.md](docs/TESTING.md) tiers 3.1–3.4: discovery, the private-bus
-  happy path, cancel, and a session-bus run, through both PIN paths.
-- **2026-09-05**. A live Microsoft Entra ID sign-in: the WebAuthentication portal window, the
-  client-certificate challenge, WebKit's network process, the PKCS#11 module, this backend's
-  chooser, the shell's PIN prompt, an RSA-PSS signature, and the authorization code returned.
-  Later the same day the full chain reached an Azure Virtual Desktop session.
-- **2026-09-06**. Firefox, fresh profile, module loaded from Security Devices with
-  `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`, signed in to a site requiring a client certificate.
-- **2026-09-07**. The same, from the Flathub Firefox with `--nosocket=pcsc --nodevice=all`: the
-  sandbox reached the card only through the portal, and the chooser named the sandboxed app.
+The frontend exports the interface only when a backend is configured and `Certificate1` is
+listed in `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` in the frontend's environment
+(comma separated, no spaces; `Certificate1,WebAuthentication1` enables both portals).
+To select this backend in `portals.conf`:
 
-Unrun: TESTING 3.5 (one PIN per grant), 3.6 (wrong PIN and `FINAL_TRY`), card removal during an
-operation, a PIN-pad reader, a second card, KDE, and the OpenSSL 3 provider.
-
-## How it works
-
+```ini
+[preferred]
+org.freedesktop.impl.portal.experimental.Certificate1=certificate
 ```
-  application ──────── org.freedesktop.portal.experimental.Certificate1 ┐
-                   on org.freedesktop.portal.Desktop, at               │
-                   /org/freedesktop/portal/desktop                     ▼
-                                                   ┌───────────────────────────────────┐
-                                                   │ FRONTEND  xdg-desktop-portal      │
-                                                   │ branch experimental/integration   │
-                                                   │ app id · policy · permissions ·   │
-                                                   │ grants, expiry, clamping ·        │
-                                                   │ request and session lifecycle     │
-                                                   └───────────────────┬───────────────┘
-                                                                       │
-              org.freedesktop.impl.portal.experimental.Certificate1    │ app_id is an
-              on org.freedesktop.impl.portal.desktop.certificate       │ ARGUMENT here
-                                                                       ▼
-                                                   ┌───────────────────────────────────┐
-                                                   │ BACKEND: THIS REPOSITORY          │
-                                                   │ chooser · PIN prompt ·            │
-                                                   │ PKCS#11 session · Sign            │
-                                                   └───────────────────┬───────────────┘
-                                                                       ▼
-                                                        p11-kit → OpenSC → pcscd → card
-```
-
-p11-kit is the module manager that decides which PKCS#11 modules a process loads; OpenSC is the
-driver that speaks to a PIV card through `pcscd`.
-
-An application calls `AcquireCredential` naming a `purpose`: what the key is wanted for, one of
-`client_auth`, `signing`, `email` or `ssh`. The frontend works out who is asking and whether it may
-ask; this backend shows a chooser naming the application the frontend identified, how well it is
-identified, the purpose in the backend's own words, and the candidate certificates. What comes back
-is a **grant**: the record of that consent, scoped to one certificate and expiring. It holds the
-certificate as DER, its chain status, the key's type and mechanisms, the permitted operations and
-an expiry. The application then asks the
-frontend to `Sign`; this backend prompts for the PIN in its own window (or hands the field to the
-shell's prompter), logs into its own PKCS#11 session, and returns the signature.
-
-Applications that reach TLS and S/MIME through PKCS#11 rather than D-Bus (WebKitGTK's network
-process, Firefox, Thunderbird, LibreOffice) load `libpkcs11-portal-certificate.so`
-([`src/module/`](src/module/)) instead. p11-kit loads it into the application's own process, where
-it turns `C_Sign` into the portal's `Sign`; it links none of this backend. The application sees one
-token, `Portal Certificate`, holding the one certificate the user picked, advertising
-`CKF_PROTECTED_AUTHENTICATION_PATH` so that there is no PIN field in the application. The module is
-opt-in by process name (`enable-in:` in `xdg-desktop-portal-certificate.module`) and is not a trust
-boundary; the portal is. [0011](docs/decisions/0011-client-side-pkcs11-module.md) has the detail.
-
-### Why not
-
-- Why not wrap a chooser around `p11-kit server`, which hands over the whole token and does not
-  solve PIN ownership: [0006](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md).
-- Why not forward PKCS#11 instead of brokering operations:
-  [0007](docs/decisions/0007-brokered-operations-are-the-core.md).
-- Why not serve a PKCS#11 endpoint from this process rather than ship a module:
-  [0011](docs/decisions/0011-client-side-pkcs11-module.md).
-- Why not let the application draw the PIN prompt:
-  [0002](docs/decisions/0002-service-owned-pin-prompt.md).
-- Why the frontend is not here:
-  [0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md).
-
-## Interface at a glance
-
-**Public**, `org.freedesktop.portal.experimental.Certificate1` on `org.freedesktop.portal.Desktop`, at
-`/org/freedesktop/portal/desktop`. Defined by the frontend branch, not here;
-summarised in
-[docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md).
-
-| | |
-|---|---|
-| `CreateSession` | opens a session; the session handle comes back in the Response |
-| `AcquireCredential` | consent and selection; returns the grant. A session acquires once |
-| `Sign` | prehashed signature under an existing grant |
-| `GetCapabilities` | mechanisms and operations this backend can offer |
-| `Session.Close` | ends the grant |
-| `GrantInvalidated` | to the session's owner only: `expired`, `token_removed`, `policy`, `backend_gone`, `error` |
-
-`AcquireCredential` takes the standard portal request options (`handle_token` and
-`activation_token`) and, on top of them, `purpose` (required), `certificate_filter`,
-`operation_policy` (`sign` is the only key), `requested_lifetime` (clamped), `interaction_mode` and
-`reason`.
-
-**Impl**, frontend to backend, `org.freedesktop.impl.portal.experimental.Certificate1` on
-`org.freedesktop.impl.portal.desktop.certificate`, at
-`/org/freedesktop/portal/desktop`. Described
-in [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md), declared in
-[`data/org.freedesktop.impl.portal.experimental.Certificate1.xml`](data/org.freedesktop.impl.portal.experimental.Certificate1.xml),
-a copy of the frontend branch's file, byte for byte apart from a provenance comment.
-**Applications do not call this.**
-
-| | |
-|---|---|
-| `CreateSession` | `(o handle, o session_handle, s app_id, a{sv}) → (u, a{sv})` |
-| `AcquireCredential` | `(o handle, o session_handle, s app_id, s parent_window, a{sv}) → (u, a{sv})` |
-| `Sign` | `(o handle, o session_handle, s app_id, s parent_window, a{sv}) → (u, a{sv})` |
-| `GetCapabilities` | `(s app_id, a{sv}) → a{sv}` |
-| `SessionInvalidated` | the backend's half of `GrantInvalidated` |
-
-Every impl call carries `app_id`, `GetCapabilities` included. The backend never derives it.
 
 ## Try it
+
+Build and test the backend:
 
 ```console
 $ meson setup build
@@ -173,107 +47,112 @@ $ meson test -C build
 $ ./build/src/xdg-desktop-portal-certificate --list-tokens
 ```
 
-Dependencies: GLib/GIO, GTK 4, libadwaita, p11-kit and GnuTLS. Not libdex: that is the frontend
-branch's. gcr-4 is optional (`-Dgcr=auto`) and is what adds `--pin-prompt=system`;
-`-Dp11_module_path=` and `-Dp11_module_configs=` say where the module and its p11-kit module file
-are installed.
+`--list-tokens` prints the certificates on connected tokens without logging in. Only hardware
+tokens are offered by default; `--allow-software-tokens` adds software tokens, and
+`--module PATH` loads only the named PKCS#11 module.
 
-`--list-tokens` prints one block per token and one entry per usable certificate, without logging in
-and without asking for a PIN. Only hardware tokens are offered by default; `--allow-software-tokens`
-turns that off, and `--module PATH` names one module and loads nothing else.
+Build dependencies are GLib/GIO, GTK 4, libadwaita, p11-kit and GnuTLS. gcr-4 is optional
+(`-Dgcr=auto`) and adds `--pin-prompt=system`, which uses the PIN prompt drawn by the desktop
+shell. `-Dp11_module_path=` and `-Dp11_module_configs=` set where the PKCS#11 module and its
+p11-kit configuration are installed.
 
-The end-to-end stack needs frontend branch `experimental/integration`. The frontend must
-start with `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` and a configured backend.
-The list is comma separated with no spaces; use `Certificate1,WebAuthentication1` for both
-portals. The scripts append `Certificate1` to the caller's existing list when missing:
+To run the whole stack on a private bus with a software token, build the frontend branch, build
+the backend with gcr-4 (`-Dgcr=enabled`; the scripts pass `--pin-prompt`, which needs it,
+[#8](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/8)), and run:
 
 ```console
+$ tools/softhsm-fixture.sh
 $ XDP_BUILD=/path/to/xdg-desktop-portal/build tools/dev-stack.sh --softhsm
 ```
 
-starts `xdg-permission-store`, this backend and a development frontend inside `dbus-run-session`
-with a `portals.conf` routing the interface to this backend, then runs
-[`tools/certificate-e2e.py`](tools/certificate-e2e.py) against the public interface and verifies the
-signature. `--live` does the same on the real session bus, which is what a card needs; `--softhsm`
-uses a fixture token from [`tools/softhsm-fixture.sh`](tools/softhsm-fixture.sh).
+Pick the certificate and enter the fixture PIN `123456`; the client checks the returned
+signature. `tools/ui-smoke.sh` runs the same flow headless. [Testing](docs/TESTING.md) covers
+prerequisites and runs with a real card.
 
-Other scripts: [`tools/ui-smoke.sh`](tools/ui-smoke.sh) drives the chooser and the PIN prompt under
-Xvfb; [`tools/module-smoke.sh`](tools/module-smoke.sh) and
-[`tools/nss-smoke.sh`](tools/nss-smoke.sh) drive the PKCS#11 module through GnuTLS and through NSS; [`tools/firefox-flatpak.sh`](tools/firefox-flatpak.sh) runs the Flathub Firefox against the live stack with no pcsc socket;
-[`tools/trigger-certificate.sh`](tools/trigger-certificate.sh) pokes one method at a time with
-`gdbus`. [docs/TESTING.md](docs/TESTING.md) has the exact commands.
+## Status
 
-To select this backend explicitly, put in `portals.conf`:
+| Feature | State | Notes |
+|---|---|---|
+| Token discovery, certificate parsing, `purpose` rules, `certificate_filter` | done | unit tests against fixture certificates |
+| Chooser and PIN prompt | done | GTK window, or the shell's prompter through gcr-4 |
+| Signing: `RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA` | done | all three against SoftHSM; the RSA mechanisms against a PIV card |
+| Token removal, `SessionInvalidated` | done | polled; never tested with a card pulled mid-operation |
+| PKCS#11 module | done | one token and one credential per process; used by GnuTLS, NSS and WebKitGTK |
+| Certificate chain | partial | `chain_status` is always `leaf_only` |
+| Decryption | not exposed | `RSA_OAEP` code exists; neither interface has a `Decrypt` method |
+| One grant shared by an application's processes | missing | each D-Bus peer gets its own grant |
+| Proof of what a signature is for | missing | `purpose` limits selection and consent wording only |
+| KDE, translations, packaging | missing | |
+| Independent security review | missing | |
 
-```ini
-[preferred]
-org.freedesktop.impl.portal.experimental.Certificate1=certificate
-```
+Tests: 15 Meson tests with gcr-4 (14 without), an ASan/UBSan build, and a DER corpus replay.
+
+Hardware evidence, all with one PIV card, one reader, OpenSC, and GNOME 50 on Wayland:
+
+- 2026-09-04: discovery, sign, cancel and a session-bus run through both PIN prompts
+  ([Testing](docs/TESTING.md) tiers 3.1 to 3.4).
+- 2026-09-05: a Microsoft Entra ID sign-in through the WebAuthentication portal, its
+  client-certificate challenge answered by this portal, then an Azure Virtual Desktop session.
+- 2026-09-06: Firefox with the module loaded from Security Devices signed in to a site that
+  requires a client certificate.
+- 2026-09-07: Firefox from Flathub with `--nosocket=pcsc --nodevice=all` reached the card only
+  through the portal; the chooser named `org.mozilla.firefox` as a sandboxed caller.
+
+Not yet run: one PIN per grant, wrong PIN and `FINAL_TRY` handling, card removal during an
+operation, a PIN-pad reader, a second card model, KDE and the OpenSSL 3 provider.
+
+## Known problems
+
+- A WebKitGTK client-certificate handshake shows two choosers, because its UI and network
+  processes are separate D-Bus peers and each needs a grant. Sharing a grant needs a frontend
+  design ([ADR 0011](docs/decisions/0011-client-side-pkcs11-module.md)).
+- Firefox shows the portal chooser, then its own certificate picker, then the PIN prompt.
+- Firefox's NSS lists certificates by class alone; the module answers that search only with
+  `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`, so a page load does not open a chooser
+  ([search intent](docs/SECURITY.md#search-intent)).
+- With no portal or backend running, `C_Initialize` succeeds and the module reports no slots.
+- The shell's PIN prompter hands the PIN to this backend for `C_Login`; the backend keeps it in
+  wiped, non-dumpable memory ([PIN handling](docs/SECURITY.md#pin-handling)).
+- Operation log lines carry no session or operation id
+  ([#6](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/6)).
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | components, responsibilities, sequences |
+| [PUBLIC-INTERFACE](docs/PUBLIC-INTERFACE.md) | the interface applications call |
+| [IMPL-INTERFACE](docs/IMPL-INTERFACE.md) | the backend interface and its validation rules |
+| [SECURITY](docs/SECURITY.md) | threat model, PIN handling, grant scope, caller identity |
+| [TESTING](docs/TESTING.md) | commands for every test tier, including real cards |
+| [UPSTREAMING](docs/UPSTREAMING.md) | proposal status and remaining work |
+| [ROADMAP](docs/ROADMAP.md), [SPIKES](docs/SPIKES.md) | planned work and feasibility evidence |
+| [SOURCES](docs/SOURCES.md) | cited sources |
+| [decisions](docs/decisions/) | architecture decision records |
+| [CONTRIBUTING](CONTRIBUTING.md), [SECURITY policy](SECURITY.md) | working on the code, reporting vulnerabilities |
 
 ## Related repositories
 
-- <https://github.com/sjtrotter/xdg-desktop-portal-webauth>. The sibling backend for the
-  WebAuthentication portal, and the first consumer of this one. `src/module/portal-token.h` is
-  shared with it verbatim, because a PKCS#11 URI is all that crosses between the two.
-- <https://github.com/sjtrotter/entra-token-helper>. The Microsoft Entra ID client, split out of
-  the `xdg-desktop-portal-webauth` repository on 2026-09-07. It drives the WebAuthentication portal
-  for an interactive sign-in, which in turn drives this Certificate portal for the
-  client-certificate challenge.
-- <https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration>
-  The frontend fork branch that defines both public interfaces, based on upstream `8eba842`.
-  The Certificate portal is commit `39f5833`; its XML is the source of truth for this backend.
-- <https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate-webauthentication+delegation>
-  The **archived delegation branch**: an earlier version of the frontend that derived a grant for a
-  caller's descendant processes, so that one application raised one chooser. Tip `209f9ff`. Referred
-  to below by that name.
+- [xdg-desktop-portal-webauth](https://github.com/sjtrotter/xdg-desktop-portal-webauth): the
+  WebAuthentication backend, which uses this portal for client certificates.
+- [entra-token-helper](https://github.com/sjtrotter/entra-token-helper): a Microsoft Entra ID
+  token client built on the WebAuthentication portal.
+- [xdg-desktop-portal fork](https://github.com/sjtrotter/xdg-desktop-portal): the frontend
+  branches `experimental/certificate`, `experimental/webauthentication` and
+  `experimental/integration`.
 
-## Known problems and open questions
-
-- **One WebKitGTK handshake raises two choosers.** The UI process builds the `GTlsCertificate` and
-  the network process uses the key, so each acquires its own grant. With Firefox the user sees the
-  portal chooser, Firefox's own certificate picker and the PIN prompt: three dialogs. One chooser
-  was only ever achieved on the archived delegation branch, and process-tree delegation cannot work
-  for a Flatpak caller, whose app-info pidfd is the sandbox instance's rather than the calling
-  process's. Not fixable inside the module.
-- **A search that names no object does not raise a chooser**, so a class-only enumeration, which
-  is what NSS's certificate lookup and therefore Firefox's client-authentication path is, needs
-  `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`. Issuer, subject, serial and trust-category searches
-  answer nothing while there is no grant: GnuTLS sends them at every handshake, and answering them
-  with a window put a chooser in front of a user who had only opened a page.
-- **The module offers no slot when there is no portal or no certificate backend behind it**, and
-  `C_Initialize` still succeeds. It must not be loaded inside xdg-desktop-portal or inside this
-  backend; it refuses to run there three ways, and neither is on the shipped allowlist.
-- **`--pin-prompt=system` moves where the PIN is typed, not whether this process holds one.**
-  `C_Login` takes a PIN, so it still arrives here, into the same locked, wiped, non-dumpable page.
-
-## Documents
-
-| | |
-|---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, the responsibility split, sequences, process model |
-| [docs/PUBLIC-INTERFACE.md](docs/PUBLIC-INTERFACE.md) | the interface applications call, and a pointer to the branch's XML |
-| [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md) | the interface this backend implements, and why the XML here is a tracking copy |
-| [docs/UPSTREAMING.md](docs/UPSTREAMING.md) | where the frontend branch is and what remains before a pull request |
-| [docs/SECURITY.md](docs/SECURITY.md) | threat model, PIN handling, grant scoping, caller identity, the code in the application's process |
-| [docs/TESTING.md](docs/TESTING.md) | the exact commands, including the runs with a card in a reader |
-| [docs/SPIKES.md](docs/SPIKES.md) | the questions that decide whether this is buildable, and their answers so far |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | phases, effort estimate, and its assumptions |
-| [docs/SOURCES.md](docs/SOURCES.md) | the primary source behind every claim made here about another system |
-| [docs/decisions/](docs/decisions/) | the ADRs |
-| [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) | how to work on it, and how to report a vulnerability |
+The proposal was announced on
+[flatpak/xdg-desktop-portal#662](https://github.com/flatpak/xdg-desktop-portal/issues/662) and
+[FreeRDP/FreeRDP#13328](https://github.com/FreeRDP/FreeRDP/pull/13328).
 
 ## License
 
-LGPL-2.1-or-later, matching `xdg-desktop-portal`, `xdg-desktop-portal-gtk` and
-`xdg-desktop-portal-gnome`, so code can move into any of them without a relicensing step
-([0004](docs/decisions/0004-license.md)). The one piece of derived code is
-`src/ui/external-window.c`, adapted from libgxdp (also LGPL-2.1-or-later) with its attribution
-kept. No code was copied from Remmina's RDP plugin. Consumers that only speak D-Bus are
-unconstrained by the licence; those that load the PKCS#11 module load an LGPL library.
+LGPL-2.1-or-later, the license of xdg-desktop-portal and its GTK and GNOME backends, so code
+can move between them ([ADR 0004](docs/decisions/0004-license.md)). `src/ui/external-window.c`
+is adapted from libgxdp (LGPL-2.1-or-later) with its attribution kept. Applications that load
+the PKCS#11 module load an LGPL library; applications that only use D-Bus are not affected.
 
 ## AI assistance
 
-The code and documents here were written with AI assistance, Anthropic Claude and OpenAI Codex,
-under the author's direction. The author is responsible for every claim in them. Prior-art
-citations were checked against primary sources, listed in [docs/SOURCES.md](docs/SOURCES.md); where
-a source confirmed less than a claim did, the claim was narrowed and its entry says so.
+The code and documentation were written with AI assistance (Anthropic Claude, OpenAI Codex)
+under the author's direction. The author is responsible for their content.
