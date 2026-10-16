@@ -1,152 +1,124 @@
-# The public interface is not in this repository
+# Public interface
 
-The frontend is xdg-desktop-portal branch `experimental/integration`. Its XML defines
-`org.freedesktop.portal.experimental.Certificate1`; this document summarises that interface.
+`org.freedesktop.portal.experimental.Certificate1` is defined by the xdg-desktop-portal fork's
+[experimental/integration](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration)
+branch. Its XML is authoritative.
 
-## Where it is
+## Frontend files
 
-```
-repository   a local checkout of xdg-desktop-portal   (origin: sjtrotter/xdg-desktop-portal)
-branch       experimental/integration
-commit       39f5833  certificate: Add an experimental Certificate portal
-public XML   data/org.freedesktop.portal.experimental.Certificate1.xml
-impl XML     data/org.freedesktop.impl.portal.experimental.Certificate1.xml
-frontend     desktop-portal/certificate.c
-mock backend tests/templates/certificate.py
-tests        tests/test_certificate.py
-```
+| File on the frontend branch | Purpose |
+|---|---|
+| `data/org.freedesktop.portal.experimental.Certificate1.xml` | Public interface |
+| `data/org.freedesktop.impl.portal.experimental.Certificate1.xml` | Backend interface |
+| `desktop-portal/certificate.c` | Frontend implementation |
+| `tests/templates/certificate.py` | Mock backend |
+| `tests/test_certificate.py` | Frontend tests |
 
-The impl half is also here, as a verbatim tracking copy:
-[`../data/org.freedesktop.impl.portal.experimental.Certificate1.xml`](../data/org.freedesktop.impl.portal.experimental.Certificate1.xml).
-The public half is deliberately **not** copied: this repository has no reason to hold a
-second copy of an interface it does not implement, and a stale one would be worse than
-none.
+The [impl XML](../data/org.freedesktop.impl.portal.experimental.Certificate1.xml) is a tracking
+copy in this repository. The public XML belongs only to the frontend.
 
-Everything below is a summary for orientation. Where it disagrees with the XML, the XML is
-right.
+## Contract
 
-## Summary
-
-Interface `org.freedesktop.portal.experimental.Certificate1`, on bus name
-`org.freedesktop.portal.Desktop`, object path
-`/org/freedesktop/portal/desktop`. `version` property `1`.
-Request and Session handles remain under `/org/freedesktop/portal/desktop/request/`
-and `/org/freedesktop/portal/desktop/session/`.
+| Property | Value |
+|---|---|
+| Interface | `org.freedesktop.portal.experimental.Certificate1` |
+| Bus name | `org.freedesktop.portal.Desktop` |
+| Object path | `/org/freedesktop/portal/desktop` |
+| `version` | `1` |
+| Request handles | `/org/freedesktop/portal/desktop/request/...` |
+| Session handles | `/org/freedesktop/portal/desktop/session/...` |
 
 The frontend exports the interface only with a configured backend for
 `org.freedesktop.impl.portal.experimental.Certificate1` and `Certificate1` listed in
-`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` at startup. The list is comma separated with no
-spaces, such as `Certificate1,WebAuthentication1`. Without both conditions the interface is
-absent from introspection and `Properties.Get` fails. A breaking change increments the
-trailing number in the interface name; a non-breaking change increments `version`.
+`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` at startup. Values are comma separated with no
+spaces, for example `Certificate1,WebAuthentication1`. Without both conditions, the interface
+is absent from introspection and `Properties.Get` fails. Breaking changes increment the
+trailing interface number; compatible changes increment `version`.
 
-```
-CreateSession      (a{sv} options)                            → o handle          [Request]
-AcquireCredential  (o session, s parent_window, a{sv} options) → o handle          [Request]
-Sign               (o session, s parent_window, a{sv} options) → o handle          [Request]
-GetCapabilities    (a{sv} options)                             → a{sv} capabilities
-signals: GrantInvalidated(o, s), to the session's owner only
-```
+| Method or signal | Shape |
+|---|---|
+| `CreateSession` | `(a{sv} options) -> o handle`, Request |
+| `AcquireCredential` | `(o session, s parent_window, a{sv} options) -> o handle`, Request |
+| `Sign` | `(o session, s parent_window, a{sv} options) -> o handle`, Request |
+| `GetCapabilities` | `(a{sv} options) -> a{sv} capabilities` |
+| `GrantInvalidated` | `(o session_handle, s reason)`, sent only to the owning connection |
 
-**A grant is a `Session`.** `CreateSession` makes an empty one, `AcquireCredential` fills
-it in with a certificate the user chose, and `Session.Close()` ends it. A grant is bound to
-the D-Bus connection that created it, to the token that backs it, and to the operations and
-mechanisms the frontend allowed; a grant always has an expiry. **A session acquires once**:
-a second `AcquireCredential` on it answers `2` with `reason` `grant_already_held`, and a
-second credential means a second session and a second consent.
+`CreateSession` returns a Request handle; the Session handle arrives in its `Response`.
+`AcquireCredential` fills that Session with the user's selected credential; `Session.Close()`
+ends the grant. A grant is bound to its creating D-Bus connection, token, permitted operations,
+mechanisms and expiry. A session acquires once: another acquisition answers `2` with reason
+`grant_already_held`. A second credential requires a second session and consent.
 
-`Sign` is `Request`-shaped because it may prompt — a lazy login, or per-operation consent —
-and upstream's convention is that anything which can show a window returns a `Request` the
-caller can `Close()`. The acquire response carries `may_prompt_later` so a caller can never
-claim it was promised silence.
+`Sign` returns a Request because login or consent may require a prompt. The caller can cancel
+with `Request.Close()`. The acquisition result's `may_prompt_later` describes later interaction.
 
-### Options that matter
+### Options
 
-- `purpose` is **required** on `AcquireCredential`, and is one of `client_auth`,
-  `signing`, `email`, `ssh`. **There is deliberately no value meaning "anything".**
-- `interaction_mode` is `required`, `allowed` (default) or `forbidden`.
-- `requested_lifetime` is a ceiling *request*: the frontend clamps it to 3600 s (default
-  300) and hands the backend its own decision.
-- `mechanism` must be one the grant reported: `RSA_PKCS1_V1_5`, `RSA_PSS` or `ECDSA`.
-- `data` on `Sign` is **always a digest** of the `hash` named in `parameters`, and its
-  length must be exactly that digest's length. What that buys is narrow and worth stating
-  exactly: a caller cannot get a signature over bytes it did not hash itself, and cannot
-  have an arbitrary blob wrapped in raw PKCS#1 v1.5 padding and signed. It is still a
-  signing capability over any message the caller chooses to hash, as every signing API is;
-  the grant's purpose, expiry and `permitted_operations` are what bound it.
-- `reason` (≤ 256 chars) is application-supplied text, shown as such and never in the
-  trusted identity position.
-- `certificate_filter` narrows what is offered (`issuers`, `key_usage`, `eku`,
-  `key_algorithms`, `token_label`, `piv_slot`). A filter never widens, and is not a
-  security boundary. It and `operation_policy` are **closed vocabularies**: a key the
-  frontend does not know is an error, because a filter that is silently ignored offers the
-  user more than the application asked for.
+Standard Request options include `handle_token` and `activation_token`.
+`AcquireCredential` also accepts:
 
-### Results that matter
+- `purpose`, required: `client_auth`, `signing`, `email` or `ssh`.
+- `interaction_mode`: `required`, `allowed` (default) or `forbidden`.
+- `requested_lifetime`: seconds, default 300 and clamped to 3600 by the frontend.
+- `reason`: at most 256 characters of application-provided text, displayed outside trusted identity.
+- `certificate_filter`: `issuers`, `key_usage`, `eku`, `key_algorithms`, `token_label`, `piv_slot`.
+- `operation_policy`: only `sign` is supported.
 
-`certificate_der` (required), `supported_mechanisms` and `permitted_operations` (required
-and non-empty), `chain_der`, `chain_status` (`complete` / `partial` / `leaf_only`, which
-describes completeness and not trust), `token_display`, `key_type`, `key_size`,
-`key_curve`, `expires_at` and `may_prompt_later`. Every one of them is type-checked against
-the type the interface declares, and an acquisition whose results do not satisfy that
-answers `2` with `reason` `backend_protocol_error`.
+Filters only narrow selection and are not a security boundary. Unknown keys in
+`certificate_filter` and `operation_policy` are errors.
 
-`GetCapabilities` answers `purposes`, `operations`, `mechanisms`,
-`protected_authentication_path`, `has_display` and `max_grant_lifetime`. The first three
-are this backend's lists intersected with the frontend's own; `has_display` is forwarded
-as this backend reported it, because an application that cannot be shown a chooser needs
-to know before it asks for one.
+`Sign` requires a granted `mechanism`: `RSA_PKCS1_V1_5`, `RSA_PSS` or `ECDSA`. Its `data`
+is a digest with the exact length named by `parameters.hash`. The backend constructs the
+mechanism's encoding, including DigestInfo for RSA PKCS#1 v1.5. The caller can submit any bytes
+of the required length; this validates shape and cannot prove how the input was computed or used.
+See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) for parameter rules.
+
+### Results
+
+Acquisition requires `certificate_der`, non-empty `supported_mechanisms` and non-empty
+`permitted_operations`. Optional results are `chain_der`, `chain_status`, `token_display`,
+`key_type`, `key_size`, `key_curve` and `may_prompt_later`. The frontend adds `expires_at`.
+`chain_status` is `complete`, `partial` or `leaf_only`; it describes completeness without
+asserting trust. The frontend type-checks results; a protocol violation answers `2` with
+reason `backend_protocol_error`.
+
+`GetCapabilities` returns `purposes`, `operations`, `mechanisms`,
+`protected_authentication_path`, `has_display` and `max_grant_lifetime`. The frontend
+intersects the three lists with its own policy and forwards the booleans.
 
 ## Lifetime
 
-A grant always expires, and **there is no renewal**: the lifetime is fixed at acquisition,
-clamped to 3600 s, and the only way on is a fresh session and a fresh consent. `expires_at`
-is frontend-generated, can be sooner than `requested_lifetime` asked for, and is a wall-clock
-value for display — the frontend enforces the lifetime on the monotonic clock, so moving the
-system clock afterwards changes neither the grant nor that number, and the two stop agreeing.
+A grant has no renewal. Its acquisition fixes a lifetime of at most 3600 seconds; further use
+requires a fresh session and consent. `expires_at` is a frontend-generated wall-clock value
+for display. Enforcement uses a monotonic clock, so wall-clock adjustments cannot extend the
+grant and can make the displayed value disagree with the remaining time.
 
-**Announcing the expiry is the frontend's.** It arms a monotonic timer at the lifetime it
-decided; when the timer fires it emits `GrantInvalidated(expired)` to the session's owner and
-closes the session, and that `Close()` is what ends this backend's card session. This backend
-keeps its own copy of the deadline — operations stop at it — but its own teardown timer runs
-`CERTIFICATE_EXPIRY_GRACE_SECONDS` later, so the ordinary path is the frontend's and an
-application hears about one expiry once. The timer here is the backstop for a frontend that
-never called.
+The frontend's monotonic timer emits `GrantInvalidated(expired)` and closes the Session.
+The backend stops operations at the same deadline; its teardown timer runs
+`CERTIFICATE_EXPIRY_GRACE_SECONDS` later as a backstop. Backend activity cannot extend a grant.
 
-Nothing in this backend can extend a grant; it is recorded here because a backend must not
-assume a grant it was told about lives as long as its own `Sign` calls keep arriving.
-`GrantInvalidated(o session_handle, s reason)` says why a grant stopped being usable before
-it was released, and is emitted **to the session's owner alone**: a session object path
-carries the owner's unique bus name, so a broadcast would tell every application on the bus
-which peers hold certificate grants. `reason` is one of `expired`, `token_removed`, `policy`,
-`backend_gone` or `error`, and consumers must tolerate values they do not know. A session
-which never acquired a credential has no grant to invalidate: the frontend closes it without
-the signal.
+`GrantInvalidated` reasons are `expired`, `token_removed`, `policy`, `backend_gone` and `error`.
+Consumers must tolerate unknown values. The signal is sent only to the owner because a session
+path contains its unique bus name. Sessions with no acquired credential close without that signal.
 
-## Accessibility as acceptance criteria
+## Accessibility criteria
 
-The chooser and the PIN prompt carry the security decision, and a dialog a screen-reader
-user cannot navigate cannot carry informed consent. AT-SPI exposure for every control,
-complete keyboard-only operation, meaningful focus order, screen-reader announcement of
-the verified caller, purpose and operation class, scalable text, high contrast,
-reduced-animation behaviour, no information carried by colour alone, accessible error and
-cancellation states, focus restored to the calling application afterwards. These are
-**backend** obligations — this repository's — and they are acceptance criteria rather than
-polish. See [ARCHITECTURE.md](ARCHITECTURE.md) and [SECURITY.md](SECURITY.md).
+The backend owns the chooser and PIN interaction. Required behavior includes AT-SPI exposure,
+keyboard operation, meaningful focus order, screen-reader announcement of caller, purpose and
+operation class, scalable text, high contrast, reduced animation, textual state indicators, accessible errors and
+cancellation, and focus restoration to the caller. PIN entry must hide its contents from AT-SPI;
+errors and retry warnings must be announced. See [ARCHITECTURE.md](ARCHITECTURE.md) and
+[SECURITY.md](SECURITY.md).
 
-## What is not on the interface, and why
+## Absent methods and options
 
-`OpenPkcs11Endpoint` — the experimental PKCS#11 compatibility endpoint the earlier sketch
-specified here — **is not in the branch at all**, on either the public or the impl side; why
-it was left out is [ARCHITECTURE.md](ARCHITECTURE.md#the-endpoint-that-is-not-there), and what
-serves those consumers instead is
-[0011](decisions/0011-client-side-pkcs11-module.md).
+Neither interface exposes `OpenPkcs11Endpoint`; PKCS#11 consumers use the client module.
+See [the endpoint design](ARCHITECTURE.md#deferred-endpoint) and
+[ADR 0011](decisions/0011-client-side-pkcs11-module.md).
+There is no `context` destination hint; `reason` carries application-provided explanatory text.
 
-`context` — the "requested destination host" hint — is not there either. The only
-caller-supplied text on the interface is `reason`.
+## Manual calls
 
-## Poking it by hand
-
-[`../tools/trigger-certificate.sh`](../tools/trigger-certificate.sh) makes each of these
-calls with `gdbus`, and [`../tools/dev-stack.sh`](../tools/dev-stack.sh) starts a
-development frontend and this backend on a private bus first.
+[`trigger-certificate.sh`](../tools/trigger-certificate.sh) calls methods with `gdbus`.
+[`dev-stack.sh`](../tools/dev-stack.sh) starts a configured frontend and backend; see
+[TESTING.md](TESTING.md).

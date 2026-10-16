@@ -1,15 +1,11 @@
 # Testing
 
-Three tiers, in the order they become possible, and only the third needs a card. What each tier
-can and cannot tell you is [tests/README.md](../tests/README.md); this file is the **commands**.
+Build checks, private-bus integration and software-token tests precede hardware tests.
+[Test coverage](../tests/README.md) lists registered tests and their prerequisites.
+Commands and dated evidence below are recorded from Fedora 44. Hardware tiers 3.1–3.4 have
+one PIV-card/reader result; remaining hardware checks are unrun.
 
-Everything here has been run on Fedora 44. Tier 3 is the author's; tiers 3.1 through 3.4 have now
-been run once, against one real PIV card and one reader (see the note under §3.4), but the rest of
-tier 3 and every other card and reader combination remain unrun.
-
----
-
-## 0. Build and run what needs nothing
+## 0. Build and test
 
 ```console
 $ meson setup build -Dwarning_level=2 -Dwerror=false
@@ -17,128 +13,96 @@ $ ninja -C build
 $ meson test -C build
 ```
 
-Thirteen suites with gcr-4, twelve without:
+[tests/README.md](../tests/README.md) lists registered suites, coverage and skip conditions.
 
-| Suite | Needs | What it covers |
-|---|---|---|
-| `filter` | nothing | purpose and `certificate_filter` matching against fixture certificates |
-| `mechanism` | nothing | the mechanism mapping, the digest-length rule, the PSS parameters and the `MGF1-<hash>` spelling **including a mismatched hash and a wrong-typed one**, the OAEP parameters and `CK_RSA_PKCS_OAEP_PARAMS`, **that only `RSA_OAEP` may decrypt and only the three signing mechanisms may sign**, and that a present-but-mistyped `signature_encoding`, `mgf` or `mgf1_hash` is an error rather than a default |
-| `redact` | nothing | the redactor, the display-text sanitiser, that a newline in an app id cannot forge a journal line |
-| `chooser` | nothing | the consent window's display helpers: that a desktop file's `Name=` or a card's token label cannot add a line, an ANSI escape or a direction override to the window, that both are capped, and that "expired" is a **word** |
-| `broker-device` | a SoftHSM fixture, and `openssl(1)` for the OAEP half | `C_Login`, `C_Sign`, signature verification, an **RSA-OAEP round trip** against a ciphertext `openssl pkeyutl` produced, and that opening the device for a **different** candidate throws away the previous grant's login and key handle. **Skips itself** without one; see tier 2 |
-| `broker-decrypt` | a SoftHSM fixture | the two properties that would make decryption safe to offer: **one indistinguishable error** for every failure, and the **per-grant budget**. Nothing on the interface can ask for it today. **Skips itself** without a fixture |
-| `broker-regrant` | a SoftHSM fixture with both an RSA and an EC key | a second `AcquireCredential` on a live impl session, end to end: the signature after the re-grant **verifies against the new certificate**, and the operation in between is refused rather than signed with the old grant's key. The frontend refuses a second acquisition on one session, so this is the backend not relying on it. **Skips itself** without a fixture |
-| `filter` (cont.) | nothing | also: that the backend **refuses to load the portal's own client-side module**, by p11-kit name and by an explicit `--module` path. Loading it would make the backend enumerate a token whose enumeration calls the backend |
-| `fuzz-der` | nothing | a corpus replay of the DER reader and DigestInfo parser over `tests/fixtures/fuzz-corpus`, always built so a sanitized `meson test` covers it on every machine |
-| `tools-lib` | nothing | the two helpers in `tools/lib.sh` that decide something dangerous: that the generated `portals.conf` is the **effective** per-interface resolution of the machine's whole configuration chain rather than a copy of the first file (a user `Screenshot=none` survives an `/etc` file that names a backend for it), that our `Certificate` line replaces any existing one, that a private run switches the `Secret` backend off and a `--live` one does not, and that the fixture checks refuse a forged marker, a symlinked path, an ancestor that is not ours, a mode that is not 0700, and a directory this project did not make |
-| `pin-system` | nothing (it stands up its own `GTestDBus`, and gcr's own system prompter or a hand-written hostile one on it) | the OTHER PIN prompt, end to end and with nobody typing: that `--pin-prompt=auto` picks the system prompter when the name is on the bus, that the application, purpose, token and reader reach the prompt, that no "remember" choice is ever offered, that a wrong PIN comes back as a **warning on the prompt that is already up** rather than a second prompt, that an **empty answer never reaches `C_Login`**, the three-attempt cap, cancel from the prompter, `Request.Close()` closing it, a **Cancel in the shell after the PIN was submitted** answering `cancelled` and abandoning the login that succeeds anyway, the prompter **vanishing** during the open, during a password round and during a confirmation round, a **close racing a transport error** (gcr completing one round twice), the `FINAL_TRY` second confirmation **and that refusing it leaves the card unasked — on a protected authentication path too**, the token flags reaching the warning without a number, the login timeout, and a protected-authentication-path token asking for nothing. Built only when the build found gcr-4 |
-| `module` | nothing | the **client-side PKCS#11 module**'s rules with no bus at all: the DigestInfo parser (every accepted spelling, and the refusals — a wrong digest length, a trailing byte, a truncated structure, and the TLS 1.0/1.1 MD5‖SHA-1 concatenation), the definite-length DER reader (a non-minimal long form, an indefinite length, an overrun, a high tag), the mechanism map and the fact that it follows the portal's advertised list rather than a hardcoded one, the three objects a grant becomes, that the private key's `CKA_VALUE` and RSA factors answer `CKR_ATTRIBUTE_SENSITIVE` while `CKA_ID` in the same template is still answered, `C_GetAttributeValue`'s size-query and buffer-too-small protocol, template matching including a `CKA_ID` that does not match, that a search for a class this token does not have never provokes a chooser, that the refusal fingerprint ignores `CKA_CLASS` so a certificate search and a key search count as one, and that the URIs in `portal-token.h` still name what the module presents |
-| `impl-dbus` | nothing (it stands up its own `GTestDBus`) | the D-Bus boundary: a stranger calling every method including both `Close()`s, cross-`app_id` session use, session-path reuse, strict option validation, the results vardict's types, a frontend **replaced while its call is already in the backend's queue**, and the frontend vanishing while a call is in flight |
-| `cancellation` | a display for four of six, a SoftHSM fixture for two | cancelling while `C_Login` is in flight, cancelling before the window is up, cancelling **while the device call is in progress**, a cancelled login that succeeded anyway being logged out again (and a normal one not being), and one of two callers sharing a PIN window cancelling **on its own** |
+### Sanitizer build
 
-### Under a sanitizer, which is where the cancellation tests earn their keep
-
-Three of the defects the 2026 review found were use-after-frees on cancellation paths, and none of
-them was reachable by a test that only checked return values. Run the whole suite again with
-AddressSanitizer and UndefinedBehaviorSanitizer:
+Run cancellation and parser coverage under AddressSanitizer and UndefinedBehaviorSanitizer:
 
 ```console
 $ meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
 $ meson test -C build-asan
 ```
 
-**If every suite exits 127**, the sanitizer runtime is missing rather than the tests being broken:
-`ldd build-asan/tests/test-mechanism` says `libasan.so.8 => not found`. It ships in `libasan` /
-`libubsan`, which do not have to be installed system wide either — unpack them beside everything
-else and point the loader at them, which wins over the binary's own `RUNPATH`:
+If tests exit 127, inspect `ldd build-asan/tests/test-mechanism` for missing sanitizer runtimes,
+such as `libasan.so.8`. Fedora packages are `libasan` and `libubsan`. To unpack them without
+system installation, keep download and extraction in the same scratch directory:
 
 ```console
-$ dnf download --arch=x86_64 libasan libubsan
-$ mkdir -p ~/scratch/asan-rt && cd ~/scratch/asan-rt && for f in ../*.rpm; do rpm2cpio "$f" | cpio -idmu; done
+$ mkdir -p ~/scratch/asan-rt
+$ (cd ~/scratch/asan-rt && dnf download --arch=x86_64 libasan libubsan && for f in *.rpm; do rpm2cpio "$f" | cpio -idmu; done)
 $ LD_LIBRARY_PATH=~/scratch/asan-rt/usr/lib64 meson test -C build-asan
 ```
 
-`tests/lsan.supp` suppresses the one-time allocations GTK, GnuTLS and p11-kit keep for the life of
-the process. **Nothing under `src/` is suppressed, and nothing broad enough to cover it either**: it
-used to contain `leak:libglib-2.0`, `leak:libgio-2.0` and `leak:libgobject-2.0`, and because LSan
-matches a suppression against *any* frame of the allocation stack, those hid almost every leak this
-backend can have. A leak reported against this backend's own code is a defect.
+`LD_LIBRARY_PATH` overrides the binary's `RUNPATH`. `tests/lsan.supp` covers process-lifetime
+allocations in GTK, GnuTLS and p11-kit; it contains no broad GLib/GIO/GObject suppression that
+could hide allocations from this backend. LSan matches any allocation-stack frame. Leaks in
+`src/` require investigation.
 
-To check that the cancellation tests still fail when the bug is put back, make
-`pin_prompt_finish()` answer immediately while a login is in flight and hand the worker the
-prompt's own buffer instead of a copy — `/cancel/during-login` fails on the assertion that nothing
-has been answered yet.
-
-**`/cancel/during-login` opens a real PIN window** for a fraction of a second: it drives this
-process's own prompt rather than needing `xdotool`. It skips itself when `gtk_init_check()` fails,
-so a headless CI run reports it as skipped rather than failed. Run the suite under `Xvfb` if a
-window appearing on your desktop is a problem.
+`/cancel/during-login` checks deferred completion and worker-owned PIN storage. Immediate
+completion with the prompt's buffer would violate its assertions. It briefly opens a real
+backend PIN window without xdotool, and skips without a display. Xvfb can isolate that window.
 
 ```console
 $ ./build/src/xdg-desktop-portal-certificate --help
 $ ./build/src/xdg-desktop-portal-certificate --version
 ```
 
-### The build without gcr
+### Build without gcr
 
-`--pin-prompt` exists only when the build found gcr-4, and so does the `pin-system` suite. Both
-halves are checked by configuring without it:
+`--pin-prompt` and the `pin-system` test exist only with gcr-4:
 
 ```console
 $ meson setup build-nogcr -Dgcr=disabled && ninja -C build-nogcr
-$ ./build-nogcr/src/xdg-desktop-portal-certificate --help | grep pin-prompt   # nothing
-$ meson test -C build-nogcr                                                   # twelve suites
+$ ./build-nogcr/src/xdg-desktop-portal-certificate --help | grep pin-prompt   # no match
+$ meson test -C build-nogcr
 ```
 
-An option that names a prompt the binary cannot draw would be an option that fails at the worst
-possible moment, so it is absent rather than refused.
+Without gcr, PIN entry uses the backend's GTK window.
 
----
+## 1. Private bus without a card
 
-## 1. A private bus, with nothing in the reader
+The private-bus test checks backend selection, public-interface export and acquisition refusal.
 
-This proves the plumbing: that the frontend finds the `.portal` file, matches the impl interface,
-exports the public one, activates this backend, and that a request with no card comes back as a
-clean refusal rather than a hang.
+### Prerequisites
 
-The stack runs against a throwaway `XDG_DESKTOP_PORTAL_DIR` that is a **copy of the machine's**: a
-symlink to every `.portal` installed here, this repository's `certificate.portal`, and the machine's
-effective `portals.conf` with one line added. The directory is printed at the top of the run. §2
-says why it is the whole set rather than just ours.
+Build the backend with gcr-4 (`-Dgcr=enabled`). `tools/dev-stack.sh` passes `--pin-prompt`,
+which is absent without gcr-4; see
+[issue #8](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/8).
 
-### What it needs first
+Build the frontend from
+[experimental/integration](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration).
+It needs a configured backend and `Certificate1` in
+`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` at startup. Development scripts preserve an existing
+comma-separated list and append `Certificate1` if missing, including under `--live`.
+Both portals use `Certificate1,WebAuthentication1`, with no spaces.
 
-The frontend must start with a configured backend and
-`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` in its environment. The development
-scripts append `Certificate1` to the caller's comma-separated list when missing, including
-`--live`. Values contain no spaces.
+The stack needs `dbus-run-session`, Python 3 with PyGObject (`python3-gobject` on Fedora),
+and a frontend build containing both xdg-desktop-portal and xdg-permission-store.
+The end-to-end client verifies with python-cryptography or OpenSSL; raw ECDSA verification
+requires python-cryptography, or `--der` when using the OpenSSL fallback.
 
-The frontend is a **local branch of xdg-desktop-portal**,
-`experimental/integration`, and it has a hard dependency on libdex which Fedora
-does not install by default. If it was built against a scratch prefix, put the environment for it
-in `.xdp-env` in this repository — the file is gitignored, and both `tools/dev-stack.sh` and
-`tools/ui-smoke.sh` source it:
+The frontend depends on libdex. If its libraries live in a scratch prefix, put the environment
+in this repository's gitignored `.xdp-env`; `dev-stack.sh`, `ui-smoke.sh`, `module-smoke.sh`
+and `nss-smoke.sh` source it:
 
 ```sh
 # .xdp-env
 export LD_LIBRARY_PATH=/path/to/scratch/prefix/lib64
 ```
 
-The frontend binary's `RUNPATH` already names the prefix it was built in, so it may work with no
-`.xdp-env` at all — until that prefix is deleted. If the prefix was under `/tmp`, copy the one
-library that is not packaged (`libdex-1.so.1`) somewhere that survives a reboot and point
-`LD_LIBRARY_PATH` at it: `LD_LIBRARY_PATH` wins over `RUNPATH`. Rebuilding libdex from scratch is
-out of scope here.
+A valid `RUNPATH` may suffice. A prefix under `/tmp` can disappear at reboot; keep
+`libdex-1.so.1` in a persistent scratch prefix if needed. The script checks frontend libraries
+with `ldd`. `XDP_BUILD` selects the frontend build directory; `BACKEND` selects the backend
+executable, and `XDP_ENV` selects the environment file.
 
-`tools/dev-stack.sh` checks with `ldd` and says so if the frontend cannot resolve its libraries.
-
-### The run
+### Run and expected output
 
 ```console
 $ tools/dev-stack.sh -- --expect-no-certificate
 ```
 
-**What to look for in the output**, in order:
+Frontend output should include:
 
 ```
 XDP: Found 'certificate' in configuration for org.freedesktop.impl.portal.experimental.Certificate1
@@ -147,7 +111,7 @@ XDP: Providing portal org.freedesktop.portal.experimental.Certificate1
 XDP: org.freedesktop.portal.Desktop acquired
 ```
 
-then, from the backend:
+Backend output for an empty discovery result includes:
 
 ```
 ** Message: request-received app_id=(none) identity=(none) purpose=create_session granted=yes
@@ -156,8 +120,7 @@ then, from the backend:
 ** Message: no-matching-certificate tokens=0 candidates=0
 ```
 
-and from the client (`operations` is `['sign']`: the interface has no `Decrypt`, and
-[IMPL-INTERFACE.md](IMPL-INTERFACE.md) says what became of it):
+The client reports signing capabilities and a refused acquisition:
 
 ```
 GetCapabilities:
@@ -170,64 +133,59 @@ GetCapabilities:
 PASS no-certificate: AcquireCredential answered 2, no grant
 ```
 
-That is the plumbing check: the frontend routed to this backend, the backend answered, and the
-answer was a clean refusal rather than a hang or a crash.
+The Python client on a private bus is unidentified; `app_id=(none)` and
+`identity=unidentified` are expected. Capabilities do not require a present card. The frontend
+filters the backend's mechanism list to its signing allowlist.
 
-`app_id=(none)` and `identity=unidentified` are correct here: the client is a bare python script
-on a private bus, so the frontend has nothing to identify it by, and the backend says so rather
-than inventing a name. **That is the identity level doing its job.**
-
-To poke it by hand instead, leave the stack up:
+For manual calls, keep the stack running:
 
 ```console
 $ tools/dev-stack.sh --keep --no-e2e
 ```
 
-and use `tools/trigger-certificate.sh` or `gdbus` from another shell with the
-`DBUS_SESSION_BUS_ADDRESS` it prints.
+In another shell, set `DBUS_SESSION_BUS_ADDRESS` to the printed value and use
+`tools/trigger-certificate.sh` (`version`, `introspect`, `capabilities`, `session`,
+`acquire PATH`, `sign PATH`, `release PATH`, `monitor`, `all`). Its `sign` example sends
+three bytes with `SHA256`, so it demonstrates validation failure; use the end-to-end client
+for a signature that can verify.
 
----
+## 2. Software token
 
-## 2. A software token, with nobody at the keyboard
-
-A rehearsal. It proves the cryptography and the windows; it proves nothing about hardware.
+SoftHSM tests verify cryptography and UI paths without establishing hardware behavior.
+Fixture creation needs `libsofthsm2.so`, `softhsm2-util`, `certtool` (gnutls-utils),
+`pkcs11-tool` (OpenSC) and OpenSSL. Module smoke tests also need `p11tool` (gnutls-utils).
 
 ```console
 $ tools/softhsm-fixture.sh
 $ meson test -C build broker-device --verbose
 ```
 
-`broker-device` opens a session on the fixture token, logs in, signs with RSA PKCS#1 v1.5 over
-SHA-256 and SHA-384, with RSA-PSS and with ECDSA, and **verifies each signature against the
-certificate the token handed back** — not against the key the fixture script generated. It also runs
-an **RSA-OAEP decryption round trip** against a ciphertext GnuTLS produced. It checks that a wrong PIN comes back as
-`PIN_INCORRECT` and not as a generic failure, and that discovery sees both certificates without
-logging in.
+`broker-device` verifies RSA PKCS#1 v1.5 with SHA-256/SHA-384, RSA-PSS and ECDSA against
+certificates read from the token. Its internal OAEP test decrypts ciphertext produced by
+`openssl pkeyutl`. It also checks wrong-PIN reporting and discovery without login.
 
-`tools/softhsm-fixture.sh` refuses to write into — or delete — any directory unless all five of
-these hold: no component of the path is a symlink (the path is compared with its own resolved real
-path), it is under `$TMPDIR` by real path, every ancestor from `$TMPDIR` down is owned by you or by
-root and is not writable by others unless it is sticky, it carries this project's marker
-(`.xdg-desktop-portal-certificate-fixture`) as a **regular file you own at mode 0600** whose
-contents name the fixture, and the directory itself is mode 0700. What lives in that directory
-includes the module path the backend `dlopen()`s, and the script deletes it recursively; an
-ownership check alone is one a mistyped `SOFTHSM_DIR` pointing at `$HOME` passes.
+### Fixture directories
 
-A directory that already exists without a valid marker is **refused rather than emptied**, and the
-message names the manual way out. Modes are no longer repaired: fixtures are created exclusively
-(`mktemp -d`, or a plain `mkdir` under `umask 077` for the one whose name has to be predictable) so
-they are 0700 from their first instant, and one that is not was open at some point. The delete runs
-on the resolved path with `--one-file-system`.
+`tools/lib.sh` checks every fixture before use or recursive deletion. The resolved path must
+be under `$TMPDIR`, contain no symlink component, have acceptable ancestor ownership and modes,
+and have an accepted mode. Each ancestor beneath `$TMPDIR` must be owned by the user or root
+and cannot be writable by others unless sticky. The marker `.xdg-desktop-portal-certificate-fixture`
+must be a regular user-owned mode-0600 file naming the fixture. Existing unmarked directories
+are refused. Fixtures are created exclusively with mode 0700 under `umask 077`; validation
+accepts 0700 or 0500 without repairing modes.
+Deletion uses the resolved path and `--one-file-system`.
 
-`$TMPDIR` itself is the operator's choice and is not otherwise validated: containment under it
-guards against a typo, not against the person running the script. The same rules cover
-`tools/ui-smoke.sh`'s `$LOGDIR` and `tools/dev-stack.sh`'s `$DEVDIR`; it is all in `tools/lib.sh`,
-and the `tools-lib` suite in tier 1 asserts each refusal.
+These checks cover the dlopened module path in `$SOFTHSM_DIR`, UI `$LOGDIR` and stack `$DEVDIR`.
+`$TMPDIR` is operator-chosen; containment protects against mistyped paths without authenticating
+the operator. `tools-lib` tests the refusal cases. A valid fixture with a 0644 marker is refused;
+change only that marker to mode 0600 or recreate the fixture with its owning script.
 
-**A fixture made before these checks existed has a 0644 marker and will be refused.** Either
-`chmod 600` the marker or re-create the fixture with the script that owns it.
+### UI smoke tests
 
-Then the whole thing including the windows, in a headless X server:
+Build the backend with gcr-4 (`-Dgcr=enabled`): `tools/ui-smoke.sh` passes `--pin-prompt`
+even for GTK ([issue #8](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/8)).
+
+Create the fixture, then run the windows under Xvfb and xdotool:
 
 ```console
 $ tools/ui-smoke.sh                                        # RSA
@@ -237,48 +195,32 @@ $ tools/ui-smoke.sh -- --key-algorithm RSA --regrant EC    # two sessions, two p
 $ tools/ui-smoke.sh --pin-prompt=system                    # the shell's prompt instead
 ```
 
-**`--pin-prompt=system` is the only way to exercise the system-prompt path against the real stack**,
-and it does it without a shell: the script starts `build/tests/certificate-test-prompter`, which
-owns `org.gnome.keyring.SystemPrompter` **on the private bus** and answers with `$PIN`. Nothing is
-typed, `xdotool` is not used for the PIN at all, and a signature coming back is the proof. It
-refuses to run if anything already owns that name on the bus it was pointed at, because a test
-fixture must never stand between a user and a password request. It needs a build with gcr-4.
+`--pin-prompt=system` starts `build/tests/certificate-test-prompter` on the private bus,
+answering with `$PIN`. It needs gcr-4 and exercises the system-prompt implementation without
+an operator shell or xdotool typing the PIN. The test prompter refuses to take an already-owned
+name. Other UI runs drive the backend's GTK PIN window.
 
-`tools/dev-stack.sh` **refuses** `--pin-prompt=system` outside `--live`, and **defaults a private
-run to `gtk`** rather than leaving it at the backend's `auto`. Both are the same fact: `auto` asks
-the bus whether `org.gnome.keyring.SystemPrompter` has an owner *or is activatable*, and
-`dbus-run-session` reads the same service directories the session bus does — so on any machine with
-gnome-keyring installed, `org.gnome.keyring.SystemPrompter.service` activates
-`/usr/libexec/gcr-prompter` on the private bus too. **"No shell" is not "no prompter"**, and a
-private run left at `auto` was not testing the window it looked like it was testing. `--pin-prompt`
-is forwarded through both of the script's re-executions, so `--live --pin-prompt=gtk` really is
-`gtk`. On the real session bus with no `--pin-prompt`, `auto` picks the shell's prompter.
+`dev-stack.sh` defaults private runs to GTK and refuses private `--pin-prompt=system`.
+A private bus can activate `/usr/libexec/gcr-prompter` from system service directories, so
+`auto` would depend on the machine. On a live bus, `auto` selects an owned or activatable
+system prompter. Prompt options survive script re-execution.
 
-The portal directory these scripts build is a **reconstruction of the machine's**: a symlink to
-every `.portal` file installed here, plus this repository's, plus the machine's configuration
-chain **flattened into one `portals.conf`**, with the `Certificate` line replaced by ours.
-`XDG_DESKTOP_PORTAL_DIR` makes the frontend ignore every other portal directory *and* every other
-`portals.conf`, so a directory holding only `certificate.portal` used to leave the stack with no
-settings portal — which is why the windows came up light on a dark desktop — and used to take every
-other portal on the session down for the duration of a `--live` run.
+### Portal configuration
 
-**Flattened, not copied.** The frontend does not stop at the first configuration file it finds: it
-loads one per directory in the chain and then resolves *each interface* against the whole list, so
-copying the first file loses whatever a later one said — a partial `~/.config` file hiding
-`/etc`'s `Screenshot=none`, for instance, and handing the development stack a backend the session
-had switched off. `tools/lib.sh` replays that resolution per interface, `none` included, and the
-`tools-lib` suite asserts it.
+The scripts symlink installed `.portal` files and add this backend to a temporary portal
+directory. `tools/lib.sh` resolves each interface across the machine's configuration chain
+and flattens the effective choices into `portals.conf`, replacing the Certificate entry.
+This preserves later-directory values such as `Screenshot=none`. `XDG_DESKTOP_PORTAL_DIR`
+replaces all normal portal/configuration search directories, so the development directory
+must include the desktop's other portals too. The `tools-lib` test checks this resolution.
 
-**On a private bus the `Secret` backend is switched off**, because nothing there owns
-`org.freedesktop.secrets` and the frontend's start-up otherwise waits out the full D-Bus activation
-timeout — about 25 seconds of "Failed to create secret proxy: … Timeout was reached" before
-`Desktop acquired`. A `--live` run keeps the machine's own value.
-
-To check the settings portal is really there:
+Private runs disable the `Secret` backend because the private bus has no secret-service owner;
+otherwise activation can delay frontend startup by about 25 seconds. Live runs preserve it.
+To check the settings portal:
 
 ```console
 $ tools/dev-stack.sh --keep --no-e2e
-# ...then, from another shell, with the DBUS_SESSION_BUS_ADDRESS it printed:
+# Set the printed DBUS_SESSION_BUS_ADDRESS in another shell.
 $ gdbus call --session --dest org.freedesktop.portal.Desktop \
       --object-path /org/freedesktop/portal/desktop \
       --method org.freedesktop.portal.Settings.ReadOne \
@@ -286,15 +228,13 @@ $ gdbus call --session --dest org.freedesktop.portal.Desktop \
 (<uint32 1>,)
 ```
 
-`1` is `prefer-dark`, `2` is `prefer-light`, `0` is "no preference".
+Color-scheme values are `1` for prefer-dark, `2` for prefer-light and `0` for no preference.
 
-### The theme, which is a security-relevant detail dressed as a cosmetic one
+### Theme and headless dependencies
 
-A trusted dialog that does not look like the rest of the desktop is a trusted dialog that is harder
-to tell from an untrusted one. `PR_SET_DUMPABLE(0)` stops the settings portal identifying this
-process, so the backend reads `org.gnome.desktop.interface color-scheme` from GSettings itself;
-[SECURITY.md](SECURITY.md#pin-handling) records why that rather than dropping the hardening.
-`--verbose` prints the answer:
+Process hardening prevents the settings portal identifying the backend. It reads
+`org.gnome.desktop.interface color-scheme` through GSettings; see
+[PIN handling](SECURITY.md#pin-handling). Test the dark setting and inspect verbose output:
 
 ```console
 $ ADW_DEBUG_COLOR_SCHEME=prefer-dark tools/ui-smoke.sh
@@ -302,61 +242,47 @@ $ grep colour-scheme /tmp/xdp-certificate-ui-smoke.*/backend.log
 ... DEBUG: colour-scheme detail=dark
 ```
 
-With `ADW_DEBUG_COLOR_SCHEME` unset the same line reports what the session is actually set to, which
-is the thing that used to be wrong.
-
-It needs `Xvfb` and `xdotool`. Neither has to be installed system wide:
+Without `ADW_DEBUG_COLOR_SCHEME`, the log reports the session setting.
+Xvfb and xdotool can also be unpacked in a scratch directory:
 
 ```console
-$ dnf download --arch=x86_64 --resolve xorg-x11-server-Xvfb xdotool
-$ mkdir -p ~/scratch && cd ~/scratch && for f in *.rpm; do rpm2cpio "$f" | cpio -idmu; done
+$ mkdir -p ~/scratch
+$ (cd ~/scratch && dnf download --arch=x86_64 --resolve xorg-x11-server-Xvfb xdotool && for f in *.rpm; do rpm2cpio "$f" | cpio -idmu; done)
 $ XVFB=~/scratch/usr/bin/Xvfb XDOTOOL=~/scratch/usr/bin/xdotool \
     LD_LIBRARY_PATH=~/scratch/usr/lib64 tools/ui-smoke.sh
 ```
 
-**`LD_LIBRARY_PATH` is not optional for an unpacked `xdotool`**: it needs `libxdo.so.3`, which came
-out of the same rpm. The script searches for the window with `xdotool ... 2>/dev/null`, so a
-loader failure there looks exactly like a window that never appeared — `ui-smoke: no window titled
-'Use a Certificate'` while the backend log says `chooser-shown`. Run `xdotool search --name .`
-by hand if you see that.
+The unpacked xdotool needs `libxdo.so.3` from that scratch library directory. A loader failure
+can look like `ui-smoke: no window titled 'Use a Certificate'` because window-search stderr is
+suppressed. Check `xdotool search --name .` directly when the backend logged `chooser-shown`.
+SoftHSM can be unpacked similarly; set `SOFTHSM_MODULE` to its module.
 
-SoftHSM itself can be unpacked the same way and pointed at with `SOFTHSM_MODULE`.
+### Cancellation and manual UI
 
-And the cancellation path, where the point is that **nothing** touches the windows:
+For client cancellation without driving the windows:
 
 ```console
 $ tools/ui-smoke.sh --no-drive -- --cancel-after 3000 --expect-cancelled
 ```
 
-The client calls `org.freedesktop.portal.Request.Close()` on the in-flight `AcquireCredential`
-three seconds after making it. The backend log must show `chooser-cancelled` at that moment, and
-**no `Response` signal follows the `Close()`** — the frontend unexports its own Request before
-forwarding the Close, so the application, which asked for it, is not told again.
-
-To see the windows on your own display instead of driving them:
+The client closes the acquisition Request after three seconds. Expect `chooser-cancelled`,
+no grant and no later `Response`: the frontend unexports its Request before forwarding close.
+For interactive windows on the current display:
 
 ```console
 $ tools/dev-stack.sh --softhsm -- --purpose client_auth
 ```
 
-**The fixture token is software**, and this backend offers only hardware tokens by default — a
-window headed "security token" that offers keys out of a home directory says something untrue about
-where the key is. Naming a module with `--module` is already the deliberate act that lifts the
-default, which is what `tools/` does; it passes `--allow-software-tokens` as well so that the intent
-is visible in the command line rather than implied. `--list-tokens` names any token it skipped and
-why.
+Select a certificate and enter fixture PIN `123456`; the client verifies the signature.
+Use the PIN only for this fixture. Scripts pass an explicit module and `--allow-software-tokens`;
+the backend otherwise offers hardware tokens only. An explicit `--module` also permits software
+tokens. `--list-tokens` explains skipped tokens. Remove the fixture with
+`tools/softhsm-fixture.sh --clean`.
 
-The chooser appears, you pick a certificate, the PIN prompt appears, the PIN is `123456`, and the
-client verifies the signature. **The fixture PIN is a test PIN in a scratch directory. Do not
-reuse it.**
+### 2.5 Client module through GnuTLS and OpenSC
 
-Clean up with `tools/softhsm-fixture.sh --clean`.
-
-### 2.5 The client-side PKCS#11 module, driven by three consumers
-
-`tools/module-smoke.sh` runs the same private-bus stack as `tools/ui-smoke.sh` — frontend, backend,
-SoftHSM fixture, Xvfb, xdotool — but **nothing in it speaks D-Bus**. Everything talks PKCS#11 to
-`build/src/module/libpkcs11-portal-certificate.so`, and the module does the talking.
+Consumers talk PKCS#11 to `build/src/module/libpkcs11-portal-certificate.so`; the module
+calls D-Bus. The harness supplies frontend, backend, SoftHSM, Xvfb and xdotool.
 
 ```console
 $ ninja -C build
@@ -366,42 +292,26 @@ $ tools/module-smoke.sh --phase 3        # just the handshake
 $ tools/module-smoke.sh --phase 0        # just the "no chooser" proof
 ```
 
-Four phases:
+0. Token-only `p11tool --list-all-certs` and `pkcs11-tool --list-objects` must leave
+   `grant-created` counts unchanged and return no objects. `portal_template_intent()` in
+   `src/module/objects.c` and `/module/objects/credential-search` in `tests/test-module.c`
+   define the intent gate. The recorded 2026-09-05 live run found server-chain lookups reaching
+   this module before a client-certificate challenge; scope depends on GnuTLS configuration
+   [[S19](SOURCES.md)]. Such lookups must not open a chooser.
+1. `p11tool --provider ... --list-all` uses `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` to acquire
+   during class enumeration. Certificate and both keys must share `CKA_ID` and the contract's
+   object label. URIs come from `src/module/portal-token.h`; `URI_OBJECT=` removes `object=`
+   to exercise the single-object import failure.
+2. `pkcs11-tool --sign --mechanism SHA256-RSA-PKCS` signs; reading the certificate and
+   `openssl dgst -sha256 -verify` must verify against the returned DER rather than fixture PEM.
+3. `tests/gtls-client` constructs a certificate with `g_tls_certificate_new_from_pkcs11_uris()`
+   and completes mutual TLS against a Python ssl server that requires and verifies the client.
+   This is the constructor WebKitGTK reaches through glib-networking ([SPIKES.md](SPIKES.md) S3).
 
-0. **A search that names no object must not ask for one.** `p11tool --list-all-certs` on the
-   **token-only** URI, and `pkcs11-tool --list-objects`, are both run with the chooser driver
-   running, and the count of `grant-created` lines in `backend.log` must be the same before and
-   after. Neither command finds anything, and that is the pass. This is the gate added on
-   2026-09-05: GnuTLS verifying a *server's* certificate chain sends `CKA_ISSUER` and
-   `CKA_SUBJECT` lookups through every configured p11-kit module at every handshake, and answering
-   those with a chooser put a window in front of a user who had only opened a sign-in page. The
-   table of what does and does not acquire is in `portal_template_intent()`
-   (`src/module/objects.c`) and asserted row by row in `tests/test-module.c`
-   (`/module/objects/credential-search`).
-1. **`p11tool --provider … --list-all`** — GnuTLS enumerating the token, run with
-   `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`, which is the opt-in that puts class-only enumeration
-   back on the acquiring side and the only place in this repository that sets it. The chooser
-   appears at the search, and the certificate, the public key and the private key come back with
-   matching `CKA_ID` and a URI naming `token=Portal%20Certificate;object=Portal%20Certificate`. The
-   script builds the URIs from the shared contract in `src/module/portal-token.h`, which **now
-   carries the `object=` attribute itself**; `URI_OBJECT=` empties it, which is how the
-   single-object import's requirement was found and is how to watch it fail again.
-2. **`pkcs11-tool --sign --mechanism SHA256-RSA-PKCS`**, then `pkcs11-tool --read-object --type
-   cert`, then `openssl dgst -sha256 -verify` — the signature must verify **against the certificate
-   the module handed back**, not against the fixture's PEM.
-3. **`tests/gtls-client`** — `g_tls_certificate_new_from_pkcs11_uris()` and a real mutual-TLS
-   handshake against a python `ssl` server that requires and verifies a client certificate. This is
-   the constructor WebKitGTK reaches through glib-networking, and it is
-   [SPIKES.md](SPIKES.md) S3 in its smallest honest form.
-
-**Nothing is installed system wide.** p11-kit reads user module files from
-`$XDG_CONFIG_HOME/pkcs11/modules`, so the script points `XDG_CONFIG_HOME` at a directory under its
-own `$LOGDIR` holding one `.module` file with an absolute path in it. A python server rather than
-`gnutls-serv`: the fixture certificates are self-signed leaves without `basicConstraints CA:TRUE`,
-which GnuTLS will not accept as an anchor and OpenSSL will when it is the peer's own certificate in
-the trust store.
-
-Expect, on a pass:
+p11-kit reads an ephemeral `$XDG_CONFIG_HOME/pkcs11/modules` file with an absolute module path.
+No installation is needed. The fixture's self-signed leaves lack `basicConstraints CA:TRUE`;
+Python/OpenSSL accepts the peer leaf as a trust anchor where GnuTLS's server does not.
+Expected output includes:
 
 ```
 === 0  a search that names no object must not ask for one ===
@@ -415,12 +325,11 @@ protocol: TLSv1.3 cipher: TLS_AES_256_GCM_SHA384
 module-smoke: PASS
 ```
 
-**When a consumer gives up and says nothing, `MODULE_LOG_CALLS=1` is the way in**: it adds
-`log-calls: yes` to the run's module file, and p11-kit then logs every call into the module on the
-consumer's stderr. That is how "GnuTLS opens a session, closes it, and never searches" was traced
-to a URI that named no object.
+`MODULE_LOG_CALLS=1` adds `log-calls: yes` to that configuration so p11-kit logs calls to
+consumer stderr. It can diagnose a session that closes without searching, including a URI
+that names no object.
 
-Under a sanitizer, the module can be driven by a real consumer rather than only by its unit tests:
+Run the module through real consumers under sanitizers:
 
 ```console
 $ meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
@@ -428,30 +337,19 @@ $ ninja -C build-asan
 $ LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0     MODULE_SO=$PWD/build-asan/src/module/libpkcs11-portal-certificate.so     GTLS_CLIENT=$PWD/build-asan/tests/gtls-client     tools/module-smoke.sh --phase "1 3"
 ```
 
-`--phase 2` cannot be run this way: OpenSC's `pkcs11-tool` `dlopen()`s modules with `RTLD_DEEPBIND`,
-which the sanitizer runtime refuses. That is a property of `pkcs11-tool`, not of the module.
+Phase 2 cannot use this sanitizer setup: OpenSC's pkcs11-tool uses `RTLD_DEEPBIND`, which
+the sanitizer runtime refuses.
 
-### 2.55 WebKitGTK, through the module, proven headless
+### 2.55 WebKitGTK evidence
 
-`tools/module-smoke.sh` phase 3 proves the constructor. It does not prove the *consumer*, because
-`tests/gtls-client` is a program written for this repository and WebKit is not.
+The web-auth backend's `tools/portal-stack.sh` supplies both portals, SoftHSM, a WebKitGTK view,
+a temporary p11-kit configuration and a server requiring the fixture certificate, on a private
+bus under Xvfb. Its frontend environment enables `Certificate1,WebAuthentication1` and routes
+the impl interfaces to both backends. That script belongs to the sibling repository; this tree
+contains only the certificate-side prerequisites, `ninja -C build` and
+`tools/softhsm-fixture.sh`.
 
-The sibling repository does. `xdg-desktop-portal-webauth`'s `tools/portal-stack.sh` stands up
-**both portals on one private bus inside one headless X server** — this backend against the SoftHSM
-fixture, that backend as a WebKitGTK web view, the development frontend with a `portals.conf`
-routing both experimental interfaces to those two backends,
-`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1,WebAuthentication1` in the frontend's
-environment, a p11-kit module directory
-naming the module built here, and a TLS server that demands a client certificate and trusts only
-the fixture card's own certificate.
-
-```console
-$ ninja -C build && tools/softhsm-fixture.sh
-$ cd ../xdg-desktop-portal-webauth && tools/portal-stack.sh
-```
-
-Re-run on 2026-09-05 after delegation came out of the proposal, it passes, and each hop is a log
-line from the process that made it:
+The 2026-09-05 run, following WebKitGTK runs on 2026-09-04/05, recorded:
 
 ```
   ok    3 p11-kit loaded the module here   xdg-desktop-portal-webauth:378854): pkcs11-portal-certificate-DEBUG
@@ -469,42 +367,24 @@ PIN prompts:      1
 signatures:       1
 ```
 
-Three things that run established, and none of them was predictable from the code:
+TLS 1.3 exercises `CKM_SHA256_RSA_PKCS_PSS`, module parameter mapping, portal `Sign` with
+`mgf`/`salt_length` and backend PSS assembly. The pkcs11-tool phase covers v1.5 separately.
+The UI process constructs a `GTlsCertificate`; the network process resolves the private-key
+URI. Each module instance owns a D-Bus grant, producing two choosers about three seconds apart.
+A third chooser is a regression to investigate. The 2026-09-05 live Entra run observed a third
+prompt from server-chain verification before a challenge; phase 0 checks that search class.
 
-- **`RSA_PSS`**, not `RSA_PKCS`. TLS 1.3 asks for PSS, so the path exercised is `C_SignInit` with
-  `CKM_SHA256_RSA_PKCS_PSS`, the module's PSS parameter mapping, the portal's `Sign` with `mgf` and
-  `salt_length`, and this backend's own PSS assembly. The `pkcs11-tool` phase of
-  `module-smoke.sh` exercises v1.5 and would not have caught a PSS mistake.
-- **ONE HANDSHAKE, TWO GRANTS, TWO CHOOSERS.** The consumer resolves the URI twice, in two
-  processes: once in the application's own process to build a `GTlsCertificate`, and again in
-  WebKit's network process, which owns the handshake. Each is a separate p11-kit module instance
-  with a grant of its own, so the user answers the same question twice, about three seconds apart.
-  It is the module's most visible UX defect and it is not fixable in the module, because a grant
-  belongs to the D-Bus peer that acquired it and that is the point of the design.
+Process-tree delegation cannot support Flatpak identity and can cross application boundaries.
+Its code is archived on `experimental/certificate-webauthentication+delegation`;
+[ADR 0011](decisions/0011-client-side-pkcs11-module.md) discusses app-info-scoped alternatives.
+The module refuses exactly `xdg-desktop-portal` and `xdg-desktop-portal-certificate`, allowing
+the consumer executable `xdg-desktop-portal-webauth`.
 
-  Process-tree delegation did fix it and came out of the proposal: it cannot fire at all for a
-  Flatpak caller, and ancestry alone crosses application boundaries. It is archived on
-  `experimental/certificate-webauthentication+delegation`. **The count to watch is two, and a
-  third is a regression.** See [ADR 0011](decisions/0011-client-side-pkcs11-module.md) for the
-  candidate that would replace it.
+### 2.56 NSS headless tests
 
-  Two, and no longer three. The live Entra run on 2026-09-05 saw a *third* chooser, two seconds
-  after the sign-in window opened and before any client-certificate challenge, from GnuTLS
-  verifying the identity provider's own certificate chain through this module. Phase 0 of
-  `module-smoke.sh` is the check that it stays gone.
-- **The exclusion list had to stop being a prefix match.** The module refused to run in any process
-  named `xdg-desktop-portal*`, which includes `xdg-desktop-portal-webauth` — a *consumer*, not the
-  portal. It is now two exact names.
-
-### 2.56 NSS itself, headless — `tools/nss-smoke.sh`
-
-`tools/module-smoke.sh` drives the module with GnuTLS and with OpenSC's `pkcs11-tool`.
-`tools/nss-smoke.sh` drives it with **NSS**, which is the library Firefox, Thunderbird, LibreOffice
-and Evolution all reach a card through [[S54](SOURCES.md)] — the half of
-[SPIKES.md](SPIKES.md) S1 that was open until 2026-09-06. Same private-bus stack as §2.5:
-frontend, backend, SoftHSM fixture, Xvfb, xdotool, and nothing in it speaks D-Bus. The module is
-loaded **the way Firefox loads it** — `modutil -add -libfile` against the built `.so`, not through
-p11-kit's proxy — because "Security Devices → Load" wants a path.
+NSS consumers include Firefox, Thunderbird, LibreOffice and Evolution [[S54](SOURCES.md)].
+`nss-smoke.sh` loads the shared object directly with `modutil -add -libfile`, matching Firefox's
+Security Devices loader. It uses the same private stack as §2.5.
 
 ```console
 $ ninja -C build
@@ -514,34 +394,22 @@ $ tools/nss-smoke.sh --phase 1        # just the private-key path
 $ tools/nss-smoke.sh --phase 3        # just the handshake
 ```
 
-It wants `nss-tools`: `certutil` and `modutil` from `$PATH`, and `tstclnt`, which Fedora puts in
-`/usr/lib64/nss/unsupported-tools`. Nothing has to be installed system wide — `dnf download
-nss-tools`, `rpm2cpio … | cpio -idmu` into a scratch directory, then `NSS_BIN=<that>/usr/bin`.
+Prerequisites are `nss-tools`: `certutil`, `modutil` and `tstclnt`. Fedora places the last in
+`/usr/lib64/nss/unsupported-tools`. Unpacked packages can be used with `NSS_BIN` pointing to
+their `usr/bin`, or `TSTCLNT` naming that binary; download with `dnf download nss-tools`
+and extract with `rpm2cpio`/`cpio` as above.
 
-Four phases:
+0. `modutil -list portal` names the token; whole-database `certutil -L` leaves grant counts unchanged.
+1. `certutil -K -h "Portal Certificate"` finds a private key without enumeration opt-in.
+   `CKA_CLASS=CKO_PRIVATE_KEY` establishes intent even with `CKA_TOKEN`. Output must not contain
+   `Error opening input terminal for read`, which indicates the application's password callback.
+2. `certutil -L -h "Portal Certificate"` returns no objects without enumeration opt-in, then
+   acquires with `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`. `u,u,u` means NSS matched a user
+   certificate to the token's private key.
+3. `tstclnt -n "Portal Certificate:Portal Certificate"` uses a `token:nickname` label search and
+   needs no opt-in. It completes mutual TLS against the same Python server as §2.5.
 
-0. **The token is visible and nothing about listing the database asks for a credential.**
-   `modutil -list portal` must name `Portal Certificate`, and `certutil -L` over the whole database
-   must leave the `grant-created` count where it was.
-1. **`certutil -K -h "Portal Certificate"` — the private key, and NO password callback.** NSS asks
-   for private keys with `[CKA_CLASS = CKO_PRIVATE_KEY, CKA_TOKEN]`, which names a credential on its
-   own, so this phase needs no enumeration opt-in: one chooser, one key, `rsa … Portal Certificate`.
-   The second half of the assertion is the one that matters: **certutil's output must not contain
-   `Error opening input terminal for read`.** That string is NSS running the application's password
-   callback, and it is the same event that in Firefox is a modal alert somebody has to dismiss. It
-   appears if and only if the token claims `CKF_LOGIN_REQUIRED`; see §2.6 and
-   [[S59](SOURCES.md)].
-2. **`certutil -L -h "Portal Certificate"` — the certificate list needs the opt-in.** Run twice.
-   Without `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` it lists nothing and raises no chooser; with it,
-   one chooser and one line, `Portal Certificate:Portal Certificate … u,u,u`. The `u` is NSS
-   calling it a **user** certificate, which means NSS matched the certificate to the private key on
-   the same token.
-3. **`tstclnt -n "Portal Certificate:Portal Certificate"` — a real TLS client-auth handshake, NSS
-   end to end**, against the same python `ssl` server §2.5 phase 3 uses. `token:nickname` is how NSS
-   names an object on a token and it reaches the module as a `CKA_LABEL` search, so this phase needs
-   no opt-in either.
-
-Expect, on a pass:
+Expected output:
 
 ```
 === 0  the token is visible, and listing the database asks for nothing ===
@@ -565,16 +433,10 @@ PASS Portal Test User (RSA)
 nss-smoke: PASS
 ```
 
-**Every NSS tool here gets `</dev/null`, and that is not tidiness.** `modutil` asks "Type
-`q <enter>` to abort, or `<enter>` to continue" whenever p11-kit is configured on the machine and
-`-force` does not silence *that* prompt; `certutil`'s password callback reads the terminal. Both
-block for ever on a pipe nobody writes to, which is how the first run of this script appeared to
-hang in `modutil -add`. `tstclnt` needs `-Q`: without it, it spins on a closed stdin after the
-handshake has already succeeded — the first run of this script wrote a 4.4 GB log that way and
-filled `$TMPDIR`.
-
-Under a sanitizer, all three NSS tools load the module with a plain `dlopen()`, so unlike
-`module-smoke.sh` phase 2 there is nothing here the sanitizer runtime refuses:
+The tools receive `</dev/null` so terminal prompts cannot block. `modutil -force` does not
+silence its p11-kit configuration prompt. `tstclnt -Q` exits on closed stdin; omitting it can
+loop after a successful handshake. NSS uses plain `dlopen()`, so all phases can load the
+sanitized module:
 
 ```console
 $ meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
@@ -582,91 +444,42 @@ $ ninja -C build-asan
 $ LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0     MODULE_SO=$PWD/build-asan/src/module/libpkcs11-portal-certificate.so     tools/nss-smoke.sh --phase "1 2 3"
 ```
 
-### 2.6 Firefox: what NSS actually does, and what to expect
+### 2.6 Firefox
 
-Confirmed by the author on 2026-09-06 with Firefox, a throwaway profile, the module loaded from
-Security Devices and a PIV card: the portal chooser, Firefox's own picker, then the PIN prompt,
-and the site accepted the certificate. No "Protected Authentication" alert.
+Confirmed on 2026-09-06 with Firefox, a throwaway profile, direct Security Devices loading and
+a PIV card: portal chooser, Firefox picker, PIN prompt and successful site authentication.
+No Protected Authentication alert appeared.
 
-Two module defects were found here on 2026-09-06, both by driving NSS headlessly with §2.56 and by
-reading NSS's and Firefox's own source [[S59](SOURCES.md)]. The live report they explain: the
-module was loaded into a fresh profile with `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`, a site that
-wants a client certificate was visited, Firefox put up **"Protected Authentication — Please
-authenticate to the security device (Portal Certificate)"** and it never went away; the frontend
-log showed no `CreateSession` and no `AcquireCredential`, and the backend showed no chooser.
+NSS authenticates non-friendly slots before `PK11_ListCertsInSlot()`. A manually loaded module
+is not friendly. `CKF_LOGIN_REQUIRED` would invoke Firefox's protected-path callback, whose modal
+`Alert()` waits for OK before the certificate search, even if `C_Login` has already returned.
+The 2026-09-06 failure report recorded that alert, no frontend session/acquisition and no chooser;
+[ADR 0011](decisions/0011-client-side-pkcs11-module.md) and [[S59](SOURCES.md)] explain it.
+[The module login flags](ARCHITECTURE.md#client-side-pkcs11-module) avoid that alert.
+`CKA_TOKEN=CK_FALSE` requests unsupported session objects;
+[search intent](SECURITY.md#search-intent) covers persistent-token searches.
 
-- **The dialog was not waiting for anything.** Firefox's password callback for a
-  protected-authentication-path token dispatches `PK11_CheckUserPassword()` to a background task
-  and then calls `prompt->Alert()` — a modal alert with an OK button — and only waits for the
-  background task **after** `Alert()` returns. The module's `C_Login` had already answered `CKR_OK`
-  in microseconds. The alert sits there until a person clicks OK, and while it is up Firefox's main
-  thread is inside `Alert()`'s nested event loop, so the certificate search — and therefore every
-  D-Bus call the module would have made — had not started. That is why the frontend saw nothing.
-- **Why Firefox logged in before searching at all**: `FindClientCertificatesWithPrivateKeys()`
-  calls `PK11_Authenticate()` on every slot that is not "friendly" *before*
-  `PK11_ListCertsInSlot()`, and a module loaded through the "Load" dialog is never friendly.
-  `PK11_Authenticate()` does nothing at all unless the token sets `CKF_LOGIN_REQUIRED`. **The token
-  no longer sets it** (`src/module/module.c`, `C_GetTokenInfo`): nothing in the module is gated on a
-  login, so claiming one bought a dialog and nothing else. `CKF_PROTECTED_AUTHENTICATION_PATH`
-  stays, for the consumers that log in regardless — GnuTLS and `pkcs11-tool` both do — so that none
-  of them asks the user for a PIN.
-- **And even after clicking OK, the token would have looked empty.** NSS attaches
-  `CKA_TOKEN = CK_TRUE` to every search it makes: `[CKA_TOKEN, CKA_CLASS]` to list certificates,
-  `[CKA_CLASS, CKA_TOKEN]` to list private keys. `portal_template_intent()` counted that as a
-  distinguishing attribute, so **both** landed on the "never acquire" row — the private-key search
-  never reached the `CKO_PRIVATE_KEY` rule, and the certificate search was not classified as
-  enumeration, which left `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` with nothing to switch.
-  `CKA_TOKEN = CK_TRUE` says the object is persistent, which all three of this token's objects are,
-  and it names nothing; it is now passed over exactly as `CKA_SIGN` and `CKA_DECRYPT` are.
-  `CKA_TOKEN = CK_FALSE` asks for session objects and stays on the refusing side.
+1. Build or install `libpkcs11-portal-certificate.so`. Start Firefox with
+   `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`; its class-only certificate listing otherwise sees
+   no objects. Private-key and token:nickname searches do not need the opt-in.
+2. In Settings, Privacy & Security, Security Devices, Load, give the shared-object path.
+   Direct loading does not read p11-kit configuration. On distribution builds using
+   p11-kit-proxy instead, add `firefox` to the installed `enable-in:` list or a per-user override;
+   see [the allowlist](decisions/0011-client-side-pkcs11-module.md#the-module-is-opt-in-by-name-and-the-shipped-file-is-the-allowlist).
+   Do not combine `enable-in` and `disable-in`; p11-kit consults only the former when both exist.
+3. Start the portal stack with a card or fixture, then visit a site requiring a client certificate.
+4. Expect portal chooser at search, Firefox's own one-certificate picker, then backend PIN
+   interaction at first `Sign`. A Protected Authentication alert indicates `CKF_LOGIN_REQUIRED`.
 
-To run it:
+Repeated enumeration and changing object sets after expiry need live testing. The recorded NSS
+`[CKA_ISSUER, CKA_SERIAL_NUMBER]` lookup returned no object even with a grant; certutil listing
+survived and the Firefox path did not depend on it. That compatibility gap remains open.
 
-1. Install the module and its `.module` file, or point `XDG_CONFIG_HOME` at a directory holding
-   one, as `tools/module-smoke.sh` does.
-2. In Firefox: Settings → Privacy & Security → Security Devices → Load, and give it
-   `libpkcs11-portal-certificate.so`. (Firefox does not read p11-kit configuration; it wants the
-   path.)
+### 2.7 Firefox Flatpak
 
-   **Start Firefox with `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`,** or it will see an empty token.
-   `PK11_ListCertsInSlot()` is "every certificate on this token" and NSS has no way to name an
-   object there, so it is a class-only enumeration and does not acquire a credential by default —
-   see §2.5 phase 0. The variable exists for this. The private key and a `token:nickname` lookup do
-   not need it; the certificate list does, and Firefox's client-auth path starts from the
-   certificate list.
-
-   On a system whose Firefox and NSS build **do** go through p11-kit's proxy module, the
-   recommended way to try this is to add `firefox` to the `enable-in:` line of the installed
-   `.module` file, or to write a per-user file naming only `firefox`, instead of step 2's manual
-   "Load". The shipped file is already an allowlist and already carries the commented line; see
-   [0011](decisions/0011-client-side-pkcs11-module.md#the-module-is-opt-in-by-name-and-the-shipped-file-is-the-allowlist).
-   `enable-in` alone, never `disable-in` alongside it — `pkcs11.conf(5)` says not to set both on
-   one module, and p11-kit only consults `enable-in` when both are present.
-3. Start the portal stack with a card or the SoftHSM fixture, and visit a site that asks for a
-   client certificate.
-4. **Expect three dialogs and no fourth**, in this order:
-   1. **this backend's chooser**, at the moment Firefox looks for a certificate, because that is
-      `C_FindObjectsInit`;
-   2. **Firefox's own certificate picker**, offering exactly the one that was granted — Firefox
-      always draws it, and it is not something the module can suppress;
-   3. **this backend's PIN prompt**, at the first `Sign`, not a PIN field from Firefox.
-
-   **No "Protected Authentication" alert.** One appearing means the token is claiming
-   `CKF_LOGIN_REQUIRED` again.
-
-Still to write down, because §2.56 cannot answer it: how often Firefox re-enumerates within one
-session and whether that provokes a second chooser (each `C_Initialize` in a new process is a grant
-of its own — §2.55's count of two is the precedent), and whether it copes with a token whose object
-set changes when the grant expires. Known caveat: NSS's search for a certificate by
-`[CKA_ISSUER, CKA_SERIAL_NUMBER]` answers nothing against this token even with a live grant, which
-`certutil -L` survives; nothing on Firefox's client-auth path depends on it, and it has not been
-chased.
-
-### 2.7 Firefox as a Flatpak: the sandbox case
-
-**Run 2026-09-07, PASS.** Firefox 155.0.1 from Flathub on `org.freedesktop.Platform//25.08`,
-started with `--nosocket=pcsc --nodevice=all`, module loaded from the app's data directory,
-real PIV card, GNOME 50 on Wayland, `--pin-prompt=system`. The backend's log, times as printed:
+Run 2026-09-07: pass. Firefox 155.0.1 from Flathub, `org.freedesktop.Platform//25.08`,
+`--nosocket=pcsc --nodevice=all`, module in app data, real PIV card, GNOME 50/Wayland and
+`--pin-prompt=system`. Recorded backend log:
 
 ```
 15:20:31  request-received    app_id=org.mozilla.firefox identity=(none)     purpose=create_session granted=yes
@@ -681,382 +494,258 @@ real PIV card, GNOME 50 on Wayland, `--pin-prompt=system`. The backend's log, ti
 15:21:13  grant-invalidated   detail=closed-by-portal
 ```
 
-One chooser, one PIN, one signature, and the site accepted the certificate. The frontend
-derived `org.mozilla.firefox` from the sandbox and this backend named it in the chooser; the
-identity level was `sandboxed`, which the mock-backed pytest suite had only ever exercised with a
-fixture. Firefox in one process raised one chooser, where a WebKitGTK handshake raises two.
-Firefox's own picker appeared between the chooser and the PIN, as on the host (§2.6).
+There was one portal chooser, Firefox's picker, one PIN and one signature accepted by the site.
+The frontend derived `org.mozilla.firefox` and `sandboxed` from the caller. The sandbox reached
+the card through module, D-Bus and backend. The installed Firefox permissions included
+`sockets=pcsc` and `devices=all`; `flatpak info --show-permissions org.mozilla.firefox` shows
+permissions for an installed version.
 
-Installing the Flatpak has a side effect on Fedora: its exported `org.mozilla.firefox.desktop`
-shadows the RPM Firefox's launcher of the same id, so the dock icon and the default browser
-start the Flatpak and its empty profile. The host profile under `~/.config/mozilla/firefox` is
-untouched. The script copies the RPM launcher into `~/.local/share/applications/`, which
-outranks the Flatpak export; `flatpak uninstall --user org.mozilla.firefox` is the other way
-out.
+Checks on 2026-09-07 found the host module needed glibc 2.14, linked libraries available in that
+runtime (GLib/GIO, GnuTLS, p11-kit and dependencies), and loaded inside the sandbox. Sandbox
+gdbus saw the experimental interface with the branch frontend live; the restricted run lacked
+`/run/pcscd`. Two discovery failures before the successful run reported `tokens=0` with the
+card absent. Check `--list-tokens` and `opensc-tool -l` first in that case.
 
-Two runs before it failed at discovery with `tokens=0`: the card was not in the reader. The
-backend's own `--list-tokens` and `opensc-tool -l` say the same thing in that state, so check
-those first.
+Start the live stack in one terminal:
 
-
-The Flathub Firefox ships with `sockets=pcsc` and `devices=all`
-(`flatpak info --show-permissions org.mozilla.firefox`), so as installed it can reach `pcscd`
-directly, the same as a host Firefox. The point of this run is to take both away and show the
-card is still reachable, through the module, D-Bus and this backend, with no device permission
-at all. The portal bus name `org.freedesktop.portal.Desktop` is reachable from every Flatpak
-by default, which is the whole argument for a portal.
-
-What was checked before writing the recipe, on 2026-09-07: the host-built module needs
-glibc 2.14 and links only libraries the `org.freedesktop.Platform//25.08` runtime ships (GLib,
-GIO, GnuTLS, p11-kit and their dependencies), and it `dlopen`s inside the sandbox; `gdbus`
-inside the sandbox sees the experimental Certificate interface on the portal bus when the branch
-frontend is live; `flatpak run --nosocket=pcsc --nodevice=all` removes `/run/pcscd` from the
-sandbox.
-
-To run it:
-
-1. In one terminal, the live stack, which replaces the session's portal with the branch build,
-   routes the Certificate interface to this backend and prints the backend's decision lines:
-
-   ```console
+```console
    $ tools/dev-stack.sh --live --keep --no-e2e --pin-prompt=system
    ```
 
-   Without `--no-e2e` the stack runs `tools/certificate-e2e.py` once before it hands over, which
-   with a card present is a chooser, a PIN prompt and a signature of its own; a run driven by
-   hand does not want that.
+`--no-e2e` skips the script's own chooser, PIN and signature before the browser test.
+In another terminal:
 
-2. In another:
-
-   ```console
+```console
    $ flatpak install flathub org.mozilla.firefox      # once
    $ tools/firefox-flatpak.sh --fresh
    ```
 
-   The script copies the built module into `~/.var/app/org.mozilla.firefox/data/`, which is
-   `$XDG_DATA_HOME` inside the sandbox, creates a throwaway profile beside it, verifies from
-   inside the sandbox that `/run/pcscd` is gone and the portal bus is visible, and starts Firefox
-   with `--nosocket=pcsc --nodevice=all` and `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`.
-   `--check` stops after the verification; `--keep-pcsc` is the control run with the sandbox as
-   shipped; `--url` opens a site.
+The script copies the module to `~/.var/app/org.mozilla.firefox/data/`, creates a scratch profile,
+checks sandbox pcsc absence and portal visibility, then launches with enumeration opt-in and
+both direct-device permissions removed. `--fresh` resets the test profile; `--check` stops after
+verification; `--keep-pcsc` is the installed-permissions control; `--url` opens a site;
+`--module` selects another built module.
 
-3. In Firefox, once per profile: Settings, Privacy & Security, Security Devices, Load, with the
-   path the script printed. Firefox loads the `.so` by path and reads no p11-kit configuration,
-   so the `.module` file's `enable-in` list plays no part here.
+Once per profile, load the printed module path through Firefox's Security Devices dialog.
+The `.module` allowlist is not involved in this direct loading. Visit a client-certificate site.
+Expect the three dialogs from §2.6. Correlate the backend's
+`app_id=org.mozilla.firefox identity=sandboxed purpose=client_auth granted=yes` with
+`CreateSession`/`AcquireCredential` in `$DEVDIR/frontend.log`. An alert, empty certificate list
+or unidentified caller needs investigation. Compatibility with other runtime versions remains
+unproven.
 
-4. Visit a site that asks for a client certificate.
+On Fedora the Flatpak-exported `org.mozilla.firefox.desktop` can shadow the RPM launcher and
+select an empty Flatpak profile. The host profile under `~/.config/mozilla/firefox` remains
+separate. The script copies the RPM launcher to `~/.local/share/applications/` if no user
+launcher exists. Removing the user Flatpak with `flatpak uninstall --user org.mozilla.firefox`
+also removes that exported launcher.
 
-Expect the three dialogs of §2.6 in the same order: this backend's chooser, Firefox's own
-picker, the shell's PIN prompt. The proof that the sandbox case held is two log lines:
+## 3. Real PIV card
 
-- on the dev-stack terminal, the backend's decision line
-  `... app_id=org.mozilla.firefox identity=sandboxed purpose=client_auth granted=yes`, which
-  says the frontend identified the caller from its sandbox and this backend named it in the
-  chooser;
-- in `$DEVDIR/frontend.log`, the `CreateSession` and `AcquireCredential` from that app id.
+Tiers 3.1–3.4 have a single-card result. Read this section before inserting a card: the live
+stack replaces the session portal, and the optional wrong-PIN check spends a failed attempt.
 
-A `Protected Authentication` alert, an empty certificate list, or a chooser naming an
-unidentified caller are the failure signatures; §2.6 explains the first two.
+### 3.0 Sequence
 
-Open before the run: whether Firefox's Flatpak build resolves `dlopen` of a module outside
-`/app` and `/usr` (the runtime's loader has no reason to refuse a path under `$XDG_DATA_HOME`,
-and Python's `ctypes` inside the same sandbox loads it), and whether the runtime's GnuTLS and
-p11-kit versions change anything the host run did not show.
+Run discovery, private-bus signing, private-bus cancellation, then live signing. Follow with
+same-grant reuse only when a suitable client exists; retry checks require a healthy card you
+can unblock. Stop at an unexpected result and retain the backend log. Successful PIN validation
+can reset a retry counter; a wrong PIN consumes one.
 
----
-## 3. A real PIV card. Tiers 3.1–3.4 have been run, once.
-
-**Read this whole section before inserting the card.** One step deliberately spends a PIN attempt
-and one step replaces the system portal. Nothing above this line touches hardware, and nothing
-below it has been run against more than one card in one reader — see the note under §3.4.
-
-### 3.0 The shortest sequence that would change that
-
-Six steps, in this order, and the first four are cheap. Everything after step 3 assumes the one
-before it passed.
-
-| | Step | What it settles | Spends an attempt |
-|---|---|---|---|
-| 1 | `--list-tokens` | the card is visible, the certificates parse, the PIN counter is healthy | no |
-| 2 | private bus, happy path | chooser → PIN window → `C_Sign` → the signature verifies | no |
-| 3 | private bus, cancel | the window goes away and no grant is issued | no |
-| 4 | live, happy path | the **system prompter** draws the PIN request, on the real session bus | no |
-| 5 | live, a second signature on one grant | one PIN for the grant, not one per operation | no |
-| 6 | wrong PIN, **optional** | the retry wording and the flags, from a real counter | **yes** |
-
-The exact commands are 3.1 to 3.6. **Stop at the first one that does not do what it says**, and keep
-the backend log: every one of them has a distinctive failure and they are the interesting ones.
-
-### 3.1 Does anything see the card
+### 3.1 Card discovery
 
 ```console
-$ systemctl --user status pcscd.socket ; systemctl status pcscd
+$ systemctl status pcscd.socket pcscd.service
 $ pkcs11-tool --module /usr/lib64/pkcs11/opensc-pkcs11.so --list-token-slots
 $ ./build/src/xdg-desktop-portal-certificate --list-tokens
 ```
 
-and, if p11-kit is not configured for OpenSC on this machine:
+If p11-kit has no OpenSC configuration:
 
 ```console
 $ ./build/src/xdg-desktop-portal-certificate \
       --module /usr/lib64/pkcs11/opensc-pkcs11.so --list-tokens
 ```
 
-If `pkcs11-tool --list-token-slots` shows no token, nothing below will work and the problem is
-pcscd, the reader or the card, not this backend.
+A missing token in pkcs11-tool indicates a reader/card/pcscd problem before portal testing.
+The backend prints token and certificate blocks: subject, issuer, expiry, key type/size,
+mechanisms, purposes, PIV slot where known and a stable id. Display text is sanitized; pipe to
+`cat -v` to inspect bytes. Serial output is `****` plus its last four characters; full serials
+are not logged ([SECURITY.md](SECURITY.md)).
 
-Expect one token block per card, then one entry per usable certificate: subject, issuer, expiry, key
-type and size, the mechanisms the token advertises, the purposes it fits, the PIV slot where that
-could be determined, and a stable id. Every card-supplied string goes through the same sanitiser the
-chooser uses, so a card carrying ANSI escapes or a right-to-left override cannot rewrite this
-output; `| cat -v` if you want the bytes rather than the reading. **The serial is printed as `****`
-plus its last four characters** and the full one is never logged — [SECURITY.md](SECURITY.md) says
-why.
+`hardware yes (CKF_HW_SLOT)` is expected for a reader; software slots are skipped without
+`--allow-software-tokens` or explicit `--module`. A protected-path reader gets instructions
+without a PIN entry; the typed wrong-PIN recipe below does not apply. Recent-failure warnings
+mean skip §3.6. A final-attempt warning means stop and reset the counter. Expired certificates
+remain offered and marked. Missing usable certificates can indicate key/ID, mechanism or
+purpose restrictions; hidden keys are handled as [documented](IMPL-INTERFACE.md#discovery-before-login).
 
-Four lines to read carefully:
-
-- `hardware      yes (CKF_HW_SLOT)` — expected for a card in a reader. **`no`** means this backend
-  will not offer it without `--allow-software-tokens` or `--module`, and a `SKIPPED` line says so.
-- `PIN entry: on the reader (protected path)` — your reader has a PIN pad, and the prompt will be an
-  instruction with no editable field. 3.6 does not apply.
-- `PIN state: recent failed attempts` — the counter is already down. Do not run 3.6.
-- `PIN state: final attempt before locking` — **stop.** Reset the counter before anything else.
-
-A certificate you expected but do not see has no private key with a matching `CKA_ID`, has a key
-type this backend has no mechanism for, or is ruled out of every purpose by its EKU. One listed as
-`EXPIRED` is correct behaviour: expired certificates are offered and marked, never hidden.
-
-### 3.2 The private-bus happy path
+### 3.2 Private-bus signing
 
 ```console
 $ tools/dev-stack.sh -- --purpose client_auth --reason "Testing the certificate portal"
 ```
 
-Windows appear on your real display even though the bus is private, because the backend inherits
-`WAYLAND_DISPLAY` from your session. On a private bus there is no shell to own
-`org.gnome.keyring.SystemPrompter`, so this run uses **this backend's own PIN window** — which is
-the one to look at first, because it is the one this repository draws.
+The backend inherits the desktop display but uses a private bus and defaults to its GTK PIN
+window. The chooser is titled "Use a Certificate". This Python caller is unidentified and must
+be labelled accordingly. Purpose text describes proving identity to a server; `reason` appears
+inside "The application says", outside trusted identity. Rows show certificate, validity, key,
+token and reader; the window states scope and duration. Check the desktop color scheme.
 
-**In order:**
+Choose a certificate. At `Sign`, "Unlock Security Token" names caller, purpose, token and reader.
+`may_prompt_later=true` describes this lazy login. Enter the PIN; expect a signature length,
+`verified  signature checks against the returned certificate`, and `PASS`. A verification failure
+can indicate the wrong key or encoding; retain logs.
 
-1. **The chooser**, titled *Use a Certificate*. At the top the application name and its identity
-   level — for this client, "This application could not be identified", in warning styling, which is
-   correct. Then "wants to use a certificate on your security token to prove who you are to a
-   server." Then the `reason` you passed, quoted, inside a frame labelled *The application says* — it
-   must never appear above, in the name position. Then the certificates, each with subject, issuer,
-   validity, key type, token label and reader. Then what the grant allows and for how long. Then
-   Cancel and Use Certificate. **It should be the same colour as the rest of your desktop**; if it is
-   not, `--verbose` prints `colour-scheme detail=dark` or `detail=light` and §2 says what that means.
-2. Pick a certificate, press Use Certificate.
-3. **The PIN prompt**, titled *Unlock Security Token*, naming the application, the purpose, the token
-   and the reader. It appears **at Sign time, not at grant time** — that is the lazy login, and it is
-   why `may_prompt_later` was `true` in the output above it.
-4. Type the PIN. The client prints the signature length, then
-   `verified  signature checks against the returned certificate`, then `PASS`.
-
-`FAIL: the signature did not verify` is the interesting failure and worth keeping the logs for: the
-wrong key signed, or the digest was wrapped wrongly.
-
-### 3.3 The private-bus cancel
+### 3.3 Private-bus cancellation
 
 ```console
 $ tools/dev-stack.sh -- --purpose client_auth --cancel-after 5000 --expect-cancelled
 ```
 
-The chooser goes up and the client closes the request five seconds later. The window must vanish at
-that moment, the backend log must show `chooser-cancelled`, no grant may be issued, and **no
-`Response` follows the `Close()`**. Pressing Escape or the close button by hand must do the same
-thing from the other direction: the client prints `cancelled by the user` and exits 2. When the
-client asked, it prints `PASS cancel: Close() delivered, no Response` — upstream's `Request`
-unexports the frontend object before forwarding `Close()` to the backend, so there is no second
-answer for the application that asked.
+The client closes the Request after five seconds. Expect prompt closure, `chooser-cancelled`,
+no grant and no later Response. Client-side cancellation prints
+`PASS cancel: Close() delivered, no Response`. Escape or the window close button instead
+produces `cancelled by the user` and exit 2.
 
-### 3.4 On the real session bus, with the shell's PIN prompt
+### 3.4 Live bus and system PIN prompt
 
-Only when 3.1 to 3.3 have all passed. This **takes `org.freedesktop.portal.Desktop` away from the
-system portal** for as long as it runs.
+Proceed after 3.1–3.3 pass. This takes `org.freedesktop.portal.Desktop` from the installed
+portal for the run:
 
 ```console
 $ tools/dev-stack.sh --live -- --purpose client_auth
 ```
 
-On a GNOME session `--pin-prompt` defaults to `auto` and `org.gnome.keyring.SystemPrompter` is owned
-by gnome-shell, so **the PIN request is drawn by the shell**, not by this backend: a shell-styled
-dialog rather than a window of ours, and it will **not** be parented to the requesting application.
-Both of those are expected and [SECURITY.md](SECURITY.md#where-the-field-is-drawn-and-what-that-moves)
-says what that moves and what it does not.
+On GNOME, `auto` selects the shell-owned prompter. Its session-modal dialog is not parented
+to the application; see [PIN transport](SECURITY.md#pin-entry-and-transport).
+Press Return in an empty field: expect "Enter the PIN for this token.", no `pin-incorrect`
+and no consumed attempt. If cancellation lands after submission, expect `cancelled`; successful
+late login logs `login-ok detail=cancelled-after-login` and
+`login-ok detail=abandoning-cancelled-login`.
 
-**Two things to try in the shell's dialog by hand.** Press Return on an empty field: the prompt
-must come back with "Enter the PIN for this token." and the attempt counter must not move
-(`--verbose` shows no `pin-incorrect`, and 3.1 will still say the counter is healthy). Press Cancel
-*after* the PIN has gone in, while the card is thinking: the answer must be `cancelled`, and if the
-login succeeded anyway the log must show `login-ok detail=cancelled-after-login` followed by
-`login-ok detail=abandoning-cancelled-login`. **That second one is not reliably testable by hand**:
-a PIV card typically verifies a submitted PIN in tens of milliseconds, well inside human reaction
-time, so there is usually no window to land the Cancel after submission and before the answer comes
-back — it is only observable by hand against a slow reader or card. Otherwise it is covered by the
-headless `/pin-system/shell-cancel-after-the-pin-was-submitted` case in `tests/test-pin-system.c`,
-which drives the same path with a scripted prompter instead.
+A card can validate in tens of milliseconds, making post-submission cancellation impractical by
+hand. `/pin-system/shell-cancel-after-the-pin-was-submitted` tests it with a scripted prompter.
+GNOME's prompter is gnome-shell; killing it ends the session. Test disappearance with the private
+prompter cases `prompter-vanishes-during-open`, `prompter-vanishes-during-password` and
+`prompter-vanishes-during-confirm` in `tests/test-pin-system.c` instead.
 
-On GNOME, `org.gnome.keyring.SystemPrompter` **is gnome-shell itself**, not a separate
-`gcr-prompter` process — killing it would end the session the prompt is running in, not exercise a
-crash path. The prompter vanishing mid-interaction is therefore **not testable by hand on GNOME**;
-it is covered instead by the vanish cases in `tests/test-pin-system.c`
-(`prompter-vanishes-during-open`, `prompter-vanishes-during-password`,
-`prompter-vanishes-during-confirm`), which run against a hand-written hostile prompter that can
-drop off the bus on command.
-
-The backend log says which prompt was used:
+Prompt selection appears as:
 
 ```
 ** Message: pin-prompt-selected detail=system
 ```
 
-To compare the two by eye, run it again with the other one. `--pin-prompt` is forwarded through
-the script's `--live` re-execution, so this really is the in-process window and not `auto` again:
+Compare with explicit GTK:
 
 ```console
 $ tools/dev-stack.sh --live --pin-prompt=gtk -- --purpose client_auth
 ```
 
-The chooser is this backend's window in both cases. Only the PIN request moves.
+The chooser belongs to the backend in both runs.
 
 ### Observed on real hardware (2026-09-04)
 
-Tiers 3.1 through 3.4 have passed, once, against one PIV card in one reader (OpenSC, an SCR 331
-class reader, GNOME 50 under Wayland): `--list-tokens` parsed every certificate on the card (3.1),
-the private-bus happy path and cancel both went as described (3.2, 3.3), and the live run with the
-shell's own prompter passed including the empty-Return re-prompt and a chooser cancel (3.4).
-Timings, from the backend's own log: the card verifies a submitted PIN in about 40 ms, a signature
-comes back in about 0.26 s, and moving the `Secret` backend off (§2) took private-bus startup from
-roughly 25 s to about 2 s. **One card, one reader** — this is not yet a claim about PIV hardware in
-general.
+Tiers 3.1–3.4 passed once against one PIV card, OpenSC, an SCR 331-class reader and GNOME 50
+on Wayland. Discovery parsed every certificate; private signing/cancel behaved as described;
+live system prompting passed, including empty-Return and chooser cancellation. The backend log
+measured about 40 ms for PIN validation and 0.26 s for a signature. Disabling private-bus Secret
+activation reduced startup from roughly 25 s to 2 s. These are measurements from one setup.
 
 ### 3.5 One PIN per grant
 
-```console
-$ tools/dev-stack.sh --live --keep -- --purpose client_auth
-# ...then, from another shell on the same bus, run tools/certificate-e2e.py again
-```
+Unrun on hardware. Verify two sequential signatures and two concurrent signatures under the same
+grant: one login prompt and successful results for all live waiters. No current command in
+`certificate-e2e.py` keeps a grant for a second signing operation. Separate invocations create
+separate connections/grants, and `--regrant` creates another session, so neither tests this
+property. The broker and cancellation unit tests cover software-side sharing.
 
-The second signature must go through with **no second PIN request**: the session stays logged in for
-the grant's lifetime. Two `certificate-e2e.py` runs started at once must produce **exactly one** PIN
-request and both must be answered.
+### 3.6 Wrong PIN and final attempt
 
-### 3.6 The wrong-PIN run — OPTIONAL, and it spends an attempt
-
-**Skip this unless 3.1 said the counter is healthy, and never run it on a card you cannot unblock.**
-A PIV card typically allows three attempts before it locks, and this deliberately spends one.
+Optional and unrun on hardware. Use a healthy card that you can unblock; a typical PIV card
+allows three failed attempts. This check intentionally spends one:
 
 ```console
 $ tools/dev-stack.sh --live -- --purpose client_auth
 ```
 
-Type a wrong PIN, then the right one. What must happen:
+Enter a wrong PIN, then the correct one. The prompt should offer a retry without failing the
+request, refresh `CKF_USER_PIN_COUNT_LOW` and show recent-failure wording without an invented
+count. If `CKF_USER_PIN_FINAL_TRY` appears, require explicit second confirmation; refusing must
+leave the counter unchanged. Expect `pin-incorrect ... detail=retry-offered`. One prompt stops
+after three refusals; a new application request is a separate prompt.
 
-- the prompt says the PIN was not accepted and lets you try again, **without the request failing**;
-- the warning is re-read from the token, so `CKF_USER_PIN_COUNT_LOW` appearing shows up as
-  "There have been recent failed attempts on this token";
-- if `CKF_USER_PIN_FINAL_TRY` appears, the prompt demands a **second, explicit** confirmation before
-  spending the attempt — and refusing it must leave the counter alone;
-- the backend log shows `pin-incorrect ... detail=retry-offered`, and never a number of attempts,
-  because PKCS#11 has no portable way to ask for one.
+### 3.7 Removal and other hardware checks
 
-Three refusals in one prompt is where it stops asking; the application can ask again, which is a new
-decision rather than a habit.
+Unrun. Remove during signing, between initialization and signing, between consent and first use,
+and during PIN entry; expect a clean failure and invalidation when detected. Test same-card and
+same-label different-card reinsertion. A detected removal must require reselection. Polling may
+miss a quick removal/reinsertion; identity re-resolution and an open session's device-removal
+errors provide additional checks. [SECURITY.md](SECURITY.md#card-removal-and-grants)
+records the limit. Reader unplug, pcscd restart, multiple readers and a PIN-pad reader need
+separate runs.
 
-### 3.7 The things only a card can answer, when there is time
+[PIN cancellation rules](SECURITY.md#login-retries-and-cancellation) apply during these checks,
+including flag refresh after refusal and abandonment of late login success.
 
-None of these is on the critical path, and each is a separate run.
+OAEP with non-SHA1 hashes or labels remains unproven against a compatible module; SoftHSM 2.x
+refuses those parameters. No live-stack command can test this, because neither interface exposes
+`Decrypt`. Internal decryption accepts only RSA-OAEP; PKCS#1 v1.5 is refused.
 
-```console
-# pull the card out between the chooser and the PIN prompt
-# pull the card out while the PIN prompt is up
-# pull the card out after the grant, before signing
-#   -> expect GrantInvalidated with reason token_removed, and a clean error
-
-# reinsert the SAME card, then insert a DIFFERENT card with the SAME label into
-# the same reader: a grant must not survive either, because the token is
-# re-resolved by manufacturer, model, serial and label together
-
-# OAEP with a hash other than SHA-1, and with a label: SoftHSM 2.x refuses both
-# at C_DecryptInit, so neither path has ever run against a module
-$ tools/dev-stack.sh --live -- --purpose client_auth
-```
-
-Three things changed in the 2026-09-04 fix pass that this section depends on:
-
-- **Cancelling during the PIN prompt does not free what `C_Login` is reading.** The prompt
-  disappears at once, the answer is given when the worker returns, and the buffer the card is
-  reading is a private copy the worker owns. The card operation itself is still not cancellable —
-  PKCS#11 has no way to withdraw a `C_Login` — so **an attempt that has been submitted is spent
-  whatever you do with the prompt.** The same is true of `--login-timeout`, which gives up on the
-  interaction after 60 seconds and abandons the login if it lands afterwards.
-- **The PIN flags are re-read after every refusal**, so `CKF_USER_PIN_FINAL_TRY` appearing mid-run
-  is shown.
-- **Decryption, if it returns, takes `RSA_OAEP` and nothing else.** PKCS#1 v1.5 decryption is refused by name, so
-  there is no path that could expose the key to a padding oracle.
-
-### 3.8 Putting the session back
+### 3.8 Restore the session and upgrade the backend
 
 ```console
 $ busctl --user status org.freedesktop.portal.Desktop
 ```
 
-The `Exe=` line should read `/usr/libexec/xdg-desktop-portal` again, not your build directory. It
-returns by D-Bus activation the next time anything asks for the name; if nothing has,
-`busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop >/dev/null`
-provokes it. Then:
+After stack exit, `Exe=` should identify `/usr/libexec/xdg-desktop-portal`. If activation has not
+occurred, request it:
+
+```console
+$ busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop >/dev/null
+```
+
+Check for remaining development processes:
 
 ```console
 $ pgrep -af 'xdg-desktop-portal(-certificate)?' | grep -v /usr/libexec
 ```
 
-should print nothing.
+No output is expected. Backend replacement requires the current owner to permit it:
 
-**There is no in-place upgrade of this backend, and `--replace` on its own is not one.**
-`G_BUS_NAME_OWNER_FLAGS_REPLACE` only succeeds if the current owner asked to be replaceable, and the
-D-Bus-activated instance deliberately does not: `ALLOW_REPLACEMENT` is not "let the package manager
-replace me", it is "let whoever asks next replace me", and what would be taken over is the thing
-that asks for a PIN. The two halves are separate flags:
-
-| | |
+| Option | Meaning |
 |---|---|
-| `--allow-replacement` | this instance may be replaced later. Not the default, and **not in the installed `.service` file** |
-| `--replace` | this instance asks to replace the current owner — which works only if that owner was started with `--allow-replacement` |
+| `--allow-replacement` | Permit a later process to take the name; absent from installed activation |
+| `--replace` | Ask to replace a permitting owner |
 
-So moving to a new build means **stopping the old process and letting D-Bus activation start the new
-one**:
+D-Bus cannot authenticate the replacement. Upgrade by stopping the old backend and allowing
+activation of the installed binary:
 
 ```console
 $ pkill -f xdg-desktop-portal-certificate     # or systemctl --user stop, where it is a unit
-# ...the next AcquireCredential activates the new binary
+# The next backend call activates the installed binary.
 ```
 
-`tools/dev-stack.sh --live` starts its backend with `--replace --allow-replacement` so that
-re-running it takes the name off the instance the previous run left behind. That is a development
-loop, not a deployment recipe.
+Development `dev-stack.sh --live` passes both flags so successive runs can replace each other.
+Use restart/activation for installed instances.
 
----
+## Reading logs
 
-## Reading the logs
-
-The backend logs **decisions, not data**. Every line is a stable reason code plus fields that
-`src/redact.h` permits:
+Backend events use the [logging fields and redaction rules](SECURITY.md#logging) in `src/redact.h`:
 
 ```
 request-received      an impl method arrived
 discovery-started     token enumeration began
-discovery-result      how many tokens, how many candidates -- never which
+discovery-result      how many tokens, how many candidates; inventory excluded
 no-matching-certificate
 chooser-shown         the consent window went up
 consent-granted       the user picked one
 chooser-cancelled     the user did not
 grant-created         a grant a user answered a window for
-pin-prompt-selected   detail=gtk | system -- which process drew the PIN field
+pin-prompt-selected   detail=gtk | system; entry owner
 pin-prompted          detail=on-screen | protected-path
-pin-prompt-failed     detail=system-prompter[-unreachable] -- the shell's prompt did not answer
-pin-prompt-dismissed  detail=system-prompter -- the shell took the prompt away
+pin-prompt-failed     detail=system-prompter[-unreachable]; prompter failure
+pin-prompt-dismissed  detail=system-prompter; prompter dismissal
 pin-prompt-round-completed-twice  gcr completed one round twice; the second was ignored
 pin-incorrect         an attempt was spent
 pin-locked            terminal
@@ -1069,32 +758,31 @@ grant-invalidated     detail says why
 token-removed
 ```
 
-There is deliberately no PIN, no certificate subject, no PKCS#11 URI, no signature and no card
-serial in any of them, and there is no logging entry point that takes a format string, so there is
-no way to add one by accident. `--verbose` adds breadcrumbs; it does not add data.
+`--verbose` adds diagnostic events. The [logging gap](SECURITY.md#logging) tracked in
+[issue #6](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/6) prevents correlation
+with the frontend journal by session or operation id.
 
-**Answering "what used my card, and when" needs both journals.** The decision — which application,
-at which identity level, for which purpose — is xdg-desktop-portal's; the card event is this
-backend's. That is a consequence of the split, and the session handle is what joins them.
+## Troubleshooting
 
-## If something goes wrong
-
-| Symptom | Where to look |
+| Symptom | Check |
 |---|---|
-| `org.freedesktop.portal.experimental.Certificate1 is not exported` | check frontend branch `experimental/integration`, a configured backend for `org.freedesktop.impl.portal.experimental.Certificate1`, and `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` in the frontend's startup environment. Introspect `/org/freedesktop/portal/desktop` |
-| the frontend logs nothing about `certificate` | no `.portal` file matched: check `XDG_DESKTOP_PORTAL_DIR` and `portals.conf` |
-| `Backend call failed: ... disconnected from message bus without replying` | **this backend crashed** — and there will be no core dump, because `main()` sets `PR_SET_DUMPABLE(0)` and `RLIMIT_CORE 0` so that a crash between typing a PIN and wiping it cannot write one to disk. Re-run it with `--debug-allow-core` to get a dump and to be able to attach `gdb`; never put that flag in an installed service file |
-| `Gdk-WARNING: Failed to read portal settings ... Unable to open /proc/<pid>/root` | expected, and the same hardening: a non-dumpable process's `/proc` entries are root-owned, so the settings portal cannot identify this one. It is the mechanism that blocks a same-uid `ptrace` attach. The colour scheme is **not** lost with it: `src/main.c` reads `org.gnome.desktop.interface color-scheme` from GSettings and feeds libadwaita directly, because measuring showed the fallbacks did not recover it |
-| the chooser or the PIN window is the wrong colour | `--verbose` prints `colour-scheme detail=dark` / `detail=light`. If it disagrees with `gsettings get org.gnome.desktop.interface color-scheme`, the GSettings path in `follow_colour_scheme()` is what to look at; if it agrees, the theme is right and something else is wrong |
-| `--pin-prompt` is not in `--help` | this build has no gcr-4. `meson configure build \| grep gcr`; the option does not exist rather than failing later |
-| `--pin-prompt=system` and nothing appears | `org.gnome.keyring.SystemPrompter` is not on the bus the backend is using. On a private bus there is no shell; the backend answers `no_display` and says `pin-prompt-failed detail=system-prompter-unreachable` rather than silently drawing its own window |
-| `--list-tokens` says `SKIPPED  not a hardware token` | the token's slot does not set `CKF_HW_SLOT`. That is the default policy, not a failure: pass `--allow-software-tokens`, or name the module with `--module` |
-| a tools script says a directory `has no .xdg-desktop-portal-certificate-fixture` | it was not created by this project, and the scripts delete these directories recursively. Remove it by hand if it really is disposable |
-| a tools script says a marker `is mode 644, not 600` | the fixture predates the tightened checks. `chmod 600` the marker, or re-create the fixture with the script that owns it |
-| a `Sign` fails with "The token did not answer the login in time" | `--login-timeout` (60 s) ran out. The attempt is still spent — PKCS#11 cannot withdraw a `C_Login` — and a login that lands afterwards is logged out again. Raise it, or pass `--login-timeout 0`, if the middleware is legitimately that slow |
-| every method returns `AccessDenied` | the sender does not own `org.freedesktop.portal.Desktop`. That is the peer check, and it is working |
-| `AcquireCredential` answers 2 with `no_token` | no token is present |
-| `AcquireCredential` answers 2 with `no_matching_certificate` | a token is present but nothing on it fits the purpose and filter. `--list-tokens` says which purposes each certificate fits |
-| `Sign` answers 2 with `invalid_request` | the mechanism, the `hash` parameter or the digest length did not validate. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) |
-| `AcquireCredential` answers 2 with `no_such_session` and the session obviously exists | the call named a different `app_id` than `CreateSession` did, or a higher `app_identity_level` than the session has already been used at |
-| a second `CreateSession` on the same path answers 2 | there is a live session there. Close it first; a **closed** one is replaced |
+| Experimental Certificate interface absent | Frontend branch `experimental/integration`, configured impl backend and startup `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1`; introspect the desktop path |
+| No frontend Certificate routing log | `.portal` interface, `XDG_DESKTOP_PORTAL_DIR` and `portals.conf` |
+| Backend disconnected without replying | Crash; hardening disables dumps. Use `--debug-allow-core` only for development debugging, using a disposable fixture |
+| Settings-portal `/proc/<pid>/root` warning | Expected consequence of non-dumpable hardening; GSettings supplies the theme |
+| Wrong window theme | Compare `--verbose` `colour-scheme` with `gsettings get org.gnome.desktop.interface color-scheme`; inspect `follow_colour_scheme()` if they disagree |
+| `--pin-prompt` absent | No gcr-4 in this build; inspect `meson configure build` |
+| System prompt unavailable | Check the prompter on the backend's bus; failure is `no_display`, with `pin-prompt-failed detail=system-prompter-unreachable`. A private bus may activate a fallback, but has no shell |
+| Software token skipped | Pass `--allow-software-tokens` or explicit `--module` |
+| Missing fixture marker | Existing directory is refused; remove it manually only if disposable |
+| Marker mode 644 | Set a valid fixture marker to 0600 or recreate with its script |
+| Login timeout | Submitted attempt cannot be cancelled. Configure the backend's `--login-timeout` or `--login-timeout 0` for slow middleware; late success is abandoned |
+| Every impl call gets `AccessDenied` | Caller must own `org.freedesktop.portal.Desktop` |
+| Internal `no_token` | Discovery produced no usable candidates; not proof of physical reader absence |
+| Internal `no_matching_certificate` | Candidates exist but none satisfies purpose/filter; inspect `--list-tokens` |
+| `Sign` with `invalid_request` | Mechanism, parameter type or digest length; see [IMPL-INTERFACE.md](IMPL-INTERFACE.md) |
+| Existing session gives `no_such_session` | Different `app_id` or increased identity level |
+| Reused session path rejected | A live session occupies it; close first. Closed entries are replaceable |
+
+The backend's `error` diagnostic is not forwarded by the frontend; the public response may carry
+a different recognized `reason`.

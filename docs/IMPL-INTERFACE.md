@@ -1,500 +1,251 @@
-# The implementation interface — `org.freedesktop.impl.portal.experimental.Certificate1`
+# Implementation interface
 
-Status: EXPERIMENTAL, and **more** unstable than the public interface, deliberately. Upstream
-treats the `org.freedesktop.impl.portal.*` interfaces as an internal contract between a frontend
-and the backends of the same release, versioned but not promised to applications. This one is the
-same, with less of a track record and a trailing `1` major-version suffix that says so on the wire.
+`org.freedesktop.impl.portal.experimental.Certificate1` is the experimental, versioned
+frontend-to-backend contract. It carries no stability promise for applications.
+xdg-desktop-portal calls bus name `org.freedesktop.impl.portal.desktop.certificate`, object
+path `/org/freedesktop/portal/desktop`. The frontend needs a configured backend and
+`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` at startup.
 
-**This interface is not for applications.** It is what xdg-desktop-portal calls on a backend it
-selected — here, `xdg-desktop-portal-certificate` on bus name
-`org.freedesktop.impl.portal.desktop.certificate`, object path
-`/org/freedesktop/portal/desktop`. The frontend needs a configured backend and
-`XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` in its environment.
+## XML ownership
 
-## The XML this repository ships is a copy, and it must track its source
+[`data/org.freedesktop.impl.portal.experimental.Certificate1.xml`](../data/org.freedesktop.impl.portal.experimental.Certificate1.xml)
+tracks that file on
+[experimental/integration](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration),
+apart from its provenance comment. Update the interface in the frontend branch and copy it here.
+The declared interface must match `data/certificate.portal`.
 
-[`../data/org.freedesktop.impl.portal.experimental.Certificate1.xml`](../data/org.freedesktop.impl.portal.experimental.Certificate1.xml)
-is, apart from its provenance comment block, a **byte-for-byte copy** of
+Released backends normally read impl XML from xdg-desktop-portal's pkg-config interfaces
+directory, as `xdg-desktop-portal-gtk/data/meson.build` does. This tracking copy is needed
+until a release ships the interface. The public contract is in
+[PUBLIC-INTERFACE.md](PUBLIC-INTERFACE.md), responsibilities in
+[ARCHITECTURE.md](ARCHITECTURE.md#responsibilities), and proposal work in
+[UPSTREAMING.md](UPSTREAMING.md).
 
-```
-xdg-desktop-portal, branch experimental/integration, commit 39f5833
-data/org.freedesktop.impl.portal.experimental.Certificate1.xml
-```
+## Portal conventions
 
-The interface belongs to the frontend. This repository does not get to change it, and a
-divergence between the two files is not a difference of opinion — it is a backend that no longer
-implements the interface it claims in `data/certificate.portal`. To update: copy the branch's file
-again without editing it.
+Interactive methods receive frontend-selected paths and return `(u response, a{sv} results)`.
+The backend exports `org.freedesktop.impl.portal.Request` at `handle` during an interaction;
+it has `Close()` and no `Response` signal. The public Request sends the terminal response.
+Compare [Usb.AcquireDevices](https://github.com/flatpak/xdg-desktop-portal/blob/main/data/org.freedesktop.impl.portal.Usb.xml).
 
-Upstream keeps `org.freedesktop.impl.portal.*.xml` in xdg-desktop-portal itself and backends
-consume it from that project's pkg-config interfaces directory —
-`xdg-desktop-portal-gtk/data/meson.build` reads exactly that. This copy exists only because the
-branch is unmerged and no released xdg-desktop-portal ships the file. When the branch lands, the
-copy is deleted and the file comes from the interfaces directory like every other backend's.
-
-The public interface applications call is [PUBLIC-INTERFACE.md](PUBLIC-INTERFACE.md), which is
-itself a pointer to the branch. Which side is responsible for what is the table in
-[ARCHITECTURE.md](ARCHITECTURE.md#who-does-what). What is left before any of this could be a pull
-request is [UPSTREAMING.md](UPSTREAMING.md).
-
-## The conventions, all borrowed
-
-Every one of these is xdg-desktop-portal's, and none of them is an improvement on it:
-
-- **Interactive methods take `handle`, `session_handle`, `app_id` and `parent_window`, and return
-  `(u response, a{sv} results)`.** The frontend picks the `handle` path; the backend exports an
-  `org.freedesktop.impl.portal.Request` there for the duration of the interaction. Compare
-  [`org.freedesktop.impl.portal.Usb.AcquireDevices`](https://github.com/flatpak/xdg-desktop-portal/blob/main/data/org.freedesktop.impl.portal.Usb.xml).
-- **The app id is an argument.** The backend never derives it, never asks the bus who is calling,
-  never reads `/proc`. If it did, the answer would be "xdg-desktop-portal".
-- **The impl `Request` has `Close()` and no `Response` signal.** The result comes back as the
-  method's return value. Exactly one object — the frontend's `Request` — is responsible for the
-  at-most-one-terminal-response rule.
-- **Long-lived state hangs off an `org.freedesktop.impl.portal.Session`** at the path the
-  frontend chose, with `Close()` and `Closed`.
-- **Backends declare themselves in a `.portal` file** and are selected by `portals.conf`, per
-  [writing a new backend](https://flatpak.github.io/xdg-desktop-portal/docs/writing-a-new-backend.html)
-  and [portals.conf](https://flatpak.github.io/xdg-desktop-portal/docs/portals.conf.html).
+Every impl call receives `app_id`; the backend never derives it from the bus peer or `/proc`,
+which would identify the frontend. Long-lived state uses an
+`org.freedesktop.impl.portal.Session` with `Close()` and `Closed` at the supplied path.
+Backend registration uses `.portal` files and `portals.conf`:
+[backend guide](https://flatpak.github.io/xdg-desktop-portal/docs/writing-a-new-backend.html),
+[configuration reference](https://flatpak.github.io/xdg-desktop-portal/docs/portals.conf.html).
 
 ## Methods
 
-| Method | Shape | Notes |
-|---|---|---|
-| `CreateSession(o handle, o session_handle, s app_id, a{sv} options) → (u, a{sv})` | non-interactive | Creates the backend-side state for a grant. `options` is unused and `results` is empty. Fails early when there is no p11-kit, no reader, no display. |
-| `AcquireCredential(o handle, o session_handle, s app_id, s parent_window, a{sv} options) → (u, a{sv})` | **interactive** | Discovery, filtering, and **the chooser**. |
-| `Sign(o handle, o session_handle, s app_id, s parent_window, a{sv} options) → (u, a{sv})` | **interactive** | The signature, and the PIN prompt if this is the first private-key use. |
-| `GetCapabilities(s app_id, a{sv} options) → a{sv}` | non-interactive | What this backend can do on this hardware. **Note the `app_id`** — see below. |
-| `SessionInvalidated(o session_handle, s reason)` | signal | A grant can no longer be honoured. `reason` is one of the interface's four and nothing else: see "`SessionInvalidated` speaks the public vocabulary". The frontend turns it into `GrantInvalidated`, emitted to the session's owner alone, and closes the Session. |
-
-**There is no `Decrypt`, no `RenewGrant`, no `ReleaseGrant` and there are no token
-signals.** They were on the branch and came out of it: the first proposal is
-`CreateSession`, `AcquireCredential`, `Sign`, `GetCapabilities`, `Session.Close`
-and `GrantInvalidated`, and this backend implements exactly that. The broker
-still knows how to decrypt (`src/broker/mechanism.c`, `tests/test-broker-decrypt.c`)
-and the mechanism layer still knows `RSA_OAEP`, because the operation is right
-and only the method is missing; nothing exports it, and `GetCapabilities` does
-not advertise `decrypt`.
-
-**`GetCapabilities` carries `app_id`, and that is a change** from what this repository used to
-document. The old sketch had `GetCapabilities(a{sv}) → a{sv}` on both interfaces. The branch made
-the impl side `GetCapabilities(s app_id, a{sv}) → a{sv}` because *every* impl call upstream carries
-`app_id`; the public side is unchanged. A backend is not obliged to vary its answer by application,
-but it is told which one is asking, and it is now impossible to implement the impl interface while
-forgetting that the question has a subject.
-
-**There is no `OpenPkcs11Endpoint`.** The earlier sketch had one on both interfaces, returning
-`(h endpoint_fd, s certificate_uri, s private_key_uri, u endpoint_version)`. The branch left it out
-of both, deliberately: an fd-returning method needs its own review, and the python-dbusmock backend
-the frontend is tested against cannot produce a usable endpoint fd, so a first version with it would
-have had no test. It is a follow-up. [`../src/export/facade.h`](../src/export/facade.h) still holds
-the requirements, and they are still the acceptance criteria for that follow-up.
-
-### What the frontend sends that the public interface does not have
-
-These are the fields that exist *because* of the split, and they are the reason it is worth its
-cost:
-
-| Key | Why |
+| Method | Signature and behavior |
 |---|---|
-| `app_id` | Established by the frontend from `xdp_invocation_get_app_info()`. Empty string when unidentified. |
-| `app_identity_level` | `sandboxed` \| `host` \| `unidentified`. **The backend must display this.** An application name shown without saying how it was established is a lie by omission. |
-| `lifetime` | Seconds the frontend has *decided* to allow, after applying its 3600 s ceiling — not the caller's `requested_lifetime`. The frontend arms a monotonic timer at this length and closes the session when it fires; this backend's own teardown timer waits `CERTIFICATE_EXPIRY_GRACE_SECONDS` longer so that the two do not announce the same expiry twice. |
+| `CreateSession` | `(o handle, o session_handle, s app_id, a{sv} options) -> (u, a{sv})`; creates empty state without prompting. `options` is unused, successful results are empty. Token and display checks occur during acquisition. |
+| `AcquireCredential` | `(o handle, o session_handle, s app_id, s parent_window, a{sv} options) -> (u, a{sv})`; discovers, filters and asks for consent. |
+| `Sign` | `(o handle, o session_handle, s app_id, s parent_window, a{sv} options) -> (u, a{sv})`; signs and may prompt for login. |
+| `GetCapabilities` | `(s app_id, a{sv} options) -> a{sv}`; reports supported capabilities without prompting. |
+| `SessionInvalidated` | Signal `(o session_handle, s reason)`; frontend emits owner-only `GrantInvalidated` and closes the session. |
 
-**And two fields that are gone.** `app_display_name` is not on the branch interface: the backend
-gets an app id and an identity level, and any human-readable name is its own to derive or to omit.
-`context` — the destination-host hint — is not on either interface: the only caller-supplied text
-that reaches a backend is `reason`.
+There is no `Decrypt`, `RenewGrant`, `ReleaseGrant`, `OpenPkcs11Endpoint` or public token-presence
+signal. A grant ends with `Session.Close()`. The client-side module serves PKCS#11 consumers;
+[`src/export/facade.h`](../src/export/facade.h) points to requirements for a possible served facade.
 
-### What the backend returns that the frontend does not simply pass on
+### Frontend-supplied identity and lifetime
 
-Nothing is stored anywhere: there is no selection memory on the interface, so
-there is no `certificate_id` and no `remember_selection`, and this backend never
-touches the permission store.
+| Field | Contract |
+|---|---|
+| `app_id` | Derived by `xdp_invocation_get_app_info()`; empty when unidentified. |
+| `app_identity_level` | `sandboxed`, `host` or `unidentified`; the backend displays it. |
+| `lifetime` | Frontend-approved seconds, after the 3600 s ceiling; operations stop at its monotonic deadline. Backend teardown waits `CERTIFICATE_EXPIRY_GRACE_SECONDS` longer than the frontend timer. |
 
-The frontend **requires** `certificate_der`, `supported_mechanisms` and
-`permitted_operations`, type-checks every optional key against the type the
-public interface declares, and fails the acquisition over any of it. It also
-**intersects**: `supported_mechanisms` against its allow list
-(`RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA`) and `permitted_operations` against what the application
-asked for in `operation_policy`; `expires_at` is not the backend's to send at all — it is
-frontend-generated. A backend that returns more than it was allowed to does not get more; it gets
-clamped, and the branch has a test for exactly that
-(`test_grant_is_bounded_by_the_request`).
+There is no `app_display_name`: the backend may derive a human-readable name from `app_id`.
+There is no destination `context` option. The application-provided explanation is `reason`.
+The backend never writes selection memory; the interface has no `certificate_id` or
+`remember_selection` result.
 
-## What the XML left ambiguous, and how this backend resolved it
+### Acquisition results
 
-The interface XML and the python-dbusmock backend it is tested against are an executable
-specification of the *shape* of every call. They are silent on several things a real backend has to
-decide, because a mock that returns `b"signature"` never had to. Each of these is a decision this
-repository made and can be argued with; each is here so that arguing with it does not require
-reading the source.
+The frontend requires `certificate_der`, `supported_mechanisms` and `permitted_operations`
+and type-checks optional results against the public XML. It intersects mechanisms with
+`RSA_PKCS1_V1_5`, `RSA_PSS`, `ECDSA`, in that order, and operations with the request's
+`operation_policy` and purpose. Empty intersections fail acquisition. `expires_at` is generated
+by the frontend. The frontend test `test_grant_is_bounded_by_the_request` covers these limits.
 
-### `data` is always the digest, and `parameters.hash` is required
+## Backend behavior
 
-The public XML says `data` is "the digest or the message, as the mechanism requires" and stops
-there. This backend resolves it one way, for every mechanism:
+### Digest and hash
 
-- **`data` is the bare digest.** Never a message, never a pre-built `DigestInfo`.
-- **`parameters.hash` is required** and names which digest it is: `SHA1`, `SHA224`, `SHA256`,
-  `SHA384` or `SHA512` (`SHA-256` is accepted as a spelling of `SHA256`).
-- A digest whose length is not the one that hash produces is **refused**, not signed.
-- For `RSA_PKCS1_V1_5` the backend builds the RFC 8017 `DigestInfo` around the digest itself and
-  calls `CKM_RSA_PKCS`. For `RSA_PSS` it builds `CK_RSA_PKCS_PSS_PARAMS`. For `ECDSA` it passes the
-  digest through, which is what `CKM_ECDSA` wants.
+`Sign.data` is the bare digest. `parameters.hash` is required: `SHA1`, `SHA224`, `SHA256`,
+`SHA384` or `SHA512`; spellings such as `SHA-256` are accepted. Digest length must match.
+RSA PKCS#1 v1.5 builds RFC 8017 DigestInfo and calls `CKM_RSA_PKCS`; RSA-PSS builds
+`CK_RSA_PKCS_PSS_PARAMS`; ECDSA passes the digest to `CKM_ECDSA`.
 
-**Why not accept a raw blob under `CKM_RSA_PKCS`.** Because raw v1.5 padding of unstructured
-bytes is a materially larger thing for a user to consent to than a signature over a digest of known
-length: with it, a caller can have the card produce a signature over a structure it chose whole,
-including one that means something in a protocol nobody was thinking about. Requiring a named hash
-and a matching length costs a caller one option and removes that.
+The API does not accept an arbitrary-length blob for raw v1.5 padding. It cannot establish that
+a caller hashed the submitted bytes: any input of the required length can be signed
+under the grant. TLS 1.0/1.1's raw MD5+SHA1 `CertificateVerify` concatenation is unsupported.
 
-**And what it does not buy.** A caller can still hash any message it likes and get that digest
-signed — that is what a signing interface is. The rule establishes exactly two things: no signature
-over bytes the caller did not hash itself, and no raw v1.5 padding of an arbitrary blob. Everything
-else about the capability is bounded by the grant, not by the shape of `data`.
+### ECDSA encoding
 
-The cost is that a TLS 1.1-and-earlier `CertificateVerify`, which signs a raw MD5+SHA1
-concatenation with no `DigestInfo`, cannot be produced through this interface. That is not a
-regression anybody will notice.
+ECDSA defaults to PKCS#11's raw `r || s`, with each integer padded to the curve-order byte
+length. X.509 and TLS use DER `ECDSA-Sig-Value`. Request DER with:
 
-### An ECDSA signature comes back raw, unless asked otherwise
-
-PKCS#11's `CKM_ECDSA` produces the raw `r || s` pair. X.509 and TLS want a DER `ECDSA-Sig-Value`.
-The interface does not say which crosses it, and both are defensible.
-
-This backend returns **the PKCS#11-native raw form by default**, because that is what anyone who
-has used PKCS#11 expects and because silently re-encoding what the card produced is the kind of
-helpfulness that hides bugs. A caller that wants the DER form asks for it:
-
-```
+```text
 parameters = {'hash': <'SHA256'>, 'signature_encoding': <'der'>}
 ```
 
-`signature_encoding` is `raw` (the default) or `der`; anything else is an error rather than a
-silent fallback. It began as this backend's own addition to the `parameters` vardict, which the
-frontend passed through unexamined. **It is now in both XML files**, with `raw` as the documented
-default and a requirement that a backend implementing ECDSA implement both — the frontend
-validates the enum value as well. The interface grew the opinion, and it agrees with what was
-here.
+Both encodings are required by the XML. The frontend validates `signature_encoding` as `raw`
+or `der`; other values fail.
 
-### `RSA_PSS` takes `mgf` and `salt_length`, spelled the interface's way
+### RSA-PSS parameters
 
-Neither can be checked without the modulus size, so the frontend forwards both untouched and this
-backend is where they are validated:
+The frontend forwards parameters for backend checks against modulus size.
+`mgf` (`s`) accepts `MGF1-<hash>`, for example `MGF1-SHA256`. Plain `MGF1` or omission uses
+MGF1 over `hash`; bare hash names are refused. `salt_length` (`u`) defaults to digest length
+and must satisfy RFC 8017 9.1.1 step 3: `emLen >= hLen + sLen + 2`.
 
-- **`mgf` (`s`)** is `MGF1-<hash>`, for example `MGF1-SHA256`. Plain `MGF1` means MGF1 over
-  `hash`, and so does leaving the key out. Anything else is an error. A bare hash name — `SHA256`
-  — used to be accepted here as well; it was leniency the interface does not describe and a second
-  backend would not implement, so a caller relying on it would have found its requests refused
-  elsewhere. It is now refused here too.
-- **`salt_length` (`u`)** defaults to the digest's length, and is checked against RFC 8017 9.1.1
-  step 3: `emLen >= hLen + sLen + 2`.
+### Interaction and consent
 
-The `mgf` spelling was added to both XML files on the frontend branch, because a value that goes
-straight into a PKCS#11 mechanism parameter is not a good thing for each backend to name for
-itself.
+`required` and `allowed` always open the chooser, including for one candidate.
+`forbidden` fails acquisition with response `2`. There is no delegation or remembered
+selection that bypasses the chooser. The
+[security checklist](SECURITY.md#missing-controls-and-evidence) records the signing-consent gap.
 
-### `interaction_mode` never skips the chooser
+### Invalidation vocabulary
 
-The XML says `required` means always prompt, `allowed` means prompt if needed, and `forbidden`
-means never prompt and fail instead. It does not say whether a single matching certificate may skip
-the consent window.
+The public vocabulary is `expired`, `token_removed`, `policy`, `backend_gone`, `error`.
+`certificate_impl_session_invalidate()` in `src/session-impl.c` logs a `g_critical()` for
+an unknown reason and sends `error`.
 
-**It may not.** For `required` and `allowed` the chooser always opens, even with exactly one
-candidate. The chooser is where the application's identity, its identity *level*, and the purpose
-are shown; skipping it because there was only one certificate turns a consent dialog into a PIN
-dialog, which is the failure mode this project exists to end. Nothing on the interface skips it:
-there is no delegation and no remembered selection to skip it with.
-
-For `forbidden` there is no path to a grant at all, and `AcquireCredential` answers 2. That is the
-XML's own reading: consent here *is* a prompt.
-
-### `SessionInvalidated` speaks the public vocabulary
-
-The impl XML used to list three reasons — `token_removed`, `device_error`, `backend_shutdown` —
-where the public `GrantInvalidated` had a different set. The frontend does not translate: it
-forwards the backend's string through unchanged, so a divergent list is a trap in both directions.
-The impl XML now carries the public list verbatim:
-
-> `token_removed`, `policy`, `backend_gone`, `error`
-
-A backend that goes off the bus needs no signal for it: the frontend invalidates every grant it was
-holding when the backend's name loses its owner.
-
-**A value outside it is a `g_critical()` and goes on the bus as `error`.** The list is in
-`src/session-impl.c`, checked in `certificate_impl_session_invalidate()`, because a typo in a
-string literal is otherwise a word applications receive as though it were part of the contract.
-
-The public XML fixes the vocabulary at five: `expired`, `token_removed`, `policy`,
-`backend_gone`, `error`. This backend emits `token_removed`, `backend_gone` and `error`, and
-`expired` once as a backstop when the frontend missed its own deadline; `policy` is legal but
-nothing emits it yet:
-
-| Reason | When |
+| Reason | Backend behavior |
 |---|---|
-| `token_removed` | the card leaves the reader, or a different card takes its place, or a login fails because the token is gone |
-| `policy` | not this backend's to emit in the ordinary case — it is a frontend decision — but a legal wire value |
-| `backend_gone` | this backend is exiting, or its connection loses ownership of `org.freedesktop.portal.Desktop` |
-| `error` | a programming error: a value outside this vocabulary is never put on the bus, and this is sent instead |
+| `token_removed` | Detected removal, replacement, or a login failure indicating token loss. |
+| `policy` | Legal value; this backend does not emit it. |
+| `backend_gone` | Backend shutdown. |
+| `error` | Invalid internal reason value. |
+| `expired` | Backstop teardown after the frontend deadline plus `CERTIFICATE_EXPIRY_GRACE_SECONDS`. |
 
-`expired` is the frontend's own: it announces the grant's lifetime running out and closes the
-session at the deadline. This backend enforces the same deadline as a backstop, sending `expired`
-itself only if the frontend missed its own, `CERTIFICATE_EXPIRY_GRACE_SECONDS` later.
-`device_error` is gone from the interface and was never emitted anyway — a device that fails
-mid-operation fails that operation and keeps the grant, because the card may still be there.
+Frontend loss or replacement closes old sessions without an invalidation signal; no remaining
+frontend owns those sessions. Backend bus-name loss is independently detected by the frontend.
+A device error mid-operation fails that operation without necessarily invalidating a still-present
+token's grant. `device_error` is not an invalidation reason.
 
-**One case is deliberately silent.** When the portal name loses its owner altogether, every grant
-is still closed and the card session released, but nothing is emitted: there is no longer anybody
-subscribed to hear it.
+### Decryption implementation
 
-### The broker can decrypt; the interface cannot ask it to
+`src/broker/mechanism.c` implements RSA-OAEP and refuses PKCS#1 v1.5 decryption.
+`tests/test-broker-decrypt.c` checks indistinguishable failures and a per-grant budget.
+No D-Bus method reaches that code and capabilities advertise only `sign`.
+PKCS#1 v1.5 decryption can expose a Bleichenbacher oracle; see [SECURITY.md](SECURITY.md).
 
-`src/broker/mechanism.c` implements `RSA_OAEP` decryption, refuses PKCS#1 v1.5 for it, and budgets
-a grant's decryptions; `tests/test-broker-decrypt.c` covers it. None of that is reachable, because
-the interface has no `Decrypt` method and `GetCapabilities` does not advertise `decrypt`. It is
-kept rather than deleted because the reasoning is the part that is expensive: a v1.5 decryption
-whose outcome the caller can observe is a Bleichenbacher oracle over the token's key, and that
-conclusion should be in the tree when the method comes back.
+### Email-purpose matching
 
-### `email` is the one purpose that does not end in a signature
+`email` accepts an EKU permitting `emailProtection`, or no EKU restriction, and usable signing or encipherment key usage. Signing permits `digitalSignature` or
+`contentCommitment`; decryption permits `keyEncipherment` or `dataEncipherment`.
+Absent key usage imposes no restriction. Signing and decryption capabilities are
+computed separately, then intersected with allowed operations. A PIV key-management certificate
+can match `email` for decryption, but cannot be offered through the current sign-only interface.
+S/MIME and eID cards can have separate signing and decryption credentials.
 
-`certificate_purpose_matches()` in `src/tokens/filter.c` used to require `can_sign` for **every**
-purpose, `email` included, on the reasoning that every purpose here ends in a signature. That is
-true for `client_auth`, `signing` and `ssh`, and false for a certificate whose only role is
-unwrapping mail: a PIV "key management" certificate, `keyEncipherment` with no `digitalSignature`,
-backed by a private key that will decrypt and never sign. Such a certificate matched **no purpose
-at all**, so an email client asking for `email` in order to decrypt an incoming message could
-never be offered it — even though decryption is exactly the operation it would need. Belgian and
-Estonian eID cards are laid out the same way as PIV here.
+`certificate_purpose_operations()` returns an operation set, enabling `--list-tokens` to print
+`email (decrypt only)`. Certificate key usage also restricts a token's `CKA_SIGN` claim.
+`client_auth`, `signing` and `ssh` require signing capability; SSH uses the raw RSA or EC key
+without X.509 key-usage restrictions. No extra purpose such as `email_decrypt` is defined.
 
-**The rule now**, implemented here even though commit `7635aa8` is on no branch and this
-behaviour is not in the proposed interface (whose `operation_policy` permits only `sign`):
+### Session ownership and identity
 
-- a certificate matches `email` when its extended key usage permits `emailProtection` — or it
-  carries no extended key usage extension at all — **and** its key usage permits either
-  `digitalSignature` or `keyEncipherment`;
-- which of the two it matched decides which operations it can serve: signing, decryption, or both;
-- it is offered only if one of those operations is one the request's `operation_policy` permits.
+Acquisition and signing compare `app_id` with the session's creating id; a mismatch answers
+`2` / `no_such_session`. The frontend also checks peer ownership. The backend records identity
+level at first acquisition; it may fall on later calls but cannot rise from an unverified level
+to a verified one.
 
-**With no `Decrypt` on the interface this is currently theory**, and it is written down because the
-matching rule is in the tree and behaves this way: `operation_policy` names only `sign` today, so a
-decrypt-only certificate matches `email` and is then offered to nobody.
+### Option validation
 
-`client_auth`, `signing` and `ssh` are unchanged and still require a key that will sign.
+A present value with a wrong type, an unknown enum, or an unknown key in `operation_policy`,
+`certificate_filter` or `parameters` fails with `2` / `invalid_request` or `invalid_filter`.
+Defaults apply only to absent fields. Unknown top-level keys are ignored for compatibility with
+frontend additions.
 
-The purpose vocabulary was kept at four rather than gaining `decrypt` or `email_decrypt`: the
-consent sentence the user reads is "use a certificate for mail" either way, and the sign/decrypt
-split already exists in `operation_policy`, which is where an application states it.
+### Session close and path reuse
 
-Two consequences inside this repository. `certificate_purpose_operations()` returns the set rather
-than a yes/no, which is what lets `--list-tokens` print `email (decrypt only)`. And the key usage
-now restricts what the *card* claims: a token that sets `CKA_SIGN` on every key it holds cannot
-turn a key-management certificate into a signing credential.
+`Close()` is idempotent. Invalidation leaves the Session skeleton exported so the frontend can
+close it. Paths include the caller's unique name and `session_handle_token`; a closed session
+can be replaced at the same path, while a live session prevents reuse.
 
-### A session is bound to its app id, and its identity level may not rise
+### Device rebinding
 
-`AcquireCredential` and `Sign` both compare `app_id` against the one the session was
-created with and answer `2` / `no_such_session` when they differ. The frontend enforces session
-ownership too, and that is the point: it is the check this backend can make for free, and a
-frontend regression or a second frontend implementation would otherwise turn a session handle into
-cross-application key use.
+The frontend permits one acquisition per session. The backend also handles reacquisition:
+`CertificateDevice` remembers its candidate and closes and logs out the old token session
+before opening a different one. Login state and key handles cannot carry over to a new
+certificate. Reacquisition resets the decryption budget and lifetime timer.
 
-`app_identity_level` is recorded on the session at the first `AcquireCredential` and may **fall** —
-the frontend can legitimately know less about a caller later — but never **rise**. A session
-created for an unidentified caller does not become a session for a verified one because a later
-call said so.
+`tools/certificate-e2e.py --regrant <key algorithm>` exercises a second frontend session and
+checks its signature against the second certificate. `tools/ui-smoke.sh` drives both prompts.
 
-### Options are validated strictly, and defaults apply only to absent fields
+### Token display and chain
 
-A field that is **present with the wrong type**, an unknown value for an enumerated field, or an
-unknown key in `operation_policy`, `certificate_filter` or `parameters` is refused with `2` /
-`invalid_request` (or `invalid_filter`). It used to be treated as absent, which meant an unknown
-`interaction_mode` became "prompting is allowed", a mistyped `certificate_filter` stopped filtering,
-and a `lifetime` of the wrong type became 300 seconds.
+`token_display` includes `label`, `manufacturer`, `model`, `reader` and
+`protected_authentication_path`. It excludes the serial, a stable identifier that could
+correlate a user across applications. `chain_der` is empty and `chain_status` is `leaf_only`;
+chain construction is a [roadmap item](ROADMAP.md).
 
-**Unknown keys at the top level are still ignored**, deliberately: that is where the frontend adds
-fields, and a backend that refused them could not be upgraded past. Unknown keys in the three nested
-dictionaries above are refused, because a key nobody understood may have been the one that said
-"less".
+### Capabilities and absence
 
-### `Session.Close()` is idempotent, and a session path can be used again
+With no token, `GetCapabilities` reports all mechanisms the backend can drive. With a token,
+it narrows that list to advertised mechanisms. `AcquireCredential` reports missing usable
+candidates or no filter match. Its internal diagnostic names are `no_token` and
+`no_matching_certificate`; these do not establish physical reader presence.
 
-`SessionInvalidated` leaves the Session skeleton **on the bus**. The frontend answers that signal
-with `Session.Close()` and returns its result to the application, so a backend that had already
-unexported the object turned a clean close into `UnknownObject`.
+### Failure results
 
-The frontend's session paths are built from the caller's unique name and its
-`session_handle_token`, and applications pass a fixed token — so the same application gets the same
-path every time. A closed entry left in the table therefore made every later `CreateSession` from
-that application fail for the life of the backend process. A **closed** session at a path is now
-replaced; a **live** one is still refused.
+Response `2` includes an internal `error` key: `no_token`, `no_matching_certificate`,
+`no_such_session`, `invalid_purpose`, `invalid_filter`, `interaction_required`, `no_display`,
+`device_error`, `token_removed`, `pin_locked`, `invalid_request`, `cancelled`, `owner_gone`,
+`backend_gone`. The frontend only forwards recognized results and drops `error`. This diagnostic
+is available to direct impl tests and the journal; application-visible reasons belong to the
+frontend contract.
 
-### A second `AcquireCredential` on a live session rebinds the device
+### Discovery before login
 
-**The frontend now refuses one**: a session acquires once, and a second credential means a second
-session. The backend does not rely on that. It is one process on the other side of a bus from a
-frontend it does not control, so it treats the grant, not the session, as what the open token
-session belongs to.
+Discovery never logs in. When private keys are hidden by `CKA_PRIVATE`, a public key with the
+same `CKA_ID` establishes a pair. With neither key visible and `CKF_LOGIN_REQUIRED` set,
+the certificate can still be offered. Capabilities come from private `CKA_SIGN`/`CKA_DECRYPT`,
+public `CKA_VERIFY`/`CKA_ENCRYPT`, or certificate key usage as a last resort. The first operation
+checks the opened private key.
 
-It does: the open `CertificateDevice` remembers the candidate it was opened for, and the next
-operation that finds a different one **logs out, closes the PKCS#11 session and opens a new one** —
-so the login does not carry over, the private key handle does not carry over, and the first
-operation after the re-grant shows a PIN window again. That is not a nicety. Reusing the open
-session meant the frontend was handed certificate B's DER and the next `Sign` went to certificate
-A's key, with no prompt: a signature that does not verify against the certificate the portal
-returned, produced silently. If the new grant is on a *different token*, the operation would have
-been submitted to the first token's session entirely.
+### PIV slot mapping
 
-The decryption budget is reset by the re-grant, and the lifetime timer restarts.
-`tools/certificate-e2e.py --regrant <key algorithm>` drives the frontend's version of this — a
-second session, a second consent — and checks the second signature against the second certificate;
-`tools/ui-smoke.sh` runs it with the windows.
+`piv_slot` derives from `CKA_ID`. OpenSC uses `0x01` through `0x04`; other middleware uses
+PIV key references [[S45](SOURCES.md), [S46](SOURCES.md)]. Accepted pairs are:
 
-### `token_display` does not carry the serial
+| IDs | Slot |
+|---|---|
+| `0x9a`, `0x01` | `authentication` |
+| `0x9c`, `0x02` | `signature` |
+| `0x9d`, `0x03` | `key_management` |
+| `0x9e`, `0x04` | `card_authentication` |
 
-The XML says `token_display` is "token and reader identity for display only" and does not enumerate
-the keys. This backend sends `label`, `manufacturer`, `model`, `reader` and
-`protected_authentication_path`, and **deliberately omits the serial number**. A card serial is a
-stable hardware identifier: every application that ever obtained a grant could use it to correlate
-this user across all of them, and nothing a human reads needs it — the label and the reader are what
-tell two cards apart on a desk.
+Other IDs produce no slot. A slot filter never matches an undetermined slot.
 
-### `chain_der` is empty and `chain_status` is `leaf_only`
+## Frontend-only access
 
-Honest rather than empty-handed: this backend reads the leaf certificate off the token and does not
-go looking for intermediates, so it says `leaf_only` rather than claiming a completeness it has not
-established. Building a chain from the other certificates on the token is a known gap; see
-[ROADMAP.md](ROADMAP.md).
+Flatpak's D-Bus proxy permits the public portal and does not grant access to this impl bus name.
+The backend also restricts every method, including `Request.Close()` and `Session.Close()`,
+to the unique owner of `org.freedesktop.portal.Desktop`. Other senders receive
+`org.freedesktop.DBus.Error.AccessDenied`, logged by reason code. See
+[`certificate_impl_sender_is_frontend`](../src/certificate-impl.h).
 
-### `GetCapabilities` answers with no token present
+Rejections use the cached owner without a bus round trip, so hostile messages cannot force a
+synchronous lookup per message. Acceptance resolves `GetNameOwner` directly: D-Bus does not
+order `NameOwnerChanged` against a former owner's queued messages. Unique names are never reused.
+A successor's first call can be refused before the owner watch updates; the frontend retries.
+Owner change cancels old windows and invalidates old sessions before accepting the successor.
+No owner means every method is refused.
 
-`GetCapabilities` reports the mechanisms this backend can drive, not the ones a card in the reader
-happens to support right now. With a token present the answer is narrowed to what that token
-advertises; with none, the answer is the full set rather than the empty one.
-
-Reporting nothing because the card is in the user's pocket would make every caller conclude the
-feature does not exist. **`AcquireCredential` is where the absence of a card is reported**, and it
-reports it honestly, distinguishing `no_token` from `no_matching_certificate` — a user needs to know
-whether to insert a card or to talk to whoever issued the one they have.
-
-### The `results` vardict carries an `error` key on failure
-
-On a response of 2, this backend adds `error` to `results`: `no_token`,
-`no_matching_certificate`, `no_such_session`, `invalid_purpose`, `invalid_filter`,
-`interaction_required`, `no_display`, `device_error`, `token_removed`, `pin_locked`,
-`invalid_request`, `cancelled`, `owner_gone`, `backend_gone`. **The frontend drops it**, because it passes through only the keys
-it knows. It is a diagnostic for a direct impl call and for the journal, not a channel to the
-application, and it must not become one: an error string is caller-visible text and the frontend is
-the side that decides what applications learn.
-
-### A certificate whose private key cannot be seen is still offered
-
-Discovery does not log in — enumerating what is on a card must not spend the user's presence — and
-on some tokens `CKA_PRIVATE` hides the private key object until it does. Where that happens the
-matching **public** key stands in as proof that a key pair with that `CKA_ID` exists; where neither
-can be seen and the token says `CKF_LOGIN_REQUIRED`, the certificate is offered anyway rather than
-the card being reported as empty. `can_sign` and `can_decrypt` come from the private key's
-`CKA_SIGN`/`CKA_DECRYPT` where it is visible, the public key's `CKA_VERIFY`/`CKA_ENCRYPT` where it
-is not, and the certificate's key usage as a last resort — which is why the grant re-checks
-everything at `Sign` time against the key it actually opened.
-
-### PIV slots are best effort, and a filter that names one is strict
-
-`piv_slot` is derived from `CKA_ID` — OpenSC's PIV driver uses `0x01`–`0x04` and other
-middleware uses the PIV key reference itself [[S45](SOURCES.md), [S46](SOURCES.md)]:
-`0x9a`/`0x01` is `authentication`, `0x9c`/`0x02` is
-`signature`, `0x9d`/`0x03` is `key_management`, `0x9e`/`0x04` is `card_authentication`. Anything
-else yields no slot rather than a guess. A `certificate_filter` that names a slot therefore does
-**not** match a certificate whose slot could not be determined: guessing would offer the wrong key,
-and a caller that asked for the signature slot and got the authentication one has been lied to.
-
-## Why an application cannot call this
-
-This is the question a reviewer asks first, and the answer has three parts.
-
-**1. The mechanism upstream actually relies on.** The impl bus names are not something an
-application has any reason to hold, they are not proxied into sandboxes by the portal machinery,
-and a Flatpak's D-Bus policy does not grant them: a sandboxed application talks to
-`org.freedesktop.portal.Desktop` through the proxy and cannot see
-`org.freedesktop.impl.portal.desktop.certificate` at all. This is now literally the same mechanism
-upstream relies on, rather than an analogue of it under our own names.
-
-**2. The check this backend adds on top.** Every impl method compares the sender against the
-unique name that currently owns `org.freedesktop.portal.Desktop`, and refuses anything else with
-`org.freedesktop.DBus.Error.AccessDenied`, logged by reason code
-([`../src/certificate-impl.h`](../src/certificate-impl.h),
-`certificate_impl_sender_is_frontend`). **"Every method" includes `Request.Close()` and
-`Session.Close()`** on the objects this backend exports at the paths the frontend chose: those
-paths are guessable, and a `Session.Close()` from a stranger logs the card out and destroys a
-grant.
-
-The owner is **resolved from the bus** with `GetNameOwner` before any sender is *accepted*, never
-taken from the name watcher's cache: D-Bus does not order `NameOwnerChanged` against the messages of
-the process that lost the name, so a former frontend that is still connected would otherwise be
-compared equal to a stale cached owner and admitted.
-
-A **refusal** is the other way round: it is decided from the cached owner, with no bus call at all.
-The asymmetry is deliberate. Anything on the session bus can send this backend a message, and a
-synchronous `GetNameOwner` per stranger's message is a main-thread stall that an open PIN window
-feels — a denial of service reached by a different door. A stranger's unique name can never equal
-the cached owner's, because the bus assigns unique names and never reuses one, so a stranger never
-reaches the bus call. What it costs is one refused call at the moment a replacement portal takes the
-name over before this process has processed the change; the frontend retries.
-
-The watcher is kept for what it is good at: when the name changes hands or goes away, every session
-belonging to the old owner is invalidated, and every chooser and PIN window that old owner asked for
-is cancelled, before the new owner is accepted.
-
-What that still does not provide is atomicity: the answer is a snapshot, and the name can change
-hands between the check and the work the call authorises. That is the ordinary check-then-use
-property of every bus check; the residual risk is recorded in
+The lookup is a snapshot; ownership can change between authorization and work. See
 [SECURITY.md](SECURITY.md#open-problems).
+[The threat model](SECURITY.md#boundary-and-threat-model) covers host-process access and external
+hardening requirements.
 
-When nothing owns the name, every method is refused, because with no frontend on the bus there is
-nobody who may legitimately call. When the frontend goes away, every grant goes with it and every
-card session is closed.
-Upstream backends do not all do this. It is cheap, and the failure it prevents — an unsandboxed
-application calling `AcquireCredential` with an `app_id` of its own invention, and getting a consent
-dialog that names somebody else — would destroy the entire consent model rather than degrade it.
-
-**3. What none of that fixes.** On a conventional desktop, an unsandboxed process running as the
-user may be able to interfere with either process by means that have nothing to do with D-Bus
-names: `ptrace`, environment manipulation, runtime files, input injection. The split does not
-change that, and [SECURITY.md](SECURITY.md) says so in the same words it used before the split.
-What the split *does* fix is the case that used to be unfixable: one service both deriving an
-application's identity and drawing the window that asserts it.
-
-A deployment that wants more can add a D-Bus policy rule denying this backend's name to everything
-but the portal's uid. That is not in v1; it is recorded here so that "we could tighten this" is
-written down rather than assumed.
-
-**The bus name is not offered for replacement unless `--allow-replacement` was passed.** Every other
-backend sets `ALLOW_REPLACEMENT` unconditionally, and for a file chooser that is reasonable; here it
-meant any process running as the user could take
-`org.freedesktop.impl.portal.desktop.certificate` with one call and become the thing the portal
-calls — receiving `AcquireCredential` and `Sign` with a real app id and identity level, and drawing
-the window that asks for the PIN.
-
-D-Bus cannot authenticate a replacement. `ALLOW_REPLACEMENT` is not "let the package manager replace
-me"; it is "let whoever asks next replace me", and the bus offers the current owner no way to
-inspect who is asking. So the two halves are separate flags — `--allow-replacement` to be
-replaceable, `--replace` to ask to replace — and **the installed `.service` file passes neither**.
-An upgrade is therefore a restart: stop the old process and let D-Bus activation start the new one.
-`tools/dev-stack.sh --live` passes both, which is a development loop and not a deployment recipe.
-[TESTING.md](TESTING.md) §3.8 has the commands.
-
-## What the backend must never do
-
-Repeated here because it is the whole contract:
-
-- **Derive the caller's identity.** It arrives as an argument.
-- **Decide policy.** Purpose validity, lifetime ceilings, operation sets, rate limits: frontend.
-- **Write the permission store.** The key is the app id.
-- **Widen anything.** A backend returns what it can do; the frontend decides what is allowed.
-- **Trust the caller directly.** The only legitimate caller is xdg-desktop-portal, and it is checked.
-- **Edit the interface XML in `data/`.** It belongs to the frontend.
-
-And what it must always do: display the app id **with** its identity level, render the purpose in
-its own words, keep the caller-supplied `reason` out of the trusted identity position, and
-re-validate every mechanism and parameter even though the frontend already did. Two checks against
-a hostile caller is the correct number.
+The backend permits replacement only under `--allow-replacement`; `--replace` merely asks to
+replace an owner that permits it. D-Bus cannot authenticate who requests replacement. The
+installed activation file passes neither flag. Upgrades require stopping the process and allowing
+activation of the new executable. Development `tools/dev-stack.sh --live` passes both flags;
+[TESTING.md](TESTING.md) §3.8 covers restoration.

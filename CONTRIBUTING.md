@@ -1,115 +1,68 @@
 # Contributing
 
-**This is an experimental backend for a proposed portal interface.** The backend, the client
-module, and 13 meson test suites exist and pass. The interface is not upstream, and the frontend
-branch that defines it is not merged. The most useful contribution today is still not code.
+The experimental backend and client-side PKCS#11 module implement the unmerged Certificate
+interface. Status and hardware coverage are in [README.md](README.md#status).
 
-**The interface is not changed here.** It is defined by the xdg-desktop-portal branch
-`experimental/integration`, and `data/org.freedesktop.impl.portal.experimental.Certificate1.xml`
-is a verbatim copy of the branch's file. A change to the interface is a change to that branch,
-followed by re-copying the file; a hand-edit here produces a backend that no longer implements what
-it claims. See [docs/decisions/0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md).
+The interface belongs to the xdg-desktop-portal branch
+[experimental/integration](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration).
+The [impl XML](data/org.freedesktop.impl.portal.experimental.Certificate1.xml) is a tracking
+copy, apart from its provenance comment. Make interface changes in the frontend branch and
+copy the XML here. See [ADR 0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md).
 
-## What helps most
+## Useful contributions
 
-**Tell us the design is wrong.** This repository already exists in its second shape, because an
-independent review established that its founding claim — a certificate-scoped, already-logged-in
-PKCS#11 module produced by `p11-kit server` — was false in six separate ways. That correction is
-recorded in [docs/decisions/0006](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md)
-and it is worth more than any amount of code written on top of the wrong idea. If something else
-here is wrong, saying so is the contribution.
+- Check PKCS#11 semantics: login state, session scope, handle lifetime, mechanism parameters
+  and v3 interface tables. Report design errors; [ADR 0006](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md)
+  records the limits of token forwarding.
+- Record cards, readers, middleware and failures using [docs/TESTING.md](docs/TESTING.md).
+  [docs/SPIKES.md](docs/SPIKES.md) lists unanswered feasibility questions.
+- Describe consumer integration requirements, including whether brokered `Sign` or a PKCS#11
+  module fits the application. See [ADR 0007](docs/decisions/0007-brokered-operations-are-the-core.md).
+- Help with desktop integration, especially a KDE backend and PIN interaction. No KDE
+  equivalent of GNOME's gcr system prompter is integrated here.
+- Review keyboard and screen-reader access to the chooser and PIN prompts. These controls
+  must support informed consent.
 
-Specifically valuable:
+## Documentation rules
 
-- **Anything about PKCS#11 semantics** we have got wrong — login state, session scope, handle
-  lifetime, mechanism parameters, v3 interface tables.
-- **Hardware results.** Which cards, which readers, which middleware, what breaks. One PIV card in
-  one reader has been through [docs/TESTING.md](docs/TESTING.md) tiers 3.1–3.4; that is one card,
-  one reader, one middleware. [docs/SPIKES.md](docs/SPIKES.md) records S1, S2, S3 and S5 answered;
-  the rest are still open.
-- **Consumer perspectives.** If you maintain something that would use this — a browser, a mail
-  client, a VPN client, an SSH agent — the most useful thing you can say is whether brokered `Sign`
-  is integrable in your codebase, or whether only a PKCS#11 module would work. That answer decides
-  [decision 0007](docs/decisions/0007-brokered-operations-are-the-core.md)'s balance.
-- **Desktop integration knowledge**, especially KDE. There is no KDE equivalent of GNOME's gcr
-  prompter, and a KDE chooser and PIN prompt is a prerequisite for ever proposing this upstream.
-- **Accessibility review** of the chooser and PIN designs. These controls carry the security
-  decision; a dialog a screen-reader user cannot navigate cannot carry informed consent.
+State unproven claims and the evidence needed to establish them. Add features with a consumer.
+Keep frontend and backend responsibilities explicit; token-scoped forwarding cannot provide
+object scoping. `purpose` constrains selection and consent language and cannot attest later use.
+Keep caller-supplied text outside the trusted identity position.
 
-## Ground rules for changes to the documents
+PINs must never be stored, logged or carried over the Certificate interfaces. The system
+prompter transports an encrypted PIN to the backend for login; see
+[PIN handling](docs/SECURITY.md#pin-handling). No prompt offers PIN retention.
 
-- **Do not weaken a claim into ambiguity.** If something is unproven, say it is unproven and say
-  what would prove it. Every document here names its own open problems on purpose.
-- **Do not add a feature without a consumer.** One consumer is already thin evidence; zero is none.
-- **Do not describe token-scoped forwarding as object scoping**, in any wording, anywhere.
-- **Do not blur the frontend/backend line to make a paragraph shorter.** "The service" is two
-  services with different jobs, in two different projects, and a document that says "the service
-  resolves the caller's identity and shows the chooser" has described a design this project
-  deliberately does not have.
-- **`purpose` is not enforceable** and every document that mentions it says so. Keep it that way.
-- **Nothing may put caller-supplied text in the trusted identity position.**
-- **No design may store, log, or transport a PIN.** There is no "remember PIN" and there will not
-  be one.
+## Code and ownership
 
-## Code
+Use C11, GLib and Meson, and keep compiler warnings clean. Preserve
+`SPDX-License-Identifier: LGPL-2.1-or-later` and `SPDX-FileCopyrightText` headers in source,
+tests, tools and build files. [ADR 0004](docs/decisions/0004-license.md) explains licensing.
+Logging uses `src/redact.h`, whose entry points accept only permitted fields.
 
-- C11, GLib, meson. Warnings are on; keep them clean.
-- `SPDX-License-Identifier: LGPL-2.1-or-later` and `SPDX-FileCopyrightText` in every source, test,
-  tool and build file. See
-  [docs/decisions/0004-license.md](docs/decisions/0004-license.md) for why.
-- Logging goes through `src/redact.h`, which accepts only the fields it may emit. Do not add a
-  `printf`-shaped logging call; a filter that must recognise a secret has already been handed one.
-- The synthetic PKCS#11 facade (`src/export/facade.h`) is not being built. It was a server design,
-  superseded by the client-side module in `src/module/`; see
-  [docs/decisions/0011](docs/decisions/0011-client-side-pkcs11-module.md).
+Assign changes using the [responsibility table](docs/ARCHITECTURE.md#responsibilities) and
+[backend layout](docs/UPSTREAMING.md#backend-layout). New caller information requires an impl
+argument; see [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md).
 
-## Which repository does a change belong in
+The served facade in `src/export/facade.h` is unimplemented. PKCS#11 consumers use
+`src/module/`; see [ADR 0011](docs/decisions/0011-client-side-pkcs11-module.md).
 
-This repository is a portal **backend**, laid out like every out-of-tree backend
-(`xdg-desktop-portal-gtk`, `xdg-desktop-portal-termfilechooser`): `src/` holds one file per portal
-interface implemented, `data/` holds the `.portal` file, the D-Bus service file and the interface
-XML. The **frontend** is a branch of xdg-desktop-portal
-([docs/decisions/0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md)).
+## Running tests
 
-Before writing anything, decide which project it goes in, and check it against
-[the responsibility table](docs/ARCHITECTURE.md#who-does-what):
-
-- **Frontend** (xdg-desktop-portal, branch `experimental/integration`,
-  `desktop-portal/certificate.c`): who is calling, what they are allowed to ask for, what is
-  remembered, how long a grant lives, which backend is used, the interface XML.
-- **Backend** (here, `src/`): what the user sees, what the card does. It never derives an app id,
-  never decides policy, never writes the permission store, and never widens what it was granted. It
-  is the only side with a toolkit and a PKCS#11 dependency, and that is not a coincidence.
-
-Three rules that are easy to break by accident:
-
-- **Do not let the backend learn anything about the caller except what the frontend passed it.** If
-  a change needs the backend to know something new about the application, the change is a new
-  argument on the impl interface — that is, a change to the branch — not a lookup in the backend.
-- **Do not add a way for an application to reach the impl interface.** Not a convenience method, not
-  a debug flag, not a "direct mode". See [docs/IMPL-INTERFACE.md](docs/IMPL-INTERFACE.md).
-- **Do not edit `data/org.freedesktop.impl.portal.experimental.Certificate1.xml`.** It is a tracking
-  copy.
-
-## Running the tests
-
-The frontend branch needs `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1` in its
-startup environment and a configured backend. The development scripts append `Certificate1`
-to an existing comma-separated list when missing. Include `WebAuthentication1` when running
-both portals.
-
-`meson setup build && meson test -C build` runs the headless suites (tier 0 of
-[docs/TESTING.md](docs/TESTING.md)); a sanitizer build and the software-token and real-card tiers
-are documented there too. Run at least tier 0 before sending a change.
+Run `meson setup build` and `meson test -C build` before sending a change.
+[docs/TESTING.md](docs/TESTING.md) covers sanitizer builds, frontend configuration,
+software-token smoke tests and hardware checks. Development scripts preserve the caller's
+experimental-portal list and append `Certificate1` when missing; both portals require
+`Certificate1,WebAuthentication1`.
 
 ## Sign-off and licence
 
-A `Signed-off-by` trailer (`git commit -s`) is welcome but not required. By sending a change you
-agree it is licensed under this project's licence, LGPL-2.1-or-later.
+A `Signed-off-by` trailer (`git commit -s`) is welcome but optional. Contributions are
+licensed under LGPL-2.1-or-later.
 
 ## AI assistance
 
-These documents were drafted with AI assistance (Anthropic Claude and OpenAI Codex) under the
-author's direction. If you use the same, say so in the commit body, and be responsible for every
-claim you land — including the citations. Several claims in the first draft of this repository were
-wrong, and checking them against primary sources is what found it.
+Documentation credits: Anthropic Claude and OpenAI Codex, under the author's direction.
+Disclose AI assistance in the commit body and take responsibility for each claim and citation.
+Check claims against primary sources.
