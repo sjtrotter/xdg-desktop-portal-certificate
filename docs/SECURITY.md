@@ -436,12 +436,11 @@ adds diagnostic events without sensitive data.
 
 ## Open problems
 
-WebAuthentication and Certificate share a frontend process but do not yet propagate the original
-web-authentication caller's identity in-process. The certificate backend sees its immediate consumer.
-Authenticated IPC or a frontend-issued capability could also support delegation if the frontend
-independently identifies each peer. Caller-supplied third-party app ids cannot establish identity.
-See [0005](decisions/0005-first-consumer-is-the-web-auth-service.md) and
-[0010](decisions/0010-backend-only-frontend-lives-upstream.md).
+Propagating an original caller's identity through an intermediary is no longer a goal: applications
+load the module themselves and no service acquires credentials on their behalf
+([#14](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/14),
+[ARCHITECTURE.md](ARCHITECTURE.md#scope-limits)). Caller-supplied third-party app ids cannot
+establish identity.
 
 Endpoint loading, concurrency and fd lifetime remain questions for a served facade; the client
 module already serves PKCS#11 consumers. [SPIKES.md](SPIKES.md) S3 lists remaining browser tests.

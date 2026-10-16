@@ -116,7 +116,7 @@ A dynamic endpoint design would also need late introduction after browser subpro
 URI resolution and socket-owner tracing. Possible alternatives are a permanently registered
 broker with grant-aware slots, dedicated network-process environments, or direct glib-networking/
 GnuTLS integration. Retaining a separate consumer implementation would require its own design;
-the web-auth backend currently uses this module exclusively.
+the web-auth backend used this module exclusively until its development stopped.
 
 ## S4: removal, reinsertion and multiple readers
 

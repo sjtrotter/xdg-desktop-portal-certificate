@@ -28,7 +28,7 @@ Applications call `org.freedesktop.portal.experimental.Certificate1` on
 
 The frontend exports the interface only when a backend is configured and `Certificate1` is
 listed in `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` in the frontend's environment
-(comma separated, no spaces; `Certificate1,WebAuthentication1` enables both portals).
+(comma separated, no spaces).
 To select this backend in `portals.conf`:
 
 ```ini
@@ -139,8 +139,9 @@ operation, a PIN-pad reader, a second card model, KDE and the OpenSSL 3 provider
 
 ## Related repositories
 
-- [xdg-desktop-portal-webauth](https://github.com/sjtrotter/xdg-desktop-portal-webauth): the
-  WebAuthentication backend, which uses this portal for client certificates.
+- [xdg-desktop-portal-webauth](https://github.com/sjtrotter/xdg-desktop-portal-webauth): a
+  WebAuthentication backend that used this portal for client certificates; development stopped
+  2026-10-16.
 - [entra-token-helper](https://github.com/sjtrotter/entra-token-helper): a Microsoft Entra ID
   token client built on the WebAuthentication portal.
 - [xdg-desktop-portal fork](https://github.com/sjtrotter/xdg-desktop-portal): the frontend

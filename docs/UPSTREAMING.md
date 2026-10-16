@@ -15,12 +15,12 @@ branch `experimental/integration`. Git remotes are
 The merged experimental convention is defined by
 [PR #2129](https://github.com/flatpak/xdg-desktop-portal/pull/2129), with the opt-in check fixed by
 [PR #2173](https://github.com/flatpak/xdg-desktop-portal/pull/2173).
-Certificate and WebAuthentication remain fork interfaces. Propose Certificate before
-WebAuthentication.
+Certificate remains a fork interface. WebAuthentication will not be proposed: its development
+stopped on 2026-10-16.
 
 [ADR 0012](decisions/0012-merged-experimental-portal-convention.md) records the naming and
 export convention. [PUBLIC-INTERFACE.md](PUBLIC-INTERFACE.md#contract) applies it to Certificate
-and documents `version` and the `Certificate1,WebAuthentication1` opt-in for both portals.
+and documents `version` and the `Certificate1` opt-in.
 
 ## Frontend dependencies
 

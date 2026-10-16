@@ -47,9 +47,9 @@ without becoming a product dependency. [SPIKES.md](SPIKES.md) records the detail
 Interface stability requires evidence for:
 
 1. A real GnuTLS mutual-TLS handshake through brokered `Sign`.
-2. A real WebKitGTK client-certificate handshake through the web-auth backend. The module must
-   be configured in each process that uses GLib's PKCS#11 URI constructor, which has no module
-   parameter. The web-auth backend's client-certificate path uses this portal module.
+2. A real WebKitGTK client-certificate handshake. The module must be configured in each process
+   that uses GLib's PKCS#11 URI constructor, which has no module parameter. Recorded once
+   (2026-09-05) through the now-stopped web-auth backend.
 3. Wrong PIN and final retry on hardware that can be unblocked.
 4. Protected authentication path on a PIN-pad reader without an emulated entry.
 5. Card removal during signing.
@@ -73,7 +73,9 @@ Requirements include OpenSC-compatible PIV cards, p11-kit API enumeration and fi
 trusted accessible dialogs, verified Flatpak identities and labelled host callers, short-lived
 independent grants, removal/invalidation, and separate `client_auth` and `signing` consent
 policies. The mechanisms are RSA PKCS#1 v1.5, RSA-PSS and ECDSA as supported by tested cards.
-The first consumer is `xdg-desktop-portal-webauth`, through the client-side PKCS#11 module.
+The first consumers are browsers loading the client-side PKCS#11 module: Firefox (tested
+2026-09-06 and 2026-10-16) and Chrome (tested 2026-10-16). The web-auth backend was the first
+consumer until its development stopped on 2026-10-16.
 
 Complete [chain construction](IMPL-INTERFACE.md#token-display-and-chain) with best-effort
 intermediates and `complete`/`partial`/`leaf_only` reporting. Add idle exit with no sessions and
@@ -88,7 +90,7 @@ Browser experiments in the test record do not establish packaging or general bro
 ## Phase 2: packaging and compatibility
 
 Package the backend and module, test GNOME and KDE on Wayland including parenting and activation,
-and obtain a consumer independent of the web-auth backend. A KDE chooser and PIN implementation
+and confirm browser consumers without manual setup. A KDE chooser and PIN implementation
 would be a separate backend package with its own `.portal` file
 ([ADR 0008](decisions/0008-build-to-the-upstream-shape.md)); no KDE system-prompter equivalent
 is integrated here.
@@ -108,8 +110,7 @@ lists the conversation order. `Certificate` remains an incubation name.
 
 1. Working implementation and published introspection XML.
 2. Documented threat model, consent policy, identity, scoping and UI security.
-3. Two consumers, including one independent of `xdg-desktop-portal-webauth`; the first consumer
-   is a private tool with additional governance obligations.
+3. Two independent consumers; Firefox and Chrome through the PKCS#11 module are the current ones.
 4. GNOME and KDE/Wayland testing, including parenting and activation.
 5. An upstream new-portal issue identifying the protected host resource: hardware-backed private
    key use and trusted consent/PIN interaction, replacing blanket `--socket=pcsc` access.
