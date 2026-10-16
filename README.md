@@ -69,6 +69,9 @@ Pick the certificate and enter the fixture PIN `123456`; the client checks the r
 signature. `tools/ui-smoke.sh` runs the same flow headless. [Testing](docs/TESTING.md) covers
 prerequisites and runs with a real card.
 
+The [single-prompt Firefox procedure](docs/TESTING.md#single-prompt-firefox-procedure) uses
+the portal chooser and PIN prompt without Firefox's certificate picker.
+
 ## Status
 
 | Feature | State | Notes |
@@ -109,7 +112,8 @@ operation, a PIN-pad reader, a second card model, KDE and the OpenSSL 3 provider
 - A WebKitGTK client-certificate handshake shows two choosers, because its UI and network
   processes are separate D-Bus peers and each needs a grant. Sharing a grant needs a frontend
   design ([ADR 0011](docs/decisions/0011-client-side-pkcs11-module.md)).
-- Firefox shows the portal chooser, then its own certificate picker, then the PIN prompt.
+- Firefox's default selection setting adds its own certificate picker;
+  [automatic selection](docs/TESTING.md#single-prompt-firefox-procedure) skips it.
 - Firefox's NSS lists certificates by class alone; the module answers that search only with
   `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`, so a page load does not open a chooser
   ([search intent](docs/SECURITY.md#search-intent)).

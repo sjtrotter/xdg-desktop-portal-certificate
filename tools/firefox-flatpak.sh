@@ -15,6 +15,7 @@ URL=""
 FRESH=0
 CHECK=0
 KEEP_PCSC=0
+CERT_SELECTION=""
 
 die() { echo "${0##*/}: $*" >&2; exit 1; }
 
@@ -25,6 +26,8 @@ while [ $# -gt 0 ]; do
 		--fresh) FRESH=1 ;;
 		--check) CHECK=1 ;;
 		--keep-pcsc) KEEP_PCSC=1 ;;
+		--auto-select) CERT_SELECTION=auto ;;
+		--ask) CERT_SELECTION=ask ;;
 		-h | --help)
 			cat <<EOF
 Usage: ${0##*/} [options]
@@ -38,6 +41,8 @@ Options:
   --fresh         remove the test profile before starting Firefox
   --check         check portal and sandbox access without starting Firefox
   --keep-pcsc     retain the sandbox's pcsc socket and device access
+  --auto-select   skip Firefox's certificate picker in the test profile
+  --ask           remove the test profile's automatic-selection preference
   -h, --help      show this help
 
 The default run removes pcsc socket and device access.
@@ -99,6 +104,25 @@ if [ "$FRESH" = 1 ]; then
 fi
 mkdir -p "$PROFILE"
 
+if [ -n "$CERT_SELECTION" ]; then
+	USER_JS="$PROFILE/user.js"
+	if [ -f "$USER_JS" ]; then
+		sed -i '/^[[:space:]]*user_pref([[:space:]]*"security\.default_personal_cert"[[:space:]]*,/d' "$USER_JS" ||
+			die "profile preference could not be removed: $USER_JS"
+	fi
+	if [ "$CERT_SELECTION" = auto ]; then
+		if [ -s "$USER_JS" ] && [ -n "$(tail -c 1 "$USER_JS")" ]; then
+			printf '\n' >> "$USER_JS" || die "profile preference could not be written: $USER_JS"
+		fi
+		printf '%s\n' 'user_pref("security.default_personal_cert", "Select Automatically");' >> "$USER_JS" ||
+			die "profile preference could not be written: $USER_JS"
+	elif [ -f "$PROFILE/prefs.js" ]; then
+		# Firefox saves preferences from user.js into prefs.js during a run.
+		sed -i '/^[[:space:]]*user_pref([[:space:]]*"security\.default_personal_cert"[[:space:]]*,/d' "$PROFILE/prefs.js" ||
+			die "profile preference could not be removed: $PROFILE/prefs.js"
+	fi
+fi
+
 cat <<MSG
 ${0##*/}: module copied to $INSIDE
 ${0##*/}: profile $PROFILE
@@ -107,7 +131,11 @@ ${0##*/}: in Firefox, once per profile:
     Module name: Portal Certificate
     Module filename: $INSIDE
 ${0##*/}: then visit a site that asks for a client certificate.
-${0##*/}: expect: this backend's chooser, Firefox's picker, the shell's PIN prompt.
 MSG
+if [ "$CERT_SELECTION" = auto ] || { [ -z "$CERT_SELECTION" ] && grep -qs 'default_personal_cert", "Select Automatically"' "$PROFILE/user.js"; }; then
+	echo "${0##*/}: expect: the portal chooser, then the portal PIN prompt."
+else
+	echo "${0##*/}: expect: the portal chooser, Firefox's picker, then the portal PIN prompt (--auto-select skips the picker)."
+fi
 
 exec flatpak run "${RUN_ARGS[@]}" "$APP" --new-instance --profile "$PROFILE" ${URL:+"$URL"}

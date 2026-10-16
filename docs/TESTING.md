@@ -472,6 +472,11 @@ The 2026-09-06 failure report recorded that alert, no frontend session/acquisiti
 4. Expect portal chooser at search, Firefox's own one-certificate picker, then backend PIN
    interaction at first `Sign`. A Protected Authentication alert indicates `CKF_LOGIN_REQUIRED`.
 
+For single-prompt selection, set `security.default_personal_cert` to `Select Automatically`
+in `about:config`. Firefox then uses the first candidate with a private key. The module exposes
+only the certificate selected in the portal chooser, so Firefox's picker is skipped.
+The Flatpak helper's `--auto-select` option sets this preference in its test profile.
+
 Repeated enumeration and changing object sets after expiry need live testing. The recorded NSS
 `[CKA_ISSUER, CKA_SERIAL_NUMBER]` lookup returned no object even with a grant; certutil listing
 survived and the Firefox path did not depend on it. That compatibility gap remains open.
@@ -510,16 +515,16 @@ card absent. Check `--list-tokens` and `opensc-tool -l` first in that case.
 Start the live stack in one terminal:
 
 ```console
-   $ tools/dev-stack.sh --live --keep --no-e2e --pin-prompt=system
-   ```
+$ tools/dev-stack.sh --live --keep --no-e2e --pin-prompt=system
+```
 
 `--no-e2e` skips the script's own chooser, PIN and signature before the browser test.
 In another terminal:
 
 ```console
-   $ flatpak install flathub org.mozilla.firefox      # once
-   $ tools/firefox-flatpak.sh --fresh
-   ```
+$ flatpak install flathub org.mozilla.firefox      # once
+$ tools/firefox-flatpak.sh --fresh --auto-select
+```
 
 The script copies the module to `~/.var/app/org.mozilla.firefox/data/`, creates a scratch profile,
 checks sandbox pcsc absence and portal visibility, then launches with enumeration opt-in and
@@ -529,17 +534,125 @@ verification; `--keep-pcsc` is the installed-permissions control; `--url` opens 
 
 Once per profile, load the printed module path through Firefox's Security Devices dialog.
 The `.module` allowlist is not involved in this direct loading. Visit a client-certificate site.
-Expect the three dialogs from §2.6. Correlate the backend's
+With `--auto-select`, expect the portal chooser followed by the portal PIN prompt, with no
+Firefox certificate dialog. Correlate the backend's
 `app_id=org.mozilla.firefox identity=sandboxed purpose=client_auth granted=yes` with
 `CreateSession`/`AcquireCredential` in `$DEVDIR/frontend.log`. An alert, empty certificate list
 or unidentified caller needs investigation. Compatibility with other runtime versions remains
 unproven.
+
+#### Single-prompt Firefox procedure
+
+Close the test Firefox before changing its profile. After the initial module load, reuse it:
+
+```sh
+tools/firefox-flatpak.sh --auto-select --url https://mtls.example.org
+```
+
+Replace the URL with a site that requests your card's client certificate. `--auto-select`
+writes `user_pref("security.default_personal_cert", "Select Automatically");` once in the test
+profile's `user.js`. Runs without either selection option preserve the profile's setting.
+To restore Firefox's picker, close the test Firefox and run:
+
+```sh
+tools/firefox-flatpak.sh --ask
+```
+
+`--ask` removes the preference from `user.js` and its saved value in `prefs.js`.
+`--fresh` deletes the test profile, including its module registration.
+
+Confirmed on 2026-10-16 with Flathub Firefox and a PIV card
+([issue #13](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/13)):
+the portal chooser appeared, then the portal PIN prompt; Firefox showed no certificate dialog.
+Private windows within the five-minute grant reused the selected certificate. Opening Firefox's
+certificate manager opened the portal chooser before visiting any site; listing needed no PIN.
+The first signature required the PIN.
 
 On Fedora the Flatpak-exported `org.mozilla.firefox.desktop` can shadow the RPM launcher and
 select an empty Flatpak profile. The host profile under `~/.config/mozilla/firefox` remains
 separate. The script copies the RPM launcher to `~/.local/share/applications/` if no user
 launcher exists. Removing the user Flatpak with `flatpak uninstall --user org.mozilla.firefox`
 also removes that exported launcher.
+
+### 2.8 Chrome Flatpak
+
+Untested so far. This procedure targets Flathub `com.google.Chrome` and requires the built
+portal module, the live portal stack from §2.7, a card and host `nss-tools` for `modutil`.
+Set `MODUTIL=/path/to/modutil` if it is not on `PATH`. Chrome has no module-loading UI;
+the helper registers the module with `modutil -dbdir sql:<database-directory> -add`.
+
+Install Chrome, start it once to create its profile, then quit it completely (background
+processes can outlive the last window; `flatpak kill com.google.Chrome` stops them). The helper
+refuses to run while Chrome is running:
+
+```sh
+flatpak install flathub com.google.Chrome
+flatpak run com.google.Chrome
+```
+
+Chrome's Flatpak wrapper links the host's `/etc/opt/chrome/policies/managed/` files into the
+sandbox. Install a policy for the site that requests your certificate; replace the example
+pattern before running these commands:
+
+```sh
+sudo install -d -m 0755 /etc/opt/chrome/policies/managed
+sudo tee /etc/opt/chrome/policies/managed/portal-certificate.json >/dev/null <<'POLICY'
+{
+  "AutoSelectCertificateForUrls": [
+    "{\"pattern\":\"https://[*.]example.org\",\"filter\":{}}"
+  ]
+}
+POLICY
+sudo chmod 0644 /etc/opt/chrome/policies/managed/portal-certificate.json
+```
+
+`AutoSelectCertificateForUrls` takes an array of JSON strings. The empty filter accepts any
+certificate offered for the matching site; the portal chooser determines which one this module
+offers. The policy applies to every matching site in host Chrome and the Flatpak.
+
+Keep the live stack running in another terminal, then launch the helper:
+
+```sh
+tools/chrome-flatpak.sh --site 'https://[*.]example.org' --url https://mtls.example.org
+```
+
+The helper copies the module to `~/.var/app/com.google.Chrome/data/`, finds `cert9.db` under
+`~/.var/app/com.google.Chrome/`, and registers the copied library unless it is already listed.
+`--site` prints policy JSON inside exact host installation commands; the helper never runs
+`sudo`. A missing policy also prints commands, using `https://[*.]example.org` unless `--site`
+was given. Chrome can still show its picker until the policy is installed and loaded.
+
+Chrome M146 and later use `$HOME/.local/share/pki/nssdb`, while an existing `$HOME/.pki/nssdb`
+still takes precedence. The helper discovers the persistent Flatpak database rather than
+assuming either location. No database produces `start Chrome once to create its profile`;
+multiple databases stop setup and print their paths. The database selected by Chrome inside
+this Flatpak and the copied library's absolute sandbox path still need live confirmation.
+
+Open `chrome://policy`, reload policies and confirm `AutoSelectCertificateForUrls` has the
+intended pattern and no errors. Visit the matching client-certificate site. Expect the portal
+chooser and portal PIN prompt, with no Chrome picker, and a successful sign-in. Check the
+backend log for `app_id=com.google.Chrome identity=sandboxed`, `grant-created`, `login-ok`
+and `operation-completed`. A Chrome picker despite a valid matching policy, or no portal
+chooser, needs investigation of the database and module path printed by the helper.
+
+After closing Chrome, verify the setup without copying or registering anything:
+
+```sh
+tools/chrome-flatpak.sh --check
+```
+
+The helper passes `--env=PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` on each run, so the opt-in
+does not persist. Default launches remove the pcsc socket and all device access with
+`--nosocket=pcsc --nodevice=all`. If removing devices prevents Chrome's GPU startup, use:
+
+```sh
+tools/chrome-flatpak.sh --keep-devices --url https://mtls.example.org
+```
+
+`--keep-devices` keeps device access while removing the pcsc socket. `--keep-pcsc` retains both
+installed permissions for comparison. `--module PATH` selects another built module.
+The current manifest uses `org.freedesktop.Platform//25.08`, as in the Firefox module-loading
+run; Chrome module loading and automatic selection remain unverified.
 
 ## 3. Real PIV card
 
