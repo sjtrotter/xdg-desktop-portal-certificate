@@ -33,9 +33,15 @@ gboolean certificate_device_login(CertificateDevice* device,
                                   const CertificateCandidate* candidate, const char* pin,
                                   GError** error);
 
+gboolean certificate_device_login_context(CertificateDevice* device, const char* pin,
+                                          GError** error);
+
+typedef gboolean (*CertificateDeviceAuthenticate)(gpointer user_data, GError** error);
+
 /** Payloads come from certificate_mechanism_prepare(); returned signatures retain the module's encoding. */
 GBytes* certificate_device_perform(CertificateDevice* device, gboolean decrypt,
                                    CertificateMechanism* mechanism, GBytes* payload,
+                                   CertificateDeviceAuthenticate authenticate, gpointer auth_data,
                                    GError** error);
 
 /** Middleware may retain authentication after logout and session close. */

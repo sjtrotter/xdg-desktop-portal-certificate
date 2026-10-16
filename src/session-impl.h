@@ -53,6 +53,8 @@ struct _CertificateImplSession
 
 	/* Workers hold device_lock; GObject creation and destruction stay on the main thread. */
 	GMutex device_lock;
+	/* Operation initialization survives PIN retries while device_lock is released. */
+	GMutex operation_lock;
 	CertificateDevice device;
 
 	/* The session owns one shared PIN prompt; cancel it only after the last login waiter leaves. */

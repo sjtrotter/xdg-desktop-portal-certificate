@@ -237,6 +237,11 @@ application's sessions, without transferring that state across a forwarding boun
 middleware may cache authentication outside this service. `C_Logout` is issued at grant end;
 the backend cannot guarantee that card, firmware or driver forgets authentication.
 
+Keys with `CKA_ALWAYS_AUTHENTICATE` require a fresh PIN interaction and
+`C_Login(CKU_CONTEXT_SPECIFIC)` after operation initialization for each use. The PIN is not
+cached. PIN cancellation or failure closes the device session to discard the initialized
+operation.
+
 A protected authentication path (`CKF_PROTECTED_AUTHENTICATION_PATH`) uses a null PIN and an
 instructional dialog without an editable field [[S12](SOURCES.md)]. The token or reader collects
 the secret. `FINAL_TRY` confirmation still applies before submitting that login.
@@ -253,8 +258,9 @@ offered per prompt. Incorrect PINs permit user-initiated retries within that lim
 login ends the interaction after an incorrect PIN because the reader owns entry. Locked PINs,
 cancellation, token removal and other device failures, including ambiguous transport failures,
 end the interaction. A fresh application request can start a new prompt and spend another
-attempt. PIN prompts are serialized; concurrent operations on one session share one. Cancelling
-a waiter leaves other waiters active; cancelling the last hides the prompt.
+attempt. PIN prompts are serialized; concurrent operations on one session share the initial
+user login. Cancelling a waiter leaves other waiters active; cancelling the last hides the
+prompt. Keys with `CKA_ALWAYS_AUTHENTICATE` prompt separately for each operation.
 
 With no usable display or forbidden interaction, calls fail with `no_display` or
 `interaction_required`. No path reads a PIN from stdin. A headless trusted-agent protocol

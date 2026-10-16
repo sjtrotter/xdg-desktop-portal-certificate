@@ -801,10 +801,18 @@ activation reduced startup from roughly 25 s to 2 s. These are measurements from
 ### 3.5 One PIN per grant
 
 Unrun on hardware. Verify two sequential signatures and two concurrent signatures under the same
-grant: one login prompt and successful results for all live waiters. No current command in
-`certificate-e2e.py` keeps a grant for a second signing operation. Separate invocations create
+grant with `CKA_ALWAYS_AUTHENTICATE=FALSE`: one login prompt and successful results for all
+live waiters. Keys with `CKA_ALWAYS_AUTHENTICATE=TRUE` require another PIN interaction for each
+signature. No current command in `certificate-e2e.py` keeps a grant for a second signing
+operation. Separate invocations create
 separate connections/grants, and `--regrant` creates another session, so neither tests this
 property. The broker and cancellation unit tests cover software-side sharing.
+
+`/device/always-authenticate` generates a temporary token key in the SoftHSM fixture, verifies
+two signatures and checks a context-specific login for each. The key is removed after the test.
+`/pin-system/broker-context-login` checks two concurrent signatures with separate scripted PIN
+prompts and asserts that each context login follows `C_SignInit`. It needs a private D-Bus but
+no display or hardware.
 
 ### 3.6 Wrong PIN and final attempt
 

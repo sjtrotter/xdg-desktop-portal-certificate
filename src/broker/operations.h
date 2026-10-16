@@ -29,4 +29,7 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 typedef void (*CertificateBrokerGate)(gpointer user_data);
 void certificate_broker_set_gate(CertificateBrokerGate gate, gpointer user_data);
 
+/** The test open gate runs once on a worker after the device opens, without locks held. */
+void certificate_broker_set_open_gate(CertificateBrokerGate gate, gpointer user_data);
+
 #endif

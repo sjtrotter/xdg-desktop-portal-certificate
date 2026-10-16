@@ -34,6 +34,8 @@ typedef struct
 	/* Each login waiter watches its own cancellation independently. */
 	gulong login_cancel_id;
 	guint login_cancel_idle;
+	CertificatePinOutcome context_outcome;
+	gboolean retry_open;
 } Operation;
 
 static void operation_free(Operation* operation)
@@ -227,6 +229,116 @@ static void do_abandon(gpointer user_data)
 	certificate_impl_session_release_device_async(session);
 }
 
+typedef struct
+{
+	Operation* operation;
+	GMutex lock;
+	GCond cond;
+	gboolean done;
+	CertificatePinOutcome outcome;
+	CK_SESSION_HANDLE handle;
+} ContextAuthentication;
+
+static gboolean do_context_login(const char* pin, gpointer user_data, GError** error)
+{
+	ContextAuthentication* authentication = user_data;
+	Operation* operation = authentication->operation;
+	CertificateImplSession* session = operation->session;
+	gboolean ok;
+
+	g_mutex_lock(&session->device_lock);
+	ok = operation_still_authorised(operation, error);
+	if (ok && session->device.session != authentication->handle)
+	{
+		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR,
+		                    CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
+		                    "The security token is no longer present");
+		ok = FALSE;
+	}
+	if (ok)
+		ok = certificate_device_login_context(&session->device, pin, error);
+	g_mutex_unlock(&session->device_lock);
+
+	return ok;
+}
+
+static void refresh_context_flags(CertificateToken* token, gpointer user_data)
+{
+	ContextAuthentication* authentication = user_data;
+	Operation* operation = authentication->operation;
+
+	certificate_tokens_refresh_flags(operation->tokens, token);
+}
+
+static void on_context_pin_done(CertificatePinOutcome outcome, gpointer user_data)
+{
+	ContextAuthentication* authentication = user_data;
+
+	g_mutex_lock(&authentication->lock);
+	authentication->outcome = outcome;
+	authentication->done = TRUE;
+	g_cond_signal(&authentication->cond);
+	g_mutex_unlock(&authentication->lock);
+}
+
+static gboolean prompt_context_pin(gpointer user_data)
+{
+	ContextAuthentication* authentication = user_data;
+	Operation* operation = authentication->operation;
+	CertificateImplSession* session = operation->session;
+
+	certificate_pin_login_full(session->candidate->token, session->id, operation->parent_window,
+	                           operation->caller_display, operation->purpose_display,
+	                           do_context_login, refresh_context_flags, NULL, authentication,
+	                           NULL, operation->cancellable, on_context_pin_done, authentication);
+	return G_SOURCE_REMOVE;
+}
+
+/* The operation lock preserves SignInit while the main thread runs the PIN interaction. */
+static gboolean authenticate_context(gpointer user_data, GError** error)
+{
+	Operation* operation = user_data;
+	CertificateImplSession* session = operation->session;
+	ContextAuthentication authentication = {
+		.operation = operation, .handle = session->device.session
+	};
+
+	g_mutex_init(&authentication.lock);
+	g_cond_init(&authentication.cond);
+	g_mutex_unlock(&session->device_lock);
+
+	g_mutex_lock(&authentication.lock);
+	g_idle_add(prompt_context_pin, &authentication);
+	while (!authentication.done)
+		g_cond_wait(&authentication.cond, &authentication.lock);
+	g_mutex_unlock(&authentication.lock);
+
+	g_mutex_lock(&session->device_lock);
+	operation->context_outcome = authentication.outcome;
+	g_cond_clear(&authentication.cond);
+	g_mutex_clear(&authentication.lock);
+
+	if (operation->context_outcome != CERTIFICATE_PIN_OK)
+	{
+		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
+		                    "Token refused authentication");
+		return FALSE;
+	}
+
+	if (!operation_still_authorised(operation, error))
+		return FALSE;
+
+	if (session->device.module == NULL || session->device.session != authentication.handle)
+	{
+		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR,
+		                    CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
+		                    "The security token is no longer present");
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
 static CertificateBrokerGate certificate_broker_gate = NULL;
 static gpointer certificate_broker_gate_data = NULL;
 
@@ -234,6 +346,15 @@ void certificate_broker_set_gate(CertificateBrokerGate gate, gpointer user_data)
 {
 	certificate_broker_gate = gate;
 	certificate_broker_gate_data = user_data;
+}
+
+static CertificateBrokerGate certificate_broker_open_gate = NULL;
+static gpointer certificate_broker_open_gate_data = NULL;
+
+void certificate_broker_set_open_gate(CertificateBrokerGate gate, gpointer user_data)
+{
+	certificate_broker_open_gate = gate;
+	certificate_broker_open_gate_data = user_data;
 }
 
 static void sign_thread(GTask* task, gpointer source, gpointer task_data,
@@ -250,13 +371,28 @@ static void sign_thread(GTask* task, gpointer source, gpointer task_data,
 		return;
 	}
 
+	g_mutex_lock(&session->operation_lock);
 	g_mutex_lock(&session->device_lock);
 
 	/* Recheck under the lock immediately before submitting work to the token. */
 	if (!operation_still_authorised(operation, &error))
 	{
 		g_mutex_unlock(&session->device_lock);
+		g_mutex_unlock(&session->operation_lock);
 		g_task_return_error(task, g_steal_pointer(&error));
+		return;
+	}
+
+	/* A preceding operation may have reset the device while this request waited. */
+	if (session->device.module == NULL ||
+	    (!session->device.logged_in &&
+	     (session->candidate->token->login_required ||
+	      session->device.private_key == CK_INVALID_HANDLE)))
+	{
+		operation->retry_open = TRUE;
+		g_mutex_unlock(&session->device_lock);
+		g_mutex_unlock(&session->operation_lock);
+		g_task_return_pointer(task, NULL, NULL);
 		return;
 	}
 
@@ -264,8 +400,10 @@ static void sign_thread(GTask* task, gpointer source, gpointer task_data,
 		certificate_broker_gate(certificate_broker_gate_data);
 
 	result = certificate_device_perform(&session->device, operation->decrypt,
-	                                    &operation->mechanism, operation->payload, &error);
+	                                    &operation->mechanism, operation->payload,
+	                                    authenticate_context, operation, &error);
 	g_mutex_unlock(&session->device_lock);
+	g_mutex_unlock(&session->operation_lock);
 
 	if (result == NULL)
 	{
@@ -289,11 +427,27 @@ static void sign_thread(GTask* task, gpointer source, gpointer task_data,
 	}
 }
 
+static void apply_login_outcome(Operation* operation, CertificatePinOutcome outcome);
+static void open_operation(Operation* operation);
+
 static void on_signed(GObject* source, GAsyncResult* result, gpointer user_data)
 {
 	Operation* operation = user_data;
 	g_autoptr(GError) error = NULL;
 	g_autoptr(GBytes) signature = g_task_propagate_pointer(G_TASK(result), &error);
+
+	if (operation->retry_open && error == NULL)
+	{
+		operation->retry_open = FALSE;
+		open_operation(operation);
+		return;
+	}
+
+	if (signature == NULL && operation->context_outcome != CERTIFICATE_PIN_OK)
+	{
+		apply_login_outcome(operation, operation->context_outcome);
+		return;
+	}
 
 	if (signature == NULL)
 	{
@@ -502,6 +656,14 @@ static void open_thread(GTask* task, gpointer source, gpointer task_data,
 	ok = ensure_session_locked(operation, &error);
 	g_mutex_unlock(&session->device_lock);
 
+	if (ok && certificate_broker_open_gate != NULL)
+	{
+		CertificateBrokerGate gate = certificate_broker_open_gate;
+
+		certificate_broker_open_gate = NULL;
+		gate(certificate_broker_open_gate_data);
+	}
+
 	if (!ok)
 		g_task_return_error(task, g_steal_pointer(&error));
 	else
@@ -530,6 +692,15 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 
 	/* Lazy login state is shared with workers and read under device_lock. */
 	g_mutex_lock(&session->device_lock);
+
+	/* Another operation's cancelled authentication may have closed the device since it opened. */
+	if (session->device.module == NULL)
+	{
+		g_mutex_unlock(&session->device_lock);
+		open_operation(operation);
+		return;
+	}
+
 	needs_login = !session->device.logged_in &&
 	              (session->candidate->token->login_required ||
 	               session->device.private_key == CK_INVALID_HANDLE);
@@ -580,6 +751,14 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 	                           login_interaction_ref(interaction));
 }
 
+static void open_operation(Operation* operation)
+{
+	g_autoptr(GTask) task = g_task_new(NULL, operation->cancellable, on_opened, operation);
+
+	g_task_set_task_data(task, operation_ref(operation), operation_unref);
+	g_task_run_in_thread(task, open_thread);
+}
+
 void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSession* session,
                                 gboolean decrypt, const char* operation_id,
                                 const char* mechanism_name,
@@ -591,7 +770,6 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 	g_autoptr(GError) error = NULL;
 	CertificateMechanism mechanism;
 	g_autoptr(GBytes) payload = NULL;
-	g_autoptr(GTask) task = NULL;
 
 	if (!session->granted || session->candidate == NULL)
 	{
@@ -701,9 +879,7 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 	certificate_log_operation(CERTIFICATE_REASON_REQUEST_RECEIVED, session->id, operation_id,
 	                          mechanism.name);
 
-	task = g_task_new(NULL, operation->cancellable, on_opened, operation);
-	g_task_set_task_data(task, operation_ref(operation), operation_unref);
-	g_task_run_in_thread(task, open_thread);
+	open_operation(operation);
 
 	/* Release the creation reference while the task chain holds its own. */
 	operation_unref(operation);

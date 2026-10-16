@@ -156,7 +156,7 @@ static void sign_and_verify(Fixture* fixture, const char* key_type, const char* 
 	g_assert_no_error(error);
 	g_assert_cmpuint(device.private_key, !=, (guint) CK_INVALID_HANDLE);
 
-	signature = certificate_device_perform(&device, FALSE, &mechanism, payload, &error);
+	signature = certificate_device_perform(&device, FALSE, &mechanism, payload, NULL, NULL, &error);
 	g_assert_no_error(error);
 	g_assert_nonnull(signature);
 	g_assert_cmpuint(g_bytes_get_size(signature), >, 0);
@@ -164,6 +164,118 @@ static void sign_and_verify(Fixture* fixture, const char* key_type, const char* 
 	certificate_test_verify_signature(candidate, algorithm, digest, digest_length, signature,
 	                                  g_strcmp0(mechanism_name, "ECDSA") == 0);
 
+	certificate_device_close(&device);
+	certificate_mechanism_clear(&mechanism);
+}
+
+typedef struct
+{
+	CertificateDevice* device;
+	guint logins;
+} ContextLogin;
+
+static gboolean context_login(gpointer user_data, GError** error)
+{
+	ContextLogin* login = user_data;
+
+	login->logins++;
+	return certificate_device_login_context(login->device, FIXTURE_PIN, error);
+}
+
+static void test_always_authenticate(Fixture* fixture, gconstpointer user_data)
+{
+	CertificateCandidate* candidate = candidate_of_type(fixture, "RSA");
+	CertificateDevice device = { 0 };
+	ContextLogin login = { .device = &device };
+	CertificateMechanism mechanism;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GVariant) parameters =
+	    g_variant_parse(G_VARIANT_TYPE_VARDICT, "{'hash': <'SHA256'>}", NULL, NULL, NULL);
+	g_autoptr(GBytes) data = NULL;
+	g_autoptr(GBytes) payload = NULL;
+	CK_BBOOL yes = CK_TRUE;
+	CK_ULONG bits = 2048;
+	CK_BYTE exponent[] = { 1, 0, 1 };
+	CK_ATTRIBUTE public_attributes[] = {
+		{ CKA_TOKEN, &yes, sizeof(yes) },
+		{ CKA_MODULUS_BITS, &bits, sizeof(bits) },
+		{ CKA_PUBLIC_EXPONENT, exponent, sizeof(exponent) },
+		{ CKA_VERIFY, &yes, sizeof(yes) },
+	};
+	CK_ATTRIBUTE private_attributes[] = {
+		{ CKA_TOKEN, &yes, sizeof(yes) },
+		{ CKA_PRIVATE, &yes, sizeof(yes) },
+		{ CKA_SIGN, &yes, sizeof(yes) },
+		{ CKA_ALWAYS_AUTHENTICATE, &yes, sizeof(yes) },
+	};
+	CK_MECHANISM generation = { CKM_RSA_PKCS_KEY_PAIR_GEN, NULL, 0 };
+	CK_OBJECT_HANDLE public_key;
+	CK_OBJECT_HANDLE key;
+	g_autoptr(GByteArray) modulus = NULL;
+	gnutls_pubkey_t verifier;
+	gnutls_datum_t modulus_data;
+	gnutls_datum_t exponent_data = { exponent, sizeof(exponent) };
+	gnutls_datum_t digest_data;
+	guint8 digest[32] = { 0 };
+
+	if (fixture->tokens == NULL)
+		return;
+
+	if (candidate == NULL)
+	{
+		g_test_skip("the fixture has no RSA key");
+		return;
+	}
+
+	g_assert_true(certificate_device_open(&device, fixture->tokens, candidate, &error));
+	g_assert_cmpuint(device.module->C_CloseSession(device.session), ==, CKR_OK);
+	g_assert_cmpuint(device.module->C_OpenSession(candidate->token->slot,
+	                                             CKF_SERIAL_SESSION | CKF_RW_SESSION,
+	                                             NULL, NULL, &device.session), ==, CKR_OK);
+	g_assert_true(certificate_device_login(&device, candidate, FIXTURE_PIN, &error));
+	g_assert_no_error(error);
+
+	g_assert_cmpuint(device.module->C_GenerateKeyPair(
+	                    device.session, &generation, public_attributes,
+	                    G_N_ELEMENTS(public_attributes), private_attributes,
+	                    G_N_ELEMENTS(private_attributes), &public_key, &key), ==, CKR_OK);
+	modulus = certificate_pkcs11_get_attribute(device.module, device.session, public_key,
+	                                           CKA_MODULUS);
+	g_assert_nonnull(modulus);
+	modulus_data = (gnutls_datum_t) { modulus->data, modulus->len };
+	g_assert_cmpint(gnutls_pubkey_init(&verifier), ==, GNUTLS_E_SUCCESS);
+	g_assert_cmpint(gnutls_pubkey_import_rsa_raw(verifier, &modulus_data, &exponent_data), ==,
+	                GNUTLS_E_SUCCESS);
+	device.private_key = key;
+	g_assert_true(certificate_pkcs11_get_bool(device.module, device.session, key,
+	                                         CKA_ALWAYS_AUTHENTICATE, FALSE));
+	g_assert_true(certificate_mechanism_parse("RSA_PKCS1_V1_5", parameters, candidate->key_type,
+	                                          candidate->key_size, FALSE, &mechanism, &error));
+	g_assert_no_error(error);
+	data = g_bytes_new(digest, sizeof(digest));
+	payload = certificate_mechanism_prepare(&mechanism, data, &error);
+	g_assert_no_error(error);
+
+	for (guint i = 0; i < 2; i++)
+	{
+		g_autoptr(GBytes) signature = certificate_device_perform(
+		    &device, FALSE, &mechanism, payload, context_login, &login, &error);
+
+		g_assert_no_error(error);
+		g_assert_nonnull(signature);
+		g_assert_cmpuint(login.logins, ==, i + 1);
+		gnutls_datum_t signature_data = {
+			(unsigned char*) g_bytes_get_data(signature, NULL), g_bytes_get_size(signature)
+		};
+
+		digest_data = (gnutls_datum_t) { digest, sizeof(digest) };
+		g_assert_cmpint(gnutls_pubkey_verify_hash2(verifier, GNUTLS_SIGN_RSA_SHA256, 0,
+		                                         &digest_data, &signature_data), >=, 0);
+	}
+
+	g_assert_cmpuint(device.module->C_DestroyObject(device.session, key), ==, CKR_OK);
+	g_assert_cmpuint(device.module->C_DestroyObject(device.session, public_key), ==, CKR_OK);
+	gnutls_pubkey_deinit(verifier);
 	certificate_device_close(&device);
 	certificate_mechanism_clear(&mechanism);
 }
@@ -420,7 +532,7 @@ static void test_oaep_round_trip(Fixture* fixture, gconstpointer user_data)
 	payload = certificate_mechanism_prepare(&mechanism, ciphertext, &error);
 	g_assert_no_error(error);
 
-	plain = certificate_device_perform(&device, TRUE, &mechanism, payload, &error);
+	plain = certificate_device_perform(&device, TRUE, &mechanism, payload, NULL, NULL, &error);
 	g_assert_no_error(error);
 	g_assert_nonnull(plain);
 	g_assert_cmpuint(g_bytes_get_size(plain), ==, strlen(plaintext));
@@ -438,7 +550,7 @@ static void test_oaep_round_trip(Fixture* fixture, gconstpointer user_data)
 		payload = certificate_mechanism_prepare(&mechanism, labelled_ciphertext, &error);
 		g_assert_no_error(error);
 
-		plain = certificate_device_perform(&device, TRUE, &mechanism, payload, &error);
+		plain = certificate_device_perform(&device, TRUE, &mechanism, payload, NULL, NULL, &error);
 		if (plain == NULL)
 		{
 			g_test_message("this module does not implement a labelled OAEP: %s",
@@ -489,7 +601,7 @@ static void test_oaep_bad_input_is_refused(Fixture* fixture, gconstpointer user_
 		mechanism = oaep_mechanism(candidate, "{'hash': <'SHA1'>}");
 		payload = certificate_mechanism_prepare(&mechanism, not_a_ciphertext, &error);
 		g_assert_no_error(error);
-		g_assert_null(certificate_device_perform(&device, TRUE, &mechanism, payload, &error));
+		g_assert_null(certificate_device_perform(&device, TRUE, &mechanism, payload, NULL, NULL, &error));
 		g_assert_nonnull(error);
 		g_clear_error(&error);
 		certificate_mechanism_clear(&mechanism);
@@ -576,6 +688,7 @@ int main(int argc, char** argv)
 #define ADD(path, function) \
 	g_test_add(path, Fixture, NULL, fixture_set_up, function, fixture_tear_down)
 
+	ADD("/device/always-authenticate", test_always_authenticate);
 	ADD("/device/discovery-without-login", test_discovery_without_login);
 	ADD("/device/rsa-pkcs1-sha256", test_rsa_pkcs1);
 	ADD("/device/rsa-pkcs1-sha384", test_rsa_pkcs1_sha384);

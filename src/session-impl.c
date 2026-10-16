@@ -76,6 +76,7 @@ static void certificate_impl_session_finalize(GObject* object)
 	g_clear_pointer(&session->app_id, g_free);
 	g_clear_pointer(&session->owner, g_free);
 	g_mutex_clear(&session->device_lock);
+	g_mutex_clear(&session->operation_lock);
 
 	G_OBJECT_CLASS(certificate_impl_session_parent_class)->finalize(object);
 }
@@ -95,6 +96,7 @@ static void certificate_impl_session_class_init(CertificateImplSessionClass* kla
 static void certificate_impl_session_init(CertificateImplSession* session)
 {
 	g_mutex_init(&session->device_lock);
+	g_mutex_init(&session->operation_lock);
 	session->device.session = CK_INVALID_HANDLE;
 	session->device.private_key = CK_INVALID_HANDLE;
 	xdp_impl_session_set_version(XDP_IMPL_SESSION(session), 1);
