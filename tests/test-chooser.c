@@ -259,7 +259,7 @@ static void test_completion_log_fields(gconstpointer data)
 	certificate_ui_set_has_display(TRUE);
 	g_ptr_array_add(candidates, certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE));
 
-	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
+	g_test_expect_message("xdg-desktop-portal-certificate", G_LOG_LEVEL_MESSAGE,
 	                      "chooser-shown app_id=org.example.App identity=host "
 	                      "purpose=client_auth granted=no");
 	certificate_chooser_show(NULL, NULL, candidates, &request, NULL, on_chooser_done, &received);
@@ -272,7 +272,7 @@ static void test_completion_log_fields(gconstpointer data)
 	                           "purpose=client_auth granted=%s",
 	                           granted ? "consent-granted" : "chooser-cancelled",
 	                           granted ? "yes" : "no");
-	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE, expected);
+	g_test_expect_message("xdg-desktop-portal-certificate", G_LOG_LEVEL_MESSAGE, expected);
 	if (granted)
 	{
 		GtkWidget* list = find_list(GTK_WIDGET(window));
