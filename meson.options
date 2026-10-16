@@ -5,7 +5,7 @@ option(
   'gcr',
   type: 'feature',
   value: 'auto',
-  description: 'PIN entry through the desktop shell\'s system prompter (gcr-4). Adds --pin-prompt=system; without it that option does not exist and the in-process GTK window is the only prompt.',
+  description: 'PIN entry through the desktop shell\'s system prompter (gcr-4). Required for --pin-prompt=system; without it gtk and auto use the in-process GTK window.',
 )
 
 option(

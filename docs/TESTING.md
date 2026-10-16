@@ -50,15 +50,18 @@ $ ./build/src/xdg-desktop-portal-certificate --version
 
 ### Build without gcr
 
-`--pin-prompt` and the `pin-system` test exist only with gcr-4:
+`--pin-prompt=gtk` and `auto` work without gcr-4. The `pin-system` test is skipped:
 
 ```console
-$ meson setup build-nogcr -Dgcr=disabled && ninja -C build-nogcr
-$ ./build-nogcr/src/xdg-desktop-portal-certificate --help | grep pin-prompt   # no match
+$ meson setup build-nogcr -Dgcr=disabled -Dwerror=true && ninja -C build-nogcr
+$ ./build-nogcr/src/xdg-desktop-portal-certificate --pin-prompt=gtk --version
+$ ./build-nogcr/src/xdg-desktop-portal-certificate --pin-prompt=auto --version
 $ meson test -C build-nogcr
 ```
 
-Without gcr, PIN entry uses the backend's GTK window.
+Without gcr-4, `gtk` and `auto` use the backend's GTK window. `--pin-prompt=system` prints
+`--pin-prompt=system requires a build with gcr-4` and exits 64. The `cli` test checks option
+parsing and the usage error without a display or session bus.
 
 ## 1. Private bus without a card
 
@@ -66,9 +69,7 @@ The private-bus test checks backend selection, public-interface export and acqui
 
 ### Prerequisites
 
-Build the backend with gcr-4 (`-Dgcr=enabled`). `tools/dev-stack.sh` passes `--pin-prompt`,
-which is absent without gcr-4; see
-[issue #8](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/8).
+Build the backend. `tools/dev-stack.sh` uses GTK on the private bus and works without gcr-4.
 
 Build the frontend from
 [experimental/integration](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration).
@@ -182,8 +183,8 @@ change only that marker to mode 0600 or recreate the fixture with its owning scr
 
 ### UI smoke tests
 
-Build the backend with gcr-4 (`-Dgcr=enabled`): `tools/ui-smoke.sh` passes `--pin-prompt`
-even for GTK ([issue #8](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/8)).
+`tools/ui-smoke.sh` uses GTK by default and works without gcr-4. Build with
+`-Dgcr=enabled` to test `--pin-prompt=system`.
 
 Create the fixture, then run the windows under Xvfb and xdotool:
 
@@ -202,8 +203,8 @@ name. Other UI runs drive the backend's GTK PIN window.
 
 `dev-stack.sh` defaults private runs to GTK and refuses private `--pin-prompt=system`.
 A private bus can activate `/usr/libexec/gcr-prompter` from system service directories, so
-`auto` would depend on the machine. On a live bus, `auto` selects an owned or activatable
-system prompter. Prompt options survive script re-execution.
+`auto` would depend on the machine. With gcr-4 on a live bus, `auto` selects an owned or
+activatable system prompter. Prompt options survive script re-execution.
 
 ### Portal configuration
 
@@ -771,7 +772,7 @@ and `operation=<operation_id>` for correlation with the frontend journal. An abs
 | Backend disconnected without replying | Crash; hardening disables dumps. Use `--debug-allow-core` only for development debugging, using a disposable fixture |
 | Settings-portal `/proc/<pid>/root` warning | Expected consequence of non-dumpable hardening; GSettings supplies the theme |
 | Wrong window theme | Compare `--verbose` `colour-scheme` with `gsettings get org.gnome.desktop.interface color-scheme`; inspect `follow_colour_scheme()` if they disagree |
-| `--pin-prompt` absent | No gcr-4 in this build; inspect `meson configure build` |
+| `--pin-prompt=system` requires gcr-4 | Rebuild with `-Dgcr=enabled`, or use `--pin-prompt=gtk` or `auto` |
 | System prompt unavailable | Check the prompter on the backend's bus; failure is `no_display`, with `pin-prompt-failed detail=system-prompter-unreachable`. A private bus may activate a fallback, but has no shell |
 | Software token skipped | Pass `--allow-software-tokens` or explicit `--module` |
 | Missing fixture marker | Existing directory is refused; remove it manually only if disposable |

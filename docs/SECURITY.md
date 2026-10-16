@@ -174,8 +174,8 @@ is truncated before logging.
 
 With gcr-4, `--pin-prompt=auto|gtk|system` selects the entry implementation. `auto` uses the
 system prompter when `org.gnome.keyring.SystemPrompter` is owned or activatable, otherwise GTK.
-The journal records `pin-prompt-selected detail=gtk|system`. Without gcr-4 the GTK path is the
-only implementation and `--pin-prompt` is absent.
+The journal records `pin-prompt-selected detail=gtk|system`. Without gcr-4, `gtk` and `auto`
+use GTK; `system` is rejected with a usage error (64).
 
 | Property | `gtk` | `system` |
 |---|---|---|

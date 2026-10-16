@@ -122,6 +122,14 @@ test(
   env: test_env,
 )
 
+test(
+  'cli',
+  find_program('test-cli.sh'),
+  args: [certificate_backend, gcr_dep.found() ? 'gcr' : 'no-gcr'],
+  protocol: 'tap',
+  env: test_env,
+)
+
 # The scripted prompter runs on a private bus and must never reach the user's real prompter.
 if gcr_dep.found()
   pin_prompter = files('pin-prompter.c')
