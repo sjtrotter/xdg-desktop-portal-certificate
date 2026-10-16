@@ -31,6 +31,7 @@ typedef struct
 typedef struct
 {
 	GPtrArray* objects; /**< PortalObject* elements. */
+	GBytes* identifier;
 } PortalObjects;
 
 /** The generation prevents reuse of handles from released grants. */
@@ -53,17 +54,16 @@ typedef enum
 {
 	PORTAL_TEMPLATE_UNRELATED = 0,
 
-	/** Class-only and empty searches acquire only when PKCS11_PORTAL_CERTIFICATE_ENUMERATE is enabled. */
+	/** Class-only and empty searches require the enumeration opt-in. */
 	PORTAL_TEMPLATE_ENUMERATES,
 
 	PORTAL_TEMPLATE_NAMES_CREDENTIAL
 } PortalTemplateIntent;
 
-PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG count);
+PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG count,
+                                           GHashTable* issued_ids);
 
-gboolean portal_template_wants_credential(CK_ATTRIBUTE_PTR templ, CK_ULONG count);
-
-/** Ignore CKA_CLASS so certificate and key searches share refusal memory. */
-guint portal_template_fingerprint(CK_ATTRIBUTE_PTR templ, CK_ULONG count);
+gboolean portal_template_wants_credential(CK_ATTRIBUTE_PTR templ, CK_ULONG count,
+                                          GHashTable* issued_ids, gboolean enumerate);
 
 #endif

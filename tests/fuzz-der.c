@@ -129,8 +129,7 @@ static void drive_attributes(const uint8_t* data, size_t size)
 
 	templ = build_template(data, size, &count, buffers);
 
-	portal_template_wants_credential(templ, count);
-	portal_template_fingerprint(templ, count);
+	portal_template_wants_credential(templ, count, NULL, FALSE);
 
 	der = g_bytes_new(data, size);
 

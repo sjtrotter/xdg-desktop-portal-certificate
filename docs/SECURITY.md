@@ -339,12 +339,15 @@ resolution.
 
 ### Search intent
 
-Credential acquisition at `C_FindObjectsInit` requires the contract's `CKA_LABEL`, a non-empty
-`CKA_ID`, or `CKA_CLASS == CKO_PRIVATE_KEY`. `CKA_SIGN`, `CKA_DECRYPT` and persistent
-`CKA_TOKEN` modifiers do not change intent. Without a grant, issuer, subject, serial,
+Credential acquisition at `C_FindObjectsInit` requires the contract's `CKA_LABEL`, a
+`CKA_ID` issued during this module initialization, or `CKA_CLASS == CKO_PRIVATE_KEY`.
+`CKA_SIGN`, `CKA_DECRYPT` and persistent `CKA_TOKEN` modifiers do not change intent. Without a grant, issuer, subject, serial,
 trust-category, class-only and empty searches return no objects and never prompt. With a grant,
-normal template matching applies. `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` permits class-only
-acquisition for NSS experiments. `portal_template_intent()` and `test-module.c` define this gate;
+normal template matching applies. Unknown or malformed IDs cannot trigger acquisition, even
+with the contract label. `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` or
+`x-init-reserved: enumerate=1` in the p11-kit module file permits class-only acquisition.
+A cancelled chooser suppresses acquisition for ten seconds across all templates in the process.
+`portal_template_intent()` and `test-module.c` define this gate;
 `tools/module-smoke.sh` phase 0 checks token-only `p11tool --list-all-certs` and
 `pkcs11-tool --list-objects` produce no `grant-created` events.
 

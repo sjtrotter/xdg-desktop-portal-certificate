@@ -45,6 +45,7 @@ struct _PortalClient
 	GMutex invalid_lock;
 	GHashTable* invalidated;
 	guint invalidated_subscription;
+	guint closed_subscription;
 };
 
 /* Every callback source holds a reference because the method reply may outlive the Response waiter. */
@@ -138,6 +139,17 @@ static void on_grant_invalidated(GDBusConnection* connection, const char* sender
 	g_mutex_unlock(&client->invalid_lock);
 }
 
+static void on_session_closed(GDBusConnection* connection, const char* sender,
+                              const char* path, const char* interface, const char* signal,
+                              GVariant* parameters, gpointer user_data)
+{
+	PortalClient* client = user_data;
+
+	g_mutex_lock(&client->invalid_lock);
+	g_hash_table_add(client->invalidated, g_strdup(path));
+	g_mutex_unlock(&client->invalid_lock);
+}
+
 static gboolean subscribe_invalidated(gpointer data)
 {
 	PortalClient* client = data;
@@ -146,6 +158,10 @@ static gboolean subscribe_invalidated(gpointer data)
 	    client->connection, PKCS11_PORTAL_BUS_NAME, PKCS11_PORTAL_INTERFACE, "GrantInvalidated",
 	    PKCS11_PORTAL_OBJECT_PATH, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
 	    on_grant_invalidated, client, NULL);
+
+	client->closed_subscription = g_dbus_connection_signal_subscribe(
+	    client->connection, PKCS11_PORTAL_BUS_NAME, "org.freedesktop.portal.Session", "Closed",
+	    NULL, NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_session_closed, client, NULL);
 
 	return G_SOURCE_REMOVE;
 }
@@ -689,6 +705,10 @@ void portal_client_free(PortalClient* client)
 		if (client->invalidated_subscription != 0)
 			g_dbus_connection_signal_unsubscribe(client->connection,
 			                                     client->invalidated_subscription);
+
+		if (client->closed_subscription != 0)
+			g_dbus_connection_signal_unsubscribe(client->connection,
+			                                     client->closed_subscription);
 
 		/* Flush the final queued Close before disconnecting. */
 		g_dbus_connection_flush_sync(client->connection, NULL, NULL);

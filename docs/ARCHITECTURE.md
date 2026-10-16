@@ -201,9 +201,14 @@ backend code. NSS can also load the shared object directly.
 The module exposes one slot and a token labelled `Portal Certificate` while the portal answers
 `GetCapabilities`. With no portal or backend, it reports zero slots and `C_Initialize` succeeds.
 Credential-intent searches trigger `C_FindObjectsInit` acquisition; trust and unrelated-class
-searches do not. Cancelled/refused acquisitions with the same search fingerprint are cached for ten seconds. `CKA_TOKEN == CK_TRUE` is ignored when
+searches do not. A cancelled chooser suppresses acquisitions across all search templates for ten seconds. `CKA_TOKEN == CK_TRUE` is ignored when
 classifying intent because all synthetic objects are persistent. Class-only enumeration needs
-`PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`; see [TESTING.md](TESTING.md).
+`PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` or `x-init-reserved: enumerate=1` in the p11-kit
+module file; see [TESTING.md](TESTING.md).
+
+The grant survives ordinary `C_CloseSession` calls. `C_Logout` on a valid session and
+`C_CloseAllSessions` release it by closing its portal session. Portal `Session.Closed` also
+invalidates the grant. A subsequent credential search can open the chooser again.
 
 The module sets `CKF_PROTECTED_AUTHENTICATION_PATH` and clears `CKF_LOGIN_REQUIRED`.
 The first successful `C_Login(CKU_USER, ...)` returns `CKR_OK`; a repeated login returns

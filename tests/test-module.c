@@ -475,6 +475,8 @@ static void test_template_matching(void)
 
 static void test_only_a_credential_search_provokes_a_chooser(void)
 {
+	g_autoptr(GHashTable) issued_ids = g_hash_table_new_full(g_bytes_hash, g_bytes_equal,
+	                                                       (GDestroyNotify) g_bytes_unref, NULL);
 	CK_OBJECT_CLASS certificate = CKO_CERTIFICATE;
 	CK_OBJECT_CLASS public_key = CKO_PUBLIC_KEY;
 	CK_OBJECT_CLASS private_key = CKO_PRIVATE_KEY;
@@ -494,6 +496,8 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 		                            { CKA_LABEL, label, sizeof(label) - 1 } };
 	CK_ATTRIBUTE by_identifier[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
 		                             { CKA_ID, identifier, sizeof(identifier) } };
+	CK_ATTRIBUTE label_and_identifier[] = { { CKA_LABEL, label, sizeof(label) - 1 },
+		                                      { CKA_ID, identifier, sizeof(identifier) } };
 	CK_ATTRIBUTE want_private[] = { { CKA_CLASS, &private_key, sizeof(private_key) } };
 	CK_ATTRIBUTE signing_key[] = { { CKA_CLASS, &private_key, sizeof(private_key) },
 		                          { CKA_SIGN, &yes, sizeof(yes) } };
@@ -537,79 +541,67 @@ static void test_only_a_credential_search_provokes_a_chooser(void)
 	CK_ATTRIBUTE empty_identifier[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
 		                                { CKA_ID, identifier, 0 } };
 
-	g_assert_cmpint(portal_template_intent(by_label, 1), ==, PORTAL_TEMPLATE_NAMES_CREDENTIAL);
-	g_assert_cmpint(portal_template_intent(cert_by_label, 2), ==,
-	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
-	g_assert_cmpint(portal_template_intent(key_by_label, 2), ==,
-	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
-	g_assert_cmpint(portal_template_intent(by_identifier, 2), ==,
-	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
-	g_assert_cmpint(portal_template_intent(want_private, 1), ==,
-	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
-	g_assert_cmpint(portal_template_intent(signing_key, 2), ==,
-	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
-	g_assert_cmpint(portal_template_intent(nss_private_keys, 2), ==,
-	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
-
-	g_assert_cmpint(portal_template_intent(NULL, 0), ==, PORTAL_TEMPLATE_ENUMERATES);
-	g_assert_cmpint(portal_template_intent(want_certificate, 1), ==,
-	                PORTAL_TEMPLATE_ENUMERATES);
-	g_assert_cmpint(portal_template_intent(want_public, 1), ==, PORTAL_TEMPLATE_ENUMERATES);
-	g_assert_cmpint(portal_template_intent(nss_certificates, 2), ==,
-	                PORTAL_TEMPLATE_ENUMERATES);
-	g_assert_cmpint(portal_template_intent(only_on_token, 1), ==, PORTAL_TEMPLATE_ENUMERATES);
-
-	g_assert_cmpint(portal_template_intent(by_issuer, 2), ==, PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(by_subject, 2), ==, PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(by_serial, 3), ==, PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(trusted, 2), ==, PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(in_category, 2), ==, PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(not_on_token, 2), ==, PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(nss_by_serial, 4), ==, PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(wrong_label, 2), ==, PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(wrong_label_right_id, 2), ==,
+	g_assert_cmpint(portal_template_intent(by_identifier, 2, issued_ids), ==,
 	                PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(want_data, 1), ==, PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(malformed, 1), ==, PORTAL_TEMPLATE_UNRELATED);
-	g_assert_cmpint(portal_template_intent(empty_identifier, 2), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(label_and_identifier, 2, issued_ids), ==,
+	                PORTAL_TEMPLATE_UNRELATED);
+	g_hash_table_add(issued_ids, g_bytes_new(identifier, sizeof(identifier)));
+	g_assert_cmpint(portal_template_intent(by_label, 1, issued_ids), ==, PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(cert_by_label, 2, issued_ids), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(key_by_label, 2, issued_ids), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(by_identifier, 2, issued_ids), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(want_private, 1, issued_ids), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(signing_key, 2, issued_ids), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
+	g_assert_cmpint(portal_template_intent(nss_private_keys, 2, issued_ids), ==,
+	                PORTAL_TEMPLATE_NAMES_CREDENTIAL);
 
+	g_assert_cmpint(portal_template_intent(NULL, 0, issued_ids), ==, PORTAL_TEMPLATE_ENUMERATES);
+	g_assert_cmpint(portal_template_intent(want_certificate, 1, issued_ids), ==,
+	                PORTAL_TEMPLATE_ENUMERATES);
+	g_assert_cmpint(portal_template_intent(want_public, 1, issued_ids), ==, PORTAL_TEMPLATE_ENUMERATES);
+	g_assert_cmpint(portal_template_intent(nss_certificates, 2, issued_ids), ==,
+	                PORTAL_TEMPLATE_ENUMERATES);
+	g_assert_cmpint(portal_template_intent(only_on_token, 1, issued_ids), ==, PORTAL_TEMPLATE_ENUMERATES);
+
+	g_assert_cmpint(portal_template_intent(by_issuer, 2, issued_ids), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(by_subject, 2, issued_ids), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(by_serial, 3, issued_ids), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(trusted, 2, issued_ids), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(in_category, 2, issued_ids), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(not_on_token, 2, issued_ids), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(nss_by_serial, 4, issued_ids), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(wrong_label, 2, issued_ids), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(wrong_label_right_id, 2, issued_ids), ==,
+	                PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(want_data, 1, issued_ids), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(malformed, 1, issued_ids), ==, PORTAL_TEMPLATE_UNRELATED);
+	g_assert_cmpint(portal_template_intent(empty_identifier, 2, issued_ids), ==, PORTAL_TEMPLATE_UNRELATED);
+
+	g_assert_true(portal_template_wants_credential(nss_certificates, 2, issued_ids, TRUE));
+	g_assert_false(portal_template_wants_credential(by_issuer, 2, issued_ids, TRUE));
 	g_unsetenv(PKCS11_PORTAL_ENV_ENUMERATE);
-	g_assert_true(portal_template_wants_credential(cert_by_label, 2));
-	g_assert_true(portal_template_wants_credential(want_private, 1));
-	g_assert_true(portal_template_wants_credential(nss_private_keys, 2));
-	g_assert_false(portal_template_wants_credential(NULL, 0));
-	g_assert_false(portal_template_wants_credential(want_certificate, 1));
-	g_assert_false(portal_template_wants_credential(nss_certificates, 2));
-	g_assert_false(portal_template_wants_credential(by_issuer, 2));
-	g_assert_false(portal_template_wants_credential(want_data, 1));
+	g_assert_true(portal_template_wants_credential(cert_by_label, 2, issued_ids, FALSE));
+	g_assert_true(portal_template_wants_credential(want_private, 1, issued_ids, FALSE));
+	g_assert_true(portal_template_wants_credential(nss_private_keys, 2, issued_ids, FALSE));
+	g_assert_false(portal_template_wants_credential(NULL, 0, issued_ids, FALSE));
+	g_assert_false(portal_template_wants_credential(want_certificate, 1, issued_ids, FALSE));
+	g_assert_false(portal_template_wants_credential(nss_certificates, 2, issued_ids, FALSE));
+	g_assert_false(portal_template_wants_credential(by_issuer, 2, issued_ids, FALSE));
+	g_assert_false(portal_template_wants_credential(want_data, 1, issued_ids, FALSE));
 
 	g_setenv(PKCS11_PORTAL_ENV_ENUMERATE, "1", TRUE);
-	g_assert_true(portal_template_wants_credential(NULL, 0));
-	g_assert_true(portal_template_wants_credential(want_certificate, 1));
-	g_assert_true(portal_template_wants_credential(nss_certificates, 2));
-	g_assert_false(portal_template_wants_credential(by_issuer, 2));
-	g_assert_false(portal_template_wants_credential(nss_by_serial, 4));
-	g_assert_false(portal_template_wants_credential(want_data, 1));
+	g_assert_true(portal_template_wants_credential(NULL, 0, issued_ids, FALSE));
+	g_assert_true(portal_template_wants_credential(want_certificate, 1, issued_ids, FALSE));
+	g_assert_true(portal_template_wants_credential(nss_certificates, 2, issued_ids, FALSE));
+	g_assert_false(portal_template_wants_credential(by_issuer, 2, issued_ids, FALSE));
+	g_assert_false(portal_template_wants_credential(nss_by_serial, 4, issued_ids, FALSE));
+	g_assert_false(portal_template_wants_credential(want_data, 1, issued_ids, FALSE));
 	g_unsetenv(PKCS11_PORTAL_ENV_ENUMERATE);
-}
-
-static void test_refusal_fingerprint_ignores_the_class(void)
-{
-	CK_OBJECT_CLASS certificate = CKO_CERTIFICATE;
-	CK_OBJECT_CLASS private_key = CKO_PRIVATE_KEY;
-	guint8 identifier[4] = { 1, 2, 3, 4 };
-	guint8 other[4] = { 4, 3, 2, 1 };
-	CK_ATTRIBUTE certificate_search[] = { { CKA_CLASS, &certificate, sizeof(certificate) },
-		                                  { CKA_ID, identifier, sizeof(identifier) } };
-	CK_ATTRIBUTE key_search[] = { { CKA_CLASS, &private_key, sizeof(private_key) },
-		                          { CKA_ID, identifier, sizeof(identifier) } };
-	CK_ATTRIBUTE different[] = { { CKA_CLASS, &private_key, sizeof(private_key) },
-		                         { CKA_ID, other, sizeof(other) } };
-
-	g_assert_cmpuint(portal_template_fingerprint(certificate_search, 2), ==,
-	                 portal_template_fingerprint(key_search, 2));
-	g_assert_cmpuint(portal_template_fingerprint(certificate_search, 2), !=,
-	                 portal_template_fingerprint(different, 2));
 }
 
 static void test_token_constants_match_the_uris(void)
@@ -696,8 +688,6 @@ int main(int argc, char** argv)
 	g_test_add_func("/module/objects/matching", test_template_matching);
 	g_test_add_func("/module/objects/credential-search",
 	                test_only_a_credential_search_provokes_a_chooser);
-	g_test_add_func("/module/objects/refusal-fingerprint",
-	                test_refusal_fingerprint_ignores_the_class);
 	g_test_add_func("/module/token/constants", test_token_constants_match_the_uris);
 	g_test_add_func("/module/token/excluded-programs", test_excluded_programs_are_exact);
 

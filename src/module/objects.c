@@ -338,6 +338,7 @@ PortalObjects* portal_objects_new(const PortalGrant* grant, guint generation, GE
 
 	objects = g_new0(PortalObjects, 1);
 	objects->objects = g_ptr_array_new_with_free_func(object_free);
+	objects->identifier = g_bytes_ref(parsed.identifier);
 
 	object = object_new(objects, generation, HANDLE_CERTIFICATE, CKO_CERTIFICATE);
 	add_bool(object, CKA_TOKEN, TRUE);
@@ -414,6 +415,7 @@ void portal_objects_free(PortalObjects* objects)
 		return;
 
 	g_ptr_array_free(objects->objects, TRUE);
+	g_bytes_unref(objects->identifier);
 	g_free(objects);
 }
 
@@ -567,7 +569,8 @@ static gboolean template_says_token_object(const CK_ATTRIBUTE* attribute)
 }
 
 /* Only credential-specific searches may prompt by default; NSS enumeration exceptions are documented in docs/decisions/0011-client-side-pkcs11-module.md. */
-PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG count)
+PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG count,
+                                           GHashTable* issued_ids)
 {
 	CK_OBJECT_CLASS object_class = 0;
 	gboolean have_class = FALSE;
@@ -605,11 +608,21 @@ PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG cou
 				break;
 
 			case CKA_ID:
-				have_identifier = have_identifier ||
-				                  (templ[i].pValue != NULL &&
-				                   templ[i].ulValueLen != CK_UNAVAILABLE_INFORMATION &&
-				                   templ[i].ulValueLen > 0);
+			{
+				g_autoptr(GBytes) identifier = NULL;
+
+				if (issued_ids == NULL || templ[i].pValue == NULL ||
+				    templ[i].ulValueLen == CK_UNAVAILABLE_INFORMATION ||
+				    templ[i].ulValueLen == 0)
+					return PORTAL_TEMPLATE_UNRELATED;
+
+				identifier = g_bytes_new_static(templ[i].pValue, templ[i].ulValueLen);
+				if (!g_hash_table_contains(issued_ids, identifier))
+					return PORTAL_TEMPLATE_UNRELATED;
+
+				have_identifier = TRUE;
 				break;
+			}
 
 			default:
 				break;
@@ -620,7 +633,7 @@ PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG cou
 			key_shaped = FALSE;
 	}
 
-	/* A label decides ownership even when a CKA_ID is also present. */
+	/* A different label excludes a search even when its identifier is known. */
 	if (have_label)
 		return label_is_ours ? PORTAL_TEMPLATE_NAMES_CREDENTIAL : PORTAL_TEMPLATE_UNRELATED;
 
@@ -640,41 +653,16 @@ PortalTemplateIntent portal_template_intent(CK_ATTRIBUTE_PTR templ, CK_ULONG cou
 	return PORTAL_TEMPLATE_UNRELATED;
 }
 
-gboolean portal_template_wants_credential(CK_ATTRIBUTE_PTR templ, CK_ULONG count)
+gboolean portal_template_wants_credential(CK_ATTRIBUTE_PTR templ, CK_ULONG count,
+                                          GHashTable* issued_ids, gboolean enumerate)
 {
-	switch (portal_template_intent(templ, count))
+	switch (portal_template_intent(templ, count, issued_ids))
 	{
 		case PORTAL_TEMPLATE_NAMES_CREDENTIAL:
 			return TRUE;
 		case PORTAL_TEMPLATE_ENUMERATES:
-			return g_strcmp0(g_getenv(PKCS11_PORTAL_ENV_ENUMERATE), "1") == 0;
+			return enumerate || g_strcmp0(g_getenv(PKCS11_PORTAL_ENV_ENUMERATE), "1") == 0;
 		default:
 			return FALSE;
 	}
-}
-
-guint portal_template_fingerprint(CK_ATTRIBUTE_PTR templ, CK_ULONG count)
-{
-	guint hash = 5381;
-
-	if (templ == NULL)
-		return hash;
-
-	for (CK_ULONG i = 0; i < count; i++)
-	{
-		const guint8* data = templ[i].pValue;
-
-		if (templ[i].type == CKA_CLASS)
-			continue;
-
-		hash = (hash * 33) ^ (guint) templ[i].type;
-
-		if (data == NULL || templ[i].ulValueLen == CK_UNAVAILABLE_INFORMATION)
-			continue;
-
-		for (CK_ULONG byte = 0; byte < templ[i].ulValueLen; byte++)
-			hash = (hash * 33) ^ data[byte];
-	}
-
-	return hash;
 }
