@@ -753,6 +753,8 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 	request.may_decrypt = FALSE;
 	request.lifetime_seconds = transaction->lifetime;
 	request.reason = transaction->reason;
+	request.request_handle =
+	    g_dbus_interface_skeleton_get_object_path(G_DBUS_INTERFACE_SKELETON(transaction->request));
 
 	certificate_chooser_show(transaction->parent_window, transaction->activation_token, matching,
 	                         &request,

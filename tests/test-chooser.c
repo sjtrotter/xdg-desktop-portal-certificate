@@ -25,6 +25,63 @@ static void assert_is_safe_display_text(const char* text)
 	g_assert_null(strstr(text, "\xe2\x80\x8b"));
 }
 
+static void test_purpose_wording(void)
+{
+	static const struct
+	{
+		CertificatePurpose purpose;
+		const char* expected;
+	} cases[] = {
+		{ CERTIFICATE_PURPOSE_CLIENT_AUTH, "prove who you are to a server" },
+		{ CERTIFICATE_PURPOSE_SIGNING, "sign a document or a piece of data" },
+		{ CERTIFICATE_PURPOSE_EMAIL, "sign or read secure email" },
+		{ CERTIFICATE_PURPOSE_SSH, "authenticate an SSH connection" },
+	};
+	static const struct
+	{
+		const char* handle;
+		gboolean module;
+	} handles[] = {
+		{ NULL, FALSE },
+		{ "/org/freedesktop/portal/desktop/request/1_42/native", FALSE },
+		{ "/org/freedesktop/portal/desktop/request/pkcs11a/native", FALSE },
+		{ "/org/freedesktop/portal/desktop/request/1_42/pkcs11a123_2", TRUE },
+		{ "/org/freedesktop/portal/desktop/request/1_42/pkcs11a123_2/456", TRUE },
+	};
+
+	for (gsize i = 0; i < G_N_ELEMENTS(cases); i++)
+	{
+		for (gsize j = 0; j < G_N_ELEMENTS(handles); j++)
+		{
+			CertificateChooserRequest request = { 0 };
+			g_autofree char* text = NULL;
+			g_autofree char* expected = NULL;
+
+			request.purpose = cases[i].purpose;
+			request.request_handle = handles[j].handle;
+			request.reason = "Application-provided explanation";
+			text = certificate_chooser_format_purpose(&request);
+
+			if (handles[j].module)
+			{
+				g_assert_cmpstr(text, ==,
+				                "is asking to use a certificate on your security token.");
+				g_assert_cmpstr(certificate_chooser_purpose_detail(&request), ==,
+				                "The application will be able to use this key until the "
+				                "grant expires. It cannot read the private key.");
+			}
+			else
+			{
+				expected = g_strdup_printf("wants to use a certificate on your security "
+				                           "token to %s.", cases[i].expected);
+				g_assert_cmpstr(text, ==, expected);
+				g_assert_cmpstr(certificate_chooser_purpose_detail(&request), ==,
+				                certificate_purpose_detail(cases[i].purpose));
+			}
+		}
+	}
+}
+
 static void test_lifetime_wording(void)
 {
 	static const struct
@@ -241,6 +298,7 @@ int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
 
+	g_test_add_func("/chooser/purpose-wording", test_purpose_wording);
 	g_test_add_func("/chooser/lifetime-wording", test_lifetime_wording);
 	g_test_add_func("/chooser/display-name-cannot-draw-chrome",
 	                test_display_name_cannot_draw_chrome);

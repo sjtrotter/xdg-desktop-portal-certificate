@@ -166,6 +166,11 @@ chooser requirements; [grant lifetime](SECURITY.md#grant-lifetime-and-delegation
 [trusted-dialog requirements](SECURITY.md#trusted-dialog) and
 [accessibility criteria](PUBLIC-INTERFACE.md#accessibility-criteria).
 
+Module acquisition handles contain a request token prefixed with `pkcs11a`. The chooser uses
+that prefix for neutral certificate-use wording because PKCS#11 searches do not establish
+the application's intended use. The purpose still controls filtering and permissions.
+The prefix is caller-chosen and affects only display text; `reason` remains separately labelled.
+
 ### PIN UI and broker
 
 [`ui/pin.h`](../src/ui/pin.h) supplies PIN interaction at first private-key use.
