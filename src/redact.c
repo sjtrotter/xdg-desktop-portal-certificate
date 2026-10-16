@@ -44,7 +44,28 @@ static char* field(const char* text)
 
 void certificate_log_set_verbose(gboolean verbose)
 {
+	const char* messages_debug = g_getenv("G_MESSAGES_DEBUG");
+	g_autoptr(GStrvBuilder) builder = g_strv_builder_new();
+	g_auto(GStrv) domains = NULL;
+
 	certificate_verbose = verbose;
+
+	/* GLib recognizes "all" only when it is the sole domain. */
+	if (verbose && g_strcmp0(messages_debug, "all") != 0)
+	{
+		g_strv_builder_add(builder, G_LOG_DOMAIN);
+		g_strv_builder_add(builder, "pkcs11-portal-certificate");
+	}
+
+	if (messages_debug != NULL)
+	{
+		g_auto(GStrv) requested = g_strsplit(messages_debug, " ", -1);
+
+		g_strv_builder_addv(builder, (const char**) requested);
+	}
+
+	domains = g_strv_builder_end(builder);
+	g_log_writer_default_set_debug_domains((const char* const*) domains);
 }
 
 gboolean certificate_log_get_verbose(void)

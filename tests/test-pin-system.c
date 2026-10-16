@@ -204,10 +204,10 @@ static void test_happy_path(Fixture* fixture, gconstpointer user_data)
 	certificate_test_prompter_expect_password(GOOD_PIN);
 
 	g_assert_cmpstr(certificate_pin_prompt_name(), ==, "system");
-	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
+	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
 	                      "pin-prompted session=/org/freedesktop/portal/desktop/session/t/logging "
 	                      "detail=on-screen");
-	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
+	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
 	                      "login-ok session=/org/freedesktop/portal/desktop/session/t/logging "
 	                      "detail=pin-accepted");
 	certificate_pin_login_full(script.token,

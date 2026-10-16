@@ -28,7 +28,7 @@ foreach name, source : core_test_cases
     link_with: certificate_core,
     dependencies: certificate_deps,
     include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
-    c_args: test_args,
+    c_args: test_args + certificate_log_args,
     install: false,
   )
 
@@ -49,7 +49,7 @@ foreach name, source : service_test_cases
     [source] + fixture_util,
     dependencies: [certificate_service_dep],
     include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
-    c_args: test_args,
+    c_args: test_args + certificate_log_args,
     install: false,
   )
 
@@ -139,7 +139,7 @@ if gcr_dep.found()
     ['test-pin-system.c'] + pin_prompter + fixture_util,
     dependencies: [certificate_service_dep, gcr_dep],
     include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
-    c_args: test_args,
+    c_args: test_args + certificate_log_args,
     install: false,
   )
 
