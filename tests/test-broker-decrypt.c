@@ -145,7 +145,7 @@ static void decrypt(Fixture* fixture, const char* parameters_text, GBytes* ciphe
 	g_assert_nonnull(parameters);
 	answer->calls = 0;
 
-	certificate_broker_perform(fixture->tokens, fixture->session, TRUE, "RSA_OAEP", parameters,
+	certificate_broker_perform(fixture->tokens, fixture->session, TRUE, NULL, "RSA_OAEP", parameters,
 	                           ciphertext, NULL, "Test application", NULL, on_done, answer);
 
 	deadline = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;

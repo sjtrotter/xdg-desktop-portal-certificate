@@ -758,9 +758,9 @@ grant-invalidated     detail says why
 token-removed
 ```
 
-`--verbose` adds diagnostic events. The [logging gap](SECURITY.md#logging) tracked in
-[issue #6](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/6) prevents correlation
-with the frontend journal by session or operation id.
+`--verbose` adds diagnostic events. Sign operation logs include `session=<session_handle>`
+and `operation=<operation_id>` for correlation with the frontend journal. An absent
+`operation_id` appears as `(none)`. Both ids follow the [log field rules](SECURITY.md#logging).
 
 ## Troubleshooting
 

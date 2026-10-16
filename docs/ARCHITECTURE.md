@@ -181,8 +181,8 @@ A cached card login cannot authorize another application or purpose.
 
 Signing permits `RSA_PKCS1_V1_5`, `RSA_PSS` and `ECDSA`. The frontend intersects advertised
 mechanisms in its own order; the backend checks parameters against the key, including RSA-PSS
-hash, MGF and salt length. [Logging](SECURITY.md#logging) records the correlation gap in
-[issue #6](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/6).
+hash, MGF and salt length. [Operation logs](SECURITY.md#logging) carry the session handle
+and the optional `operation_id` supplied with Sign.
 
 RSA-OAEP decryption code exists in the broker and client module but is unreachable through
 D-Bus. No interface exposes `Decrypt`.
@@ -238,8 +238,8 @@ Removal behavior and polling limitations are in
 ### Logging
 
 [`redact.h`](../src/redact.h) defines the structured logging API.
-[SECURITY.md](SECURITY.md#logging) specifies permitted fields, redaction and the missing
-correlation ids.
+[SECURITY.md](SECURITY.md#logging) specifies permitted fields, redaction and session and
+operation ids for correlation.
 
 ## Process model
 

@@ -19,7 +19,8 @@
 typedef void (*CertificateBrokerDone)(GBytes* result, const GError* error, gpointer user_data);
 
 void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSession* session,
-                                gboolean decrypt, const char* mechanism_name,
+                                gboolean decrypt, const char* operation_id,
+                                const char* mechanism_name,
                                 GVariant* parameters, GBytes* data, const char* parent_window,
                                 const char* caller_display, GCancellable* cancellable,
                                 CertificateBrokerDone done, gpointer user_data);

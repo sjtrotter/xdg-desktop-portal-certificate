@@ -203,11 +203,21 @@ static void test_happy_path(Fixture* fixture, gconstpointer user_data)
 
 	certificate_test_prompter_expect_password(GOOD_PIN);
 
-	certificate_pin_login(script.token, "wayland:handle-123", "Test application",
-	                      "prove who you are", script_login, NULL, script_abandon, &script, NULL,
-	                      script_done, &script);
+	g_assert_cmpstr(certificate_pin_prompt_name(), ==, "system");
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
+	                      "pin-prompted session=/org/freedesktop/portal/desktop/session/t/logging "
+	                      "detail=on-screen");
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
+	                      "login-ok session=/org/freedesktop/portal/desktop/session/t/logging "
+	                      "detail=pin-accepted");
+	certificate_pin_login_full(script.token,
+	                           "/org/freedesktop/portal/desktop/session/t/logging",
+	                           "wayland:handle-123", "Test application", "prove who you are",
+	                           script_login, NULL, script_abandon, &script, NULL, NULL,
+	                           script_done, &script);
 
 	run_until_done(&script, 10000);
+	g_test_assert_expected_messages();
 
 	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_OK);
 	g_assert_cmpuint(script.attempts, ==, 1);

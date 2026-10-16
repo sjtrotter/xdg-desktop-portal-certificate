@@ -44,6 +44,7 @@ struct _PinPrompt
 	gint refs;
 
 	CertificateToken* token;
+	char* session_id;
 	char* parent_window;
 	char* caller_display;
 	char* purpose_display;

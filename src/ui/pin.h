@@ -46,7 +46,8 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
                            gpointer user_data);
 
 /** Prompt owns login_data and frees it exactly once after done and any subsequent abandon callback. */
-void certificate_pin_login_full(CertificateToken* token, const char* parent_window,
+void certificate_pin_login_full(CertificateToken* token, const char* session_id,
+                                const char* parent_window,
                                 const char* caller_display, const char* purpose_display,
                                 CertificatePinLoginFunc login, CertificatePinRefreshFunc refresh,
                                 CertificatePinAbandonFunc abandon, gpointer login_data,
