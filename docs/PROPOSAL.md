@@ -36,7 +36,7 @@ compositor are trusted. The user is present.
 | PIN | Typed into the application | Typed into a backend dialog; never sent to the application |
 | Retry counter | Application can submit PINs until the card locks | Application cannot submit PINs; the backend caps attempts per prompt and shows the token's retry flags when it reports them |
 | Other keys on the card | All usable | Only the key the user chose |
-| Certificate inventory | Readable without consent | Chosen certificate only, after consent; see the probe below |
+| Certificate inventory | Readable without consent | Chosen certificate only, after consent; enumeration timing still differs |
 | Signatures | Unlimited, unattributed | Bound to a grant with an expiry; consent logged with the app id |
 
 The portal does not protect against a compromised application signing arbitrary data with a
