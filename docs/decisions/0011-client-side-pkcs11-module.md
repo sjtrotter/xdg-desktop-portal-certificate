@@ -99,7 +99,7 @@ What answers it, and what does not:
 - **`tests/fuzz-der.c`** drives the TLV reader, the DigestInfo parser, `portal_objects_new()` on an
   arbitrary certificate DER, and the attribute protocol (`portal_object_matches`,
   `portal_objects_find`, `portal_object_get_attributes`, `portal_template_wants_credential`,
-  `portal_template_fingerprint`) with hostile templates. It builds as a libFuzzer target when clang
+  `portal_template_intent`) with hostile templates. It builds as a libFuzzer target when clang
   is available, and always builds as a corpus replay binary that `meson test` runs under ASan/UBSan.
 - **Opt-in loading** (below) keeps the code out of processes that never asked for it, which is the
   cheapest reduction in exposure available and the one this decision should have started with.
@@ -299,7 +299,7 @@ challenge, for a certificate nothing had asked for.
 | Template | Meaning | Acquires? |
 |---|---|---|
 | `CKA_LABEL == "Portal Certificate"` | the object label of the shared contract; what a PKCS#11 URI naming an object imports by | yes |
-| a non-empty `CKA_ID` | a consumer that has one got it from us | yes |
+| a `CKA_ID` issued during this module initialization | a previously exposed credential | yes |
 | `CKA_CLASS == CKO_PRIVATE_KEY`, alone or with `CKA_SIGN`/`CKA_DECRYPT` | nothing on a server's chain is a private key | yes |
 | `CKA_CLASS` alone (`CKO_CERTIFICATE`, `CKO_PUBLIC_KEY`), or an empty template | "list what is on this token" | only with the opt-in below |
 | `CKA_ISSUER`, `CKA_SUBJECT`, `CKA_SERIAL_NUMBER`, `CKA_TRUSTED`, `CKA_CERTIFICATE_CATEGORY`, `CKA_TOKEN == CK_FALSE`, a `CKA_LABEL` that is not ours, `CKO_DATA`, a malformed `CKA_CLASS` | somebody else's certificate, or nothing this token has | **never** |
@@ -319,14 +319,27 @@ A search on the last row answers zero objects while there is no grant, and never
 a grant exists, ordinary attribute matching applies and every one of these sees the three objects
 like any other search: the gate decides when a **window** may open, not what a token holds.
 
-`PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` moves the fourth row onto the acquiring side, and only the
-fourth row. NSS's `PK11_ListCertsInSlot()` is "every certificate on this token" and has no way to
-name an object, so an NSS consumer needs it; nothing else does, and a process that sets it is asking
+`PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` or `x-init-reserved: enumerate=1` in the module file
+moves the fourth row onto the acquiring side, and only that row. NSS's `PK11_ListCertsInSlot()`
+is "every certificate on this token" and has no way to name an object, so an NSS consumer needs it; nothing else does, and a process that sets it is asking
 for choosers it would not otherwise get. **NSS's other two lookups do not need it** — the
 private-key search names a credential by class, and `token:nickname`, which is how NSS names an
 object on a token, arrives as a `CKA_LABEL` search — but Firefox's client-authentication path starts
 from the certificate list, so for Firefox the opt-in is required. `tools/nss-smoke.sh` phase 2
 asserts both sides of the switch.
+
+p11-kit passes `x-init-reserved` as the string in `CK_C_INITIALIZE_ARGS.pReserved`.
+The module accepts `enumerate=1` and `enumerate=0`; other reserved strings return
+`CKR_ARGUMENTS_BAD`. Omission or `enumerate=0` leaves enumeration disabled unless the
+process sets the environment switch to `1`. This configuration works for launcher-started
+consumers and Flatpak extensions using p11-kit. NSS loading the library directly does not
+read p11-kit files and still needs the environment switch.
+
+Unknown, empty or malformed `CKA_ID` values cannot trigger acquisition, including when a
+search also names the contract label or enumeration is enabled. Issued IDs remain known
+until `C_Finalize`, so consumers can find a previously exposed credential after grant release.
+A cancelled chooser suppresses all new acquisitions in the process for ten seconds,
+regardless of template or PKCS#11 session.
 
 The cost is that a consumer which enumerates and then imports by URI sees an empty token on the
 first pass. That is the right trade: the enumeration is not what the user was asked about, and the
@@ -388,8 +401,11 @@ unaffected by what is shipped; `portal-stack.sh --live` writes the real per-user
   `PKCS11_PORTAL_URI_OBJECT_ATTRIBUTE` in `src/module/constants.h` is the attribute alone.
 - **A grant outlives the PKCS#11 sessions.** GnuTLS opens and closes a session for each object
   import and each signature; releasing the grant with the last session put the chooser up again
-  every time. The grant now ends at `C_Finalize`, at its own expiry, or when the portal
-  invalidates it.
+  every time. Ordinary `C_CloseSession` calls preserve the grant. `C_Logout` on a valid
+  session and `C_CloseAllSessions` close its portal session, so the next credential search
+  opens the chooser again. Logout releases the grant even when it returns
+  `CKR_USER_NOT_LOGGED_IN`. The grant also ends at `C_Finalize`, at expiry, on
+  `GrantInvalidated`, or when its portal session emits `Closed`.
 - **TLS 1.0 and 1.1 cannot work through this module and will not be made to.** They sign an
   MD5 ‖ SHA-1 concatenation with `CKM_RSA_PKCS` [[S26](../SOURCES.md)], which has no hash name the
   portal's `Sign` will accept and no DigestInfo to parse. It is refused with

@@ -115,7 +115,8 @@ operation, a PIN-pad reader, a second card model, KDE and the OpenSSL 3 provider
 - Firefox's default selection setting adds its own certificate picker;
   [automatic selection](docs/TESTING.md#single-prompt-firefox-procedure) skips it.
 - Firefox's NSS lists certificates by class alone; the module answers that search only with
-  `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1`, so a page load does not open a chooser
+  `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` or `x-init-reserved: enumerate=1` in its p11-kit
+  module file. Direct NSS loading uses the environment switch. Enumeration may open a chooser
   ([search intent](docs/SECURITY.md#search-intent)).
 - With no portal or backend running, `C_Initialize` succeeds and the module reports no slots.
 - The shell's PIN prompter hands the PIN to this backend for `C_Login`; the backend keeps it in

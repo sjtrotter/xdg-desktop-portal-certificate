@@ -10,10 +10,11 @@
 
 #include <gio/gio.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <gnutls/gnutls.h>
 #include <gnutls/x509.h>
 
-#include <p11-kit/pkcs11.h>
+#include <p11-kit/p11-kit.h>
 
 #include "module/constants.h"
 
@@ -37,6 +38,14 @@ static const char introspection[] =
     "      <arg type='a{sv}' name='options' direction='in'/>"
     "      <arg type='o' name='handle' direction='out'/>"
     "    </method>"
+    "    <method name='Sign'>"
+    "      <arg type='o' direction='in'/><arg type='s' direction='in'/>"
+    "      <arg type='a{sv}' direction='in'/><arg type='o' direction='out'/>"
+    "    </method>"
+    "    <method name='Decrypt'>"
+    "      <arg type='o' direction='in'/><arg type='s' direction='in'/>"
+    "      <arg type='a{sv}' direction='in'/><arg type='o' direction='out'/>"
+    "    </method>"
     "    <method name='AcquireCredential'>"
     "      <arg type='o' name='session_handle' direction='in'/>"
     "      <arg type='s' name='parent_window' direction='in'/>"
@@ -53,6 +62,7 @@ static const char introspection[] =
     "  </interface>"
     "  <interface name='org.freedesktop.portal.Session'>"
     "    <method name='Close'/>"
+    "    <signal name='Closed'><arg type='a{sv}' name='details'/></signal>"
     "  </interface>"
     "</node>";
 
@@ -81,12 +91,17 @@ typedef struct
 
 	AcquireMode acquire_mode;
 	guint acquire_count;
+	guint sign_count;
+	guint decrypt_count;
+	guint64 expires_at;
 	char* acquire_path;
 	char* acquire_sender;
 	/* Owns the held invocation until the test releases the method reply. */
 	GDBusMethodInvocation* held;
 	char* held_path;
 	GPtrArray* closed;
+	GPtrArray* closed_sessions;
+	char* session_path;
 	/* Keep fixture objects distinct across module initializations, which restart request tokens. */
 	GArray* exported;
 } FakePortal;
@@ -158,6 +173,11 @@ static void on_session_call(GDBusConnection* connection, const char* sender, con
                             const char* interface, const char* method, GVariant* parameters,
                             GDBusMethodInvocation* invocation, gpointer user_data)
 {
+	g_mutex_lock(&fake.lock);
+	g_ptr_array_add(fake.closed_sessions, g_strdup(path));
+	g_cond_broadcast(&fake.cond);
+	g_mutex_unlock(&fake.lock);
+
 	g_dbus_method_invocation_return_value(invocation, NULL);
 }
 
@@ -216,22 +236,27 @@ static GVariant* empty_results(void)
 
 static GVariant* credential_results(void)
 {
-	static const char* const mechanisms[] = { "RSA_PKCS1_V1_5", "RSA_PSS", "ECDSA", NULL };
-	static const char* const operations[] = { "sign", NULL };
+	static const char* const mechanisms[] = {
+		"RSA_PKCS1_V1_5", "RSA_PSS", "ECDSA", "RSA_OAEP", NULL
+	};
+	static const char* const operations[] = { "sign", "decrypt", NULL };
 	gsize size = 0;
-	const guint8* data = g_bytes_get_data(fake.certificate, &size);
+	const guint8* data;
 	GVariantBuilder builder;
 
+	g_mutex_lock(&fake.lock);
+	data = g_bytes_get_data(fake.certificate, &size);
 	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
 	g_variant_builder_add(&builder, "{sv}", "certificate_der",
 	                      g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, data, size, 1));
 	g_variant_builder_add(&builder, "{sv}", "key_type", g_variant_new_string("RSA"));
 	g_variant_builder_add(&builder, "{sv}", "key_size", g_variant_new_uint32(2048));
-	g_variant_builder_add(&builder, "{sv}", "expires_at", g_variant_new_uint64(0));
+	g_variant_builder_add(&builder, "{sv}", "expires_at", g_variant_new_uint64(fake.expires_at));
 	g_variant_builder_add(&builder, "{sv}", "supported_mechanisms",
 	                      g_variant_new_strv(mechanisms, -1));
 	g_variant_builder_add(&builder, "{sv}", "permitted_operations",
 	                      g_variant_new_strv(operations, -1));
+	g_mutex_unlock(&fake.lock);
 
 	return g_variant_builder_end(&builder);
 }
@@ -261,7 +286,9 @@ static void on_certificate_call(GDBusConnection* connection, const char* sender,
 
 	if (strcmp(method, "GetCapabilities") == 0)
 	{
-		static const char* const mechanisms[] = { "RSA_PKCS1_V1_5", "RSA_PSS", "ECDSA", NULL };
+		static const char* const mechanisms[] = {
+			"RSA_PKCS1_V1_5", "RSA_PSS", "ECDSA", "RSA_OAEP", NULL
+		};
 		GVariantBuilder capabilities;
 
 		g_variant_builder_init(&capabilities, G_VARIANT_TYPE_VARDICT);
@@ -274,7 +301,8 @@ static void on_certificate_call(GDBusConnection* connection, const char* sender,
 
 	if (strcmp(method, "CreateSession") == 0)
 		options = g_variant_get_child_value(parameters, 0);
-	else if (strcmp(method, "AcquireCredential") == 0)
+	else if (strcmp(method, "AcquireCredential") == 0 || strcmp(method, "Sign") == 0 ||
+	         strcmp(method, "Decrypt") == 0)
 		options = g_variant_get_child_value(parameters, 2);
 	else
 	{
@@ -299,10 +327,37 @@ static void on_certificate_call(GDBusConnection* connection, const char* sender,
 		    g_variant_lookup(options, "session_handle_token", "s", &session_token));
 		session_path = portal_object_path("session", sender, session_token);
 		export_transient(session_path, "org.freedesktop.portal.Session", &session_vtable);
+		g_mutex_lock(&fake.lock);
+		g_free(fake.session_path);
+		fake.session_path = g_strdup(session_path);
+		g_mutex_unlock(&fake.lock);
 
 		g_variant_builder_init(&results, G_VARIANT_TYPE_VARDICT);
 		g_variant_builder_add(&results, "{sv}", "session_handle",
 		                      g_variant_new_object_path(session_path));
+		emit_response(sender, request_path, 0, g_variant_builder_end(&results));
+		return;
+	}
+
+	if (strcmp(method, "Sign") == 0 || strcmp(method, "Decrypt") == 0)
+	{
+		g_autoptr(GVariant) session = g_variant_get_child_value(parameters, 0);
+		guint8 output[32] = { 0 };
+		GVariantBuilder results;
+		gboolean signing = strcmp(method, "Sign") == 0;
+
+		g_mutex_lock(&fake.lock);
+		g_assert_cmpstr(g_variant_get_string(session, NULL), ==, fake.session_path);
+		if (signing)
+			fake.sign_count++;
+		else
+			fake.decrypt_count++;
+		g_mutex_unlock(&fake.lock);
+		g_dbus_method_invocation_return_value(invocation, g_variant_new("(o)", request_path));
+		g_variant_builder_init(&results, G_VARIANT_TYPE_VARDICT);
+		g_variant_builder_add(&results, "{sv}", signing ? "signature" : "plaintext",
+		                      g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, output,
+		                                                sizeof(output), 1));
 		emit_response(sender, request_path, 0, g_variant_builder_end(&results));
 		return;
 	}
@@ -392,6 +447,7 @@ static void fake_start(GTestDBus* bus)
 	g_mutex_init(&fake.lock);
 	g_cond_init(&fake.cond);
 	fake.closed = g_ptr_array_new_with_free_func(g_free);
+	fake.closed_sessions = g_ptr_array_new_with_free_func(g_free);
 	fake.exported = g_array_new(FALSE, FALSE, sizeof(guint));
 	fake.certificate = fixture_der("client-auth-rsa.pem");
 	fake.nodes = g_dbus_node_info_new_for_xml(introspection, &error);
@@ -427,6 +483,8 @@ static void fake_stop(void)
 	g_clear_pointer(&fake.nodes, g_dbus_node_info_unref);
 	g_clear_pointer(&fake.certificate, g_bytes_unref);
 	g_clear_pointer(&fake.closed, g_ptr_array_unref);
+	g_clear_pointer(&fake.closed_sessions, g_ptr_array_unref);
+	g_clear_pointer(&fake.session_path, g_free);
 	g_clear_pointer(&fake.exported, g_array_unref);
 	g_clear_pointer(&fake.acquire_path, g_free);
 	g_clear_pointer(&fake.acquire_sender, g_free);
@@ -442,10 +500,17 @@ static void fake_reset(AcquireMode mode)
 	g_assert_null(fake.held);
 	fake.acquire_mode = mode;
 	fake.acquire_count = 0;
+	fake.sign_count = 0;
+	fake.decrypt_count = 0;
+	fake.expires_at = 0;
+	g_clear_pointer(&fake.certificate, g_bytes_unref);
+	fake.certificate = fixture_der("client-auth-rsa.pem");
 	g_clear_pointer(&fake.acquire_path, g_free);
 	g_clear_pointer(&fake.acquire_sender, g_free);
 	g_clear_pointer(&fake.held_path, g_free);
 	g_ptr_array_set_size(fake.closed, 0);
+	g_ptr_array_set_size(fake.closed_sessions, 0);
+	g_clear_pointer(&fake.session_path, g_free);
 	g_mutex_unlock(&fake.lock);
 }
 
@@ -570,10 +635,11 @@ static void fake_release_held_reply(void)
 static gboolean answer_acquire(gpointer data)
 {
 	guint32 response = GPOINTER_TO_UINT(data);
+	/* credential_results() takes fake.lock itself. */
+	GVariant* results = response == 0 ? credential_results() : empty_results();
 
 	g_mutex_lock(&fake.lock);
-	emit_response(fake.acquire_sender, fake.acquire_path, response,
-	              response == 0 ? credential_results() : empty_results());
+	emit_response(fake.acquire_sender, fake.acquire_path, response, results);
 	g_mutex_unlock(&fake.lock);
 
 	return G_SOURCE_REMOVE;
@@ -603,7 +669,6 @@ static CK_SESSION_HANDLE open_session(void)
 typedef struct
 {
 	CK_OBJECT_CLASS object_class;
-	guint8 identifier[4];
 	CK_ATTRIBUTE templ[2];
 	unsigned long count;
 	CK_SESSION_HANDLE session;
@@ -628,16 +693,12 @@ static void search_init(Search* search, CK_SESSION_HANDLE session)
 	g_cond_init(&search->cond);
 }
 
-/* A key identifier changes refusal memory so the second search can acquire independently. */
-static void search_init_by_id(Search* search, CK_SESSION_HANDLE session)
+static void search_init_by_label(Search* search, CK_SESSION_HANDLE session)
 {
-	static const guint8 identifier[4] = { 1, 2, 3, 4 };
-
 	search_init(search, session);
-	memcpy(search->identifier, identifier, sizeof(identifier));
-	search->templ[1].type = CKA_ID;
-	search->templ[1].pValue = search->identifier;
-	search->templ[1].ulValueLen = sizeof(search->identifier);
+	search->templ[1].type = CKA_LABEL;
+	search->templ[1].pValue = (void*) PKCS11_PORTAL_OBJECT_LABEL;
+	search->templ[1].ulValueLen = strlen(PKCS11_PORTAL_OBJECT_LABEL);
 	search->count = 2;
 }
 
@@ -887,7 +948,7 @@ static void test_a_session_closed_during_the_wait_asks_for_nothing(void)
 	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
 
 	search_init(&first, open_session());
-	search_init_by_id(&second, open_session());
+	search_init_by_label(&second, open_session());
 
 	one = g_thread_new("first", find_thread, &first);
 	acquired = fake_wait_for_acquire(WAIT_MS);
@@ -931,7 +992,7 @@ static void test_a_search_does_not_survive_reinitialization(void)
 	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
 
 	search_init(&first, open_session());
-	search_init_by_id(&second, open_session());
+	search_init_by_label(&second, open_session());
 	search_init(&finalize, 0);
 
 	one = g_thread_new("first", find_thread, &first);
@@ -1005,12 +1066,440 @@ static CK_OBJECT_HANDLE find_the_private_key(CK_SESSION_HANDLE session)
 	return handles[0];
 }
 
+static guint find_count(CK_SESSION_HANDLE session, CK_ATTRIBUTE* templ, CK_ULONG count)
+{
+	CK_OBJECT_HANDLE handles[4];
+	CK_ULONG found = 0;
+
+	g_assert_cmpuint(functions->C_FindObjectsInit(session, templ, count), ==, CKR_OK);
+	g_assert_cmpuint(functions->C_FindObjects(session, handles, G_N_ELEMENTS(handles), &found),
+	                 ==, CKR_OK);
+	g_assert_cmpuint(functions->C_FindObjectsFinal(session), ==, CKR_OK);
+
+	return found;
+}
+
+static void test_configuration_enables_enumeration(void)
+{
+	CK_C_INITIALIZE_ARGS args = { .flags = CKF_OS_LOCKING_OK };
+	CK_SESSION_HANDLE session;
+	CK_OBJECT_CLASS certificate = CKO_CERTIFICATE;
+	CK_ATTRIBUTE templ = { CKA_CLASS, &certificate, sizeof(certificate) };
+
+	g_unsetenv(PKCS11_PORTAL_ENV_ENUMERATE);
+	fake_reset(ACQUIRE_ANSWER);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	g_assert_cmpuint(find_count(session, &templ, 1), ==, 0);
+	g_assert_cmpuint(fake_acquire_count(), ==, 0);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+
+	args.pReserved = (void*) "enumerate=1";
+	g_assert_cmpuint(functions->C_Initialize(&args), ==, CKR_OK);
+	session = open_session();
+	g_assert_cmpuint(find_count(session, &templ, 1), ==, 1);
+	g_assert_cmpuint(fake_acquire_count(), ==, 1);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+
+	fake_reset(ACQUIRE_ANSWER);
+	args.pReserved = (void*) "enumerate=0";
+	g_assert_cmpuint(functions->C_Initialize(&args), ==, CKR_OK);
+	session = open_session();
+	g_assert_cmpuint(find_count(session, &templ, 1), ==, 0);
+	g_setenv(PKCS11_PORTAL_ENV_ENUMERATE, "1", TRUE);
+	g_assert_cmpuint(find_count(session, &templ, 1), ==, 1);
+	g_unsetenv(PKCS11_PORTAL_ENV_ENUMERATE);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+
+	args.pReserved = (void*) "unknown=1";
+	g_assert_cmpuint(functions->C_Initialize(&args), ==, CKR_ARGUMENTS_BAD);
+}
+
+static void test_p11kit_forwards_configuration(void)
+{
+	if (g_test_subprocess())
+	{
+		CK_FUNCTION_LIST** modules = p11_kit_modules_load(NULL, 0);
+		CK_FUNCTION_LIST* module;
+		CK_SESSION_HANDLE session;
+		CK_OBJECT_CLASS certificate = CKO_CERTIFICATE;
+		CK_ATTRIBUTE templ = { CKA_CLASS, &certificate, sizeof(certificate) };
+
+		g_assert_nonnull(modules);
+		module = p11_kit_module_for_name(modules, PKCS11_PORTAL_MODULE_NAME);
+		g_assert_nonnull(module);
+		g_assert_cmpuint(p11_kit_module_initialize(module), ==, CKR_OK);
+		functions = module;
+		session = open_session();
+		g_assert_cmpuint(find_count(session, &templ, 1), ==, 1);
+		g_assert_cmpuint(fake_acquire_count(), ==, 1);
+		g_assert_cmpuint(p11_kit_module_finalize(module), ==, CKR_OK);
+		p11_kit_modules_release(modules);
+		return;
+	}
+
+	g_autofree char* directory = g_dir_make_tmp("certificate-module-XXXXXX", NULL);
+	g_autofree char* modules_dir = g_build_filename(directory, "pkcs11", "modules", NULL);
+	g_autofree char* pkcs11_dir = g_path_get_dirname(modules_dir);
+	g_autofree char* config_path = g_build_filename(modules_dir,
+	                                               XDG_PORTAL_CERTIFICATE_MODULE_CONFIG, NULL);
+	g_autofree char* program = g_path_get_basename(g_get_prgname());
+	g_autofree char* config = g_strdup_printf("module: %s\nenable-in: %s\n"
+	                                         "x-init-reserved: enumerate=1\n",
+	                                         PORTAL_MODULE_PATH, program);
+	g_autofree char* previous = g_strdup(g_getenv("XDG_CONFIG_HOME"));
+
+	g_assert_nonnull(directory);
+	g_assert_cmpint(g_mkdir_with_parents(modules_dir, 0700), ==, 0);
+	g_assert_true(g_file_set_contents(config_path, config, -1, NULL));
+	g_setenv("XDG_CONFIG_HOME", directory, TRUE);
+	g_unsetenv(PKCS11_PORTAL_ENV_ENUMERATE);
+	g_test_trap_subprocess(NULL, 10 * G_USEC_PER_SEC, G_TEST_SUBPROCESS_DEFAULT);
+	if (previous != NULL)
+		g_setenv("XDG_CONFIG_HOME", previous, TRUE);
+	else
+		g_unsetenv("XDG_CONFIG_HOME");
+	g_assert_cmpint(g_remove(config_path), ==, 0);
+	g_assert_cmpint(g_rmdir(modules_dir), ==, 0);
+	g_assert_cmpint(g_rmdir(pkcs11_dir), ==, 0);
+	g_assert_cmpint(g_rmdir(directory), ==, 0);
+	g_test_trap_assert_passed();
+}
+
+static void assert_session_closed(const char* path)
+{
+	gint64 deadline = g_get_monotonic_time() + WAIT_MS * G_TIME_SPAN_MILLISECOND;
+	gboolean closed = FALSE;
+
+	g_mutex_lock(&fake.lock);
+	for (;;)
+	{
+		for (guint i = 0; i < fake.closed_sessions->len && !closed; i++)
+			closed = g_strcmp0(g_ptr_array_index(fake.closed_sessions, i), path) == 0;
+
+		if (closed || !g_cond_wait_until(&fake.cond, &fake.lock, deadline))
+			break;
+	}
+	g_mutex_unlock(&fake.lock);
+	g_assert_true(closed);
+}
+
+static char* current_portal_session(void)
+{
+	char* path;
+
+	g_mutex_lock(&fake.lock);
+	path = g_strdup(fake.session_path);
+	g_mutex_unlock(&fake.lock);
+
+	return path;
+}
+
+static void test_logout_releases_the_grant(void)
+{
+	CK_SESSION_HANDLE session;
+	CK_SESSION_HANDLE other;
+	CK_OBJECT_HANDLE key;
+	CK_ATTRIBUTE label = { CKA_LABEL, NULL, 0 };
+	g_autofree char* path = NULL;
+
+	fake_reset(ACQUIRE_ANSWER);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	other = open_session();
+	key = find_the_private_key(session);
+	path = current_portal_session();
+	g_assert_cmpuint(functions->C_Login(session, CKU_USER, NULL, 0), ==, CKR_OK);
+	g_assert_cmpuint(functions->C_Logout(session), ==, CKR_OK);
+	assert_session_closed(path);
+	g_assert_cmpuint(functions->C_GetAttributeValue(other, key, &label, 1), ==,
+	                 CKR_OBJECT_HANDLE_INVALID);
+	g_assert_cmpuint(find_the_private_key(other), !=, key);
+	g_assert_cmpuint(fake_acquire_count(), ==, 2);
+	g_clear_pointer(&path, g_free);
+	path = current_portal_session();
+	g_assert_cmpuint(functions->C_Logout(other), ==, CKR_USER_NOT_LOGGED_IN);
+	assert_session_closed(path);
+	find_the_private_key(session);
+	g_assert_cmpuint(fake_acquire_count(), ==, 3);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static void test_close_all_sessions_releases_the_grant(void)
+{
+	CK_SESSION_HANDLE session;
+	g_autofree char* path = NULL;
+
+	fake_reset(ACQUIRE_ANSWER);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	find_the_private_key(session);
+	path = current_portal_session();
+	g_assert_cmpuint(functions->C_CloseSession(session), ==, CKR_OK);
+	session = open_session();
+	find_the_private_key(session);
+	g_assert_cmpuint(fake_acquire_count(), ==, 1);
+	g_assert_cmpuint(functions->C_CloseAllSessions(1), ==, CKR_OK);
+	assert_session_closed(path);
+	session = open_session();
+	find_the_private_key(session);
+	g_assert_cmpuint(fake_acquire_count(), ==, 2);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static void test_portal_session_closure_drops_the_grant(void)
+{
+	CK_SESSION_HANDLE session;
+	CK_OBJECT_HANDLE key;
+	CK_OBJECT_HANDLE replacement = CK_INVALID_HANDLE;
+	g_autofree char* path = NULL;
+	gint64 deadline;
+
+	fake_reset(ACQUIRE_ANSWER);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	key = find_the_private_key(session);
+	path = current_portal_session();
+	g_dbus_connection_emit_signal(fake.connection, NULL, path,
+	                              "org.freedesktop.portal.Session", "Closed",
+	                              g_variant_new("(@a{sv})", empty_results()), NULL);
+
+	deadline = g_get_monotonic_time() + WAIT_MS * G_TIME_SPAN_MILLISECOND;
+	do
+	{
+		replacement = find_the_private_key(session);
+		if (replacement != key)
+			break;
+		g_usleep(1000);
+	} while (g_get_monotonic_time() < deadline);
+	g_assert_cmpuint(replacement, !=, key);
+	g_assert_cmpuint(fake_acquire_count(), ==, 2);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static void test_only_issued_identifiers_acquire(void)
+{
+	CK_SESSION_HANDLE session;
+	CK_OBJECT_HANDLE key;
+	guint8 identifier[20];
+	guint8 unknown[20] = { 1, 2, 3, 4 };
+	CK_ATTRIBUTE query = { CKA_ID, identifier, sizeof(identifier) };
+	CK_ATTRIBUTE by_id = { CKA_ID, unknown, sizeof(unknown) };
+	g_autofree char* path = NULL;
+
+	fake_reset(ACQUIRE_ANSWER);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	g_assert_cmpuint(find_count(session, &by_id, 1), ==, 0);
+	g_assert_cmpuint(fake_acquire_count(), ==, 0);
+	key = find_the_private_key(session);
+	g_assert_cmpuint(functions->C_GetAttributeValue(session, key, &query, 1), ==, CKR_OK);
+	path = current_portal_session();
+	g_assert_cmpuint(functions->C_CloseAllSessions(1), ==, CKR_OK);
+	assert_session_closed(path);
+	session = open_session();
+	g_setenv(PKCS11_PORTAL_ENV_ENUMERATE, "1", TRUE);
+	g_assert_cmpuint(find_count(session, &by_id, 1), ==, 0);
+	g_assert_cmpuint(fake_acquire_count(), ==, 1);
+	by_id.pValue = identifier;
+	by_id.ulValueLen = query.ulValueLen;
+	g_assert_cmpuint(find_count(session, &by_id, 1), ==, 3);
+	g_assert_cmpuint(fake_acquire_count(), ==, 2);
+	g_unsetenv(PKCS11_PORTAL_ENV_ENUMERATE);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	g_assert_cmpuint(find_count(session, &by_id, 1), ==, 0);
+	g_assert_cmpuint(fake_acquire_count(), ==, 2);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static void test_logout_discards_an_acquisition_in_progress(void)
+{
+	Search search;
+	GThread* finder;
+	g_autofree char* acquired = NULL;
+	g_autofree char* path = NULL;
+	CK_SESSION_HANDLE session;
+	CK_OBJECT_HANDLE handles[4];
+	CK_ULONG count = 0;
+
+	fake_reset(ACQUIRE_STALL);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	g_assert_cmpuint(functions->C_Login(session, CKU_USER, NULL, 0), ==, CKR_OK);
+	search_init(&search, session);
+	finder = g_thread_new("find", find_thread, &search);
+	acquired = fake_wait_for_acquire(WAIT_MS);
+	g_assert_nonnull(acquired);
+	path = current_portal_session();
+	g_assert_cmpuint(functions->C_Logout(session), ==, CKR_OK);
+	fake_answer_acquire(0);
+	g_assert_true(search_wait(&search, WAIT_MS));
+	g_thread_join(finder);
+	g_assert_cmpuint(search.rv, ==, CKR_OK);
+	g_assert_cmpuint(functions->C_FindObjects(session, handles, G_N_ELEMENTS(handles), &count),
+	                 ==, CKR_OK);
+	g_assert_cmpuint(count, ==, 0);
+	g_assert_cmpuint(functions->C_FindObjectsFinal(session), ==, CKR_OK);
+	assert_session_closed(path);
+	search_clear(&search);
+	g_mutex_lock(&fake.lock);
+	fake.acquire_mode = ACQUIRE_ANSWER;
+	g_mutex_unlock(&fake.lock);
+	find_the_private_key(session);
+	g_assert_cmpuint(fake_acquire_count(), ==, 2);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static void test_cancel_suppresses_different_templates(void)
+{
+	Search first;
+	Search second;
+	GThread* finder;
+	g_autofree char* acquired = NULL;
+	CK_SESSION_HANDLE session;
+
+	fake_reset(ACQUIRE_STALL);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	search_init(&first, session);
+	finder = g_thread_new("find", find_thread, &first);
+	acquired = fake_wait_for_acquire(WAIT_MS);
+	g_assert_nonnull(acquired);
+	fake_answer_acquire(1);
+	g_assert_true(search_wait(&first, WAIT_MS));
+	g_thread_join(finder);
+	g_assert_cmpuint(first.rv, ==, CKR_OK);
+	g_assert_cmpuint(functions->C_FindObjectsFinal(session), ==, CKR_OK);
+
+	g_mutex_lock(&fake.lock);
+	fake.acquire_mode = ACQUIRE_ANSWER;
+	g_mutex_unlock(&fake.lock);
+	search_init_by_label(&second, open_session());
+	g_assert_cmpuint(find_count(second.session, second.templ, second.count), ==, 0);
+	g_assert_cmpuint(fake_acquire_count(), ==, 1);
+	search_clear(&first);
+	search_clear(&second);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
 static CK_RV sign_init(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE key, CK_ULONG salt_length)
 {
 	CK_RSA_PKCS_PSS_PARAMS parameters = { CKM_SHA256, CKG_MGF1_SHA256, salt_length };
 	CK_MECHANISM mechanism = { CKM_RSA_PKCS_PSS, &parameters, sizeof(parameters) };
 
 	return functions->C_SignInit(session, &mechanism, key);
+}
+
+static void init_pending_operations(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE key)
+{
+	CK_RSA_PKCS_OAEP_PARAMS parameters = {
+		CKM_SHA256, CKG_MGF1_SHA256, CKZ_DATA_SPECIFIED, NULL, 0
+	};
+	CK_MECHANISM mechanism = { CKM_RSA_PKCS_OAEP, &parameters, sizeof(parameters) };
+
+	g_assert_cmpuint(sign_init(session, key, 32), ==, CKR_OK);
+	g_assert_cmpuint(functions->C_DecryptInit(session, &mechanism, key), ==, CKR_OK);
+}
+
+static void test_pending_operations_do_not_survive_grant_release(gconstpointer data)
+{
+	const char* release = data;
+	CK_SESSION_HANDLE session;
+	CK_SESSION_HANDLE pending;
+	CK_OBJECT_HANDLE key;
+	CK_OBJECT_HANDLE replacement;
+	g_autofree char* path = NULL;
+	guint64 expires_at = 0;
+	gint64 deadline;
+	guint8 input[32] = { 0 };
+	guint8 signature[256];
+	guint8 plaintext[256];
+	CK_ULONG signature_len = sizeof(signature);
+	CK_ULONG plaintext_len = sizeof(plaintext);
+	CK_RV sign_rv;
+	CK_RV decrypt_rv;
+	CK_RV expected = CKR_OPERATION_NOT_INITIALIZED;
+
+	fake_reset(ACQUIRE_ANSWER);
+	if (strcmp(release, "expiry") == 0)
+	{
+		expires_at = g_get_real_time() / G_USEC_PER_SEC + 2;
+		g_mutex_lock(&fake.lock);
+		fake.expires_at = expires_at;
+		g_mutex_unlock(&fake.lock);
+	}
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	pending = open_session();
+	key = find_the_private_key(session);
+	path = current_portal_session();
+	init_pending_operations(pending, key);
+
+	if (strcmp(release, "logout") == 0)
+	{
+		g_assert_cmpuint(functions->C_Login(session, CKU_USER, NULL, 0), ==, CKR_OK);
+		g_assert_cmpuint(functions->C_Logout(session), ==, CKR_OK);
+		assert_session_closed(path);
+	}
+	else if (strcmp(release, "close-all") == 0)
+	{
+		g_assert_cmpuint(functions->C_CloseAllSessions(1), ==, CKR_OK);
+		assert_session_closed(path);
+		session = open_session();
+		expected = CKR_SESSION_HANDLE_INVALID;
+	}
+	else if (strcmp(release, "closed") == 0)
+	{
+		g_dbus_connection_emit_signal(fake.connection, NULL, path,
+		                              "org.freedesktop.portal.Session", "Closed",
+		                              g_variant_new("(@a{sv})", empty_results()), NULL);
+	}
+	else
+	{
+		while ((guint64) (g_get_real_time() / G_USEC_PER_SEC) < expires_at)
+			g_usleep(1000);
+	}
+
+	/* The next search must select credential B, with a different certificate and key. */
+	g_mutex_lock(&fake.lock);
+	g_clear_pointer(&fake.certificate, g_bytes_unref);
+	fake.certificate = fixture_der("email-sign-and-encipher.pem");
+	fake.expires_at = 0;
+	g_mutex_unlock(&fake.lock);
+	deadline = g_get_monotonic_time() + WAIT_MS * G_TIME_SPAN_MILLISECOND;
+	do
+	{
+		replacement = find_the_private_key(session);
+		if (replacement != key)
+			break;
+		g_usleep(1000);
+	} while (g_get_monotonic_time() < deadline);
+	g_assert_cmpuint(replacement, !=, key);
+	g_assert_cmpuint(fake_acquire_count(), ==, 2);
+
+	sign_rv = functions->C_Sign(pending, input, sizeof(input), signature, &signature_len);
+	decrypt_rv = functions->C_Decrypt(pending, input, sizeof(input), plaintext, &plaintext_len);
+	g_mutex_lock(&fake.lock);
+	g_assert_cmpuint(fake.sign_count, ==, 0);
+	g_assert_cmpuint(fake.decrypt_count, ==, 0);
+	g_mutex_unlock(&fake.lock);
+	g_assert_cmpuint(sign_rv, ==, expected);
+	g_assert_cmpuint(decrypt_rv, ==, expected);
+
+	/* Fresh operations may use B, proving that the fake portal observes both methods. */
+	init_pending_operations(session, replacement);
+	g_assert_cmpuint(functions->C_Sign(session, input, sizeof(input), signature, &signature_len),
+	                 ==, CKR_OK);
+	g_assert_cmpuint(functions->C_Decrypt(session, input, sizeof(input), plaintext, &plaintext_len),
+	                 ==, CKR_OK);
+	g_mutex_lock(&fake.lock);
+	g_assert_cmpuint(fake.sign_count, ==, 1);
+	g_assert_cmpuint(fake.decrypt_count, ==, 1);
+	g_mutex_unlock(&fake.lock);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
 }
 
 static void test_caller_lengths_are_bounded_before_they_are_narrowed(void)
@@ -1083,6 +1572,31 @@ int main(int argc, char** argv)
 	                test_a_timed_out_request_is_closed);
 	g_test_add_func("/module/portal/caller-lengths",
 	                test_caller_lengths_are_bounded_before_they_are_narrowed);
+	g_test_add_data_func("/module/portal/pending-operations/logout", "logout",
+	                     test_pending_operations_do_not_survive_grant_release);
+	g_test_add_data_func("/module/portal/pending-operations/close-all", "close-all",
+	                     test_pending_operations_do_not_survive_grant_release);
+	g_test_add_data_func("/module/portal/pending-operations/closed", "closed",
+	                     test_pending_operations_do_not_survive_grant_release);
+	g_test_add_data_func("/module/portal/pending-operations/expiry", "expiry",
+	                     test_pending_operations_do_not_survive_grant_release);
+
+	g_test_add_func("/module/portal/config-enumeration",
+	                test_configuration_enables_enumeration);
+	g_test_add_func("/module/portal/p11kit-configuration",
+	                test_p11kit_forwards_configuration);
+	g_test_add_func("/module/portal/logout-releases-grant",
+	                test_logout_releases_the_grant);
+	g_test_add_func("/module/portal/close-all-releases-grant",
+	                test_close_all_sessions_releases_the_grant);
+	g_test_add_func("/module/portal/portal-session-closed",
+	                test_portal_session_closure_drops_the_grant);
+	g_test_add_func("/module/portal/issued-identifiers",
+	                test_only_issued_identifiers_acquire);
+	g_test_add_func("/module/portal/logout-during-acquisition",
+	                test_logout_discards_an_acquisition_in_progress);
+	g_test_add_func("/module/portal/cancel-different-template",
+	                test_cancel_suppresses_different_templates);
 
 	result = g_test_run();
 

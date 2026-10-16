@@ -74,7 +74,7 @@ exe = executable(
   link_with: pkcs11_portal_module,
   dependencies: module_deps,
   include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
-  c_args: test_args,
+  c_args: test_args + ['-DPORTAL_MODULE_PATH="' + pkcs11_portal_module.full_path() + '"'],
   install: false,
 )
 

@@ -68,8 +68,9 @@ static guint module_generation;
 static GHashTable* module_sessions;
 static CK_SESSION_HANDLE module_next_session;
 static gboolean module_logged_in;
+static gboolean module_enumerate;
+static GHashTable* module_issued_ids;
 static gint64 module_refusal_time;
-static guint module_refusal_fingerprint;
 static char module_serial[PKCS11_PORTAL_TOKEN_SERIAL_SIZE + 1];
 
 static void pad_field(CK_UTF8CHAR* field, gsize size, const char* value)
@@ -163,12 +164,25 @@ static PortalSession* session_revalidate(CK_SESSION_HANDLE handle, guint lifecyc
 
 static void drop_objects(void)
 {
+	GHashTableIter iter;
+	gpointer value;
+
+	/* Pending operations must never use a replacement grant. */
+	g_hash_table_iter_init(&iter, module_sessions);
+	while (g_hash_table_iter_next(&iter, NULL, &value))
+	{
+		session_reset_sign(value);
+		session_reset_decrypt(value);
+	}
+
 	g_clear_pointer(&module_objects, portal_objects_free);
 	g_clear_pointer(&module_grant, portal_grant_free);
 }
 
 static void release_grant(void)
 {
+	module_generation++;
+
 	if (module_grant != NULL && !portal_client_grant_gone(module_client, module_grant))
 		portal_client_release(module_client, module_grant);
 
@@ -205,7 +219,7 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_
 	g_autoptr(GError) error = NULL;
 	PortalClient* client;
 	PortalGrant* grant;
-	guint fingerprint;
+	guint generation;
 
 	/* Concurrent searches share one acquisition and grant. */
 	while (module_acquiring && !module_finalizing)
@@ -220,18 +234,14 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_
 	if (!portal_client_available(module_client))
 		return FALSE;
 
-	if (!portal_template_wants_credential(templ, count))
+	if (!portal_template_wants_credential(templ, count, module_issued_ids, module_enumerate))
 		return FALSE;
-
-	fingerprint = portal_template_fingerprint(templ, count);
 
 	if (module_refusal_time != 0)
 	{
 		gint64 age = g_get_monotonic_time() - module_refusal_time;
 
-		if (fingerprint != module_refusal_fingerprint)
-			module_refusal_time = 0;
-		else if (age < PKCS11_PORTAL_REFUSAL_GRACE_SECONDS * G_USEC_PER_SEC)
+		if (age < PKCS11_PORTAL_REFUSAL_GRACE_SECONDS * G_USEC_PER_SEC)
 			return FALSE;
 		else
 			module_refusal_time = 0;
@@ -239,6 +249,7 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_
 
 	/* C_Finalize waits for module_acquiring before freeing the client. */
 	client = module_client;
+	generation = module_generation;
 	module_acquiring = TRUE;
 	g_mutex_unlock(&module_lock);
 
@@ -253,15 +264,15 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_
 		if (g_error_matches(error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_CANCELLED))
 		{
 			module_refusal_time = g_get_monotonic_time();
-			module_refusal_fingerprint = fingerprint;
 		}
 
 		g_debug("no credential: %s", error != NULL ? error->message : "unavailable");
 		return FALSE;
 	}
 
-	/* Release grants acquired after finalization or closure of the requesting session. */
-	if (module_client != client || session_revalidate(handle, lifecycle, serial) == NULL)
+	/* Grant release invalidates acquisitions that were already in progress. */
+	if (module_client != client || module_generation != generation ||
+	    session_revalidate(handle, lifecycle, serial) == NULL)
 	{
 		portal_client_release(client, grant);
 		portal_grant_free(grant);
@@ -284,6 +295,8 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_
 		release_grant();
 		return FALSE;
 	}
+
+	g_hash_table_add(module_issued_ids, g_bytes_ref(module_objects->identifier));
 
 	return TRUE;
 }
@@ -317,7 +330,9 @@ CK_RV C_Initialize(void* init_args)
 		gboolean all_mutex = args->CreateMutex != NULL && args->DestroyMutex != NULL &&
 		                     args->LockMutex != NULL && args->UnlockMutex != NULL;
 
-		if (args->pReserved != NULL)
+		if (args->pReserved != NULL &&
+		    strcmp(args->pReserved, "enumerate=1") != 0 &&
+		    strcmp(args->pReserved, "enumerate=0") != 0)
 		{
 			g_mutex_unlock(&module_lock);
 			return CKR_ARGUMENTS_BAD;
@@ -339,6 +354,9 @@ CK_RV C_Initialize(void* init_args)
 	g_snprintf(module_serial, sizeof(module_serial), "%s%013X",
 	           PKCS11_PORTAL_TOKEN_SERIAL_PREFIX, (unsigned) (getpid() & 0x1fffffff));
 
+	module_enumerate = args != NULL && g_strcmp0(args->pReserved, "enumerate=1") == 0;
+	module_issued_ids = g_hash_table_new_full(g_bytes_hash, g_bytes_equal,
+	                                        (GDestroyNotify) g_bytes_unref, NULL);
 	module_sessions = g_hash_table_new_full(NULL, NULL, NULL, session_free);
 	module_next_session = 1;
 	module_lifecycle++;
@@ -389,6 +407,7 @@ CK_RV C_Finalize(void* reserved)
 	release_grant();
 
 	g_clear_pointer(&module_sessions, g_hash_table_unref);
+	g_clear_pointer(&module_issued_ids, g_hash_table_unref);
 	g_clear_pointer(&module_mechanisms, g_array_unref);
 	g_clear_pointer(&module_client, portal_client_free);
 
@@ -741,7 +760,7 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE session_handle)
 	if (!g_hash_table_remove(module_sessions, GUINT_TO_POINTER(session_handle)))
 		rv = CKR_SESSION_HANDLE_INVALID;
 
-	/* Grants survive PKCS#11 session closure until finalization, expiry or portal invalidation. */
+	/* Ordinary PKCS#11 session closure preserves the grant for subsequent imports and signatures. */
 	if (rv == CKR_OK && g_hash_table_size(module_sessions) == 0)
 		module_logged_in = FALSE;
 
@@ -759,6 +778,7 @@ CK_RV C_CloseAllSessions(CK_SLOT_ID slot_id)
 
 	g_mutex_lock(&module_lock);
 	g_hash_table_remove_all(module_sessions);
+	release_grant();
 	module_logged_in = FALSE;
 	g_mutex_unlock(&module_lock);
 
@@ -832,10 +852,13 @@ CK_RV C_Logout(CK_SESSION_HANDLE session_handle)
 
 	if (session_lookup(session_handle) == NULL)
 		rv = CKR_SESSION_HANDLE_INVALID;
-	else if (!module_logged_in)
-		rv = CKR_USER_NOT_LOGGED_IN;
 	else
+	{
+		if (!module_logged_in)
+			rv = CKR_USER_NOT_LOGGED_IN;
 		module_logged_in = FALSE;
+		release_grant();
+	}
 
 	g_mutex_unlock(&module_lock);
 

@@ -446,6 +446,21 @@ $ ninja -C build-asan
 $ LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0     MODULE_SO=$PWD/build-asan/src/module/libpkcs11-portal-certificate.so     tools/nss-smoke.sh --phase "1 2 3"
 ```
 
+For consumers loaded through p11-kit, add this line to
+`xdg-desktop-portal-certificate.module` to enable enumeration without setting a launcher environment:
+
+```ini
+x-init-reserved: enumerate=1
+```
+
+p11-kit passes the value to `C_Initialize` through `pReserved`. `enumerate=0` or omission
+leaves enumeration off unless `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` is set. User module
+files under `~/.config/pkcs11/modules/` can override the installed file. Direct NSS loading
+uses the environment switch because it does not read these files. The `module-portal` tests
+cover both direct initialization and forwarding from a p11-kit module file on a private bus.
+They also cover reselection after logout, close-all and portal session closure, issued-ID
+matching and cancellation across different templates; no card or display is required.
+
 ### 2.6 Firefox
 
 Confirmed on 2026-09-06 with Firefox, a throwaway profile, direct Security Devices loading and
@@ -467,7 +482,8 @@ The 2026-09-06 failure report recorded that alert, no frontend session/acquisiti
 2. In Settings, Privacy & Security, Security Devices, Load, give the shared-object path.
    Direct loading does not read p11-kit configuration. On distribution builds using
    p11-kit-proxy instead, add `firefox` to the installed `enable-in:` list or a per-user override;
-   see [the allowlist](decisions/0011-client-side-pkcs11-module.md#the-module-is-opt-in-by-name-and-the-shipped-file-is-the-allowlist).
+   enumeration can use `x-init-reserved: enumerate=1` in that file.
+   See [the allowlist](decisions/0011-client-side-pkcs11-module.md#the-module-is-opt-in-by-name-and-the-shipped-file-is-the-allowlist).
    Do not combine `enable-in` and `disable-in`; p11-kit consults only the former when both exist.
 3. Start the portal stack with a card or fixture, then visit a site requiring a client certificate.
 4. Expect portal chooser at search, Firefox's own one-certificate picker, then backend PIN

@@ -6,8 +6,11 @@ module: @module@
 critical: no
 
 # p11-kit matches executable basenames; user module configuration can override this list.
-# Firefox and Thunderbird also require PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1 and show their own picker.
+# Firefox and Thunderbird also require enumeration and show their own picker.
 enable-in: xdg-desktop-portal-webauth, WebKitNetworkProcess
+
+# Class-only searches may prompt when this option or PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1 is set.
+# x-init-reserved: enumerate=1
 
 # Prefer real tokens when consumers traverse modules by priority.
 priority: -10
