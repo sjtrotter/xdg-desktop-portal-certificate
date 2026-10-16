@@ -217,10 +217,11 @@ that exactly one PIN copy exists.
 
 `PR_SET_DUMPABLE(0)` and `RLIMIT_CORE 0` disable core dumps and ordinary same-UID `ptrace`
 attach. `/proc/self/*` becomes root-owned; the settings portal cannot inspect `/proc/$pid/root`
-to identify the process, and GDK can warn `Failed to read portal settings`. `gdb` attach also
-fails. `--debug-allow-core` disables hardening for development and must stay out of installed
-service files. A tracer attached before hardening, `CAP_SYS_PTRACE`, or different kernel policy
-remains outside this mitigation.
+to identify the process. The backend sets `GDK_DEBUG=no-portals` and `ADW_DISABLE_PORTAL=1`
+before GTK initialization to avoid failed Settings calls. `gdb` attach also fails.
+`--debug-allow-core` disables hardening for development and must stay out of installed service
+files. A tracer attached before hardening, `CAP_SYS_PTRACE`, or different kernel policy remains
+outside this mitigation.
 
 Color-scheme behavior was measured on Fedora 44 with `prefer-dark`: portal fallbacks alone gave
 a light window under hardening and a dark one with `--debug-allow-core`. The backend retains

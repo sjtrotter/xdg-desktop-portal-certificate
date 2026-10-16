@@ -21,6 +21,9 @@ typedef struct
 	gint refs;
 
 	GPtrArray* candidates;
+	char* app_id;
+	CertificateIdentityLevel identity_level;
+	CertificatePurpose purpose;
 	CertificateChooserDone done;
 	gpointer user_data;
 
@@ -40,6 +43,7 @@ typedef struct
 static void chooser_free(Chooser* chooser)
 {
 	g_clear_pointer(&chooser->candidates, g_ptr_array_unref);
+	g_free(chooser->app_id);
 	g_clear_object(&chooser->cancellable);
 	g_free(chooser);
 }
@@ -110,7 +114,9 @@ static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen)
 
 	certificate_log_decision(chosen != NULL ? CERTIFICATE_REASON_CONSENT_GRANTED
 	                                        : CERTIFICATE_REASON_CHOOSER_CANCELLED,
-	                         NULL, NULL, NULL, chosen != NULL);
+	                         chooser->app_id,
+	                         certificate_identity_level_to_string(chooser->identity_level),
+	                         certificate_purpose_to_string(chooser->purpose), chosen != NULL);
 
 	done(&result, user_data);
 
@@ -411,6 +417,9 @@ void certificate_chooser_show(const char* parent_window, const char* activation_
 	chooser = g_new0(Chooser, 1);
 	chooser->refs = 1;
 	chooser->candidates = g_ptr_array_ref(candidates);
+	chooser->app_id = g_strdup(request->caller->app_id);
+	chooser->identity_level = request->caller->level;
+	chooser->purpose = request->purpose;
 	chooser->done = done;
 	chooser->user_data = user_data;
 	chooser->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;

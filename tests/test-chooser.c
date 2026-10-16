@@ -4,11 +4,13 @@
  * xdg-desktop-portal-certificate
  */
 
+#include <adwaita.h>
 #include <glib.h>
 #include <string.h>
 
 #include "fixture-util.h"
 #include "ui/chooser.h"
+#include "ui/pin.h"
 
 static void assert_is_safe_display_text(const char* text)
 {
@@ -146,6 +148,95 @@ static void test_detail_line_has_a_fallback(void)
 	g_assert_null(strstr(detail, " in "));
 }
 
+static GtkWidget* find_list(GtkWidget* widget)
+{
+	if (GTK_IS_LIST_BOX(widget))
+		return widget;
+
+	for (GtkWidget* child = gtk_widget_get_first_child(widget); child != NULL;
+	     child = gtk_widget_get_next_sibling(child))
+	{
+		GtkWidget* list = find_list(child);
+
+		if (list != NULL)
+			return list;
+	}
+
+	return NULL;
+}
+
+static void on_chooser_done(const CertificateChooserResult* result, gpointer user_data)
+{
+	CertificateChooserResult* received = user_data;
+
+	received->chosen = result->chosen;
+}
+
+static void test_completion_log_fields(gconstpointer data)
+{
+	static int has_display = -1;
+	gboolean granted = GPOINTER_TO_INT(data);
+	g_autoptr(GPtrArray) candidates =
+	    g_ptr_array_new_with_free_func((GDestroyNotify) certificate_candidate_unref);
+	CertificateCallerIdentity caller = { CERTIFICATE_IDENTITY_DERIVED_HOST,
+	                                     g_strdup("org.example.App"), NULL };
+	CertificateChooserRequest request = { .caller = &caller,
+	                                      .purpose = CERTIFICATE_PURPOSE_CLIENT_AUTH,
+	                                      .may_sign = TRUE,
+	                                      .lifetime_seconds = 300 };
+	CertificateChooserResult received = { NULL };
+	g_autoptr(GtkWindow) window = NULL;
+	g_autofree char* expected = NULL;
+
+	if (has_display < 0)
+		has_display = gtk_init_check();
+
+	if (!has_display)
+	{
+		g_free(caller.app_id);
+		g_test_skip("no display: the chooser window cannot be opened");
+		return;
+	}
+
+	adw_init();
+	certificate_ui_set_has_display(TRUE);
+	g_ptr_array_add(candidates, certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE));
+
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE,
+	                      "chooser-shown app_id=org.example.App identity=host "
+	                      "purpose=client_auth granted=no");
+	certificate_chooser_show(NULL, NULL, candidates, &request, NULL, on_chooser_done, &received);
+	g_test_assert_expected_messages();
+	g_clear_pointer(&caller.app_id, g_free);
+
+	g_assert_cmpuint(g_list_model_get_n_items(gtk_window_get_toplevels()), ==, 1);
+	window = g_list_model_get_item(gtk_window_get_toplevels(), 0);
+	expected = g_strdup_printf("%s app_id=org.example.App identity=host "
+	                           "purpose=client_auth granted=%s",
+	                           granted ? "consent-granted" : "chooser-cancelled",
+	                           granted ? "yes" : "no");
+	g_test_expect_message(NULL, G_LOG_LEVEL_MESSAGE, expected);
+	if (granted)
+	{
+		GtkWidget* list = find_list(GTK_WIDGET(window));
+		GtkListBoxRow* row = NULL;
+
+		g_assert_nonnull(list);
+		row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0);
+		gtk_list_box_select_row(GTK_LIST_BOX(list), row);
+		g_signal_emit_by_name(list, "row-activated", row);
+	}
+	else
+	{
+		gboolean handled = FALSE;
+
+		g_signal_emit_by_name(window, "close-request", &handled);
+		g_assert_true(handled);
+	}
+	g_test_assert_expected_messages();
+	g_assert_true(received.chosen == (granted ? g_ptr_array_index(candidates, 0) : NULL));
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -157,6 +248,10 @@ int main(int argc, char** argv)
 	g_test_add_func("/chooser/detail-line-sanitises-the-card",
 	                test_detail_line_sanitises_the_card);
 	g_test_add_func("/chooser/detail-line-has-a-fallback", test_detail_line_has_a_fallback);
+	g_test_add_data_func("/chooser/consent-log-fields", GINT_TO_POINTER(TRUE),
+	                     test_completion_log_fields);
+	g_test_add_data_func("/chooser/cancel-log-fields", GINT_TO_POINTER(FALSE),
+	                     test_completion_log_fields);
 
 	return g_test_run();
 }
