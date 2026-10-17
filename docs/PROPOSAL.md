@@ -69,7 +69,10 @@ The frontend follows the experimental convention merged in #2129 and is enabled 
 
 Existing TLS stacks do not call D-Bus, so the backend repository also ships a PKCS#11 module.
 NSS or GnuTLS load it like any token; it presents the granted certificate and turns
-`C_Sign` into a portal call. Firefox and Chrome need no code changes.
+`C_Sign` into a portal call. Firefox and Chrome need no code changes, but each needs the module
+loaded: from Firefox's Security Devices settings, or registered in Chrome's NSS database. A
+browser without the module never calls the portal. Nothing installs or loads the module
+automatically today; how it should reach sandboxed applications is question 3 below.
 
 ### Evidence
 
