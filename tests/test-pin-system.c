@@ -12,6 +12,7 @@
 #include "fixture-util.h"
 #include "tokens/discovery.h"
 #include "ui/pin.h"
+#include "ui/pin-backends.h"
 
 #define GOOD_PIN "1234"
 

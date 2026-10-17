@@ -28,6 +28,7 @@
 #include "tokens/discovery.h"
 #include "tokens/filter.h"
 #include "ui/pin.h"
+#include "ui/pin-backends.h"
 
 static GMainLoop* loop = NULL;
 static CertificateImpl* impl = NULL;

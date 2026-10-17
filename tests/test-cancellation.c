@@ -11,6 +11,7 @@
 #include "broker/operations.h"
 #include "session-impl.h"
 #include "ui/pin.h"
+#include "ui/pin-backends.h"
 
 #define FIXTURE_PIN "123456"
 
@@ -875,6 +876,7 @@ static void test_broker_cancelled_login_is_abandoned(void)
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	certificate_pin_set_provider(certificate_pin_provider_gtk());
 
 	g_test_add_func("/cancel/empty-return-is-a-retry", test_empty_return_is_a_retry);
 	g_test_add_func("/cancel/during-login", test_cancel_during_login);
