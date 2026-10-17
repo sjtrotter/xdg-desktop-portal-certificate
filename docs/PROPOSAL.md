@@ -174,22 +174,43 @@ portal backend (as the backend now accepts calls only from the frontend), and re
 PIN from the dialog over a private channel. A service could be its own user unit, part of
 p11-kit, or part of gnome-keyring.
 
-## Alternatives considered
+## Why not forward PKCS#11 to the sandbox
 
-Ueno's 2023 design (attached to #662) forwards p11-kit RPC to the sandbox after consent,
-with the token as the unit of access and a flag for destructive operations. PIN entry stays
-in the application. It adds less new interface and keeps applications' own prompts. It leaves the PIN
-and the retry counter with the application, and a token grant covers every key on a PIV
-card, so consent cannot name a certificate. Filtered forwarding (signing calls only, no
-`C_Login` from the application) would be close to this proposal over a different transport.
-I would accept that direction if maintainers prefer it.
+Daiki Ueno's 2023 design (attached to #662) forwards p11-kit RPC to the sandbox after consent,
+with the token as the unit of access and a flag for destructive operations. It identified the
+threat this proposal works from: an application bricking the card or exhausting its PIN
+retries. The prototype started from scoped p11-kit forwarding too and moved away from it
+([decision 0006](decisions/0006-failure-modes-of-naive-p11kit-forwarding.md)):
+
+- The PIN stays with the application. With forwarding, the application calls `C_Login`, so a
+  compromised application sees the PIN and can try PINs until the card locks. Here the PIN is
+  typed into a backend dialog and never reaches the application.
+- Forwarding exposes the whole token. The design's writable and destructive flags gate writes
+  and calls such as `C_InitToken`, but signing, decryption and object reads stay available
+  with every key on the card, including decryption with a PIV card's key-management key.
+  Here the only operation is signing, with keys the user consented to.
+- Access is to the token as a whole and lasts as long as the forwarding connection; there is
+  no per-key grant for the host to enforce or expire. Here a grant names the key, has an
+  expiry, is bound to one D-Bus connection, and ends on card removal or revocation. Under the
+  proposed changes, consent is remembered for the application instance, so grants can renew
+  without a prompt while it runs (question 5).
+
+Ueno's design asks for consent through portal D-Bus requests; the operations then run over
+p11-kit RPC, which carries no caller identity or parent window per call. Filtering those
+operations down to signing, with the PIN taken out of the application, would add the same
+trusted PIN prompt, grant enforcement and revocation as this proposal, split across two
+protocols. The prototype keeps the compatibility that forwarding offers: a PKCS#11 module in the
+sandbox turns calls from unmodified TLS stacks into portal calls.
+
+## Other options
 
 [credentialsd](https://github.com/linux-credentials/credentialsd) proposes a Credentials
-portal for FIDO2 and passkeys. Certificate signing could be a credential type there; the
-interfaces do not overlap today.
+portal whose current API runs WebAuthn ceremonies: origin-bearing create and get requests from
+browsers and applications. TLS client authentication needs repeated signing through PKCS#11
+by a module that has no origin to give, so this proposal stays a separate interface.
 
-A PIN-only broker keeps card access in the application and does not reduce what a
-compromised application can do.
+A PIN-only broker keeps the PIN out of the application but leaves card access with it, so a
+compromised application can still use every key and operation the token offers.
 
 ## Known limits
 
@@ -203,15 +224,15 @@ compromised application can do.
 
 1. Token-level consent (every listed key, one prompt) or key-level consent (a portal
    confirmation at the first use of each key)?
-2. Is a portal `Sign` method acceptable, or would you rather see filtered p11-kit forwarding?
+2. Signing goes through a portal method rather than forwarded PKCS#11, for the reasons above.
+   Do you see a problem with that, such as per-signature D-Bus round trips?
 3. How should the PKCS#11 module reach sandboxed applications: in the runtime, as a Flatpak
    extension, or bundled by each application?
 4. Should the card broker be a library shared by the backends, or a service (its own, in
    p11-kit or in gnome-keyring)?
 5. Is remembered consent per application instance acceptable, given that it lets grants
    renew without a prompt?
-6. Who on the GNOME and KDE side should review the API? The merge requirements need an ACK
-   from both even for an experimental portal.
+6. Is there someone on the GNOME side and someone on the KDE side who could review the API?
 
 ## Who does the work
 
