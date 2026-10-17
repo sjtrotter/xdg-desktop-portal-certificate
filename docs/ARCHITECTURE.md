@@ -173,11 +173,12 @@ The prefix is caller-chosen and affects only display text; `reason` remains sepa
 
 ### PIN UI and broker
 
-[`ui/pin.h`](../src/ui/pin.h) supplies PIN interaction at first private-key use and for each
+[`core/pin.h`](../src/core/pin.h) supplies PIN interaction at first private-key use and for each
 operation on keys with `CKA_ALWAYS_AUTHENTICATE`. Context-specific login follows operation
 initialization; operations on the same session remain serialized during PIN entry.
-The backend logs into its own session; protected-path tokens collect the secret on the token
-or reader. PIN memory, retries, serialization, cancellation and system-prompter transport
+The core owns PIN policy and [`XccSecret`](../src/core/secret.h) storage; GTK and gcr
+providers remain in `src/ui/`. The backend logs into its own session; protected-path tokens
+collect the secret on the token or reader. PIN memory, retries, serialization, cancellation and system-prompter transport
 are specified in [SECURITY.md](SECURITY.md#pin-handling).
 
 [`broker/operations.h`](../src/broker/operations.h) owns device operations. The

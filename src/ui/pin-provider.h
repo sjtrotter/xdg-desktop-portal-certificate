@@ -6,7 +6,8 @@
 #ifndef CERTIFICATE_UI_PIN_PROVIDER_H
 #define CERTIFICATE_UI_PIN_PROVIDER_H
 
-#include "pin.h"
+#include "../core/pin.h"
+#include "../core/secret.h"
 
 typedef struct _PinPrompt PinPrompt;
 
@@ -28,8 +29,8 @@ typedef struct
 /* Main thread only; copied per login; user_data must outlive all retained prompt handles. */
 void certificate_pin_set_provider(const CertificatePinProvider* provider);
 
-/* Copies only into the existing locked buffer; clear the source after submission. */
-gboolean certificate_pin_prompt_hold(PinPrompt* prompt, const char* pin);
+/* Consumes provider-filled storage, validates length and holds it through final-try confirmation. */
+gboolean certificate_pin_prompt_hold(PinPrompt* prompt, XccSecret* secret, size_t length);
 /* Submit held input or protected-path NULL; policy requests a warning before a final attempt. */
 void certificate_pin_prompt_submit(PinPrompt* prompt);
 void certificate_pin_prompt_warning_reply(PinPrompt* prompt, gboolean accepted);

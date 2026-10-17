@@ -46,7 +46,7 @@ service_test_cases = {
 exe = executable(
   'test-pin-policy',
   ['test-pin-policy.c', 'fake-pin-provider.c'],
-  link_with: [certificate_pin_policy, certificate_core],
+  link_with: certificate_core,
   dependencies: certificate_deps,
   include_directories: [config_inc, include_directories('..' / 'src')],
   c_args: certificate_log_args,
@@ -54,6 +54,20 @@ exe = executable(
 )
 
 test('pin-policy', exe, protocol: 'tap', env: test_env, timeout: 120)
+
+# Link seams inspect storage before free and force mlock failure without production hooks.
+exe = executable(
+  'test-secret',
+  'test-secret.c',
+  link_with: certificate_core,
+  link_args: ['-Wl,--wrap=mlock', '-Wl,--wrap=free'],
+  dependencies: certificate_deps,
+  include_directories: [config_inc, include_directories('..' / 'src')],
+  c_args: certificate_log_args,
+  install: false,
+)
+
+test('secret', exe, protocol: 'tap', env: test_env)
 
 foreach name, source : service_test_cases
   exe = executable(

@@ -3,16 +3,16 @@
  *
  * xdg-desktop-portal-certificate
  */
-#ifndef CERTIFICATE_UI_PIN_INTERNAL_H
-#define CERTIFICATE_UI_PIN_INTERNAL_H
+#ifndef CERTIFICATE_CORE_PIN_INTERNAL_H
+#define CERTIFICATE_CORE_PIN_INTERNAL_H
 
 #include <glib.h>
 
-#include "pin-provider.h"
+#include "../ui/pin-provider.h"
 
 /** PIN implementations collect input; core policy and ownership rules are documented in docs/SECURITY.md. */
 
-/** Only ui/pin.c writes outcome policy state. */
+/** Only core/pin.c writes outcome policy state. */
 struct _PinPrompt
 {
 	/* Cancellation, worker and timeout references may be released on different threads. */
@@ -53,8 +53,8 @@ struct _PinPrompt
 	/* A successful login discarded by the caller must be undone. */
 	gboolean login_succeeded;
 
-	/** Only ui/pin.c may read the locked page. */
-	gpointer buffer_opaque;
+	/* Held until final-try confirmation, then transferred to the worker. */
+	XccSecret* secret;
 
 	guint cancel_idle;
 	guint login_timeout_id;

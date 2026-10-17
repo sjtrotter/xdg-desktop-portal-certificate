@@ -11,7 +11,7 @@
 #include "../tokens/discovery.h"
 #include "mechanism.h"
 
-/** Blocking token operations run on workers; PIN ownership stays with ui/pin.c. */
+/** Blocking token operations run on workers; PIN ownership stays with core/pin.c. */
 
 typedef struct
 {

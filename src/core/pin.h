@@ -3,8 +3,8 @@
  *
  * xdg-desktop-portal-certificate
  */
-#ifndef CERTIFICATE_UI_PIN_H
-#define CERTIFICATE_UI_PIN_H
+#ifndef CERTIFICATE_CORE_PIN_H
+#define CERTIFICATE_CORE_PIN_H
 
 #include <gio/gio.h>
 #include <glib.h>

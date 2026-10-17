@@ -10,10 +10,11 @@
 #define GCR_API_SUBJECT_TO_CHANGE 1
 
 #include <gcr/gcr.h>
+#include <string.h>
 
 #include "../certificate.h"
 #include "../redact.h"
-#include "pin-internal.h"
+#include "../core/pin-internal.h"
 #include "pin-backends.h"
 
 /* The prompter name is fixed because changing it redirects PIN input. */
@@ -231,6 +232,10 @@ static void handle_password(PinPrompt* prompt, GObject* source, GAsyncResult* re
 {
 	g_autoptr(GError) error = NULL;
 	const char* password = NULL;
+	XccSecret* secret;
+	size_t capacity;
+	size_t length;
+	uint8_t* data;
 
 	/* GcrPrompt owns secure password storage until its next call; copy only into the core's locked page. */
 	password = gcr_prompt_password_finish(GCR_PROMPT(source), result, &error);
@@ -258,7 +263,15 @@ static void handle_password(PinPrompt* prompt, GObject* source, GAsyncResult* re
 	}
 
 	/* A rejected held PIN rearms retry without spending an attempt. */
-	if (!certificate_pin_prompt_hold(prompt, password))
+	length = strlen(password);
+	secret = xcc_secret_new();
+	if (secret != NULL)
+	{
+		data = xcc_secret_data(secret, &capacity);
+		if (length < capacity && length <= 511)
+			memcpy(data, password, length);
+	}
+	if (!certificate_pin_prompt_hold(prompt, secret, length))
 		return;
 
 	certificate_pin_prompt_submit(prompt);

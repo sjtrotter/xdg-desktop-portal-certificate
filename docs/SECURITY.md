@@ -31,28 +31,28 @@ experimental export conditions.
 | One candidate still requires consent | `src/certificate-impl.c` has no chooser-bypass path |
 | Reacquisition rebinds the device and discards old login and key handles | `certificate_device_open()` in `src/broker/device.c`; `test-broker-regrant.c` verifies against the new certificate and `test-broker-device.c` checks device state |
 | Frontend departure cancels windows and answers pending calls `owner_gone` | `cancel_transactions()` in `src/certificate-impl.c`; `test-impl-dbus.c` |
-| PIN handling stays outside Certificate interfaces | `src/ui/pin.c` takes a login callback. GTK collects locally; system prompting delivers an encrypted exchange from the shell. See PIN handling below |
-| Prompt selection is explicit and logged | `pin_impl()` in `src/ui/pin.c`, `src/ui/pin-gtk.c`, `src/ui/pin-system.c`; `--pin-prompt=auto|gtk|system`, `pin-prompt-selected detail=...`; `test-pin-system.c` and `tools/ui-smoke.sh --pin-prompt=system` |
+| PIN handling stays outside Certificate interfaces | `src/core/pin.c` takes a login callback. GTK collects locally; system prompting delivers an encrypted exchange from the shell. See PIN handling below |
+| Prompt selection is explicit and logged | `certificate_pin_set_prompt_kind()` in `src/ui/pin-backends.c`, `src/ui/pin-gtk.c`, `src/ui/pin-system.c`; `--pin-prompt=auto|gtk|system`, `pin-prompt-selected detail=...`; `test-pin-system.c` and `tools/ui-smoke.sh --pin-prompt=system` |
 | Only `main()` selects the system prompter by default | `pin_prompt_kind` defaults to `gtk` for library and test use |
 | No remember-PIN control | GTK has no control; system path uses `gcr_prompt_set_choice_label(NULL)` [[S56](SOURCES.md)]. `test-pin-system.c` checks empty choice label and `password-new=false` |
 | Login timeout hides the prompt and abandons late success | `on_login_timeout()`, `CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT`; 60 s default, `--login-timeout 0` disables; `/pin-system/login-timeout`. The caller still waits for the module to return |
-| Owned PIN pages are aligned, locked where possible, non-dumpable and wiped | `PinBuffer` in `src/ui/pin.c`: `mlock()`, `MADV_DONTDUMP`, `explicit_bzero()`. Wipe precedes completion; lock failure warns once without refusing login |
-| Worker owns a separate PIN copy | `pin_buffer_dup()`; `test-cancellation.c` checks the worker's copy after window cancellation |
+| Owned PIN pages are aligned, locked where possible, non-dumpable and wiped | `XccSecret` in `src/core/secret.c`: `mlock()`, `MADV_DONTDUMP`, `explicit_bzero()`. Wipe precedes completion; lock failure warns once without refusing login |
+| Worker owns the submitted PIN page | `src/core/pin.c` transfers `XccSecret` without copying; `test-cancellation.c` checks the worker's PIN after window cancellation |
 | In-flight login cancellation hides UI and defers completion until worker return | `pin_prompt_finish()`; `test-cancellation.c` under ASan |
 | Cancelled successful login is logged out | Abandon callback and `do_abandon()` in `src/broker/operations.c`; `test-cancellation.c` checks both abandoned and normal login |
 | Core dumps and ordinary same-UID attach are disabled | `harden()` in `src/main.c`: `PR_SET_DUMPABLE(0)`, `RLIMIT_CORE 0`; `--debug-allow-core` disables this for development and is absent from installed activation |
 | Bus-name replacement requires opt-in | `--allow-replacement` and `--replace` are separate; installed service passes neither. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) and [TESTING.md](TESTING.md) §3.8 |
 | PINs are never persisted | No keyring entry, configuration key or retention option |
 | Protected authentication path uses a null PIN and no editable field | `src/ui/pin-gtk.c`, `src/ui/pin-system.c`; system tests check zero password rounds |
-| Empty PINs consume no login attempt | `certificate_pin_prompt_hold()`; `/pin-system/empty-answer-never-reaches-the-card` checks one login for two prompt rounds |
+| Empty PINs consume no login attempt | `xcc_secret_set_length()` and `certificate_pin_prompt_hold()`; `/pin-system/empty-answer-never-reaches-the-card` checks one login for two prompt rounds |
 | Retry flags are reread after every refusal, without invented counts | `certificate_pin_prompt_retry_hint()`, `certificate_tokens_refresh_flags()`; system tests check warning text |
 | `FINAL_TRY` requires a second explicit confirmation, including protected-path login | `certificate_pin_prompt_needs_final_confirm()`, GTK's "Use the last attempt", system `handle_prompt_opened()`; system tests check refusal spends no attempt |
 | Shell dismissal ends interaction after PIN submission too | `on_gcr_prompt_close()`; `/pin-system/shell-cancel-after-the-pin-was-submitted` checks cancellation and abandonment |
 | Card administration is absent; every PIN attempt requires user action | No `C_InitToken`, `C_InitPIN` or `C_SetPIN` surface. These and repeated incorrect PINs are the threats named by Ueno on 2023-06-23 in [#662](https://github.com/flatpak/xdg-desktop-portal/issues/662). Host applications with direct card access remain able to perform them |
 | Prompter disappearance completes the interaction | System open, password and confirmation callbacks handle gcr's `G_IO_ERROR_CANCELLED`; three vanish cases in `test-pin-system.c` |
 | One prompt permits at most three attempts | `PIN_MAX_ATTEMPTS`; `/pin-system/attempt-cap`. No per-caller rate limit |
-| Retries require user action | `src/ui/pin.c`; `test-broker-device.c` preserves `PIN_INCORRECT` |
-| Prompts are serialized process-wide; operations on one session share a prompt | Queue in `src/ui/pin.c`, waiter list in `src/broker/operations.c` |
+| Retries require user action | `src/core/pin.c`; `test-broker-device.c` preserves `PIN_INCORRECT` |
+| Prompts are serialized process-wide; operations on one session share a prompt | Queue in `src/core/pin.c`, waiter list in `src/broker/operations.c` |
 | Shared prompt lifetime follows live session waiters | `waiter_cancelled_idle()`, `login_cancellable` in `src/session-impl.h`; cancelling one operation leaves others waiting, cancelling the last closes UI; `test-cancellation.c` |
 | Login happens at first private-key use | `src/broker/operations.c`; UI smoke tests |
 | Mechanisms and parameters are checked against the key | `src/broker/mechanism.c`, `test-mechanism.c`; PSS `emLen >= hLen + sLen + 2` uses 64-bit arithmetic to avoid 32-bit overflow near `G_MAXUINT32`; `test-discovery-limits.c` covers bounds |
@@ -73,7 +73,7 @@ experimental export conditions.
 | Discovery does not log in | `src/tokens/discovery.c`, `test-broker-device.c` |
 | Hardware-only selection is the default | `token_skip_reason()`, `CKF_HW_SLOT` [[S11](SOURCES.md)]; `--allow-software-tokens` or explicit `--module` permits software tokens; `--list-tokens` prints skipped reasons. Loaded modules supply these flags, so this is not isolation |
 | Windows follow desktop color scheme | `follow_colour_scheme()` reads GSettings because process hardening prevents portal identification; see PIN handling |
-| Worker-visible reference counts are atomic | `src/ui/pin.c`, `src/ui/chooser.c`, `src/broker/operations.c`: `g_atomic_int_inc`, `g_atomic_int_dec_and_test` |
+| Worker-visible reference counts are atomic | `src/core/pin.c`, `src/ui/chooser.c`, `src/broker/operations.c`: `g_atomic_int_inc`, `g_atomic_int_dec_and_test` |
 | Scratch-directory deletion requires containment and a project marker | `fixture_check()` in `tools/lib.sh`; existing unmarked directories are refused. Full path, ownership and mode rules are in [TESTING.md](TESTING.md) |
 
 Shutdown has synchronous exceptions. `certificate_impl_shutdown()` waits up to two seconds for
@@ -192,7 +192,7 @@ The worker owns a separate page and needs no live widget or prompt object. A req
 prompter that cannot be reached fails with `no_display` and a journal reason; there is no silent
 GTK fallback after selection.
 
-Common code in `src/ui/pin.c` controls attempt limits, confirmation, flag refresh, queueing,
+Common code in `src/core/pin.c` controls attempt limits, confirmation, flag refresh, queueing,
 deferred cancellation, timeouts and abandonment. Entry implementations collect characters and
 render warnings without deciding whether an attempt is spent.
 
@@ -210,7 +210,8 @@ fails transport and checks the log.
 
 Owned PIN pages use `mlock()` where the resource limit permits, `MADV_DONTDUMP` and
 `explicit_bzero()`. An `mlock()` failure is warned once at message level and login remains
-available; swap exclusion is then unproven. The worker owns and wipes its private copy.
+available; swap exclusion is then unproven. `src/core/secret.c` owns storage;
+`src/core/pin.c` transfers the submitted page to the worker, which wipes it after login returns.
 GTK's `GtkPasswordEntryBuffer` uses secure memory, zeroes on free and uses non-pageable memory
 where the platform allows it. GTK does not guarantee the lifetime of input-method, text-widget
 or Pango copies. The entry is cleared after copying into backend memory. Neither path claims

@@ -4,13 +4,7 @@
  * xdg-desktop-portal-certificate
  */
 
-#define _GNU_SOURCE 1
-
 #include "pin.h"
-
-#include <string.h>
-#include <sys/mman.h>
-#include <unistd.h>
 
 #include "../certificate.h"
 #include "../redact.h"
@@ -39,108 +33,8 @@ void certificate_pin_set_provider(const CertificatePinProvider* provider)
 	pin_provider = *provider;
 }
 
-/* PIN buffer locking, dump exclusion and wipe guarantees are documented in docs/SECURITY.md. */
-typedef struct
-{
-	char* data;
-	gsize capacity;
-	gboolean locked;
-} PinBuffer;
-
-#define PIN_BUFFER_CAPACITY 512
-
 /* Limit attempts per prompt to avoid unbounded token retries. */
 #define PIN_MAX_ATTEMPTS 3
-
-static gboolean pin_mlock_warned = FALSE;
-
-static PinBuffer* pin_buffer_new(void)
-{
-	PinBuffer* buffer = g_new0(PinBuffer, 1);
-	long page = sysconf(_SC_PAGESIZE);
-	gsize size = page > 0 ? (gsize) page : 4096;
-
-	if (posix_memalign((void**) &buffer->data, size, size) != 0)
-	{
-		g_free(buffer);
-		return NULL;
-	}
-
-	buffer->capacity = size;
-	memset(buffer->data, 0, buffer->capacity);
-	buffer->locked = mlock(buffer->data, buffer->capacity) == 0;
-
-	if (!buffer->locked && !pin_mlock_warned)
-	{
-		pin_mlock_warned = TRUE;
-		g_message("pin-buffer-unlocked detail=mlock-failed");
-	}
-
-	/* MADV_DONTDUMP is best effort; main.c also disables process dumps. */
-#ifdef MADV_DONTDUMP
-	(void) madvise(buffer->data, buffer->capacity, MADV_DONTDUMP);
-#endif
-
-	return buffer;
-}
-
-static void pin_buffer_wipe(PinBuffer* buffer)
-{
-	if (buffer == NULL || buffer->data == NULL)
-		return;
-
-	explicit_bzero(buffer->data, buffer->capacity);
-}
-
-static void pin_buffer_free(PinBuffer* buffer)
-{
-	if (buffer == NULL)
-		return;
-
-	pin_buffer_wipe(buffer);
-
-	if (buffer->locked)
-		munlock(buffer->data, buffer->capacity);
-
-	free(buffer->data);
-	g_free(buffer);
-}
-
-static gsize pin_buffer_limit(const PinBuffer* buffer)
-{
-	return MIN(buffer->capacity, (gsize) PIN_BUFFER_CAPACITY);
-}
-
-static gboolean pin_buffer_set(PinBuffer* buffer, const char* text)
-{
-	gsize length = text != NULL ? strlen(text) : 0;
-
-	pin_buffer_wipe(buffer);
-
-	if (length + 1 > pin_buffer_limit(buffer))
-		return FALSE;
-
-	memcpy(buffer->data, text, length);
-	buffer->data[length] = '\0';
-	return TRUE;
-}
-
-/* The worker owns and wipes a private PIN copy that survives prompt cancellation. */
-static PinBuffer* pin_buffer_dup(const PinBuffer* source)
-{
-	PinBuffer* copy = pin_buffer_new();
-
-	if (copy == NULL)
-		return NULL;
-
-	if (!pin_buffer_set(copy, source->data))
-	{
-		pin_buffer_free(copy);
-		return NULL;
-	}
-
-	return copy;
-}
 
 /* Timeout hides the prompt but waits for C_Login to return; discard and undo any late success. */
 #define PIN_LOGIN_TIMEOUT_DEFAULT_SECONDS 60
@@ -169,8 +63,7 @@ static void pin_prompt_free(PinPrompt* prompt)
 		prompt->impl_data_free(prompt->impl_data);
 	prompt->impl_data = NULL;
 
-	pin_buffer_free(prompt->buffer_opaque);
-	prompt->buffer_opaque = NULL;
+	g_clear_pointer(&prompt->secret, xcc_secret_free);
 	g_clear_pointer(&prompt->token, certificate_token_unref);
 	g_free(prompt->session_id);
 	g_free(prompt->parent_window);
@@ -270,7 +163,7 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 	}
 
 	/* Wipe the buffer before invoking the caller's callback. */
-	pin_buffer_wipe(prompt->buffer_opaque);
+	g_clear_pointer(&prompt->secret, xcc_secret_free);
 
 	prompt->provider.close(prompt->provider.user_data, prompt);
 
@@ -302,7 +195,7 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 typedef struct
 {
 	PinPrompt* prompt; /* Owned task reference. */
-	PinBuffer* buffer; /* Private PIN copy owned and wiped by the task. */
+	XccSecret* secret; /* Transferred PIN page owned and wiped by the task. */
 	gboolean protected_path;
 } LoginTask;
 
@@ -310,7 +203,7 @@ static void login_task_free(gpointer data)
 {
 	LoginTask* task = data;
 
-	g_clear_pointer(&task->buffer, pin_buffer_free);
+	g_clear_pointer(&task->secret, xcc_secret_free);
 	g_clear_pointer(&task->prompt, pin_prompt_unref);
 	g_free(task);
 }
@@ -320,10 +213,13 @@ static void login_thread(GTask* task, gpointer source, gpointer task_data,
 {
 	LoginTask* data = task_data;
 	g_autoptr(GError) error = NULL;
-	const char* pin = data->protected_path || data->buffer == NULL ? NULL : data->buffer->data;
+	const char* pin = data->protected_path ? NULL : xcc_secret_view(data->secret);
+	gboolean ok;
 
 	/* C_Login may block indefinitely and must run on a worker. */
-	if (data->prompt->login(pin, data->prompt->login_data, &error))
+	ok = data->prompt->login(pin, data->prompt->login_data, &error);
+	g_clear_pointer(&data->secret, xcc_secret_free);
+	if (ok)
 	{
 		g_task_return_boolean(task, TRUE);
 		return;
@@ -461,7 +357,7 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 		}
 
 		/* Retries require user input after the entry has been cleared. */
-		pin_buffer_wipe(prompt->buffer_opaque);
+		g_clear_pointer(&prompt->secret, xcc_secret_free);
 		prompt->provider.pin_update(prompt->provider.user_data, prompt,
 		                            "That PIN was not accepted. Try again.");
 		return;
@@ -497,26 +393,27 @@ static gboolean on_login_timeout(gpointer user_data)
 	return G_SOURCE_REMOVE;
 }
 
-gboolean certificate_pin_prompt_hold(PinPrompt* prompt, const char* pin)
+gboolean certificate_pin_prompt_hold(PinPrompt* prompt, XccSecret* secret, size_t length)
 {
 	if (prompt->finished || prompt->login_in_flight)
-		return FALSE;
-
-	/* Empty PINs rearm the prompt without submission because a token may count them as failed attempts. */
-	if (pin == NULL || *pin == '\0')
 	{
-		prompt->provider.pin_update(prompt->provider.user_data, prompt,
-		                            "Enter the PIN for this token.");
+		xcc_secret_free(secret);
 		return FALSE;
 	}
 
-	if (!pin_buffer_set(prompt->buffer_opaque, pin))
+	g_clear_pointer(&prompt->secret, xcc_secret_free);
+	if (secret == NULL || !xcc_secret_set_length(secret, length))
 	{
-		prompt->provider.pin_update(prompt->provider.user_data, prompt,
-		                            "PIN exceeds the supported length.");
+		const char* status = secret == NULL ? "The PIN could not be held in locked memory."
+		                    : length == 0 ? "Enter the PIN for this token."
+		                                  : "PIN exceeds the supported length.";
+
+		xcc_secret_free(secret);
+		prompt->provider.pin_update(prompt->provider.user_data, prompt, status);
 		return FALSE;
 	}
 
+	prompt->secret = secret;
 	return TRUE;
 }
 
@@ -543,21 +440,15 @@ void certificate_pin_prompt_submit(PinPrompt* prompt)
 	data->prompt = pin_prompt_ref(prompt);
 	data->protected_path = prompt->protected_path;
 
-	if (!prompt->protected_path)
+	if (!prompt->protected_path && xcc_secret_length(prompt->secret) == 0)
 	{
-		data->buffer = pin_buffer_dup(prompt->buffer_opaque);
-
-		if (data->buffer == NULL)
-		{
-			login_task_free(data);
-			prompt->provider.pin_update(prompt->provider.user_data, prompt,
-			                            "The PIN could not be held in locked memory.");
-			return;
-		}
+		login_task_free(data);
+		prompt->provider.pin_update(prompt->provider.user_data, prompt,
+		                            "Enter the PIN for this token.");
+		return;
 	}
 
-	/* Only the task's private page retains this module's PIN copy after submission. */
-	pin_buffer_wipe(prompt->buffer_opaque);
+	data->secret = g_steal_pointer(&prompt->secret);
 
 	prompt->attempts++;
 	prompt->login_in_flight = TRUE;
@@ -652,15 +543,6 @@ void certificate_pin_login_full(CertificateToken* token, const char* session_id,
 	prompt->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
 	prompt->done = done;
 	prompt->user_data = user_data;
-	prompt->buffer_opaque = pin_buffer_new();
-
-	if (prompt->buffer_opaque == NULL)
-	{
-		/* Deliver the answer before the last reference can free login_data. */
-		done(CERTIFICATE_PIN_DEVICE_ERROR, user_data);
-		pin_prompt_unref(prompt);
-		return;
-	}
 
 	if (prompt->cancellable != NULL)
 		prompt->cancel_id =

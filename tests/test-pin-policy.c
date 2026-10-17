@@ -3,6 +3,7 @@
  */
 
 #include "fake-pin-provider.h"
+#include <string.h>
 
 #define GOOD_PIN "1234"
 #define BAD_PIN "0000"
@@ -35,13 +36,18 @@ static gboolean login(const char* pin, gpointer user_data, GError** error)
 	if (fixture->token->protected_authentication_path)
 		g_assert_null(pin);
 	else
+	{
+		g_assert_true(pin == fixture->ui.submitted_pin);
 		g_assert_cmpstr(pin, ==, fixture->attempts < fixture->refusals ? BAD_PIN : GOOD_PIN);
+	}
 
 	fixture->attempts++;
 	g_mutex_lock(&fixture->lock);
 	while (fixture->block && !fixture->release)
 		g_cond_wait(&fixture->cond, &fixture->lock);
 	g_mutex_unlock(&fixture->lock);
+	if (!fixture->token->protected_authentication_path)
+		g_assert_cmpstr(pin, ==, fixture->attempts <= fixture->refusals ? BAD_PIN : GOOD_PIN);
 
 	if (fixture->attempts > fixture->refusals)
 		return TRUE;
@@ -297,6 +303,47 @@ static void test_empty_answer(Fixture* fixture, gconstpointer user_data)
 	finish(fixture, CERTIFICATE_PIN_OK, 1);
 }
 
+static void test_oversized_answer(Fixture* fixture, gconstpointer user_data)
+{
+	char pin[513];
+
+	memset(pin, '1', sizeof(pin) - 1);
+	pin[sizeof(pin) - 1] = '\0';
+	start(fixture);
+	fake_pin_provider_submit(&fixture->ui, pin);
+	g_assert_cmpuint(fixture->ui.retries, ==, 1);
+	g_assert_cmpuint(fixture->attempts, ==, 0);
+	fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
+	finish(fixture, CERTIFICATE_PIN_OK, 1);
+}
+
+static void test_submit_without_input(Fixture* fixture, gconstpointer user_data)
+{
+	start(fixture);
+	certificate_pin_prompt_submit(fixture->ui.prompt);
+	g_assert_cmpuint(fixture->ui.retries, ==, 1);
+	g_assert_cmpuint(fixture->attempts, ==, 0);
+	fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
+	finish(fixture, CERTIFICATE_PIN_OK, 1);
+}
+
+static void test_stale_secret(Fixture* fixture, gconstpointer user_data)
+{
+	PinPrompt* prompt;
+	XccSecret* secret = xcc_secret_new();
+	uint8_t* data;
+
+	g_assert_nonnull(secret);
+	data = xcc_secret_data(secret, NULL);
+	memcpy(data, GOOD_PIN, strlen(GOOD_PIN));
+	start(fixture);
+	prompt = certificate_pin_prompt_ref(fixture->ui.prompt);
+	fake_pin_provider_cancel(&fixture->ui);
+	g_assert_false(certificate_pin_prompt_hold(prompt, secret, strlen(GOOD_PIN)));
+	certificate_pin_prompt_unref(prompt);
+	finish(fixture, CERTIFICATE_PIN_CANCELLED, 0);
+}
+
 static void test_no_display(Fixture* fixture, gconstpointer user_data)
 {
 	fixture->ui.provider.needs_display = TRUE;
@@ -332,6 +379,9 @@ int main(int argc, char** argv)
 	ADD("timeout-abandons-success", TRUE, test_in_flight);
 	ADD("cancel-abandons-success", FALSE, test_in_flight);
 	ADD("empty-answer", 0, test_empty_answer);
+	ADD("oversized-answer", 0, test_oversized_answer);
+	ADD("submit-without-input", 0, test_submit_without_input);
+	ADD("stale-secret", 0, test_stale_secret);
 	ADD("no-display", 0, test_no_display);
 
 #undef ADD

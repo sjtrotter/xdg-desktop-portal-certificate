@@ -10,7 +10,7 @@
 
 #include "fixture-util.h"
 #include "ui/chooser.h"
-#include "ui/pin.h"
+#include "core/pin.h"
 #include "ui/pin-backends.h"
 
 static void assert_is_safe_display_text(const char* text)

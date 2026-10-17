@@ -6,10 +6,11 @@
 
 #include <adwaita.h>
 #include <gtk/gtk.h>
+#include <string.h>
 
 #include "../certificate.h"
 #include "external-window.h"
-#include "pin-internal.h"
+#include "../core/pin-internal.h"
 #include "pin-backends.h"
 
 typedef struct
@@ -93,6 +94,10 @@ static void on_unlock(GtkWidget* widget, gpointer user_data)
 	PinPrompt* prompt = user_data;
 	GtkPinPrompt* ui = gtk_pin(prompt);
 	const char* text = NULL;
+	XccSecret* secret;
+	size_t capacity;
+	size_t length;
+	uint8_t* data;
 
 	if (prompt->busy || prompt->finished || prompt->login_in_flight)
 		return;
@@ -100,8 +105,15 @@ static void on_unlock(GtkWidget* widget, gpointer user_data)
 	/* GTK may make intermediate PIN copies; locked core storage guarantees are documented in docs/SECURITY.md. */
 	text = gtk_editable_get_text(GTK_EDITABLE(ui->entry));
 	set_status(prompt, NULL, FALSE);
-
-	if (!certificate_pin_prompt_hold(prompt, text))
+	length = strlen(text);
+	secret = xcc_secret_new();
+	if (secret != NULL)
+	{
+		data = xcc_secret_data(secret, &capacity);
+		if (length < capacity && length <= 511)
+			memcpy(data, text, length);
+	}
+	if (!certificate_pin_prompt_hold(prompt, secret, length))
 		return;
 
 	if (ui->warning_pending)

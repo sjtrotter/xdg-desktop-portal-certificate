@@ -21,6 +21,7 @@ typedef struct
 	gboolean count_low;
 	gboolean final_try;
 	const char* status;
+	const char* submitted_pin;
 } FakePinProvider;
 
 void fake_pin_provider_init(FakePinProvider* fake);
