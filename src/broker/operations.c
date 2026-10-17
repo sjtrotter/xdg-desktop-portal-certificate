@@ -9,7 +9,7 @@
 #include <string.h>
 
 #include "../redact.h"
-#include "../ui/pin.h"
+#include "../core/pin.h"
 
 /* The task, prompt and waiter list each hold an operation reference. */
 typedef struct

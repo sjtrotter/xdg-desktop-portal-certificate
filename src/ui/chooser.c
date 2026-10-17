@@ -13,7 +13,7 @@
 
 #include "../redact.h"
 #include "external-window.h"
-#include "pin.h"
+#include "../core/pin.h"
 
 #define CERTIFICATE_REASON_MAX_CHARS 160
 

@@ -19,7 +19,7 @@
 #include "session-impl.h"
 #include "tokens/filter.h"
 #include "ui/chooser.h"
-#include "ui/pin.h"
+#include "core/pin.h"
 #include "xdp-impl-dbus.h"
 
 static void on_session_invalidated(CertificateImplSession* session, const char* reason,

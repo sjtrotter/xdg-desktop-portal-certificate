@@ -19,6 +19,8 @@ certificate_core_sources = files(
   'certificate.c',
   'certificate-impl.c',
   'redact.c',
+  'core/pin.c',
+  'core/secret.c',
   'request-impl.c',
   'session-impl.c',
   'broker/device.c',
@@ -77,28 +79,18 @@ certificate_core_dep = declare_dependency(
   dependencies: certificate_deps,
 )
 
-# PIN policy and storage compile with only toolkit-neutral dependencies.
-certificate_pin_policy = static_library(
-  'certificate-pin-policy',
-  'ui/pin.c',
-  c_args: certificate_log_args,
-  dependencies: certificate_deps,
-  include_directories: config_inc,
-  install: false,
-)
-
 certificate_service = static_library(
   'certificate-service',
   certificate_ui_sources,
   c_args: certificate_log_args,
-  link_with: [certificate_core, certificate_pin_policy],
+  link_with: certificate_core,
   dependencies: certificate_deps + certificate_ui_deps,
   include_directories: config_inc,
   install: false,
 )
 
 certificate_service_dep = declare_dependency(
-  link_with: [certificate_service, certificate_pin_policy, certificate_core],
+  link_with: [certificate_service, certificate_core],
   # Dependents need the generated header before compiling.
   sources: impl_dbus_sources[1],
   include_directories: [config_inc, include_directories('.')],

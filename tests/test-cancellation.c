@@ -10,7 +10,7 @@
 #include "broker/device.h"
 #include "broker/operations.h"
 #include "session-impl.h"
-#include "ui/pin.h"
+#include "core/pin.h"
 #include "ui/pin-backends.h"
 
 #define FIXTURE_PIN "123456"

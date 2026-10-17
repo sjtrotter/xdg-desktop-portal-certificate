@@ -3,7 +3,8 @@
  */
 
 #include "fake-pin-provider.h"
-#include "ui/pin-internal.h"
+#include "core/pin-internal.h"
+#include <string.h>
 
 static void fake_show(gpointer user_data, PinPrompt* prompt)
 {
@@ -81,8 +82,21 @@ void fake_pin_provider_submit(FakePinProvider* fake, const char* pin)
 	g_assert_nonnull(fake->prompt);
 	if (fake->protected_path)
 		g_assert_null(pin);
-	else if (!certificate_pin_prompt_hold(fake->prompt, pin))
-		return;
+	else
+	{
+		XccSecret* secret = xcc_secret_new();
+		size_t capacity;
+		size_t length = strlen(pin);
+		uint8_t* data;
+
+		g_assert_nonnull(secret);
+		data = xcc_secret_data(secret, &capacity);
+		if (length < capacity && length <= 511)
+			memcpy(data, pin, length);
+		fake->submitted_pin = (const char*) data;
+		if (!certificate_pin_prompt_hold(fake->prompt, secret, length))
+			return;
+	}
 
 	certificate_pin_prompt_submit(fake->prompt);
 }

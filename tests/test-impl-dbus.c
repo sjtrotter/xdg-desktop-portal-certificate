@@ -14,7 +14,7 @@
 #include "request-impl.h"
 #include "session-impl.h"
 #include "tokens/filter.h"
-#include "ui/pin.h"
+#include "core/pin.h"
 #include "ui/pin-backends.h"
 
 #define FRONTEND_NAME "org.freedesktop.portal.Desktop"
