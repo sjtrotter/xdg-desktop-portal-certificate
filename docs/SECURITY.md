@@ -348,8 +348,11 @@ Opt-in module loading limits exposure. The module returns:
   and `CKA_EXTRACTABLE=FALSE`. RSA private `CKA_VALUE` is a module-defined extension [[S15](SOURCES.md)].
 
 Only the leaf, public key and private key are objects; `chain_der` intermediates are excluded to
-keep certificate URIs unambiguous. Handles carry a grant-generation counter. Mechanism checks
-include PSS `hashAlg`/`mgf`/`sLen` and OAEP `hashAlg`/`mgf`/label, with backend modulus checks.
+keep certificate URIs unambiguous. Handles carry a grant-generation counter; a stale handle
+never names a replacement object.
+Grant invalidation retires all existing PKCS#11 sessions with `CKR_SESSION_HANDLE_INVALID`,
+including pending searches, signatures and decryptions. New sessions can acquire only through
+the usual search-intent gate. Mechanism checks include PSS `hashAlg`/`mgf`/`sLen` and OAEP `hashAlg`/`mgf`/label, with backend modulus checks.
 V3 interface tables offer the same functions as the v2 list. The shared object exports only
 `C_GetFunctionList`, `C_GetInterfaceList` and `C_GetInterface` to avoid inter-module symbol
 resolution.
@@ -393,12 +396,26 @@ Detected removal cancels operations, closes every grant on the token and emits
 and closes the Session. Discovery polls every two seconds and requires two consecutive changed
 observations. Invalidation can lag by seconds; removal and reinsertion between polls can be missed.
 
-An open module session can report `CKR_SESSION_HANDLE_INVALID` or `CKR_DEVICE_REMOVED`, mapped
-to `token_removed` at the next operation. A grant with no first operation has no token session
-yet, so an undetected removal/reinsertion can leave it live. Opening the device rechecks
-manufacturer, model, serial and label; a different card is refused. After a detected removal,
-reselection is required even for identical label and slot. A future facade must poison its endpoint
-and report a device/token error without rebinding.
+The client module advertises `CKF_REMOVABLE_DEVICE`. On the next session lookup, slot-info
+query, nonblocking slot-event poll or session open after a grant ends, it retires all existing
+PKCS#11 sessions. `C_GetSessionInfo` and supported operations on those handles return
+`CKR_SESSION_HANDLE_INVALID` permanently. This applies to every `GrantInvalidated` reason,
+portal `Session.Closed` and local `expires_at` expiry; all can invalidate cached object handles.
+The next credential search in a new session requires fresh consent. Issued IDs and the
+cancelled-chooser throttle survive this transition.
+
+While the portal remains available, `CKF_TOKEN_PRESENT` stays set and new sessions can open
+immediately. NSS detects removal/reinsertion through the defunct session on its next actual
+presence poll, clears token caches and increments its slot series. Its one-second presence
+cache can delay that poll; no timed absence window or sleeps are used by the module.
+`C_WaitForSlotEvent(CKF_DONT_BLOCK)` reports one event per retired grant; blocking waits remain
+unsupported. Token label and serial do not change across grants.
+
+Real-token session errors can also reveal removal at the next backend operation. A grant with
+no first operation has no token session yet, so an undetected removal/reinsertion can leave it
+live. Opening the device rechecks manufacturer, model, serial and label; a different card is
+refused. After detected removal, reselection is required even for identical label and slot.
+A future facade must poison its endpoint and report a device/token error without rebinding.
 
 ## Grant lifetime and delegation
 

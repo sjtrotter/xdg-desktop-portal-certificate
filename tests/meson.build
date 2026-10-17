@@ -153,3 +153,14 @@ if gcr_dep.found()
     install: false,
   )
 endif
+
+# NSS is optional for normal builds; tools/nss-smoke.sh phase 4 requires this client.
+nss_dep = dependency('nss', required: false)
+if nss_dep.found()
+  executable(
+    'nss-refresh-client',
+    ['nss-refresh-client.c'],
+    dependencies: [nss_dep],
+    install: false,
+  )
+endif

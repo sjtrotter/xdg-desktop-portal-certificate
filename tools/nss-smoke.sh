@@ -21,7 +21,8 @@ PIN="${PIN:-123456}"
 TOKEN_LABEL="${TOKEN_LABEL:-Portal Certificate}"
 CERT_LABEL="${CERT_LABEL:-Portal Certificate}"
 SCREEN="${SCREEN:-:77}"
-PHASES="${PHASES:-0 1 2 3}"
+PHASES="${PHASES:-0 1 2 3 4}"
+NSS_REFRESH_CLIENT="${NSS_REFRESH_CLIENT:-$BUILD/tests/nss-refresh-client}"
 
 die() {
 	echo "${0##*/}: $*" >&2
@@ -399,6 +400,30 @@ inner() {
 		kill "$SERVER" 2>/dev/null
 	fi
 
+	if phase_wanted 4 && [ "$rc" = 0 ]; then
+		local before after
+		echo
+		echo "=== 4  one NSS process signs again after grant expiry ==="
+		before="$(grants_created)"
+		if [ ! -x "$NSS_REFRESH_CLIENT" ]; then
+			echo "nss-smoke: build tests/nss-refresh-client with the NSS development package installed"
+			rc=40
+		elif PKCS11_PORTAL_CERTIFICATE_REQUESTED_LIFETIME=20 timeout 180 \
+			"$NSS_REFRESH_CLIENT" "sql:$DB" "$TOKEN_LABEL:$CERT_LABEL" \
+			</dev/null >"$LOGDIR/nss-refresh-client.log" 2>&1; then
+			after="$(grants_created)"
+			cat "$LOGDIR/nss-refresh-client.log"
+			if [ "$after" != "$((before + 2))" ]; then
+				echo "nss-smoke: expected exactly two grants across expiry"
+				rc=1
+			fi
+		else
+			echo "nss-smoke: the same-process NSS refresh failed"
+			cat "$LOGDIR/nss-refresh-client.log"
+			rc=1
+		fi
+	fi
+
 	touch "$LOGDIR/driver-stop"
 	kill "$DRIVER" "$FE" "$BE" "$PERM" 2>/dev/null
 
@@ -406,7 +431,7 @@ inner() {
 }
 
 export PIN LOGDIR REPO XDP_BUILD BACKEND MODULE_SO XDOTOOL SOFTHSM_MODULE SOFTHSM_DIR \
-	PHASES TOKEN_LABEL CERT_LABEL CERTUTIL MODUTIL TSTCLNT
+	PHASES TOKEN_LABEL CERT_LABEL CERTUTIL MODUTIL TSTCLNT NSS_REFRESH_CLIENT
 dbus-run-session -- bash -c \
 	"$(declare -f xdp_experimental_portals); $(declare -f xdp_wait_for_name); $(declare -f phase_wanted); $(declare -f inner); inner"
 rc=$?

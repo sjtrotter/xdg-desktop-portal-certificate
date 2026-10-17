@@ -68,6 +68,7 @@ static guint module_generation;
 static GHashTable* module_sessions;
 static CK_SESSION_HANDLE module_next_session;
 static gboolean module_logged_in;
+static guint module_slot_events;
 static gboolean module_enumerate;
 static GHashTable* module_issued_ids;
 static gint64 module_refusal_time;
@@ -138,11 +139,15 @@ static void session_free(gpointer data)
 	g_free(session);
 }
 
+static gboolean grant_still_good(void);
+
 static PortalSession* session_lookup(CK_SESSION_HANDLE handle)
 {
 	if (module_sessions == NULL)
 		return NULL;
 
+	/* Every supported session operation observes grant invalidation before using state. */
+	grant_still_good();
 	return g_hash_table_lookup(module_sessions, GUINT_TO_POINTER(handle));
 }
 
@@ -194,22 +199,18 @@ static gboolean grant_still_good(void)
 	if (module_grant == NULL)
 		return FALSE;
 
-	if (portal_client_grant_gone(module_client, module_grant))
-	{
-		g_debug("Grant invalidated");
-		drop_objects();
-		return FALSE;
-	}
+	if (!portal_client_grant_gone(module_client, module_grant) &&
+	    (module_grant->expires_at == 0 ||
+	     g_get_real_time() / G_USEC_PER_SEC < module_grant->expires_at))
+		return TRUE;
 
-	if (module_grant->expires_at != 0 &&
-	    g_get_real_time() / G_USEC_PER_SEC >= module_grant->expires_at)
-	{
-		g_debug("Grant expired");
-		drop_objects();
-		return FALSE;
-	}
-
-	return TRUE;
+	/* NSS detects reinsertion through the defunct session, even between presence polls. */
+	g_debug("Grant ended; invalidating sessions");
+	release_grant();
+	g_hash_table_remove_all(module_sessions);
+	module_logged_in = FALSE;
+	module_slot_events++;
+	return FALSE;
 }
 
 /** Called with module_lock held; releases it during acquisition, so all prior state requires revalidation. */
@@ -231,7 +232,8 @@ static gboolean ensure_grant(CK_ATTRIBUTE_PTR templ, CK_ULONG count, CK_SESSION_
 	if (grant_still_good())
 		return TRUE;
 
-	if (!portal_client_available(module_client))
+	if (session_revalidate(handle, lifecycle, serial) == NULL ||
+	    !portal_client_available(module_client))
 		return FALSE;
 
 	if (!portal_template_wants_credential(templ, count, module_issued_ids, module_enumerate))
@@ -363,6 +365,7 @@ CK_RV C_Initialize(void* init_args)
 	module_finalizing = FALSE;
 	module_logged_in = FALSE;
 	module_refusal_time = 0;
+	module_slot_events = 0;
 
 	if (portal_client_self_excluded())
 	{
@@ -569,7 +572,12 @@ CK_RV C_GetSlotInfo(CK_SLOT_ID slot_id, CK_SLOT_INFO* info)
 	          PKCS11_PORTAL_SLOT_DESCRIPTION);
 	pad_field(info->manufacturerID, sizeof(info->manufacturerID),
 	          XDG_PORTAL_CERTIFICATE_TOKEN_MANUFACTURER);
-	info->flags = CKF_TOKEN_PRESENT;
+	g_mutex_lock(&module_lock);
+	grant_still_good();
+	info->flags = CKF_REMOVABLE_DEVICE;
+	if (portal_client_available(module_client))
+		info->flags |= CKF_TOKEN_PRESENT;
+	g_mutex_unlock(&module_lock);
 
 	return CKR_OK;
 }
@@ -737,6 +745,8 @@ CK_RV C_OpenSession(CK_SLOT_ID slot_id, CK_FLAGS flags, void* application, CK_NO
 		return CKR_TOKEN_NOT_PRESENT;
 	}
 
+	/* Retire old sessions before a new session can acquire a replacement grant. */
+	grant_still_good();
 	session = g_new0(PortalSession, 1);
 	session->handle = module_next_session++;
 	session->serial = ++module_session_serial;
@@ -1026,6 +1036,7 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE session_handle, CK_OBJECT_HANDLE obj
 	object = portal_objects_lookup(module_objects, object_handle);
 	if (object == NULL)
 	{
+		g_debug("C_GetAttributeValue: invalid object handle");
 		g_mutex_unlock(&module_lock);
 		return CKR_OBJECT_HANDLE_INVALID;
 	}
@@ -1215,6 +1226,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session_handle, CK_MECHANISM* mechanism,
 	session = session_lookup(session_handle);
 	if (session == NULL)
 	{
+		g_debug("C_SignInit: invalid session handle");
 		g_mutex_unlock(&module_lock);
 		return CKR_SESSION_HANDLE_INVALID;
 	}
@@ -1225,8 +1237,9 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session_handle, CK_MECHANISM* mechanism,
 		return CKR_OPERATION_ACTIVE;
 	}
 
-	if (!grant_still_good())
+	if (module_grant == NULL)
 	{
+		g_debug("%s: no granted key", G_STRFUNC);
 		g_mutex_unlock(&module_lock);
 		return CKR_KEY_HANDLE_INVALID;
 	}
@@ -1234,6 +1247,7 @@ CK_RV C_SignInit(CK_SESSION_HANDLE session_handle, CK_MECHANISM* mechanism,
 	object = portal_objects_lookup(module_objects, key);
 	if (object == NULL || object->object_class != CKO_PRIVATE_KEY)
 	{
+		g_debug("%s: invalid key handle", G_STRFUNC);
 		g_mutex_unlock(&module_lock);
 		return CKR_KEY_HANDLE_INVALID;
 	}
@@ -1438,6 +1452,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session_handle, CK_MECHANISM* mechanism,
 	session = session_lookup(session_handle);
 	if (session == NULL)
 	{
+		g_debug("C_DecryptInit: invalid session handle");
 		g_mutex_unlock(&module_lock);
 		return CKR_SESSION_HANDLE_INVALID;
 	}
@@ -1448,8 +1463,9 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session_handle, CK_MECHANISM* mechanism,
 		return CKR_OPERATION_ACTIVE;
 	}
 
-	if (!grant_still_good())
+	if (module_grant == NULL)
 	{
+		g_debug("%s: no granted key", G_STRFUNC);
 		g_mutex_unlock(&module_lock);
 		return CKR_KEY_HANDLE_INVALID;
 	}
@@ -1457,6 +1473,7 @@ CK_RV C_DecryptInit(CK_SESSION_HANDLE session_handle, CK_MECHANISM* mechanism,
 	object = portal_objects_lookup(module_objects, key);
 	if (object == NULL || object->object_class != CKO_PRIVATE_KEY)
 	{
+		g_debug("%s: invalid key handle", G_STRFUNC);
 		g_mutex_unlock(&module_lock);
 		return CKR_KEY_HANDLE_INVALID;
 	}
@@ -1587,12 +1604,26 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session_handle, unsigned char* ciphertext,
 
 CK_RV C_WaitForSlotEvent(CK_FLAGS flags, CK_SLOT_ID* slot, void* reserved)
 {
+	CK_RV rv = CKR_NO_EVENT;
+
 	MODULE_CHECK();
 
-	if ((flags & CKF_DONT_BLOCK) != 0)
-		return CKR_NO_EVENT;
+	if (slot == NULL || reserved != NULL || (flags & ~CKF_DONT_BLOCK) != 0)
+		return CKR_ARGUMENTS_BAD;
+	if ((flags & CKF_DONT_BLOCK) == 0)
+		return CKR_FUNCTION_NOT_SUPPORTED;
 
-	return CKR_FUNCTION_NOT_SUPPORTED;
+	g_mutex_lock(&module_lock);
+	grant_still_good();
+	if (module_slot_events > 0)
+	{
+		module_slot_events--;
+		*slot = PORTAL_SLOT_ID;
+		rv = CKR_OK;
+	}
+	g_mutex_unlock(&module_lock);
+
+	return rv;
 }
 
 #define NOT_SUPPORTED(name, args)                                                             \

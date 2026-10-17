@@ -403,9 +403,13 @@ $ tools/softhsm-fixture.sh
 $ tools/nss-smoke.sh
 $ tools/nss-smoke.sh --phase 1        # just the private-key path
 $ tools/nss-smoke.sh --phase 3        # just the handshake
+$ tools/nss-smoke.sh --phase 4        # same-process expiry and reacquisition
 ```
 
-Prerequisites are `nss-tools`: `certutil`, `modutil` and `tstclnt`. Fedora places the last in
+Prerequisites are `nss-tools`: `certutil`, `modutil` and `tstclnt`. Phase 4 also needs NSS
+development headers (`nss-devel` on Fedora); Meson builds `tests/nss-refresh-client` when
+`pkg-config nss` is available. Reconfigure with `meson setup --reconfigure build` after adding
+the headers. `NSS_REFRESH_CLIENT` can select a different build's helper. Fedora places `tstclnt` in
 `/usr/lib64/nss/unsupported-tools`. Unpacked packages can be used with `NSS_BIN` pointing to
 their `usr/bin`, or `TSTCLNT` naming that binary; download with `dnf download nss-tools`
 and extract with `rpm2cpio`/`cpio` as above.
@@ -419,6 +423,23 @@ and extract with `rpm2cpio`/`cpio` as above.
    certificate to the token's private key.
 3. `tstclnt -n "Portal Certificate:Portal Certificate"` uses a `token:nickname` label search and
    needs no opt-in. It completes mutual TLS against the same Python server as §2.5.
+4. `nss-refresh-client` initializes NSS once, resolves the certificate and key by nickname,
+   signs and verifies a signature, then polls `PK11_IsPresent` until NSS advances the slot
+   series after expiry. It retains the first certificate and key, resolves a replacement key
+   with a different handle and signs and verifies again in the same process. The private stack
+   and chooser driver stay running. Exactly two `grant-created` events are required.
+   `tstclnt -Q` remains the TLS check in phase 3; the helper provides presence/cache assertions.
+
+Phase 4 uses real grant expiry with `PKCS11_PORTAL_CERTIFICATE_REQUESTED_LIFETIME=20`, not a
+simulated card event. The module forwards this optional environment setting as
+`requested_lifetime`; valid values are 1–3600 seconds and invalid values leave the frontend's
+default unchanged. The frontend may shorten the requested lifetime. The helper has a 45-second
+refresh deadline after its first signature; the phase has a 180-second overall timeout.
+Expect `first signature verified`, `NSS refreshed the token` and
+`PASS: two verified signatures across expiry in one NSS process` in `nss-refresh-client.log`.
+Failure to advance the slot series, replacement-handle reuse, either failed signature or an
+unexpected grant count fails the phase. There is no module reload, NSS reinitialization or
+explicit NSS cache flush between signatures.
 
 Expected output:
 
@@ -452,7 +473,7 @@ sanitized module:
 ```console
 $ meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
 $ ninja -C build-asan
-$ LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0     MODULE_SO=$PWD/build-asan/src/module/libpkcs11-portal-certificate.so     tools/nss-smoke.sh --phase "1 2 3"
+$ LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0     MODULE_SO=$PWD/build-asan/src/module/libpkcs11-portal-certificate.so     NSS_REFRESH_CLIENT=$PWD/build-asan/tests/nss-refresh-client     tools/nss-smoke.sh --phase "1 2 3 4"
 ```
 
 For consumers loaded through p11-kit, add this line to
@@ -469,6 +490,10 @@ uses the environment switch because it does not read these files. The `module-po
 cover both direct initialization and forwarding from a p11-kit module file on a private bus.
 They also cover reselection after logout, close-all and portal session closure, issued-ID
 matching and cancellation across different templates; no card or display is required.
+Invalidation tests cover `token_removed`, `expired`, `policy`, `backend_gone`, `error` and
+local expiry: old sessions fail, the slot stays present and removable, one nonblocking event
+is reported, issued-ID acquisition still works and old-generation handles remain refused.
+Pending search, signing and decryption state cannot survive the transition.
 
 ### 2.6 Firefox
 
@@ -503,8 +528,24 @@ in `about:config`. Firefox then uses the first candidate with a private key. The
 only the certificate selected in the portal chooser, so Firefox's picker is skipped.
 The Flatpak helper's `--auto-select` option sets this preference in its test profile.
 
-Repeated enumeration and changing object sets after expiry need live testing. The recorded NSS
-`[CKA_ISSUER, CKA_SERIAL_NUMBER]` lookup returned no object even with a grant; certutil listing
+To check removal/reinsertion in Firefox (including Flathub Firefox with §2.7), keep the same
+browser and portal stack running:
+
+1. Load this build's module and authenticate to a client-certificate site. Confirm
+   `grant acquired`, object searches and a completed signature in the logs.
+2. Remove the card and wait for the backend's detected removal and the module's
+   `grant invalidated: token_removed` message before reinserting it. Removal between backend
+   discovery polls can be missed.
+3. Reinsert the same card and make the site request a fresh TLS client-certificate handshake
+   (close the site's connections or use a different client-auth endpoint to avoid TLS resumption).
+4. Expect a new portal chooser, a new grant, certificate/key searches and a successful signature
+   within the next NSS presence poll, without restarting Firefox or waiting five minutes.
+   Repeat the cycle and retain frontend, backend and module logs. A client-certificate error,
+   new grant followed by only one search without signing, or stale-handle refusal after fresh
+   selection is a failure.
+
+Repeated enumeration and hardware-specific object changes after expiry still need live testing.
+The recorded NSS `[CKA_ISSUER, CKA_SERIAL_NUMBER]` lookup returned no object even with a grant; certutil listing
 survived and the Firefox path did not depend on it. That compatibility gap remains open.
 
 ### 2.7 Firefox Flatpak

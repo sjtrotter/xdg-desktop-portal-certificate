@@ -210,7 +210,15 @@ module file; see [TESTING.md](TESTING.md).
 
 The grant survives ordinary `C_CloseSession` calls. `C_Logout` on a valid session and
 `C_CloseAllSessions` release it by closing its portal session. Portal `Session.Closed` also
-invalidates the grant. A subsequent credential search can open the chooser again.
+invalidates the grant. Every grant invalidation reason and local expiry retires all existing
+PKCS#11 sessions; their info queries and supported operations return `CKR_SESSION_HANDLE_INVALID`.
+The slot advertises `CKF_REMOVABLE_DEVICE`. NSS's next actual presence check detects its defunct
+session, clears token caches and advances `slot->series`, including removal/reinsertion between
+polls. No absent-token interval is needed: the portal token stays present while available,
+and new sessions can open immediately. A credential search in a new session opens the chooser
+again with fresh generation-tagged object handles. Issued IDs and the cancellation throttle
+are preserved. `C_WaitForSlotEvent(CKF_DONT_BLOCK)` returns one event per retired grant;
+blocking waits remain unsupported.
 
 The module sets `CKF_PROTECTED_AUTHENTICATION_PATH` and clears `CKF_LOGIN_REQUIRED`.
 The first successful `C_Login(CKU_USER, ...)` returns `CKR_OK`; a repeated login returns
