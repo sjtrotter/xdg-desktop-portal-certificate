@@ -53,18 +53,18 @@ struct _PinPrompt
 	/* A successful login discarded by the caller must be undone. */
 	gboolean login_succeeded;
 
-	/* Held until final-try confirmation, then transferred to the worker. */
+	/* Held until submission, then transferred to the worker. */
 	XccSecret* secret;
 
 	guint cancel_idle;
 	guint login_timeout_id;
 	guint attempts;
-	gboolean final_try_confirmed;
+	gboolean protected_path_confirmed;
 	gboolean warning_pending;
 };
 
 /** Reports standard PIN state flags without inventing a remaining-attempt count. */
-const char* certificate_pin_prompt_retry_hint(const PinPrompt* prompt);
+const char* certificate_pin_prompt_retry_hint(const XccPinView* view);
 
 const char* certificate_pin_prompt_final_try_warning(void);
 

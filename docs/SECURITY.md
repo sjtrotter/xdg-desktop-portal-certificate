@@ -46,7 +46,7 @@ experimental export conditions.
 | Protected authentication path uses a null PIN and no editable field | `src/ui/pin-gtk.c`, `src/ui/pin-system.c`; system tests check zero password rounds |
 | Empty PINs consume no login attempt | `xcc_secret_set_length()` and `certificate_pin_prompt_hold()`; `/pin-system/empty-answer-never-reaches-the-card` checks one login for two prompt rounds |
 | Retry flags are reread after every refusal, without invented counts | `certificate_pin_prompt_retry_hint()`, `certificate_tokens_refresh_flags()`; system tests check warning text |
-| `FINAL_TRY` requires a second explicit confirmation, including protected-path login | `certificate_pin_prompt_needs_final_confirm()`, GTK's "Use the last attempt", system `handle_prompt_opened()`; system tests check refusal spends no attempt |
+| `FINAL_TRY` warns before typed input; protected-path login requires one Continue | `src/core/pin.c`, GTK warning label, system prompt warning; policy and system tests cover both paths |
 | Shell dismissal ends interaction after PIN submission too | `on_gcr_prompt_close()`; `/pin-system/shell-cancel-after-the-pin-was-submitted` checks cancellation and abandonment |
 | Card administration is absent; every PIN attempt requires user action | No `C_InitToken`, `C_InitPIN` or `C_SetPIN` surface. These and repeated incorrect PINs are the threats named by Ueno on 2023-06-23 in [#662](https://github.com/flatpak/xdg-desktop-portal/issues/662). Host applications with direct card access remain able to perform them |
 | Prompter disappearance completes the interaction | System open, password and confirmation callbacks handle gcr's `G_IO_ERROR_CANCELLED`; three vanish cases in `test-pin-system.c` |
@@ -192,8 +192,8 @@ The worker owns a separate page and needs no live widget or prompt object. A req
 prompter that cannot be reached fails with `no_display` and a journal reason; there is no silent
 GTK fallback after selection.
 
-Common code in `src/core/pin.c` controls attempt limits, confirmation, flag refresh, queueing,
-deferred cancellation, timeouts and abandonment. Entry implementations collect characters and
+Common code in `src/core/pin.c` controls attempt limits, protected-path confirmation, flag
+refresh, queueing, deferred cancellation, timeouts and abandonment. Entry implementations collect characters and
 render warnings without deciding whether an attempt is spent.
 
 The gcr 4.4 double-completion risk is this project's source analysis and test result;
@@ -246,14 +246,18 @@ operation.
 
 A protected authentication path (`CKF_PROTECTED_AUTHENTICATION_PATH`) uses a null PIN and an
 instructional dialog without an editable field [[S12](SOURCES.md)]. The token or reader collects
-the secret. `FINAL_TRY` confirmation still applies before submitting that login.
+the secret. Entry starts automatically unless `FINAL_TRY` is set; then one explicit Continue
+starts the reader and Cancel spends no attempt. Repeated Continue replies cannot restart login.
 
 Retry warnings use `CKF_USER_PIN_COUNT_LOW`, `CKF_USER_PIN_FINAL_TRY` and
 `CKF_USER_PIN_LOCKED`. Flags are reread after each refusal; remaining counts are never invented.
 The specification allows tokens to report flags false and does not specify update timing
-[[S13](SOURCES.md)]. A final-try flag requires a second explicit action: the GTK confirmation
-button or a system-prompt confirmation round. A different process can spend an attempt between
-flag read and login, so this is best effort.
+[[S13](SOURCES.md)]. Typed PIN prompts show the final-try warning from the start of the input
+round, including after a refusal refreshes the flags. Unlock submits directly. GTK places a
+warning-styled label above the entry and announces it when it appears; gcr uses the system
+prompt's warning and accessibility. Count-low wording is also shown upfront. Only protected-path
+final tries require a confirmation round. A different process can spend an attempt between flag
+read and login, so this is best effort.
 
 An empty PIN is rejected before submission and the prompt repeats. At most three attempts are
 offered per prompt. Incorrect PINs permit user-initiated retries within that limit; protected-path

@@ -177,7 +177,10 @@ The prefix is caller-chosen and affects only display text; `reason` remains sepa
 operation on keys with `CKA_ALWAYS_AUTHENTICATE`. Context-specific login follows operation
 initialization; operations on the same session remain serialized during PIN entry.
 The core owns PIN policy and [`XccSecret`](../src/core/secret.h) storage; GTK and gcr
-providers remain in `src/ui/`. The backend logs into its own session; protected-path tokens
+providers remain in `src/ui/`. `XccPinView` carries token retry flags in show/update callbacks.
+Typed PIN warnings appear before input; Unlock submits directly. Only protected-path final tries
+use the warning reply for a single Continue before starting the reader; other protected-path
+entry starts automatically. The backend logs into its own session; protected-path tokens
 collect the secret on the token or reader. PIN memory, retries, serialization, cancellation and system-prompter transport
 are specified in [SECURITY.md](SECURITY.md#pin-handling).
 

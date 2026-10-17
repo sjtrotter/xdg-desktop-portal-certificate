@@ -875,8 +875,11 @@ $ tools/dev-stack.sh --live -- --purpose client_auth
 
 Enter a wrong PIN, then the correct one. The prompt should offer a retry without failing the
 request, refresh `CKF_USER_PIN_COUNT_LOW` and show recent-failure wording without an invented
-count. If `CKF_USER_PIN_FINAL_TRY` appears, require explicit second confirmation; refusing must
-leave the counter unchanged. Expect `pin-incorrect ... detail=retry-offered`. One prompt stops
+count. If `CKF_USER_PIN_FINAL_TRY` appears, typed PIN entry must show and announce the warning
+before input, both at open and after a wrong-PIN refresh; one Unlock submits. Cancel spends no
+attempt. A PIN-pad reader instead requires one Continue before starting on the final try;
+Cancel must leave the counter unchanged, and repeated Continue must not restart the reader.
+Expect `pin-incorrect ... detail=retry-offered`. One prompt stops
 after three refusals; a new application request is a separate prompt.
 
 ### 3.7 Removal and other hardware checks

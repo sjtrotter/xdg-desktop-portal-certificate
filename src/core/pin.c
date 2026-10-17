@@ -233,21 +233,40 @@ static void login_thread(GTask* task, gpointer source, gpointer task_data,
 	g_task_return_error(task, g_steal_pointer(&error));
 }
 
+static XccPinView pin_view(const PinPrompt* prompt, const char* status)
+{
+	return (XccPinView) {
+		.protected_path = prompt->protected_path,
+		.busy = prompt->busy,
+		.count_low = prompt->token->pin_count_low,
+		.final_try = prompt->token->pin_final_try,
+		.locked = prompt->token->pin_locked,
+		.status = status,
+	};
+}
+
+static void pin_update(PinPrompt* prompt, const char* status)
+{
+	XccPinView view = pin_view(prompt, status);
+
+	prompt->provider.pin_update(prompt->provider.user_data, prompt, &view);
+}
+
 static void set_busy(PinPrompt* prompt, gboolean busy)
 {
 	prompt->busy = busy;
 
-	prompt->provider.pin_update(prompt->provider.user_data, prompt, NULL);
+	pin_update(prompt, NULL);
 }
 
 /* PKCS#11 exposes retry-state flags without a portable remaining-attempt count. */
-const char* certificate_pin_prompt_retry_hint(const PinPrompt* prompt)
+const char* certificate_pin_prompt_retry_hint(const XccPinView* view)
 {
-	if (prompt->token->pin_locked)
+	if (view->locked)
 		return "This token is locked. It cannot be unlocked here.";
-	if (prompt->token->pin_final_try)
+	if (view->final_try)
 		return "This is the last attempt before the token locks.";
-	if (prompt->token->pin_count_low)
+	if (view->count_low)
 		return "There have been recent failed attempts on this token.";
 
 	return NULL;
@@ -255,7 +274,7 @@ const char* certificate_pin_prompt_retry_hint(const PinPrompt* prompt)
 
 const char* certificate_pin_prompt_final_try_warning(void)
 {
-	return "Token will lock if this last attempt fails. Confirm to continue, or Cancel.";
+	return "Token will lock if this last attempt fails. Continue to enter the PIN on the reader, or Cancel.";
 }
 
 const char* certificate_pin_prompt_heading(const PinPrompt* prompt)
@@ -272,7 +291,8 @@ const char* certificate_pin_prompt_protected_note(void)
 
 void certificate_pin_prompt_warning_reply(PinPrompt* prompt, gboolean accepted)
 {
-	if (prompt->finished || prompt->login_in_flight || !prompt->warning_pending)
+	if (!prompt->protected_path || prompt->finished || prompt->login_in_flight ||
+	    !prompt->warning_pending)
 		return;
 
 	prompt->warning_pending = FALSE;
@@ -282,7 +302,7 @@ void certificate_pin_prompt_warning_reply(PinPrompt* prompt, gboolean accepted)
 		return;
 	}
 
-	prompt->final_try_confirmed = TRUE;
+	prompt->protected_path_confirmed = TRUE;
 	certificate_pin_prompt_submit(prompt);
 }
 
@@ -333,8 +353,6 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 	{
 		certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, prompt->session_id, "retry-offered");
 
-		prompt->final_try_confirmed = FALSE;
-
 		if (prompt->token->pin_locked)
 		{
 			certificate_log_grant(CERTIFICATE_REASON_PIN_LOCKED, prompt->session_id, "terminal");
@@ -358,8 +376,7 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 		/* Retries require user input after the entry has been cleared. */
 		g_clear_pointer(&prompt->secret, xcc_secret_free);
-		prompt->provider.pin_update(prompt->provider.user_data, prompt,
-		                            "That PIN was not accepted. Try again.");
+		pin_update(prompt, "That PIN was not accepted. Try again.");
 		return;
 	}
 
@@ -409,7 +426,7 @@ gboolean certificate_pin_prompt_hold(PinPrompt* prompt, XccSecret* secret, size_
 		                                  : "PIN exceeds the supported length.";
 
 		xcc_secret_free(secret);
-		prompt->provider.pin_update(prompt->provider.user_data, prompt, status);
+		pin_update(prompt, status);
 		return FALSE;
 	}
 
@@ -425,7 +442,8 @@ void certificate_pin_prompt_submit(PinPrompt* prompt)
 	if (prompt->busy || prompt->finished || prompt->login_in_flight)
 		return;
 
-	if (prompt->token->pin_final_try && !prompt->final_try_confirmed)
+	if (prompt->protected_path && prompt->token->pin_final_try &&
+	    !prompt->protected_path_confirmed)
 	{
 		if (!prompt->warning_pending)
 		{
@@ -443,8 +461,7 @@ void certificate_pin_prompt_submit(PinPrompt* prompt)
 	if (!prompt->protected_path && xcc_secret_length(prompt->secret) == 0)
 	{
 		login_task_free(data);
-		prompt->provider.pin_update(prompt->provider.user_data, prompt,
-		                            "Enter the PIN for this token.");
+		pin_update(prompt, "Enter the PIN for this token.");
 		return;
 	}
 
@@ -486,12 +503,14 @@ static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 
 static void pin_prompt_start(PinPrompt* prompt)
 {
+	XccPinView view = pin_view(prompt, NULL);
+
 	pin_active = prompt;
 
 	certificate_log_grant(CERTIFICATE_REASON_PIN_PROMPTED, prompt->session_id,
 	                      prompt->protected_path ? "protected-path" : "on-screen");
 
-	prompt->provider.pin_show(prompt->provider.user_data, prompt);
+	prompt->provider.pin_show(prompt->provider.user_data, prompt, &view);
 }
 
 void certificate_pin_login_full(CertificateToken* token, const char* session_id,

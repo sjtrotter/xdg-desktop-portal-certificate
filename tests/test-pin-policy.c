@@ -215,13 +215,26 @@ static void test_final_try(Fixture* fixture, gconstpointer user_data)
 
 	fixture->token->pin_final_try = TRUE;
 	start(fixture);
-	if (!fixture->token->protected_authentication_path)
-		fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
-	fake_pin_provider_submit(&fixture->ui, fixture->ui.protected_path ? NULL : GOOD_PIN);
-	g_assert_cmpuint(fixture->ui.warnings, ==, 1);
+	g_assert_true(fixture->ui.final_try);
+	g_assert_cmpuint(fixture->ui.warnings, ==, 0);
 	g_assert_cmpuint(fixture->attempts, ==, 0);
-	fake_pin_provider_confirm(&fixture->ui, accepted);
+	if (accepted)
+		fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
+	else
+		fake_pin_provider_cancel(&fixture->ui);
 	finish(fixture, accepted ? CERTIFICATE_PIN_OK : CERTIFICATE_PIN_CANCELLED, accepted ? 1 : 0);
+	g_assert_cmpuint(fixture->ui.warnings, ==, 0);
+}
+
+static void test_count_low_at_open(Fixture* fixture, gconstpointer user_data)
+{
+	fixture->token->pin_count_low = TRUE;
+	start(fixture);
+	g_assert_true(fixture->ui.count_low);
+	g_assert_false(fixture->ui.final_try);
+	fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
+	finish(fixture, CERTIFICATE_PIN_OK, 1);
+	g_assert_cmpuint(fixture->ui.warnings, ==, 0);
 }
 
 static void test_refreshed_final_try(Fixture* fixture, gconstpointer user_data)
@@ -232,11 +245,11 @@ static void test_refreshed_final_try(Fixture* fixture, gconstpointer user_data)
 	fake_pin_provider_submit(&fixture->ui, BAD_PIN);
 	wait_for(&fixture->ui.retries, 1);
 	g_assert_true(fixture->ui.final_try);
-	fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
-	g_assert_cmpuint(fixture->ui.warnings, ==, 1);
+	g_assert_cmpuint(fixture->ui.warnings, ==, 0);
 	g_assert_cmpuint(fixture->attempts, ==, 1);
-	fake_pin_provider_confirm(&fixture->ui, TRUE);
+	fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
 	finish(fixture, CERTIFICATE_PIN_OK, 2);
+	g_assert_cmpuint(fixture->ui.warnings, ==, 0);
 }
 
 static void test_refreshed_locked(Fixture* fixture, gconstpointer user_data)
@@ -261,8 +274,29 @@ static void test_protected_path(Fixture* fixture, gconstpointer user_data)
 
 static void test_protected_final_try(Fixture* fixture, gconstpointer user_data)
 {
+	gboolean accepted = GPOINTER_TO_INT(user_data);
+	PinPrompt* prompt;
+
 	fixture->token->protected_authentication_path = TRUE;
-	test_final_try(fixture, user_data);
+	fixture->token->pin_final_try = TRUE;
+	start(fixture);
+	prompt = certificate_pin_prompt_ref(fixture->ui.prompt);
+	g_assert_true(fixture->ui.final_try);
+	g_assert_cmpuint(fixture->ui.warnings, ==, 1);
+	/* Submitting without Continue must neither start the reader nor repeat the warning. */
+	fake_pin_provider_submit(&fixture->ui, NULL);
+	fake_pin_provider_submit(&fixture->ui, NULL);
+	g_assert_cmpuint(fixture->ui.warnings, ==, 1);
+	g_assert_cmpuint(fixture->attempts, ==, 0);
+	fake_pin_provider_confirm(&fixture->ui, accepted);
+	/* Repeated replies/submits during login and after completion cannot restart the reader. */
+	certificate_pin_prompt_warning_reply(prompt, TRUE);
+	certificate_pin_prompt_submit(prompt);
+	wait_for(&fixture->done_calls, 1);
+	certificate_pin_prompt_warning_reply(prompt, TRUE);
+	certificate_pin_prompt_submit(prompt);
+	certificate_pin_prompt_unref(prompt);
+	finish(fixture, accepted ? CERTIFICATE_PIN_OK : CERTIFICATE_PIN_CANCELLED, accepted ? 1 : 0);
 }
 
 static void release_login(Fixture* fixture)
@@ -368,8 +402,9 @@ int main(int argc, char** argv)
 	ADD("wrong-then-right", 0, test_wrong_then_right);
 	ADD("attempt-cap", 0, test_attempt_cap);
 	ADD("cancel", 0, test_cancel);
-	ADD("final-try-refused", FALSE, test_final_try);
-	ADD("final-try-accepted", TRUE, test_final_try);
+	ADD("final-try-cancelled", FALSE, test_final_try);
+	ADD("final-try-one-submit", TRUE, test_final_try);
+	ADD("count-low-at-open", 0, test_count_low_at_open);
 	ADD("refreshed-final-try", 0, test_refreshed_final_try);
 	ADD("refreshed-locked", 0, test_refreshed_locked);
 	ADD("protected-path", 0, test_protected_path);

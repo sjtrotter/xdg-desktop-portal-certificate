@@ -367,35 +367,43 @@ static void test_cancellable_closes_the_prompt(Fixture* fixture, gconstpointer u
 	script_clear(&script);
 }
 
-static void test_final_try_needs_a_second_answer(Fixture* fixture, gconstpointer user_data)
+static void test_final_try_warns_before_input(Fixture* fixture, gconstpointer user_data)
 {
 	LoginScript script = { 0 };
 	const char* answers[] = { "ok" };
 	g_autofree char* warning = NULL;
+	g_autofree char* action = NULL;
 
 	script.token = make_token();
 	script.token->pin_final_try = TRUE;
 	script.answers = answers;
 
+	certificate_test_prompter_set_delay(300);
 	certificate_test_prompter_expect_password(GOOD_PIN);
-	certificate_test_prompter_expect_confirm(TRUE);
 
 	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
 	                      script_login, NULL, NULL, &script, NULL, script_done, &script);
-	run_until_done(&script, 10000);
-
-	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_OK);
-	g_assert_cmpuint(script.attempts, ==, 1);
-	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 1);
+	wait_for_password_round(1, 10000);
 
 	warning = certificate_test_prompter_last_warning();
 	g_assert_nonnull(warning);
 	g_assert_nonnull(strstr(warning, "last attempt"));
+	action = certificate_test_prompter_last_continue_label();
+	g_assert_cmpstr(action, ==, "Unlock");
+	g_assert_cmpuint(script.attempts, ==, 0);
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 0);
 
+	run_until_done(&script, 10000);
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_OK);
+	g_assert_cmpuint(script.attempts, ==, 1);
+	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 1);
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 0);
+
+	certificate_test_prompter_set_delay(40);
 	script_clear(&script);
 }
 
-static void test_final_try_refused_spends_nothing(Fixture* fixture, gconstpointer user_data)
+static void test_final_try_cancelled_spends_nothing(Fixture* fixture, gconstpointer user_data)
 {
 	LoginScript script = { 0 };
 	const char* answers[] = { "ok" };
@@ -404,8 +412,7 @@ static void test_final_try_refused_spends_nothing(Fixture* fixture, gconstpointe
 	script.token->pin_final_try = TRUE;
 	script.answers = answers;
 
-	certificate_test_prompter_expect_password(GOOD_PIN);
-	certificate_test_prompter_expect_confirm(FALSE);
+	certificate_test_prompter_expect_password(NULL);
 
 	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
 	                      script_login, NULL, NULL, &script, NULL, script_done, &script);
@@ -413,7 +420,48 @@ static void test_final_try_refused_spends_nothing(Fixture* fixture, gconstpointe
 
 	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_CANCELLED);
 	g_assert_cmpuint(script.attempts, ==, 0);
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 0);
 
+	script_clear(&script);
+}
+
+static void refresh_final_try(CertificateToken* token, gpointer user_data)
+{
+	token->pin_count_low = TRUE;
+	token->pin_final_try = TRUE;
+}
+
+static void test_refreshed_final_try_warns_before_input(Fixture* fixture, gconstpointer user_data)
+{
+	LoginScript script = { 0 };
+	const char* answers[] = { "wrong", "ok" };
+	g_autofree char* warning = NULL;
+
+	script.token = make_token();
+	script.answers = answers;
+	certificate_test_prompter_set_delay(300);
+	certificate_test_prompter_expect_password("0000");
+	certificate_test_prompter_expect_password(GOOD_PIN);
+
+	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
+	                      script_login, refresh_final_try, NULL, &script, NULL, script_done,
+	                      &script);
+	wait_for_password_round(2, 10000);
+	warning = certificate_test_prompter_last_warning();
+	g_assert_nonnull(warning);
+	g_assert_nonnull(strstr(warning, "not accepted"));
+	g_assert_nonnull(strstr(warning, "last attempt"));
+	g_assert_cmpuint(script.attempts, ==, 1);
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 0);
+
+	run_until_done(&script, 10000);
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_OK);
+	g_assert_cmpuint(script.attempts, ==, 2);
+	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 2);
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 0);
+	g_assert_cmpuint(certificate_test_prompter_prompts_created(), ==, 1);
+
+	certificate_test_prompter_set_delay(40);
 	script_clear(&script);
 }
 
@@ -427,17 +475,24 @@ static void test_warning_carries_the_token_flags(Fixture* fixture, gconstpointer
 	script.token->pin_count_low = TRUE;
 	script.answers = answers;
 
+	certificate_test_prompter_set_delay(300);
 	certificate_test_prompter_expect_password(GOOD_PIN);
 
 	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
 	                      script_login, NULL, NULL, &script, NULL, script_done, &script);
-	run_until_done(&script, 10000);
+	wait_for_password_round(1, 10000);
 
 	warning = certificate_test_prompter_last_warning();
 	g_assert_nonnull(warning);
 	g_assert_nonnull(strstr(warning, "recent failed attempts"));
 	g_assert_null(strstr(warning, "2 attempts"));
 
+	g_assert_cmpuint(script.attempts, ==, 0);
+	run_until_done(&script, 10000);
+	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_OK);
+	g_assert_cmpuint(script.attempts, ==, 1);
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 0);
+	certificate_test_prompter_set_delay(40);
 	script_clear(&script);
 }
 
@@ -556,23 +611,35 @@ static void test_protected_path_final_try_confirmed(Fixture* fixture, gconstpoin
 {
 	LoginScript script = { 0 };
 	const char* answers[] = { "ok" };
+	g_autofree char* action = NULL;
+	g_autofree char* warning = NULL;
 
 	script.token = make_token();
 	script.token->protected_authentication_path = TRUE;
 	script.token->pin_final_try = TRUE;
 	script.answers = answers;
 
+	certificate_test_prompter_set_delay(300);
 	certificate_test_prompter_expect_confirm(TRUE);
 
 	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
 	                      script_login, NULL, NULL, &script, NULL, script_done, &script);
+	wait_for_confirm_round(1, 10000);
+	g_assert_cmpuint(script.attempts, ==, 0);
+	action = certificate_test_prompter_last_continue_label();
+	g_assert_cmpstr(action, ==, "Continue");
+	warning = certificate_test_prompter_last_warning();
+	g_assert_nonnull(warning);
+	g_assert_nonnull(strstr(warning, "last attempt"));
 	run_until_done(&script, 10000);
 
 	g_assert_cmpint(script.outcome, ==, CERTIFICATE_PIN_OK);
 	g_assert_cmpuint(script.attempts, ==, 1);
 	g_assert_null(script.last_pin);
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 1);
 	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 0);
 
+	certificate_test_prompter_set_delay(40);
 	script_clear(&script);
 }
 
@@ -653,11 +720,11 @@ static void test_prompter_vanishes_during_confirm(Fixture* fixture, gconstpointe
 
 	script.token = make_token();
 	script.token->pin_final_try = TRUE;
+	script.token->protected_authentication_path = TRUE;
 	script.answers = answers;
 
 	/* Delay each round so prompter loss can occur during final-attempt confirmation. */
 	certificate_test_prompter_set_delay(300);
-	certificate_test_prompter_expect_password(GOOD_PIN);
 	certificate_test_prompter_expect_confirm(TRUE);
 
 	certificate_pin_login(script.token, NULL, "Test application", "prove who you are",
@@ -1187,8 +1254,9 @@ int main(int argc, char** argv)
 	ADD("/pin-system/attempt-cap", test_attempt_cap);
 	ADD("/pin-system/cancel-in-the-prompter", test_cancel_in_the_prompter);
 	ADD("/pin-system/cancellable-closes-the-prompt", test_cancellable_closes_the_prompt);
-	ADD("/pin-system/final-try-needs-a-second-answer", test_final_try_needs_a_second_answer);
-	ADD("/pin-system/final-try-refused-spends-nothing", test_final_try_refused_spends_nothing);
+	ADD("/pin-system/final-try-warns-before-input", test_final_try_warns_before_input);
+	ADD("/pin-system/final-try-cancelled-spends-nothing", test_final_try_cancelled_spends_nothing);
+	ADD("/pin-system/refreshed-final-try-warns-before-input", test_refreshed_final_try_warns_before_input);
 	ADD("/pin-system/warning-carries-the-token-flags", test_warning_carries_the_token_flags);
 	ADD("/pin-system/login-timeout", test_login_timeout);
 	ADD("/pin-system/protected-path-asks-for-nothing", test_protected_path_asks_for_nothing);
