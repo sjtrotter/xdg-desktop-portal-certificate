@@ -44,6 +44,17 @@ service_test_cases = {
 }
 
 exe = executable(
+  'test-chooser-policy',
+  ['test-chooser-policy.c', 'fake-chooser-provider.c'] + fixture_util,
+  dependencies: [certificate_core_dep],
+  include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+  c_args: test_args + certificate_log_args,
+  install: false,
+)
+
+test('chooser-policy', exe, protocol: 'tap', env: test_env)
+
+exe = executable(
   'test-pin-policy',
   ['test-pin-policy.c', 'fake-pin-provider.c'],
   link_with: certificate_core,
@@ -72,7 +83,7 @@ test('secret', exe, protocol: 'tap', env: test_env)
 foreach name, source : service_test_cases
   exe = executable(
     'test-' + name,
-    [source] + fixture_util,
+    [source] + fixture_util + (name == 'impl-dbus' ? files('fake-chooser-provider.c') : []),
     dependencies: [certificate_service_dep],
     include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
     c_args: test_args + certificate_log_args,

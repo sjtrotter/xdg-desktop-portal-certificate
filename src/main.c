@@ -29,6 +29,7 @@
 #include "tokens/filter.h"
 #include "core/pin.h"
 #include "ui/pin-backends.h"
+#include "ui/chooser.h"
 
 static GMainLoop* loop = NULL;
 static CertificateImpl* impl = NULL;
@@ -400,6 +401,8 @@ int main(int argc, char** argv)
 		g_printerr("xdg-desktop-portal-certificate: %s\n", error->message);
 		return CERTIFICATE_EXIT_USAGE;
 	}
+
+	certificate_chooser_set_provider(certificate_chooser_provider_gtk());
 
 	tokens = certificate_tokens_new((const char* const*) opt_modules, &error);
 	if (tokens == NULL)

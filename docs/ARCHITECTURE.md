@@ -161,8 +161,11 @@ chooser requirements; [grant lifetime](SECURITY.md#grant-lifetime-and-delegation
 
 ### Chooser UI
 
-[`ui/chooser.h`](../src/ui/chooser.h) defines the backend-owned window, parented to a valid
-`parent_window` when available and unparented otherwise. Its contents follow the
+[`core/chooser.h`](../src/core/chooser.h) owns chooser state and safe display formatting.
+[`ui/chooser-provider.h`](../src/ui/chooser-provider.h) supplies borrowed `XccChooserView`
+snapshots and revisioned candidate IDs to the selected provider. GTK presentation lives in
+[`ui/chooser.c`](../src/ui/chooser.c), parented to a valid `parent_window` when available
+and unparented otherwise. Its contents follow the
 [trusted-dialog requirements](SECURITY.md#trusted-dialog) and
 [accessibility criteria](PUBLIC-INTERFACE.md#accessibility-criteria).
 

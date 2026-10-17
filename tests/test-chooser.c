@@ -9,9 +9,10 @@
 #include <string.h>
 
 #include "fixture-util.h"
-#include "ui/chooser.h"
+#include "core/chooser.h"
 #include "core/pin.h"
 #include "ui/pin-backends.h"
+#include "ui/chooser.h"
 
 static void assert_is_safe_display_text(const char* text)
 {
@@ -487,6 +488,7 @@ int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
 	certificate_pin_set_provider(certificate_pin_provider_gtk());
+	certificate_chooser_set_provider(certificate_chooser_provider_gtk());
 
 	g_test_add_func("/chooser/purpose-wording", test_purpose_wording);
 	g_test_add_func("/chooser/lifetime-wording", test_lifetime_wording);

@@ -18,7 +18,7 @@
 #include "request-impl.h"
 #include "session-impl.h"
 #include "tokens/filter.h"
-#include "ui/chooser.h"
+#include "core/chooser.h"
 #include "core/pin.h"
 #include "xdp-impl-dbus.h"
 
@@ -794,7 +794,7 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 		return;
 	}
 
-	if (!certificate_ui_has_display())
+	if (!certificate_chooser_available())
 	{
 		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
 		                    error_results("no_display"));
