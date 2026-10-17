@@ -25,9 +25,9 @@ experimental export conditions.
 | Invalidated Session skeletons remain exported for idempotent `Close()` | `src/session-impl.c`; the frontend closes in response to invalidation |
 | Wrong types, unknown enums and unknown security-relevant nested keys fail; defaults apply to absent fields | `parse_acquire_options()`, `src/tokens/filter.c`, `src/broker/mechanism.c`, `lookup_string()`; malformed-option tests in `test-impl-dbus.c` and parameter tests in `test-mechanism.c`, including `signature_encoding`, `mgf`, `mgf1_hash` and mismatched hashes |
 | Export failure aborts a call before inserting a session | `src/certificate-impl.c`, `src/request-impl.c`, `src/session-impl.c` |
-| Chooser displays supplied identity and backend-owned purpose text | `build_identity()` in `src/ui/chooser.c`, `certificate_purpose_display()` in `src/certificate.c`; private-bus runs display `unidentified` |
+| Chooser displays supplied identity and backend-owned purpose text | `src/core/chooser.c`, `src/core/chooser-format.c`, `build_identity()` in `src/ui/chooser.c`; private-bus runs display `unidentified` |
 | Externally sourced display text is sanitized and capped, including combining-mark runs | `certificate_display_text()` in `src/certificate.c`; `test-redact.c`. Applies to app names and ids, subjects, issuers, token labels, readers and `reason` |
-| Expired certificates remain selectable and have textual warnings | `src/tokens/filter.c`, `src/ui/chooser.c`; `test-filter.c` |
+| Expired certificates remain selectable and have textual warnings | `src/tokens/filter.c`, `src/core/chooser-format.c`, `src/ui/chooser.c`; `test-filter.c` |
 | One candidate still requires consent | `src/certificate-impl.c` has no chooser-bypass path |
 | Reacquisition rebinds the device and discards old login and key handles | `certificate_device_open()` in `src/broker/device.c`; `test-broker-regrant.c` verifies against the new certificate and `test-broker-device.c` checks device state |
 | Frontend departure cancels windows and answers pending calls `owner_gone` | `cancel_transactions()` in `src/certificate-impl.c`; `test-impl-dbus.c` |
@@ -73,7 +73,7 @@ experimental export conditions.
 | Discovery does not log in | `src/tokens/discovery.c`, `test-broker-device.c` |
 | Hardware-only selection is the default | `token_skip_reason()`, `CKF_HW_SLOT` [[S11](SOURCES.md)]; `--allow-software-tokens` or explicit `--module` permits software tokens; `--list-tokens` prints skipped reasons. Loaded modules supply these flags, so this is not isolation |
 | Windows follow desktop color scheme | `follow_colour_scheme()` reads GSettings because process hardening prevents portal identification; see PIN handling |
-| Worker-visible reference counts are atomic | `src/core/pin.c`, `src/ui/chooser.c`, `src/broker/operations.c`: `g_atomic_int_inc`, `g_atomic_int_dec_and_test` |
+| Worker-visible reference counts are atomic | `src/core/pin.c`, `src/core/chooser.c`, `src/broker/operations.c`: `g_atomic_int_inc`, `g_atomic_int_dec_and_test` |
 | Scratch-directory deletion requires containment and a project marker | `fixture_check()` in `tools/lib.sh`; existing unmarked directories are refused. Full path, ownership and mode rules are in [TESTING.md](TESTING.md) |
 
 Shutdown has synchronous exceptions. `certificate_impl_shutdown()` waits up to two seconds for

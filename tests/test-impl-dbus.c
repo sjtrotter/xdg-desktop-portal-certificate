@@ -11,11 +11,14 @@
 
 #include "certificate-impl.h"
 #include "fixture-util.h"
+#include "fake-chooser-provider.h"
 #include "request-impl.h"
 #include "session-impl.h"
 #include "tokens/filter.h"
+#include "core/chooser.h"
 #include "core/pin.h"
 #include "ui/pin-backends.h"
+#include "ui/chooser.h"
 
 #define FRONTEND_NAME "org.freedesktop.portal.Desktop"
 #define IMPL_PATH "/org/freedesktop/portal/desktop"
@@ -889,12 +892,17 @@ typedef enum
 {
 	DEFERRED_CLOSE,
 	DEFERRED_REMOVAL,
-	DEFERRED_SUCCESS
+	DEFERRED_SUCCESS,
+	DEFERRED_CANCEL
 } DeferredOutcome;
+
+#define DEFERRED_FAKE_UI 4
 
 static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 {
-	DeferredOutcome outcome = GPOINTER_TO_INT(user_data);
+	DeferredOutcome outcome = GPOINTER_TO_INT(user_data) & 3;
+	gboolean fake_ui = (GPOINTER_TO_INT(user_data) & DEFERRED_FAKE_UI) != 0;
+	FakeChooserProvider fake;
 	EnumerateGate gate = { 0 };
 	Call call = { 0 };
 	g_autoptr(GError) error = NULL;
@@ -904,20 +912,26 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	g_autofree char* code = NULL;
 	g_autoptr(GtkWindow) window = NULL;
 	g_autoptr(CertificateToken) token = NULL;
-	GtkWidget* list;
-	GtkListBoxRow* row;
+	GtkWidget* list = NULL;
+	GtkListBoxRow* row = NULL;
 	CertificateCandidate* candidate;
 	guint32 response = 99;
 	gint64 deadline;
 
-	if (!has_display)
+	if (!fake_ui && !has_display)
 	{
 		g_test_skip("no display: the chooser window cannot be opened");
 		return;
 	}
 	if (!require_matching_fixture(fixture))
 		return;
-	certificate_ui_set_has_display(TRUE);
+	if (fake_ui)
+	{
+		fake_chooser_provider_init(&fake);
+		certificate_chooser_set_provider(&fake.provider);
+	}
+	else
+		certificate_ui_set_has_display(TRUE);
 	certificate_tokens_stop_watch(fixture->tokens);
 	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
 	options = acquire_options(NULL);
@@ -926,19 +940,40 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	                       g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "", options),
 	                       NULL, G_DBUS_CALL_FLAGS_NONE, 20000, NULL, on_call_done, &call);
 	deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
-	while (g_list_model_get_n_items(gtk_window_get_toplevels()) == 0 && !call.done &&
-	       g_get_monotonic_time() < deadline)
+	while ((fake_ui ? fake.id == 0 : g_list_model_get_n_items(gtk_window_get_toplevels()) == 0) &&
+	       !call.done && g_get_monotonic_time() < deadline)
 		g_main_context_iteration(NULL, FALSE);
 	g_assert_false(call.done);
-	g_assert_cmpuint(g_list_model_get_n_items(gtk_window_get_toplevels()), ==, 1);
-	window = g_list_model_get_item(gtk_window_get_toplevels(), 0);
-	list = find_chooser_list(GTK_WIDGET(window));
-	g_assert_nonnull(list);
-	row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0);
-	g_assert_nonnull(row);
-	candidate = g_object_get_data(G_OBJECT(row), "candidate");
-	g_assert_nonnull(candidate);
-	token = certificate_token_ref(candidate->token);
+	if (fake_ui)
+	{
+		g_assert_cmpuint(fake.shows, ==, 1);
+		g_assert_cmpuint(fake.view.n_candidates, >, 0);
+	}
+	else
+	{
+		g_assert_cmpuint(g_list_model_get_n_items(gtk_window_get_toplevels()), ==, 1);
+		window = g_list_model_get_item(gtk_window_get_toplevels(), 0);
+		list = find_chooser_list(GTK_WIDGET(window));
+		g_assert_nonnull(list);
+		row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0);
+		g_assert_nonnull(row);
+	}
+	/* The UI exposes IDs; obtain the corresponding fixture token from discovery. */
+	{
+		g_autoptr(GPtrArray) candidates = certificate_tokens_enumerate(fixture->tokens, NULL, &error);
+		g_autoptr(GPtrArray) matching = NULL;
+		CertificateFilter filter = { 0 };
+
+		g_assert_no_error(error);
+		g_assert_true(certificate_filter_parse(options, CERTIFICATE_PURPOSE_CLIENT_AUTH,
+		                                       CERTIFICATE_OPERATION_SIGN, &filter, &error));
+		g_assert_no_error(error);
+		matching = certificate_filter_apply(candidates, &filter);
+		certificate_filter_clear(&filter);
+		g_assert_cmpuint(matching->len, >, 0);
+		candidate = g_ptr_array_index(matching, 0);
+		token = certificate_token_ref(candidate->token);
+	}
 
 	g_mutex_init(&gate.lock);
 	g_cond_init(&gate.cond);
@@ -948,9 +983,20 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	while (!g_atomic_int_get(&gate.entered) && g_get_monotonic_time() < deadline)
 		g_main_context_iteration(NULL, FALSE);
 	g_assert_true(g_atomic_int_get(&gate.entered));
-	gtk_list_box_select_row(GTK_LIST_BOX(list), row);
-	g_signal_emit_by_name(list, "row-activated", row);
-	g_assert_cmpuint(g_list_model_get_n_items(gtk_window_get_toplevels()), ==, 0);
+	if (fake_ui)
+	{
+		if (outcome == DEFERRED_CANCEL)
+			fake_chooser_provider_cancel(&fake);
+		else
+			fake_chooser_provider_choose(&fake, 0);
+		g_assert_cmpuint(fake.closes, ==, 1);
+	}
+	else
+	{
+		gtk_list_box_select_row(GTK_LIST_BOX(list), row);
+		g_signal_emit_by_name(list, "row-activated", row);
+		g_assert_cmpuint(g_list_model_get_n_items(gtk_window_get_toplevels()), ==, 0);
+	}
 	g_assert_false(call.done);
 
 	if (outcome == DEFERRED_CLOSE)
@@ -975,7 +1021,7 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	g_assert_no_error(call.error);
 	g_variant_get(call.reply, "(u@a{sv})", &response, &results);
 	g_variant_lookup(results, "error", "s", &code);
-	if (outcome == DEFERRED_CLOSE)
+	if (outcome == DEFERRED_CLOSE || outcome == DEFERRED_CANCEL)
 	{
 		g_assert_cmpuint(response, ==, CERTIFICATE_RESPONSE_CANCELLED);
 		g_assert_cmpuint(g_variant_n_children(results), ==, 0);
@@ -997,12 +1043,18 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	g_mutex_clear(&gate.lock);
 	g_cond_clear(&gate.cond);
 	g_variant_unref(call.reply);
+	if (fake_ui)
+	{
+		fake_chooser_provider_clear(&fake);
+		certificate_chooser_set_provider(certificate_chooser_provider_gtk());
+	}
 }
 
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
 	certificate_pin_set_provider(certificate_pin_provider_gtk());
+	certificate_chooser_set_provider(certificate_chooser_provider_gtk());
 	/* Keep toolkit settings and accessibility off the private service bus. */
 	g_setenv("GTK_A11Y", "test", TRUE);
 	g_setenv("ADW_DISABLE_PORTAL", "1", TRUE);
@@ -1046,6 +1098,19 @@ int main(int argc, char** argv)
 	g_test_add("/impl/deferred-consent-removal", Fixture, GINT_TO_POINTER(DEFERRED_REMOVAL),
 	           fixture_set_up, test_deferred_consent, fixture_tear_down);
 	g_test_add("/impl/deferred-consent-success", Fixture, GINT_TO_POINTER(DEFERRED_SUCCESS),
+	           fixture_set_up, test_deferred_consent, fixture_tear_down);
+
+	g_test_add("/impl/fake-deferred-consent-close", Fixture,
+	           GINT_TO_POINTER(DEFERRED_FAKE_UI | DEFERRED_CLOSE),
+	           fixture_set_up, test_deferred_consent, fixture_tear_down);
+	g_test_add("/impl/fake-deferred-consent-removal", Fixture,
+	           GINT_TO_POINTER(DEFERRED_FAKE_UI | DEFERRED_REMOVAL),
+	           fixture_set_up, test_deferred_consent, fixture_tear_down);
+	g_test_add("/impl/fake-deferred-consent-success", Fixture,
+	           GINT_TO_POINTER(DEFERRED_FAKE_UI | DEFERRED_SUCCESS),
+	           fixture_set_up, test_deferred_consent, fixture_tear_down);
+	g_test_add("/impl/fake-cancel-during-refresh", Fixture,
+	           GINT_TO_POINTER(DEFERRED_FAKE_UI | DEFERRED_CANCEL),
 	           fixture_set_up, test_deferred_consent, fixture_tear_down);
 
 #undef ADD

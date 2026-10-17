@@ -19,6 +19,8 @@ certificate_core_sources = files(
   'certificate.c',
   'certificate-impl.c',
   'redact.c',
+  'core/chooser.c',
+  'core/chooser-format.c',
   'core/pin.c',
   'core/secret.c',
   'request-impl.c',
