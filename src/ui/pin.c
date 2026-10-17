@@ -14,7 +14,6 @@
 
 #include "../certificate.h"
 #include "../redact.h"
-#include "config.h"
 #include "pin-internal.h"
 
 static gboolean ui_has_display = FALSE;
@@ -29,70 +28,15 @@ gboolean certificate_ui_has_display(void)
 	return ui_has_display;
 }
 
-/* Linking the PIN module defaults to GTK; only main() opts into automatic system-prompt selection. */
-static CertificatePinPromptKind pin_prompt_kind = CERTIFICATE_PIN_PROMPT_GTK;
-static const PinPromptImpl* pin_prompt_resolved = NULL;
+static CertificatePinProvider pin_provider;
 
-gboolean certificate_pin_set_prompt_kind(const char* name, GError** error)
+void certificate_pin_set_provider(const CertificatePinProvider* provider)
 {
-	if (name == NULL || g_ascii_strcasecmp(name, "auto") == 0)
-		pin_prompt_kind = CERTIFICATE_PIN_PROMPT_AUTO;
-	else if (g_ascii_strcasecmp(name, "gtk") == 0)
-		pin_prompt_kind = CERTIFICATE_PIN_PROMPT_GTK;
-	else if (g_ascii_strcasecmp(name, "system") == 0)
-		pin_prompt_kind = CERTIFICATE_PIN_PROMPT_SYSTEM;
-	else
-	{
-		g_set_error(error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
-		            "Unknown PIN prompt '%s'; expected auto, gtk or system", name);
-		return FALSE;
-	}
+	g_return_if_fail(provider != NULL);
+	g_return_if_fail(provider->pin_show != NULL && provider->pin_update != NULL);
+	g_return_if_fail(provider->warning != NULL && provider->hide != NULL && provider->close != NULL);
 
-	pin_prompt_resolved = NULL;
-	return TRUE;
-}
-
-/* Resolve once and log which process will draw the PIN prompt. */
-static const PinPromptImpl* pin_impl(void)
-{
-	if (pin_prompt_resolved != NULL)
-		return pin_prompt_resolved;
-
-	switch (pin_prompt_kind)
-	{
-		case CERTIFICATE_PIN_PROMPT_SYSTEM:
-#if HAVE_GCR
-			pin_prompt_resolved = certificate_pin_impl_system();
-			break;
-#else
-			pin_prompt_resolved = certificate_pin_impl_gtk();
-			break;
-#endif
-
-		case CERTIFICATE_PIN_PROMPT_AUTO:
-#if HAVE_GCR
-			if (certificate_pin_impl_system_available())
-			{
-				pin_prompt_resolved = certificate_pin_impl_system();
-				break;
-			}
-#endif
-			pin_prompt_resolved = certificate_pin_impl_gtk();
-			break;
-
-		case CERTIFICATE_PIN_PROMPT_GTK:
-		default:
-			pin_prompt_resolved = certificate_pin_impl_gtk();
-			break;
-	}
-
-	g_message("pin-prompt-selected detail=%s", pin_prompt_resolved->name);
-	return pin_prompt_resolved;
-}
-
-const char* certificate_pin_prompt_name(void)
-{
-	return pin_impl()->name;
+	pin_provider = *provider;
 }
 
 /* PIN buffer locking, dump exclusion and wipe guarantees are documented in docs/SECURITY.md. */
@@ -288,8 +232,8 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 			prompt->cancel_deferred = TRUE;
 			prompt->deferred_outcome = outcome;
 
-			if (prompt->impl->hide != NULL)
-				prompt->impl->hide(prompt);
+			if (prompt->provider.hide != NULL)
+				prompt->provider.hide(prompt->provider.user_data, prompt);
 
 			certificate_log_grant(outcome == CERTIFICATE_PIN_TIMED_OUT
 			                          ? CERTIFICATE_REASON_PIN_TIMEOUT
@@ -328,7 +272,7 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 	/* Wipe the buffer before invoking the caller's callback. */
 	pin_buffer_wipe(prompt->buffer_opaque);
 
-	prompt->impl->close(prompt);
+	prompt->provider.close(prompt->provider.user_data, prompt);
 
 	if (pin_active == prompt)
 	{
@@ -397,8 +341,7 @@ static void set_busy(PinPrompt* prompt, gboolean busy)
 {
 	prompt->busy = busy;
 
-	if (prompt->impl->busy != NULL)
-		prompt->impl->busy(prompt, busy);
+	prompt->provider.pin_update(prompt->provider.user_data, prompt, NULL);
 }
 
 /* PKCS#11 exposes retry-state flags without a portable remaining-attempt count. */
@@ -431,14 +374,20 @@ const char* certificate_pin_prompt_protected_note(void)
 	       "nothing typed on screen is sent to the token.";
 }
 
-gboolean certificate_pin_prompt_needs_final_confirm(PinPrompt* prompt)
+void certificate_pin_prompt_warning_reply(PinPrompt* prompt, gboolean accepted)
 {
-	/* FINAL_TRY requires explicit second confirmation before submission. */
-	if (!prompt->token->pin_final_try || prompt->final_try_confirmed)
-		return FALSE;
+	if (prompt->finished || prompt->login_in_flight || !prompt->warning_pending)
+		return;
+
+	prompt->warning_pending = FALSE;
+	if (!accepted)
+	{
+		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_CANCELLED);
+		return;
+	}
 
 	prompt->final_try_confirmed = TRUE;
-	return TRUE;
+	certificate_pin_prompt_submit(prompt);
 }
 
 static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_data)
@@ -513,7 +462,8 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 		/* Retries require user input after the entry has been cleared. */
 		pin_buffer_wipe(prompt->buffer_opaque);
-		prompt->impl->retry(prompt, "That PIN was not accepted. Try again.");
+		prompt->provider.pin_update(prompt->provider.user_data, prompt,
+		                            "That PIN was not accepted. Try again.");
 		return;
 	}
 
@@ -555,13 +505,15 @@ gboolean certificate_pin_prompt_hold(PinPrompt* prompt, const char* pin)
 	/* Empty PINs rearm the prompt without submission because a token may count them as failed attempts. */
 	if (pin == NULL || *pin == '\0')
 	{
-		prompt->impl->retry(prompt, "Enter the PIN for this token.");
+		prompt->provider.pin_update(prompt->provider.user_data, prompt,
+		                            "Enter the PIN for this token.");
 		return FALSE;
 	}
 
 	if (!pin_buffer_set(prompt->buffer_opaque, pin))
 	{
-		prompt->impl->retry(prompt, "PIN exceeds the supported length.");
+		prompt->provider.pin_update(prompt->provider.user_data, prompt,
+		                            "PIN exceeds the supported length.");
 		return FALSE;
 	}
 
@@ -576,6 +528,17 @@ void certificate_pin_prompt_submit(PinPrompt* prompt)
 	if (prompt->busy || prompt->finished || prompt->login_in_flight)
 		return;
 
+	if (prompt->token->pin_final_try && !prompt->final_try_confirmed)
+	{
+		if (!prompt->warning_pending)
+		{
+			prompt->warning_pending = TRUE;
+			prompt->provider.warning(prompt->provider.user_data, prompt,
+			                         certificate_pin_prompt_final_try_warning());
+		}
+		return;
+	}
+
 	data = g_new0(LoginTask, 1);
 	data->prompt = pin_prompt_ref(prompt);
 	data->protected_path = prompt->protected_path;
@@ -587,7 +550,8 @@ void certificate_pin_prompt_submit(PinPrompt* prompt)
 		if (data->buffer == NULL)
 		{
 			login_task_free(data);
-			prompt->impl->retry(prompt, "The PIN could not be held in locked memory.");
+			prompt->provider.pin_update(prompt->provider.user_data, prompt,
+			                            "The PIN could not be held in locked memory.");
 			return;
 		}
 	}
@@ -636,7 +600,7 @@ static void pin_prompt_start(PinPrompt* prompt)
 	certificate_log_grant(CERTIFICATE_REASON_PIN_PROMPTED, prompt->session_id,
 	                      prompt->protected_path ? "protected-path" : "on-screen");
 
-	prompt->impl->start(prompt);
+	prompt->provider.pin_show(prompt->provider.user_data, prompt);
 }
 
 void certificate_pin_login_full(CertificateToken* token, const char* session_id,
@@ -648,10 +612,10 @@ void certificate_pin_login_full(CertificateToken* token, const char* session_id,
                                 CertificatePinDone done, gpointer user_data)
 {
 	PinPrompt* prompt = NULL;
-	const PinPromptImpl* impl = pin_impl();
+	CertificatePinProvider provider = pin_provider;
 
-	/* Never read PINs from stdin; GTK requires a display and system prompts require a graphical prompter. */
-	if (impl->needs_display && !certificate_ui_has_display())
+	/* Never read PINs from stdin; providers declare whether they require a local display. */
+	if (provider.pin_show == NULL || (provider.needs_display && !certificate_ui_has_display()))
 	{
 		done(CERTIFICATE_PIN_NO_DISPLAY, user_data);
 
@@ -673,7 +637,7 @@ void certificate_pin_login_full(CertificateToken* token, const char* session_id,
 
 	prompt = g_new0(PinPrompt, 1);
 	prompt->refs = 1;
-	prompt->impl = impl;
+	prompt->provider = provider;
 	prompt->token = certificate_token_ref(token);
 	prompt->session_id = g_strdup(session_id);
 	prompt->protected_path = token->protected_authentication_path;

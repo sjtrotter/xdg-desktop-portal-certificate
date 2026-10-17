@@ -54,19 +54,6 @@ void certificate_pin_login_full(CertificateToken* token, const char* session_id,
                                 GDestroyNotify login_data_free, GCancellable* cancellable,
                                 CertificatePinDone done, gpointer user_data);
 
-/** The module defaults to GTK; auto selects an owned or activatable system prompter. */
-typedef enum
-{
-	CERTIFICATE_PIN_PROMPT_AUTO,
-	CERTIFICATE_PIN_PROMPT_GTK,
-	CERTIFICATE_PIN_PROMPT_SYSTEM
-} CertificatePinPromptKind;
-
-gboolean certificate_pin_set_prompt_kind(const char* name, GError** error);
-
-/** Resolving auto may query the bus. */
-const char* certificate_pin_prompt_name(void);
-
 /** Default 60 seconds; 0 disables. On timeout the prompt closes with
  *  CERTIFICATE_PIN_TIMED_OUT and a login that returns later is abandoned. The
  *  module call is not interrupted, so the caller is answered when it returns. */

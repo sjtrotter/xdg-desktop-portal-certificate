@@ -10,6 +10,7 @@
 #include "broker/device.h"
 #include "broker/operations.h"
 #include "session-impl.h"
+#include "ui/pin-backends.h"
 
 #define FIXTURE_PIN "123456"
 
@@ -251,6 +252,7 @@ static void test_grant_without_decrypt(Fixture* fixture, gconstpointer user_data
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	certificate_pin_set_provider(certificate_pin_provider_gtk());
 
 #define ADD(path, function) \
 	g_test_add(path, Fixture, NULL, fixture_set_up, function, fixture_tear_down)

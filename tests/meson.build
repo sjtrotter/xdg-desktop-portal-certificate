@@ -43,6 +43,18 @@ service_test_cases = {
   'broker-regrant': 'test-broker-regrant.c',
 }
 
+exe = executable(
+  'test-pin-policy',
+  ['test-pin-policy.c', 'fake-pin-provider.c'],
+  link_with: [certificate_pin_policy, certificate_core],
+  dependencies: certificate_deps,
+  include_directories: [config_inc, include_directories('..' / 'src')],
+  c_args: certificate_log_args,
+  install: false,
+)
+
+test('pin-policy', exe, protocol: 'tap', env: test_env, timeout: 120)
+
 foreach name, source : service_test_cases
   exe = executable(
     'test-' + name,

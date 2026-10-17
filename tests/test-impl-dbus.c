@@ -15,6 +15,7 @@
 #include "session-impl.h"
 #include "tokens/filter.h"
 #include "ui/pin.h"
+#include "ui/pin-backends.h"
 
 #define FRONTEND_NAME "org.freedesktop.portal.Desktop"
 #define IMPL_PATH "/org/freedesktop/portal/desktop"
@@ -1001,6 +1002,7 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	certificate_pin_set_provider(certificate_pin_provider_gtk());
 	/* Keep toolkit settings and accessibility off the private service bus. */
 	g_setenv("GTK_A11Y", "test", TRUE);
 	g_setenv("ADW_DISABLE_PORTAL", "1", TRUE);

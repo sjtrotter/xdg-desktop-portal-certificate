@@ -14,6 +14,7 @@
 #include "../certificate.h"
 #include "../redact.h"
 #include "pin-internal.h"
+#include "pin-backends.h"
 
 /* The prompter name is fixed because changing it redirects PIN input. */
 #define SYSTEM_PROMPTER_NAME "org.gnome.keyring.SystemPrompter"
@@ -75,7 +76,7 @@ static void system_pin_free(gpointer data)
 	g_free(ui);
 }
 
-gboolean certificate_pin_impl_system_available(void)
+gboolean certificate_pin_provider_system_available(void)
 {
 	g_autoptr(GDBusConnection) bus = NULL;
 	g_autoptr(GError) error = NULL;
@@ -211,8 +212,7 @@ static void handle_confirmed(PinPrompt* prompt, GObject* source, GAsyncResult* r
 	if (passive)
 		return;
 
-	/* Final-attempt confirmation is recorded; this submission spends the attempt. */
-	certificate_pin_prompt_submit(prompt);
+	certificate_pin_prompt_warning_reply(prompt, TRUE);
 }
 
 static void on_confirmed(GObject* source, GAsyncResult* result, gpointer user_data)
@@ -229,7 +229,6 @@ static void on_confirmed(GObject* source, GAsyncResult* result, gpointer user_da
 
 static void handle_password(PinPrompt* prompt, GObject* source, GAsyncResult* result)
 {
-	SystemPinPrompt* ui = system_pin(prompt);
 	g_autoptr(GError) error = NULL;
 	const char* password = NULL;
 
@@ -261,22 +260,6 @@ static void handle_password(PinPrompt* prompt, GObject* source, GAsyncResult* re
 	/* A rejected held PIN rearms retry without spending an attempt. */
 	if (!certificate_pin_prompt_hold(prompt, password))
 		return;
-
-	/* Keep the PIN in locked storage while awaiting final-attempt confirmation. */
-	if (certificate_pin_prompt_needs_final_confirm(prompt))
-	{
-		if (ui->gcr == NULL || ui->closed)
-		{
-			certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_CANCELLED);
-			return;
-		}
-
-		gcr_prompt_set_warning(ui->gcr, certificate_pin_prompt_final_try_warning());
-		gcr_prompt_set_continue_label(ui->gcr, "Use the last attempt");
-		gcr_prompt_confirm_async(ui->gcr, NULL, on_confirmed,
-		                         certificate_pin_prompt_ref(prompt));
-		return;
-	}
 
 	certificate_pin_prompt_submit(prompt);
 }
@@ -373,20 +356,14 @@ static void handle_prompt_opened(PinPrompt* prompt, GAsyncResult* result)
 	/* Protected authentication shows no password field and still requires confirmation on FINAL_TRY. */
 	if (prompt->protected_path)
 	{
-		gboolean confirm = certificate_pin_prompt_needs_final_confirm(prompt);
-
-		if (confirm)
+		if (!prompt->token->pin_final_try)
 		{
-			gcr_prompt_set_warning(ui->gcr, certificate_pin_prompt_final_try_warning());
-			gcr_prompt_set_continue_label(ui->gcr, "Use the last attempt");
+			ui->passive_confirm = TRUE;
+			gcr_prompt_confirm_async(ui->gcr, NULL, on_confirmed,
+			                         certificate_pin_prompt_ref(prompt));
 		}
 
-		ui->passive_confirm = !confirm;
-		gcr_prompt_confirm_async(ui->gcr, NULL, on_confirmed,
-		                         certificate_pin_prompt_ref(prompt));
-
-		if (!confirm)
-			certificate_pin_prompt_submit(prompt);
+		certificate_pin_prompt_submit(prompt);
 
 		return;
 	}
@@ -406,7 +383,7 @@ static void on_prompt_opened(GObject* source, GAsyncResult* result, gpointer use
 	certificate_pin_prompt_unref(prompt);
 }
 
-static void system_pin_start(PinPrompt* prompt)
+static void system_pin_show(gpointer user_data, PinPrompt* prompt)
 {
 	SystemPinPrompt* ui = g_new0(SystemPinPrompt, 1);
 
@@ -420,13 +397,13 @@ static void system_pin_start(PinPrompt* prompt)
 	                                          certificate_pin_prompt_ref(prompt));
 }
 
-static void system_pin_retry(PinPrompt* prompt, const char* status)
+static void system_pin_update(gpointer user_data, PinPrompt* prompt, const char* status)
 {
 	SystemPinPrompt* ui = system_pin(prompt);
 	const char* hint = certificate_pin_prompt_retry_hint(prompt);
 	g_autofree char* warning = NULL;
 
-	if (ui->gcr == NULL || ui->closed)
+	if (status == NULL || ui->gcr == NULL || ui->closed)
 		return;
 
 	/* Reuse the open prompt for retries and display only token-reported state flags. */
@@ -435,6 +412,22 @@ static void system_pin_retry(PinPrompt* prompt, const char* status)
 	gcr_prompt_set_continue_label(ui->gcr, "Unlock");
 
 	ask_for_password(prompt);
+}
+
+static void system_pin_warning(gpointer user_data, PinPrompt* prompt, const char* message)
+{
+	SystemPinPrompt* ui = system_pin(prompt);
+
+	if (ui->gcr == NULL || ui->closed)
+	{
+		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_CANCELLED);
+		return;
+	}
+
+	gcr_prompt_set_warning(ui->gcr, message);
+	gcr_prompt_set_continue_label(ui->gcr, "Use the last attempt");
+	gcr_prompt_confirm_async(ui->gcr, NULL, on_confirmed,
+	                         certificate_pin_prompt_ref(prompt));
 }
 
 /* Release the reference held across asynchronous close. */
@@ -491,27 +484,28 @@ static void system_pin_release(PinPrompt* prompt)
 	g_clear_object(&ui->gcr);
 }
 
-static void system_pin_hide(PinPrompt* prompt)
+static void system_pin_hide(gpointer user_data, PinPrompt* prompt)
 {
 	system_pin_release(prompt);
 }
 
-static void system_pin_close(PinPrompt* prompt)
+static void system_pin_close(gpointer user_data, PinPrompt* prompt)
 {
 	system_pin_release(prompt);
 }
 
-const PinPromptImpl* certificate_pin_impl_system(void)
+const CertificatePinProvider* certificate_pin_provider_system(void)
 {
-	static const PinPromptImpl impl = {
+	static const CertificatePinProvider provider = {
 		.name = "system",
 		/* The shell draws this prompt, so the backend needs no display connection for it. */
 		.needs_display = FALSE,
-		.start = system_pin_start,
-		.retry = system_pin_retry,
+		.pin_show = system_pin_show,
+		.pin_update = system_pin_update,
+		.warning = system_pin_warning,
 		.hide = system_pin_hide,
 		.close = system_pin_close,
 	};
 
-	return &impl;
+	return &provider;
 }

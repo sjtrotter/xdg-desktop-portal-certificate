@@ -13,6 +13,7 @@
 #include "fixture-util.h"
 #include "session-impl.h"
 #include "ui/pin.h"
+#include "ui/pin-backends.h"
 
 #define FIXTURE_PIN "123456"
 
@@ -264,6 +265,7 @@ static void test_sign_logs_ids(void)
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	certificate_pin_set_provider(certificate_pin_provider_gtk());
 
 	g_test_add_func("/regrant/signs-with-the-new-certificate",
 	                test_regrant_signs_with_the_new_certificate);

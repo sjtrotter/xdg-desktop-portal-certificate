@@ -11,6 +11,7 @@
 #include "fixture-util.h"
 #include "ui/chooser.h"
 #include "ui/pin.h"
+#include "ui/pin-backends.h"
 
 static void assert_is_safe_display_text(const char* text)
 {
@@ -485,6 +486,7 @@ static void test_empty_and_updates(gconstpointer data)
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	certificate_pin_set_provider(certificate_pin_provider_gtk());
 
 	g_test_add_func("/chooser/purpose-wording", test_purpose_wording);
 	g_test_add_func("/chooser/lifetime-wording", test_lifetime_wording);
