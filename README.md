@@ -7,6 +7,10 @@ time-limited grant and asks the portal for signatures. The private key stays on 
 
 A PKCS#11 module in the same repository puts that grant behind the PKCS#11 API, so applications
 that already speak PKCS#11 (Firefox, GnuTLS clients, WebKitGTK) can use the portal unchanged.
+Such an application reaches the portal only when the module is loaded into it, and nothing
+loads it automatically yet: in Firefox, load it from Security Devices; for Chrome, register it
+in Chrome's NSS database (`tools/firefox-flatpak.sh` and `tools/chrome-flatpak.sh` print or do
+the steps). Without the module, the browser never calls the portal.
 
 The interface is experimental and not merged upstream. The frontend lives on a branch of a
 fork of xdg-desktop-portal; see [Upstreaming](docs/UPSTREAMING.md).
