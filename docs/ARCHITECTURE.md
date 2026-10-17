@@ -110,6 +110,12 @@ its bus name on the session bus and exports the desktop path [[S35](SOURCES.md)]
 Requests return method results and have no `Response` signal; the public Request owns the
 at-most-one-terminal-response rule.
 
+[`core/session.h`](../src/core/session.h) defines `XccSession`, which owns grants,
+monotonic expiry, token devices, shared login state and operation locks. The broker uses
+this core object. `session-impl.c` retains the Session export, frontend identity and Close
+authorization, forwarding core invalidation to the existing D-Bus signals. Invalidated
+sessions stay exported until frontend Close().
+
 The frontend's `xdp_request_dex_new()` needs a separate `xdp_request_dex_export()` call.
 Shared request/session dependencies are in [UPSTREAMING.md](UPSTREAMING.md#frontend-dependencies).
 

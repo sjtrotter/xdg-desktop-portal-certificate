@@ -9,7 +9,7 @@
 
 #include "broker/device.h"
 #include "broker/operations.h"
-#include "session-impl.h"
+#include "core/session-private.h"
 #include "ui/pin-backends.h"
 
 #define FIXTURE_PIN "123456"
@@ -19,7 +19,7 @@ typedef struct
 	CertificateTokens* tokens;
 	GPtrArray* candidates;
 	CertificateCandidate* rsa;
-	CertificateImplSession* session;
+	XccSession* session;
 } Fixture;
 
 typedef struct
@@ -108,9 +108,9 @@ static void fixture_set_up(Fixture* fixture, gconstpointer user_data)
 		return;
 	}
 
-	fixture->session = certificate_impl_session_new(
-	    "/org/freedesktop/portal/desktop/session/decrypt/1", "org.example.App");
-	certificate_impl_session_grant(fixture->session, fixture->rsa,
+	fixture->session = xcc_session_new(
+	    "/org/freedesktop/portal/desktop/session/decrypt/1", NULL, NULL);
+	xcc_session_grant(fixture->session, fixture->rsa,
 	                              CERTIFICATE_PURPOSE_CLIENT_AUTH, FALSE, TRUE, 300);
 
 	/* Pre-login avoids a PIN window in this operation-only test. */
@@ -125,12 +125,12 @@ static void fixture_tear_down(Fixture* fixture, gconstpointer user_data)
 {
 	if (fixture->session != NULL)
 	{
-		certificate_impl_session_close(fixture->session);
+		xcc_session_close(fixture->session);
 		g_clear_object(&fixture->session);
 	}
 
 	/* Drain asynchronous device closes before finalizing the module. */
-	certificate_impl_session_drain_releases(2000);
+	xcc_session_drain_releases(2000);
 
 	g_clear_pointer(&fixture->candidates, g_ptr_array_unref);
 	g_clear_pointer(&fixture->tokens, certificate_tokens_free);
@@ -218,7 +218,7 @@ static void test_decrypt_budget(Fixture* fixture, gconstpointer user_data)
 
 	g_assert_cmpuint(fixture->session->decrypt_count, ==, CERTIFICATE_MAX_DECRYPTS_PER_GRANT);
 
-	certificate_impl_session_grant(fixture->session, fixture->rsa,
+	xcc_session_grant(fixture->session, fixture->rsa,
 	                              CERTIFICATE_PURPOSE_CLIENT_AUTH, FALSE, TRUE, 300);
 	g_assert_cmpuint(fixture->session->decrypt_count, ==, 0);
 
@@ -239,7 +239,7 @@ static void test_grant_without_decrypt(Fixture* fixture, gconstpointer user_data
 
 	garbage = modulus_length_bytes(fixture, 0x42);
 
-	certificate_impl_session_grant(fixture->session, fixture->rsa,
+	xcc_session_grant(fixture->session, fixture->rsa,
 	                              CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE, FALSE, 300);
 
 	decrypt(fixture, "{'hash': <'SHA1'>}", garbage, &answer);

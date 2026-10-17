@@ -9,6 +9,7 @@
 
 #include "pin-prompter.h"
 #include "broker/operations.h"
+#include "core/session-private.h"
 #include "fixture-util.h"
 #include "tokens/discovery.h"
 #include "core/pin.h"
@@ -923,8 +924,8 @@ static void test_broker_context_login(Fixture* fixture, gconstpointer user_data)
 {
 	g_autoptr(CertificateCandidate) candidate =
 	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
-	g_autoptr(CertificateImplSession) session = certificate_impl_session_new(
-	    "/org/freedesktop/portal/desktop/session/t/context", "org.example.App");
+	g_autoptr(XccSession) session = xcc_session_new(
+	    "/org/freedesktop/portal/desktop/session/t/context", NULL, NULL);
 	g_autoptr(GBytes) digest = g_bytes_new_static("01234567890123456789012345678901", 32);
 	g_autoptr(GVariant) parameters =
 	    g_variant_parse(G_VARIANT_TYPE_VARDICT, "{'hash': <'SHA256'>}", NULL, NULL, NULL);
@@ -941,8 +942,8 @@ static void test_broker_context_login(Fixture* fixture, gconstpointer user_data)
 
 	g_clear_pointer(&candidate->token, certificate_token_unref);
 	candidate->token = make_token();
-	certificate_impl_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
-	                               FALSE, 300);
+	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
+	                  FALSE, 300);
 	session->device.module = &module;
 	session->device.session = 1;
 	session->device.private_key = 1;
@@ -967,7 +968,7 @@ static void test_broker_context_login(Fixture* fixture, gconstpointer user_data)
 	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 2);
 	g_assert_cmpuint(certificate_test_prompter_prompts_created(), ==, 2);
 	certificate_device_close(&session->device);
-	certificate_impl_session_close(session);
+	xcc_session_close(session);
 }
 
 typedef struct
@@ -1037,7 +1038,7 @@ static void run_context_cancel_queued(gboolean hold_open)
 	g_autoptr(CertificateTokens) tokens = NULL;
 	g_autoptr(GPtrArray) candidates = NULL;
 	g_autoptr(GError) error = NULL;
-	g_autoptr(CertificateImplSession) session = NULL;
+	g_autoptr(XccSession) session = NULL;
 	CertificateCandidate* candidate = NULL;
 	CertificateDevice setup = { 0 };
 	const char* modules[2] = { NULL, NULL };
@@ -1131,10 +1132,9 @@ static void run_context_cancel_queued(gboolean hold_open)
 	g_byte_array_set_size(candidate->cka_id, 0);
 	g_byte_array_append(candidate->cka_id, id, sizeof(id));
 
-	session = certificate_impl_session_new("/org/freedesktop/portal/desktop/session/t/queued",
-	                                       "org.example.App");
-	certificate_impl_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
-	                               FALSE, 300);
+	session = xcc_session_new("/org/freedesktop/portal/desktop/session/t/queued", NULL, NULL);
+	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
+	                  FALSE, 300);
 	g_assert_true(certificate_device_open(&session->device, tokens, candidate, &error));
 	g_assert_true(certificate_device_login(&session->device, candidate, "123456", &error));
 	g_assert_no_error(error);
@@ -1210,7 +1210,7 @@ static void run_context_cancel_queued(gboolean hold_open)
 	}
 	gnutls_pubkey_deinit(verifier);
 	certificate_device_close(&session->device);
-	certificate_impl_session_close(session);
+	xcc_session_close(session);
 	g_assert_true(certificate_device_login(&setup, candidate, "123456", &error));
 	g_assert_no_error(error);
 	/* Logout invalidates private object handles, so resolve both keys again for cleanup. */

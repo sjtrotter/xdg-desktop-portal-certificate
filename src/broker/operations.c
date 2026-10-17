@@ -8,6 +8,7 @@
 
 #include <string.h>
 
+#include "../core/session-private.h"
 #include "../redact.h"
 #include "../core/pin.h"
 
@@ -19,7 +20,7 @@ typedef struct
 	gboolean answered;
 
 	CertificateTokens* tokens;
-	CertificateImplSession* session;
+	XccSession* session;
 	gboolean decrypt;
 	char* operation_id;
 	CertificateMechanism mechanism;
@@ -94,7 +95,7 @@ static void operation_succeed(Operation* operation, GBytes* result)
 }
 
 /* The authoritative budget check and charge run under device_lock. */
-static gboolean certificate_broker_decrypts_spent(CertificateImplSession* session)
+static gboolean certificate_broker_decrypts_spent(XccSession* session)
 {
 	gboolean spent;
 
@@ -108,7 +109,7 @@ static gboolean certificate_broker_decrypts_spent(CertificateImplSession* sessio
 /* PKCS#11 cannot revoke submitted work; recheck expiry under the device lock before submission. */
 static gboolean operation_still_authorised(Operation* operation, GError** error)
 {
-	CertificateImplSession* session = operation->session;
+	XccSession* session = operation->session;
 
 	if (operation->cancellable != NULL && g_cancellable_is_cancelled(operation->cancellable))
 	{
@@ -124,7 +125,7 @@ static gboolean operation_still_authorised(Operation* operation, GError** error)
 		return FALSE;
 	}
 
-	if (certificate_impl_session_is_expired(session))
+	if (xcc_session_is_expired(session))
 	{
 		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
 		                    "Grant expired");
@@ -137,7 +138,7 @@ static gboolean operation_still_authorised(Operation* operation, GError** error)
 /* Runs on a worker thread under device_lock. */
 static gboolean ensure_session_locked(Operation* operation, GError** error)
 {
-	CertificateImplSession* session = operation->session;
+	XccSession* session = operation->session;
 
 	return certificate_device_open(&session->device, operation->tokens, session->candidate,
 	                               error);
@@ -150,7 +151,7 @@ typedef struct
 	gint refs;
 
 	CertificateTokens* tokens;
-	CertificateImplSession* session;
+	XccSession* session;
 
 	/* Only the interaction that performed the login may undo it. */
 	gboolean performed_login;
@@ -180,7 +181,7 @@ static void login_interaction_unref(gpointer data)
 static gboolean do_login(const char* pin, gpointer user_data, GError** error)
 {
 	LoginInteraction* interaction = user_data;
-	CertificateImplSession* session = interaction->session;
+	XccSession* session = interaction->session;
 	gboolean ok;
 
 	g_mutex_lock(&session->device_lock);
@@ -210,7 +211,7 @@ static void do_refresh_flags(CertificateToken* token, gpointer user_data)
 static void do_abandon(gpointer user_data)
 {
 	LoginInteraction* interaction = user_data;
-	CertificateImplSession* session = interaction->session;
+	XccSession* session = interaction->session;
 	gboolean still_wanted = FALSE;
 
 	if (!interaction->performed_login)
@@ -226,7 +227,7 @@ static void do_abandon(gpointer user_data)
 
 	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id,
 	                      "logged-out-after-cancelled-login");
-	certificate_impl_session_release_device_async(session);
+	xcc_session_release_device_async(session);
 }
 
 typedef struct
@@ -243,7 +244,7 @@ static gboolean do_context_login(const char* pin, gpointer user_data, GError** e
 {
 	ContextAuthentication* authentication = user_data;
 	Operation* operation = authentication->operation;
-	CertificateImplSession* session = operation->session;
+	XccSession* session = operation->session;
 	gboolean ok;
 
 	g_mutex_lock(&session->device_lock);
@@ -285,7 +286,7 @@ static gboolean prompt_context_pin(gpointer user_data)
 {
 	ContextAuthentication* authentication = user_data;
 	Operation* operation = authentication->operation;
-	CertificateImplSession* session = operation->session;
+	XccSession* session = operation->session;
 
 	certificate_pin_login_full(session->candidate->token, session->id, operation->parent_window,
 	                           operation->caller_display, operation->purpose_display,
@@ -298,7 +299,7 @@ static gboolean prompt_context_pin(gpointer user_data)
 static gboolean authenticate_context(gpointer user_data, GError** error)
 {
 	Operation* operation = user_data;
-	CertificateImplSession* session = operation->session;
+	XccSession* session = operation->session;
 	ContextAuthentication authentication = {
 		.operation = operation, .handle = session->device.session
 	};
@@ -361,7 +362,7 @@ static void sign_thread(GTask* task, gpointer source, gpointer task_data,
                         GCancellable* cancellable)
 {
 	Operation* operation = task_data;
-	CertificateImplSession* session = operation->session;
+	XccSession* session = operation->session;
 	g_autoptr(GError) error = NULL;
 	GBytes* result = NULL;
 
@@ -519,7 +520,7 @@ static void apply_login_outcome(Operation* operation, CertificatePinOutcome outc
 			return;
 
 		case CERTIFICATE_PIN_TOKEN_REMOVED:
-			certificate_impl_session_invalidate(operation->session, "token_removed");
+			xcc_session_invalidate(operation->session, "token_removed");
 			operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
 			                                   CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
 			                                   "Token removed"));
@@ -566,7 +567,7 @@ static void detach_waiter_cancel(Operation* operation)
 static void on_pin_done(CertificatePinOutcome outcome, gpointer user_data)
 {
 	LoginInteraction* interaction = user_data;
-	CertificateImplSession* session = interaction->session;
+	XccSession* session = interaction->session;
 	/* The array owns one reference per waiter. */
 	g_autoptr(GPtrArray) waiters = NULL;
 	g_autoptr(GCancellable) cancellable = NULL;
@@ -594,7 +595,7 @@ static void on_pin_done(CertificatePinOutcome outcome, gpointer user_data)
 static gboolean waiter_cancelled_idle(gpointer user_data)
 {
 	Operation* operation = user_data;
-	CertificateImplSession* session = operation->session;
+	XccSession* session = operation->session;
 	g_autoptr(GCancellable) close_the_window = NULL;
 	gboolean was_waiting = FALSE;
 
@@ -642,7 +643,7 @@ static void open_thread(GTask* task, gpointer source, gpointer task_data,
                         GCancellable* cancellable)
 {
 	Operation* operation = task_data;
-	CertificateImplSession* session = operation->session;
+	XccSession* session = operation->session;
 	g_autoptr(GError) error = NULL;
 	gboolean ok;
 
@@ -673,7 +674,7 @@ static void open_thread(GTask* task, gpointer source, gpointer task_data,
 static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 {
 	Operation* operation = user_data;
-	CertificateImplSession* session = operation->session;
+	XccSession* session = operation->session;
 	g_autoptr(GError) error = NULL;
 	gboolean needs_login;
 	gboolean wait_for_login = FALSE;
@@ -684,7 +685,7 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 	{
 		if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR,
 		                    CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED))
-			certificate_impl_session_invalidate(session, "token_removed");
+			xcc_session_invalidate(session, "token_removed");
 
 		operation_fail(operation, g_steal_pointer(&error));
 		return;
@@ -759,7 +760,7 @@ static void open_operation(Operation* operation)
 	g_task_run_in_thread(task, open_thread);
 }
 
-void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSession* session,
+void certificate_broker_perform(CertificateTokens* tokens, XccSession* session,
                                 gboolean decrypt, const char* operation_id,
                                 const char* mechanism_name,
                                 GVariant* parameters, GBytes* data, const char* parent_window,
@@ -787,7 +788,7 @@ void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSessio
 		return;
 	}
 
-	if (certificate_impl_session_is_expired(session))
+	if (xcc_session_is_expired(session))
 	{
 		g_set_error_literal(&error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
 		                    "Grant expired");

@@ -139,7 +139,7 @@ static void close_and_forget_all(CertificateImpl* impl, const char* reason)
 		CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(value);
 
 		if (reason != NULL)
-			certificate_impl_session_invalidate(session, reason);
+			xcc_session_invalidate(session->core, reason);
 		else
 			certificate_impl_session_close(session);
 
@@ -478,7 +478,7 @@ static CertificateImplSession* lookup_session(CertificateImpl* impl, const char*
 
 	*code = "no_such_session";
 
-	if (session == NULL || session->closed)
+	if (session == NULL || xcc_session_is_closed(session->core))
 		return NULL;
 
 	/* Bind each session to its app_id to prevent cross-application key use. */
@@ -509,7 +509,7 @@ static gboolean handle_create_session(XdpImplExperimentalCertificate1* object,
 	                         "create_session", TRUE);
 
 	existing = g_hash_table_lookup(impl->sessions, arg_session_handle);
-	if (existing != NULL && !existing->closed)
+	if (existing != NULL && !xcc_session_is_closed(existing->core))
 	{
 		xdp_impl_experimental_certificate1_complete_create_session(
 		    object, invocation, CERTIFICATE_RESPONSE_OTHER, error_results("invalid_request"));
@@ -638,7 +638,7 @@ static void finish_acquire(Transaction* transaction, CertificateCandidate* candi
 	CertificateImplSession* session = transaction->session;
 
 	/* The session, frontend or token may disappear while the chooser is open. */
-	if (session == NULL || session->closed)
+	if (session == NULL || xcc_session_is_closed(session->core))
 	{
 		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
 		                    error_results("no_such_session"));
@@ -656,9 +656,9 @@ static void finish_acquire(Transaction* transaction, CertificateCandidate* candi
 	}
 
 	/* The interface exposes Sign only, so no grant permits decryption. */
-	certificate_impl_session_grant(session, candidate, transaction->purpose,
-	                               transaction->may_sign && candidate->can_sign, FALSE,
-	                               transaction->lifetime);
+	xcc_session_grant(session->core, candidate, transaction->purpose,
+	                  transaction->may_sign && candidate->can_sign, FALSE,
+	                  transaction->lifetime);
 
 	certificate_log_decision(CERTIFICATE_REASON_GRANT_CREATED, transaction->caller.app_id,
 	                         certificate_identity_level_to_string(transaction->caller.level),
@@ -1158,8 +1158,8 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	caller_display = certificate_app_display_name(arg_app_id);
 
 	certificate_broker_perform(
-	    impl->tokens, session, FALSE, operation_id, mechanism, parameters, data, arg_parent_window,
-	    caller_display != NULL ? caller_display : arg_app_id,
+	    impl->tokens, session->core, FALSE, operation_id, mechanism, parameters, data,
+	    arg_parent_window, caller_display != NULL ? caller_display : arg_app_id,
 	    certificate_impl_request_get_cancellable(transaction->request), on_operation_done,
 	    transaction);
 
@@ -1303,14 +1303,17 @@ static void on_token_event(CertificateToken* token, gboolean added, gpointer use
 		{
 			CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(value);
 
-			if (session->candidate != NULL &&
-			    certificate_token_same(session->candidate->token, token))
+			if (xcc_session_uses_token(session->core, token))
 				g_ptr_array_add(doomed, g_object_ref(session));
 		}
 
 		/* Keep invalidated sessions exported until the frontend answers with Session.Close(). */
 		for (guint i = 0; i < doomed->len; i++)
-			certificate_impl_session_invalidate(g_ptr_array_index(doomed, i), "token_removed");
+		{
+			CertificateImplSession* session = g_ptr_array_index(doomed, i);
+
+			xcc_session_invalidate(session->core, "token_removed");
+		}
 	}
 }
 
@@ -1376,7 +1379,7 @@ void certificate_impl_shutdown(CertificateImpl* impl)
 
 	g_hash_table_iter_init(&iter, impl->sessions);
 	while (g_hash_table_iter_next(&iter, NULL, &value))
-		certificate_impl_session_invalidate(CERTIFICATE_IMPL_SESSION(value), "backend_gone");
+		xcc_session_invalidate(CERTIFICATE_IMPL_SESSION(value)->core, "backend_gone");
 
 	close_and_forget_all(impl, NULL);
 
@@ -1385,7 +1388,7 @@ void certificate_impl_shutdown(CertificateImpl* impl)
 	certificate_tokens_stop_watch(impl->tokens);
 
 	/* Bound shutdown's wait for worker logouts so an unresponsive reader cannot prevent exit. */
-	certificate_impl_session_drain_releases(2000);
+	xcc_session_drain_releases(2000);
 }
 
 void certificate_impl_free(CertificateImpl* impl)
