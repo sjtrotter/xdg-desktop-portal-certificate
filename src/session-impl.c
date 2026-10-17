@@ -61,33 +61,22 @@ static void certificate_impl_session_finalize(GObject* object)
 {
 	CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(object);
 
-	/* Async release holds a reference until completion; finalization also closes devices on early error paths. */
-	certificate_impl_session_release_device(session);
-
-	if (session->expiry_source != 0)
-		g_source_remove(session->expiry_source);
-
+	if (session->core != NULL)
+		xcc_session_set_invalidated_callback(session->core, NULL, NULL);
+	g_clear_object(&session->core);
 	certificate_impl_session_unexport(session);
-
-	g_clear_pointer(&session->login_waiters, g_ptr_array_unref);
-	g_clear_object(&session->login_cancellable);
-	g_clear_pointer(&session->candidate, certificate_candidate_unref);
-	g_clear_pointer(&session->id, g_free);
-	g_clear_pointer(&session->app_id, g_free);
-	g_clear_pointer(&session->owner, g_free);
-	g_mutex_clear(&session->device_lock);
-	g_mutex_clear(&session->operation_lock);
+	g_free(session->id);
+	g_free(session->app_id);
+	g_free(session->owner);
 
 	G_OBJECT_CLASS(certificate_impl_session_parent_class)->finalize(object);
 }
 
 static void certificate_impl_session_class_init(CertificateImplSessionClass* klass)
 {
-	GObjectClass* object_class = G_OBJECT_CLASS(klass);
+	G_OBJECT_CLASS(klass)->finalize = certificate_impl_session_finalize;
 
-	object_class->finalize = certificate_impl_session_finalize;
-
-	/* The reason passes unchanged to SessionInvalidated; see docs/IMPL-INTERFACE.md. */
+	/* The reason passes unchanged to SessionInvalidated. */
 	signals[SIGNAL_INVALIDATED] =
 	    g_signal_new("invalidated", CERTIFICATE_TYPE_IMPL_SESSION, G_SIGNAL_RUN_LAST, 0, NULL,
 	                 NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
@@ -95,11 +84,16 @@ static void certificate_impl_session_class_init(CertificateImplSessionClass* kla
 
 static void certificate_impl_session_init(CertificateImplSession* session)
 {
-	g_mutex_init(&session->device_lock);
-	g_mutex_init(&session->operation_lock);
-	session->device.session = CK_INVALID_HANDLE;
-	session->device.private_key = CK_INVALID_HANDLE;
 	xdp_impl_session_set_version(XDP_IMPL_SESSION(session), 1);
+}
+
+static void on_core_invalidated(XccSession* core, const char* reason, gpointer user_data)
+{
+	g_autoptr(CertificateImplSession) session = g_object_ref(user_data);
+
+	g_signal_emit(session, signals[SIGNAL_INVALIDATED], 0, reason);
+	if (session->exported)
+		xdp_impl_session_emit_closed(XDP_IMPL_SESSION(session));
 }
 
 CertificateImplSession* certificate_impl_session_new(const char* session_handle,
@@ -110,6 +104,7 @@ CertificateImplSession* certificate_impl_session_new(const char* session_handle,
 	session->id = g_strdup(session_handle);
 	session->app_id = g_strdup(app_id);
 	session->identity_level = CERTIFICATE_IDENTITY_UNKNOWN;
+	session->core = xcc_session_new(session_handle, on_core_invalidated, session);
 
 	return session;
 }
@@ -138,166 +133,8 @@ void certificate_impl_session_unexport(CertificateImplSession* session)
 	g_dbus_interface_skeleton_unexport(G_DBUS_INTERFACE_SKELETON(session));
 }
 
-static gboolean on_lifetime_expired(gpointer user_data)
-{
-	CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(user_data);
-
-	session->expiry_source = 0;
-
-	/* This timer releases device state if the frontend misses its expiry deadline. */
-	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "lifetime-expired");
-	certificate_impl_session_invalidate(session, "expired");
-
-	return G_SOURCE_REMOVE;
-}
-
-void certificate_impl_session_grant(CertificateImplSession* session,
-                                    CertificateCandidate* candidate, CertificatePurpose purpose,
-                                    gboolean may_sign, gboolean may_decrypt, guint32 lifetime)
-{
-	g_clear_pointer(&session->candidate, certificate_candidate_unref);
-	session->candidate = certificate_candidate_ref(candidate);
-	session->purpose = purpose;
-	session->may_sign = may_sign;
-	session->may_decrypt = may_decrypt;
-
-	/* Device rebinding and budget updates share device_lock with operation workers. */
-	g_mutex_lock(&session->device_lock);
-	session->decrypt_count = 0;
-	g_mutex_unlock(&session->device_lock);
-
-	session->lifetime = lifetime;
-	/* Monotonic expiry prevents wall-clock adjustments from extending grants. */
-	session->expires_at = (g_get_monotonic_time() / G_USEC_PER_SEC) + lifetime;
-	session->granted = TRUE;
-
-	if (session->expiry_source != 0)
-		g_source_remove(session->expiry_source);
-
-	/* Operations expire at expires_at; only device teardown receives the grace period. */
-	session->expiry_source = g_timeout_add_seconds(lifetime + CERTIFICATE_EXPIRY_GRACE_SECONDS,
-	                                               on_lifetime_expired, session);
-}
-
-gboolean certificate_impl_session_is_expired(CertificateImplSession* session)
-{
-	if (!session->granted)
-		return FALSE;
-
-	return session->expires_at <= (g_get_monotonic_time() / G_USEC_PER_SEC);
-}
-
-void certificate_impl_session_release_device(CertificateImplSession* session)
-{
-	g_mutex_lock(&session->device_lock);
-	certificate_device_close(&session->device);
-	g_mutex_unlock(&session->device_lock);
-}
-
-/* Atomic count of pending worker releases, drained during shutdown. */
-static gint certificate_release_pending = 0;
-
-static void release_thread(GTask* task, gpointer source, gpointer task_data,
-                           GCancellable* cancellable)
-{
-	certificate_impl_session_release_device(CERTIFICATE_IMPL_SESSION(task_data));
-	g_task_return_boolean(task, TRUE);
-}
-
-static void on_device_released(GObject* source, GAsyncResult* result, gpointer user_data)
-{
-	g_atomic_int_add(&certificate_release_pending, -1);
-}
-
-void certificate_impl_session_release_device_async(CertificateImplSession* session)
-{
-	g_autoptr(GTask) task = NULL;
-
-	/* Avoid blocking the main thread when a worker holds device_lock. */
-	if (g_mutex_trylock(&session->device_lock))
-	{
-		gboolean idle = session->device.module == NULL;
-
-		g_mutex_unlock(&session->device_lock);
-
-		if (idle)
-			return;
-	}
-
-	g_atomic_int_add(&certificate_release_pending, 1);
-
-	task = g_task_new(NULL, NULL, on_device_released, NULL);
-	g_task_set_task_data(task, g_object_ref(session), g_object_unref);
-	g_task_run_in_thread(task, release_thread);
-}
-
-void certificate_impl_session_drain_releases(guint timeout_ms)
-{
-	gint64 deadline = g_get_monotonic_time() + (gint64) timeout_ms * 1000;
-
-	while (g_atomic_int_get(&certificate_release_pending) > 0)
-	{
-		if (g_get_monotonic_time() >= deadline)
-		{
-			/* Remaining logout work is left to module teardown. */
-			g_message("device-close-unfinished detail=shutdown-timeout timeout_ms=%u",
-			          timeout_ms);
-			return;
-		}
-
-		g_main_context_iteration(NULL, FALSE);
-		g_usleep(1000);
-	}
-}
-
 /* Keep the skeleton exported until frontend Close() or finalization. */
 void certificate_impl_session_close(CertificateImplSession* session)
 {
-	if (session->closed)
-		return;
-
-	session->closed = TRUE;
-
-	if (session->expiry_source != 0)
-	{
-		g_source_remove(session->expiry_source);
-		session->expiry_source = 0;
-	}
-
-	/* The worker owns a session reference while waiting on device_lock and the token. */
-	certificate_impl_session_release_device_async(session);
-}
-
-/* The wire vocabulary accepts policy, but this backend never emits it; expiry is a delayed fallback. */
-static const char* const certificate_session_reasons[] = {
-	"expired", "token_removed", "policy", "backend_gone", "error",
-};
-
-static const char* checked_reason(const char* reason)
-{
-	for (gsize i = 0; i < G_N_ELEMENTS(certificate_session_reasons); i++)
-	{
-		if (g_strcmp0(reason, certificate_session_reasons[i]) == 0)
-			return reason;
-	}
-
-	/* Invalid internal reason values fall back to the wire value error. */
-	g_critical("Invalid SessionInvalidated reason: '%s'",
-	           reason != NULL ? reason : "(null)");
-	return "error";
-}
-
-void certificate_impl_session_invalidate(CertificateImplSession* session, const char* reason)
-{
-	if (session->closed)
-		return;
-
-	reason = checked_reason(reason);
-
-	g_signal_emit(session, signals[SIGNAL_INVALIDATED], 0, reason);
-
-	if (session->exported)
-		xdp_impl_session_emit_closed(XDP_IMPL_SESSION(session));
-
-	certificate_impl_session_close(session);
+	xcc_session_close(session->core);
 }

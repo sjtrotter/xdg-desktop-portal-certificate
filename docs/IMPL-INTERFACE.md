@@ -112,7 +112,7 @@ selection that bypasses the chooser. The
 ### Invalidation vocabulary
 
 The public vocabulary is `expired`, `token_removed`, `policy`, `backend_gone`, `error`.
-`certificate_impl_session_invalidate()` in `src/session-impl.c` logs a `g_critical()` for
+`xcc_session_invalidate()` in `src/core/session.c` logs a `g_critical()` for
 an unknown reason and sends `error`.
 
 | Reason | Backend behavior |

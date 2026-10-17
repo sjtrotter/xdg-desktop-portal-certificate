@@ -23,6 +23,7 @@ certificate_core_sources = files(
   'core/chooser-format.c',
   'core/pin.c',
   'core/secret.c',
+  'core/session.c',
   'request-impl.c',
   'session-impl.c',
   'broker/device.c',

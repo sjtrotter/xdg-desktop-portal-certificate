@@ -10,7 +10,7 @@
 #include <glib.h>
 
 #include "../certificate.h"
-#include "../session-impl.h"
+#include "../core/session.h"
 #include "../tokens/discovery.h"
 #include "mechanism.h"
 
@@ -18,7 +18,7 @@
 
 typedef void (*CertificateBrokerDone)(GBytes* result, const GError* error, gpointer user_data);
 
-void certificate_broker_perform(CertificateTokens* tokens, CertificateImplSession* session,
+void certificate_broker_perform(CertificateTokens* tokens, XccSession* session,
                                 gboolean decrypt, const char* operation_id,
                                 const char* mechanism_name,
                                 GVariant* parameters, GBytes* data, const char* parent_window,

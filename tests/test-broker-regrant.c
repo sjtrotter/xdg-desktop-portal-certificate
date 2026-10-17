@@ -11,7 +11,7 @@
 #include "broker/device.h"
 #include "broker/operations.h"
 #include "fixture-util.h"
-#include "session-impl.h"
+#include "core/session-private.h"
 #include "core/pin.h"
 #include "ui/pin-backends.h"
 
@@ -51,7 +51,7 @@ static char* fixture_directory(void)
 	return NULL;
 }
 
-static void run_and_wait(CertificateTokens* tokens, CertificateImplSession* session,
+static void run_and_wait(CertificateTokens* tokens, XccSession* session,
                          const char* mechanism, const char* hash, GBytes* data, Probe* probe)
 {
 	g_autofree char* text = g_strdup_printf("{'hash': <'%s'>}", hash);
@@ -82,7 +82,7 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	g_autoptr(GPtrArray) candidates = NULL;
 	g_autoptr(GError) error = NULL;
 	g_autoptr(GBytes) data = NULL;
-	CertificateImplSession* session = NULL;
+	XccSession* session = NULL;
 	CertificateCandidate* first = NULL;
 	CertificateCandidate* second = NULL;
 	Probe probe = { 0 };
@@ -140,11 +140,10 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	g_checksum_get_digest(checksum, digest, &digest_length);
 	data = g_bytes_new(digest, digest_length);
 
-	session = certificate_impl_session_new("/org/freedesktop/portal/desktop/session/t/regrant",
-	                                       "org.example.App");
+	session = xcc_session_new("/org/freedesktop/portal/desktop/session/t/regrant", NULL, NULL);
 
-	certificate_impl_session_grant(session, first, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE, FALSE,
-	                               300);
+	xcc_session_grant(session, first, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE, FALSE,
+	                  300);
 
 	/* Simulate PIN entry directly because the test has no display. */
 	g_assert_true(certificate_device_open(&session->device, tokens, first, &error));
@@ -164,8 +163,8 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	certificate_test_verify_signature(first, GNUTLS_SIGN_RSA_SHA256, digest, digest_length,
 	                                  probe.signature, FALSE);
 
-	certificate_impl_session_grant(session, second, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE, FALSE,
-	                               300);
+	xcc_session_grant(session, second, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE, FALSE,
+	                  300);
 
 	run_and_wait(tokens, session, "ECDSA", "SHA256", data, &probe);
 	g_assert_true(probe.failed);
@@ -195,9 +194,9 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	}
 
 	g_clear_pointer(&probe.signature, g_bytes_unref);
-	certificate_impl_session_close(session);
+	xcc_session_close(session);
 	/* Drain asynchronous device closes before finalizing the module. */
-	certificate_impl_session_drain_releases(2000);
+	xcc_session_drain_releases(2000);
 	g_object_unref(session);
 }
 
@@ -205,19 +204,19 @@ static void test_grant_expiry_is_monotonic(void)
 {
 	g_autoptr(CertificateCandidate) candidate =
 	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
-	CertificateImplSession* session = certificate_impl_session_new(
-	    "/org/freedesktop/portal/desktop/session/t/expiry", "org.example.App");
+	XccSession* session = xcc_session_new(
+	    "/org/freedesktop/portal/desktop/session/t/expiry", NULL, NULL);
 	gint64 monotonic;
 
-	certificate_impl_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
-	                               FALSE, 300);
+	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
+	                  FALSE, 300);
 
 	monotonic = g_get_monotonic_time() / G_USEC_PER_SEC;
 	g_assert_cmpint(session->expires_at, >=, monotonic + 299);
 	g_assert_cmpint(session->expires_at, <=, monotonic + 300);
-	g_assert_false(certificate_impl_session_is_expired(session));
+	g_assert_false(xcc_session_is_expired(session));
 
-	certificate_impl_session_close(session);
+	xcc_session_close(session);
 	g_object_unref(session);
 }
 
@@ -225,8 +224,8 @@ static void test_sign_logs_ids(void)
 {
 	g_autoptr(CertificateCandidate) candidate =
 	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
-	g_autoptr(CertificateImplSession) session = certificate_impl_session_new(
-	    "/org/freedesktop/portal/desktop/session/t/logging", "org.example.App");
+	g_autoptr(XccSession) session = xcc_session_new(
+	    "/org/freedesktop/portal/desktop/session/t/logging", NULL, NULL);
 	g_autofree char* long_id = g_strnfill(200, 'x');
 	g_autofree char* prefix = g_strnfill(128, 'x');
 	g_autofree char* capped_id = g_strconcat(prefix, "...", NULL);
@@ -241,8 +240,8 @@ static void test_sign_logs_ids(void)
 		{ long_id, capped_id },
 	};
 
-	certificate_impl_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, FALSE,
-	                               FALSE, 300);
+	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, FALSE,
+	                  FALSE, 300);
 
 	for (gsize i = 0; i < G_N_ELEMENTS(cases); i++)
 	{
@@ -259,7 +258,7 @@ static void test_sign_logs_ids(void)
 		g_assert_true(probe.failed);
 	}
 
-	certificate_impl_session_close(session);
+	xcc_session_close(session);
 }
 
 int main(int argc, char** argv)

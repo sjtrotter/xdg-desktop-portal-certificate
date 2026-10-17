@@ -60,14 +60,14 @@ experimental export conditions.
 | OAEP ciphertext is exactly one modulus long and label is at most 256 bytes | Internal decryption code; `test-mechanism.c`, `test-broker-device.c` |
 | Tokens are resolved by manufacturer, model, serial and label | `certificate_tokens_open_session()` in `src/tokens/discovery.c`; slot number alone is insufficient |
 | Tokens without serials are refused during acquisition | `finish_acquire()` in `src/certificate-impl.c` |
-| Grant expiry uses a monotonic clock | `src/session-impl.c`; closed, expired and cancelled state is checked before and under the device lock; `test-broker-regrant.c` checks clock behavior |
+| Grant expiry uses a monotonic clock | `src/core/session.c`; closed, expired and cancelled state is checked before and under the device lock; `test-broker-regrant.c` checks clock behavior |
 | Detected token removal invalidates that token's grants | `on_token_event()` in `src/certificate-impl.c` |
 | Frontend disappearance or replacement closes its grants | `on_frontend_vanished()`, `set_frontend_owner()` |
 | Shutdown signals `backend_gone` and flushes; owner replacement closes silently | `src/main.c`, `src/certificate-impl.c`; `test-impl-dbus.c`. Successor knows no old sessions; pending calls get `owner_gone`, which is not a signal reason |
-| Invalidation validates five reasons | `src/session-impl.c`: `expired`, `token_removed`, `policy`, `backend_gone`, `error`; unknown internal value logs a critical and sends `error` |
+| Invalidation validates five reasons | `src/core/session.c`: `expired`, `token_removed`, `policy`, `backend_gone`, `error`; unknown internal value logs a critical and sends `error` |
 | Logging accepts structured fields and escapes/caps external values | `src/redact.h`, `src/redact.c`; `test-redact.c` checks PIN-URI truncation and newline injection |
 | Full serials are excluded from logs and all serials from `token_display` | `src/redact.c`, `src/certificate-impl.c` |
-| Runtime PKCS#11 calls run off the main thread | `src/broker/`, `src/tokens/discovery.c`, `src/certificate-impl.c`, `src/session-impl.c`; includes capabilities and asynchronous release via `certificate_impl_session_release_device_async()` |
+| Runtime PKCS#11 calls run off the main thread | `src/broker/`, `src/tokens/discovery.c`, `src/certificate-impl.c`, `src/core/session.c`; includes capabilities and asynchronous release via `xcc_session_release_device_async()` |
 | Requests share one cancellation source | `src/request-impl.c`, `src/certificate-impl.c`; `Close()` cancels it, cancelled operations answer `1`; `test-cancellation.c` |
 | Inventory stays behind consent | `on_enumerated()` always opens the chooser, including empty results; forbidden interaction and no display answer uniformly; capabilities report backend support |
 | Discovery does not log in | `src/tokens/discovery.c`, `test-broker-device.c` |

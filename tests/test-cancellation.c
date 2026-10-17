@@ -9,7 +9,7 @@
 
 #include "broker/device.h"
 #include "broker/operations.h"
-#include "session-impl.h"
+#include "core/session-private.h"
 #include "core/pin.h"
 #include "ui/pin-backends.h"
 
@@ -520,7 +520,7 @@ static void test_cancel_during_sign(void)
 	g_autoptr(GCancellable) cancellable = g_cancellable_new();
 	g_autoptr(GVariant) parameters = NULL;
 	g_autoptr(GBytes) data = NULL;
-	CertificateImplSession* session = NULL;
+	XccSession* session = NULL;
 	CertificateCandidate* candidate = NULL;
 	SignProbe probe = { 0 };
 	const char* modules[2] = { NULL, NULL };
@@ -567,10 +567,9 @@ static void test_cancel_during_sign(void)
 		return;
 	}
 
-	session = certificate_impl_session_new("/org/freedesktop/portal/desktop/session/t/1",
-	                                       "org.example.App");
-	certificate_impl_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
-	                               FALSE, 300);
+	session = xcc_session_new("/org/freedesktop/portal/desktop/session/t/1", NULL, NULL);
+	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
+	                  FALSE, 300);
 
 	/* Pre-login avoids opening a PIN window during the operation test. */
 	g_assert_true(certificate_device_open(&session->device, tokens, candidate, &error));
@@ -631,9 +630,9 @@ static void test_cancel_during_sign(void)
 	g_mutex_clear(&sign_gate.lock);
 	g_cond_clear(&sign_gate.cond);
 
-	certificate_impl_session_close(session);
+	xcc_session_close(session);
 	/* Drain asynchronous device closes before finalizing the module. */
-	certificate_impl_session_drain_releases(2000);
+	xcc_session_drain_releases(2000);
 	g_object_unref(session);
 }
 
@@ -648,7 +647,7 @@ static void test_one_waiter_cancels_alone(void)
 	g_autoptr(GCancellable) second_cancellable = g_cancellable_new();
 	g_autoptr(GVariant) parameters = NULL;
 	g_autoptr(GBytes) data = NULL;
-	CertificateImplSession* session = NULL;
+	XccSession* session = NULL;
 	CertificateCandidate* candidate = NULL;
 	SignProbe first = { 0 };
 	SignProbe second = { 0 };
@@ -704,10 +703,9 @@ static void test_one_waiter_cancels_alone(void)
 		return;
 	}
 
-	session = certificate_impl_session_new("/org/freedesktop/portal/desktop/session/t/waiters",
-	                                       "org.example.App");
-	certificate_impl_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
-	                               FALSE, 300);
+	session = xcc_session_new("/org/freedesktop/portal/desktop/session/t/waiters", NULL, NULL);
+	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
+	                  FALSE, 300);
 
 	memset(digest, 0x5a, sizeof(digest));
 	data = g_bytes_new(digest, sizeof(digest));
@@ -748,8 +746,8 @@ static void test_one_waiter_cancels_alone(void)
 	g_assert_true(second.cancelled);
 	g_assert_false(pin_window_is_up());
 
-	certificate_impl_session_close(session);
-	certificate_impl_session_drain_releases(2000);
+	xcc_session_close(session);
+	xcc_session_drain_releases(2000);
 	g_object_unref(session);
 }
 
@@ -764,7 +762,7 @@ static void test_broker_cancelled_login_is_abandoned(void)
 	g_autoptr(GCancellable) prompt_cancellable = NULL;
 	g_autoptr(GVariant) parameters = NULL;
 	g_autoptr(GBytes) data = NULL;
-	CertificateImplSession* session = NULL;
+	XccSession* session = NULL;
 	CertificateCandidate* candidate = NULL;
 	GtkWidget* entry = NULL;
 	SignProbe probe = { 0 };
@@ -820,10 +818,9 @@ static void test_broker_cancelled_login_is_abandoned(void)
 		return;
 	}
 
-	session = certificate_impl_session_new("/org/freedesktop/portal/desktop/session/t/abandon",
-	                                       "org.example.App");
-	certificate_impl_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
-	                               FALSE, 300);
+	session = xcc_session_new("/org/freedesktop/portal/desktop/session/t/abandon", NULL, NULL);
+	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
+	                  FALSE, 300);
 
 	memset(digest, 0x5a, sizeof(digest));
 	data = g_bytes_new(digest, sizeof(digest));
@@ -865,11 +862,11 @@ static void test_broker_cancelled_login_is_abandoned(void)
 	g_assert_true(probe.cancelled);
 	g_assert_false(pin_window_is_up());
 
-	certificate_impl_session_drain_releases(2000);
+	xcc_session_drain_releases(2000);
 	g_assert_false(session->device.logged_in);
 
-	certificate_impl_session_close(session);
-	certificate_impl_session_drain_releases(2000);
+	xcc_session_close(session);
+	xcc_session_drain_releases(2000);
 	g_object_unref(session);
 }
 

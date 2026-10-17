@@ -35,6 +35,20 @@ foreach name, source : core_test_cases
   test(name, exe, protocol: 'tap', env: test_env)
 endforeach
 
+# Clock and timer seams keep lifecycle coverage independent of D-Bus and token fixtures.
+exe = executable(
+  'test-session',
+  'test-session.c',
+  link_with: certificate_core,
+  link_args: ['-Wl,--wrap=g_get_monotonic_time', '-Wl,--wrap=g_timeout_add_seconds'],
+  dependencies: certificate_deps,
+  include_directories: [config_inc, include_directories('..' / 'src')],
+  c_args: certificate_log_args,
+  install: false,
+)
+
+test('session', exe, protocol: 'tap', env: test_env)
+
 service_test_cases = {
   'impl-dbus': 'test-impl-dbus.c',
   'cancellation': 'test-cancellation.c',
