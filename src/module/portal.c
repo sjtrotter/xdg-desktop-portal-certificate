@@ -794,6 +794,7 @@ PortalGrant* portal_client_acquire(PortalClient* client, GError** error)
 	g_autoptr(PortalGrant) grant = NULL;
 	g_auto(GStrv) operations = NULL;
 	const char* purpose = chosen_purpose();
+	const char* lifetime = g_getenv(PKCS11_PORTAL_ENV_LIFETIME);
 	GVariantBuilder options;
 
 	if (!portal_client_available(client))
@@ -816,6 +817,16 @@ PortalGrant* portal_client_acquire(PortalClient* client, GError** error)
 	g_variant_builder_add(&options, "{sv}", "purpose", g_variant_new_string(purpose));
 	if (reason != NULL)
 		g_variant_builder_add(&options, "{sv}", "reason", g_variant_new_string(reason));
+	if (lifetime != NULL)
+	{
+		guint64 seconds;
+
+		if (g_ascii_string_to_unsigned(lifetime, 10, 1, 3600, &seconds, NULL))
+			g_variant_builder_add(&options, "{sv}", "requested_lifetime",
+			                      g_variant_new_uint32((guint32) seconds));
+		else
+			g_debug("Ignoring invalid requested lifetime");
+	}
 	add_operation_policy(&options);
 	add_certificate_filter(&options);
 

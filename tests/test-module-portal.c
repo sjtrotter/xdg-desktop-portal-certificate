@@ -1247,13 +1247,27 @@ static void test_close_all_sessions_releases_the_grant(void)
 	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
 }
 
+static void wait_session_invalid(CK_SESSION_HANDLE session)
+{
+	CK_SESSION_INFO info;
+	CK_RV rv;
+	gint64 deadline = g_get_monotonic_time() + WAIT_MS * G_TIME_SPAN_MILLISECOND;
+
+	do
+	{
+		rv = functions->C_GetSessionInfo(session, &info);
+		if (rv != CKR_OK)
+			break;
+		g_usleep(1000);
+	} while (g_get_monotonic_time() < deadline);
+	g_assert_cmpuint(rv, ==, CKR_SESSION_HANDLE_INVALID);
+}
+
 static void test_portal_session_closure_drops_the_grant(void)
 {
 	CK_SESSION_HANDLE session;
 	CK_OBJECT_HANDLE key;
-	CK_OBJECT_HANDLE replacement = CK_INVALID_HANDLE;
 	g_autofree char* path = NULL;
-	gint64 deadline;
 
 	fake_reset(ACQUIRE_ANSWER);
 	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
@@ -1263,16 +1277,9 @@ static void test_portal_session_closure_drops_the_grant(void)
 	g_dbus_connection_emit_signal(fake.connection, NULL, path,
 	                              "org.freedesktop.portal.Session", "Closed",
 	                              g_variant_new("(@a{sv})", empty_results()), NULL);
-
-	deadline = g_get_monotonic_time() + WAIT_MS * G_TIME_SPAN_MILLISECOND;
-	do
-	{
-		replacement = find_the_private_key(session);
-		if (replacement != key)
-			break;
-		g_usleep(1000);
-	} while (g_get_monotonic_time() < deadline);
-	g_assert_cmpuint(replacement, !=, key);
+	wait_session_invalid(session);
+	session = open_session();
+	g_assert_cmpuint(find_the_private_key(session), !=, key);
 	g_assert_cmpuint(fake_acquire_count(), ==, 2);
 	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
 }
@@ -1417,7 +1424,6 @@ static void test_pending_operations_do_not_survive_grant_release(gconstpointer d
 	CK_OBJECT_HANDLE replacement;
 	g_autofree char* path = NULL;
 	guint64 expires_at = 0;
-	gint64 deadline;
 	guint8 input[32] = { 0 };
 	guint8 signature[256];
 	guint8 plaintext[256];
@@ -1473,14 +1479,13 @@ static void test_pending_operations_do_not_survive_grant_release(gconstpointer d
 	fake.certificate = fixture_der("email-sign-and-encipher.pem");
 	fake.expires_at = 0;
 	g_mutex_unlock(&fake.lock);
-	deadline = g_get_monotonic_time() + WAIT_MS * G_TIME_SPAN_MILLISECOND;
-	do
+	if (strcmp(release, "closed") == 0 || strcmp(release, "expiry") == 0)
 	{
-		replacement = find_the_private_key(session);
-		if (replacement != key)
-			break;
-		g_usleep(1000);
-	} while (g_get_monotonic_time() < deadline);
+		wait_session_invalid(session);
+		session = open_session();
+		expected = CKR_SESSION_HANDLE_INVALID;
+	}
+	replacement = find_the_private_key(session);
 	g_assert_cmpuint(replacement, !=, key);
 	g_assert_cmpuint(fake_acquire_count(), ==, 2);
 
@@ -1503,6 +1508,113 @@ static void test_pending_operations_do_not_survive_grant_release(gconstpointer d
 	g_assert_cmpuint(fake.sign_count, ==, 1);
 	g_assert_cmpuint(fake.decrypt_count, ==, 1);
 	g_mutex_unlock(&fake.lock);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static void test_invalidation_retires_sessions(gconstpointer data)
+{
+	const char* reason = data;
+	CK_SESSION_HANDLE session;
+	CK_SESSION_HANDLE pending;
+	CK_SESSION_HANDLE fresh = CK_INVALID_HANDLE;
+	CK_SESSION_INFO info;
+	CK_SLOT_INFO slot_info;
+	CK_SLOT_ID slot = 0;
+	CK_OBJECT_HANDLE key;
+	CK_OBJECT_HANDLE replacement;
+	CK_ATTRIBUTE attribute = { CKA_LABEL, NULL, 0 };
+	CK_OBJECT_HANDLE object;
+	guint8 identifier[20];
+	guint8 unknown[20] = { 1, 2, 3 };
+	CK_ATTRIBUTE id = { CKA_ID, identifier, sizeof(identifier) };
+	CK_ATTRIBUTE unknown_id = { CKA_ID, unknown, sizeof(unknown) };
+	guint64 expires_at = 0;
+	CK_ULONG count;
+	guint8 input[32] = { 0 };
+	guint8 signature[256];
+	CK_ULONG length = sizeof(signature);
+	g_autofree char* path = NULL;
+	g_autoptr(GError) error = NULL;
+
+	fake_reset(ACQUIRE_ANSWER);
+	if (strcmp(reason, "local-expiry") == 0)
+	{
+		g_mutex_lock(&fake.lock);
+		expires_at = g_get_real_time() / G_USEC_PER_SEC + 2;
+		fake.expires_at = expires_at;
+		g_mutex_unlock(&fake.lock);
+	}
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	g_assert_cmpuint(functions->C_WaitForSlotEvent(CKF_DONT_BLOCK, &slot, NULL), ==,
+	                 CKR_NO_EVENT);
+	session = open_session();
+	pending = open_session();
+	key = find_the_private_key(session);
+	g_assert_cmpuint(functions->C_GetAttributeValue(session, key, &id, 1), ==, CKR_OK);
+	init_pending_operations(pending, key);
+	g_assert_cmpuint(functions->C_FindObjectsInit(pending, NULL, 0), ==, CKR_OK);
+	path = current_portal_session();
+
+	if (strcmp(reason, "local-expiry") != 0)
+	{
+		g_assert_true(g_dbus_connection_emit_signal(
+		    fake.connection, NULL, PKCS11_PORTAL_OBJECT_PATH, PKCS11_PORTAL_INTERFACE,
+		    "GrantInvalidated", g_variant_new("(os)", path, reason), &error));
+		g_assert_no_error(error);
+	}
+	else
+	{
+		while ((guint64) (g_get_real_time() / G_USEC_PER_SEC) < expires_at)
+			g_usleep(1000);
+		/* A new session must not hide the removal from NSS's old session. */
+		fresh = open_session();
+	}
+	wait_session_invalid(session);
+	g_assert_cmpuint(sign_init(session, key, 32), ==, CKR_SESSION_HANDLE_INVALID);
+	g_assert_cmpuint(functions->C_GetAttributeValue(session, key, &attribute, 1), ==,
+	                 CKR_SESSION_HANDLE_INVALID);
+	g_assert_cmpuint(functions->C_FindObjects(pending, &object, 1, &count), ==,
+	                 CKR_SESSION_HANDLE_INVALID);
+	g_assert_cmpuint(functions->C_Sign(pending, input, sizeof(input), signature, &length), ==,
+	                 CKR_SESSION_HANDLE_INVALID);
+	g_assert_cmpuint(functions->C_GetSlotInfo(1, &slot_info), ==, CKR_OK);
+	g_assert_cmpuint(slot_info.flags, ==, CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT);
+	g_assert_cmpuint(functions->C_WaitForSlotEvent(CKF_DONT_BLOCK, NULL, NULL), ==,
+	                 CKR_ARGUMENTS_BAD);
+	g_assert_cmpuint(functions->C_WaitForSlotEvent(CKF_DONT_BLOCK, &slot, &slot), ==,
+	                 CKR_ARGUMENTS_BAD);
+	g_assert_cmpuint(functions->C_WaitForSlotEvent(CKF_DONT_BLOCK | 2, &slot, NULL), ==,
+	                 CKR_ARGUMENTS_BAD);
+	g_assert_cmpuint(functions->C_WaitForSlotEvent(CKF_DONT_BLOCK, &slot, NULL), ==, CKR_OK);
+	g_assert_cmpuint(slot, ==, 1);
+	g_assert_cmpuint(functions->C_WaitForSlotEvent(CKF_DONT_BLOCK, &slot, NULL), ==,
+	                 CKR_NO_EVENT);
+	g_assert_cmpuint(functions->C_WaitForSlotEvent(0, &slot, NULL), ==,
+	                 CKR_FUNCTION_NOT_SUPPORTED);
+	g_assert_cmpuint(fake_acquire_count(), ==, 1);
+
+	g_mutex_lock(&fake.lock);
+	fake.expires_at = 0;
+	g_mutex_unlock(&fake.lock);
+	if (fresh == CK_INVALID_HANDLE)
+		fresh = open_session();
+	g_assert_cmpuint(functions->C_GetSessionInfo(fresh, &info), ==, CKR_OK);
+	g_assert_cmpuint(find_count(fresh, &unknown_id, 1), ==, 0);
+	g_assert_cmpuint(fake_acquire_count(), ==, 1);
+	g_assert_cmpuint(find_count(fresh, &id, 1), ==, 3);
+	replacement = find_the_private_key(fresh);
+	g_assert_cmpuint(replacement, !=, key);
+	g_assert_cmpuint(fake_acquire_count(), ==, 2);
+	g_assert_cmpuint(sign_init(fresh, key, 32), ==, CKR_KEY_HANDLE_INVALID);
+	g_assert_cmpuint(functions->C_GetAttributeValue(fresh, key, &attribute, 1), ==,
+	                 CKR_OBJECT_HANDLE_INVALID);
+	g_assert_cmpuint(sign_init(fresh, replacement, 32), ==, CKR_OK);
+	g_assert_cmpuint(functions->C_Sign(fresh, input, sizeof(input), signature, &length), ==,
+	                 CKR_OK);
+	g_assert_cmpuint(functions->C_GetSessionInfo(session, &info), ==,
+	                 CKR_SESSION_HANDLE_INVALID);
+	g_assert_cmpuint(functions->C_WaitForSlotEvent(CKF_DONT_BLOCK, &slot, NULL), ==,
+	                 CKR_NO_EVENT);
 	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
 }
 
@@ -1546,6 +1658,9 @@ static void test_caller_lengths_are_bounded_before_they_are_narrowed(void)
 
 int main(int argc, char** argv)
 {
+	static const char* reasons[] = {
+		"token_removed", "expired", "policy", "backend_gone", "error", "local-expiry"
+	};
 	GTestDBus* bus = NULL;
 	int result;
 
@@ -1584,6 +1699,12 @@ int main(int argc, char** argv)
 	                     test_pending_operations_do_not_survive_grant_release);
 	g_test_add_data_func("/module/portal/pending-operations/expiry", "expiry",
 	                     test_pending_operations_do_not_survive_grant_release);
+
+	for (guint i = 0; i < G_N_ELEMENTS(reasons); i++)
+	{
+		g_autofree char* name = g_strdup_printf("/module/portal/invalidation/%s", reasons[i]);
+		g_test_add_data_func(name, reasons[i], test_invalidation_retires_sessions);
+	}
 
 	g_test_add_func("/module/portal/config-enumeration",
 	                test_configuration_enables_enumeration);
