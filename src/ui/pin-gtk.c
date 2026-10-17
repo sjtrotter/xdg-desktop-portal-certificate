@@ -26,7 +26,6 @@ typedef struct
 	GtkWidget* status;
 	GtkWidget* hint;
 	GtkWidget* spinner;
-	gboolean warning_pending;
 } GtkPinPrompt;
 
 static void gtk_pin_free(gpointer data)
@@ -77,16 +76,39 @@ static void set_status(PinPrompt* prompt, const char* text, gboolean is_error)
 	}
 }
 
-static void update_retry_hint(PinPrompt* prompt)
+/* Initial hints are announced after mapping; changed hints are announced as they appear. */
+static void announce_retry_hint(GtkWidget* window, gpointer user_data)
+{
+	GtkPinPrompt* ui = gtk_pin(user_data);
+
+	if (gtk_widget_get_mapped(window) && gtk_widget_get_visible(ui->hint) &&
+	    announcement_reaches_anyone(GTK_ACCESSIBLE(window)))
+		gtk_accessible_announce(GTK_ACCESSIBLE(window), gtk_label_get_text(GTK_LABEL(ui->hint)),
+		                        GTK_ACCESSIBLE_ANNOUNCEMENT_PRIORITY_HIGH);
+}
+
+static void update_retry_hint(PinPrompt* prompt, const XccPinView* view)
 {
 	GtkPinPrompt* ui = gtk_pin(prompt);
-	const char* hint = certificate_pin_prompt_retry_hint(prompt);
-
-	if (ui->hint == NULL)
-		return;
+	const char* hint = certificate_pin_prompt_retry_hint(view);
+	gboolean changed = g_strcmp0(gtk_label_get_text(GTK_LABEL(ui->hint)),
+	                            hint != NULL ? hint : "") != 0;
 
 	gtk_label_set_text(GTK_LABEL(ui->hint), hint != NULL ? hint : "");
 	gtk_widget_set_visible(ui->hint, hint != NULL);
+	/* The last attempt reads as an error; earlier failures as a warning. */
+	if (view->final_try)
+	{
+		gtk_widget_remove_css_class(ui->hint, "warning");
+		gtk_widget_add_css_class(ui->hint, "error");
+	}
+	else
+	{
+		gtk_widget_remove_css_class(ui->hint, "error");
+		gtk_widget_add_css_class(ui->hint, "warning");
+	}
+	if (changed)
+		announce_retry_hint(GTK_WIDGET(ui->window), prompt);
 }
 
 static void on_unlock(GtkWidget* widget, gpointer user_data)
@@ -116,13 +138,7 @@ static void on_unlock(GtkWidget* widget, gpointer user_data)
 	if (!certificate_pin_prompt_hold(prompt, secret, length))
 		return;
 
-	if (ui->warning_pending)
-	{
-		ui->warning_pending = FALSE;
-		certificate_pin_prompt_warning_reply(prompt, TRUE);
-	}
-	else
-		certificate_pin_prompt_submit(prompt);
+	certificate_pin_prompt_submit(prompt);
 }
 
 /* Protected-path login also requires explicit confirmation before its final attempt. */
@@ -179,7 +195,7 @@ static GtkWidget* label_row(const char* title, const char* value)
 	return box;
 }
 
-static void gtk_pin_show(gpointer user_data, PinPrompt* prompt)
+static void gtk_pin_show(gpointer user_data, PinPrompt* prompt, const XccPinView* view)
 {
 	GtkPinPrompt* ui = g_new0(GtkPinPrompt, 1);
 	GtkWidget* window = NULL;
@@ -189,7 +205,7 @@ static void gtk_pin_show(gpointer user_data, PinPrompt* prompt)
 	GtkWidget* buttons = NULL;
 	GtkWidget* cancel = NULL;
 	GtkEventController* keys = NULL;
-	gboolean protected_path = prompt->protected_path;
+	gboolean protected_path = view->protected_path;
 
 	ui->prompt = prompt;
 	prompt->impl_data = ui;
@@ -240,6 +256,14 @@ static void gtk_pin_show(gpointer user_data, PinPrompt* prompt)
 			gtk_box_append(GTK_BOX(content), label_row("Reader", reader));
 	}
 
+	/* Create the warning widget before login because retries may newly set PIN warning flags. */
+	ui->hint = gtk_label_new(NULL);
+	gtk_label_set_wrap(GTK_LABEL(ui->hint), TRUE);
+	gtk_label_set_xalign(GTK_LABEL(ui->hint), 0.0f);
+	gtk_widget_add_css_class(ui->hint, "warning");
+	gtk_box_append(GTK_BOX(content), ui->hint);
+	update_retry_hint(prompt, view);
+
 	if (!protected_path)
 	{
 		ui->entry = gtk_password_entry_new();
@@ -266,14 +290,6 @@ static void gtk_pin_show(gpointer user_data, PinPrompt* prompt)
 	gtk_widget_set_visible(ui->status, FALSE);
 	gtk_box_append(GTK_BOX(content), ui->status);
 
-	/* Create the warning widget before login because retries may newly set PIN warning flags. */
-	ui->hint = gtk_label_new(NULL);
-	gtk_label_set_wrap(GTK_LABEL(ui->hint), TRUE);
-	gtk_label_set_xalign(GTK_LABEL(ui->hint), 0.0f);
-	gtk_widget_add_css_class(ui->hint, "warning");
-	gtk_box_append(GTK_BOX(content), ui->hint);
-	update_retry_hint(prompt);
-
 	ui->spinner = gtk_spinner_new();
 	gtk_spinner_set_spinning(GTK_SPINNER(ui->spinner), TRUE);
 	gtk_widget_set_visible(ui->spinner, FALSE);
@@ -295,10 +311,10 @@ static void gtk_pin_show(gpointer user_data, PinPrompt* prompt)
 		g_signal_connect(ui->unlock_button, "clicked", G_CALLBACK(on_unlock), prompt);
 		gtk_box_append(GTK_BOX(buttons), ui->unlock_button);
 	}
-	else if (prompt->token->pin_final_try)
+	else if (view->final_try)
 	{
 		/* The core requests confirmation after the protected-path notice is shown. */
-		ui->confirm_button = gtk_button_new_with_mnemonic("Use the _last attempt");
+		ui->confirm_button = gtk_button_new_with_mnemonic("_Continue");
 		gtk_widget_add_css_class(ui->confirm_button, "destructive-action");
 		g_signal_connect(ui->confirm_button, "clicked", G_CALLBACK(on_protected_confirm),
 		                 prompt);
@@ -318,6 +334,7 @@ static void gtk_pin_show(gpointer user_data, PinPrompt* prompt)
 	gtk_widget_add_controller(window, keys);
 
 	g_signal_connect(window, "close-request", G_CALLBACK(on_close_request), prompt);
+	g_signal_connect_after(window, "map", G_CALLBACK(announce_retry_hint), prompt);
 
 	certificate_external_window_present(GTK_WINDOW(window), prompt->parent_window, NULL);
 
@@ -341,6 +358,8 @@ static void gtk_pin_busy(PinPrompt* prompt, gboolean busy)
 	}
 	if (ui->unlock_button != NULL)
 		gtk_widget_set_sensitive(ui->unlock_button, !busy);
+	if (ui->confirm_button != NULL)
+		gtk_widget_set_sensitive(ui->confirm_button, !busy);
 	if (ui->spinner != NULL)
 		gtk_widget_set_visible(ui->spinner, busy);
 }
@@ -348,8 +367,6 @@ static void gtk_pin_busy(PinPrompt* prompt, gboolean busy)
 static void gtk_pin_retry(PinPrompt* prompt, const char* status)
 {
 	GtkPinPrompt* ui = gtk_pin(prompt);
-
-	update_retry_hint(prompt);
 
 	if (ui->entry != NULL)
 	{
@@ -360,20 +377,25 @@ static void gtk_pin_retry(PinPrompt* prompt, const char* status)
 	set_status(prompt, status, TRUE);
 }
 
-static void gtk_pin_update(gpointer user_data, PinPrompt* prompt, const char* status)
+static void gtk_pin_update(gpointer user_data, PinPrompt* prompt, const XccPinView* view)
 {
-	if (status != NULL)
-		gtk_pin_retry(prompt, status);
+	if (view->status != NULL)
+	{
+		gtk_pin_retry(prompt, view->status);
+		update_retry_hint(prompt, view);
+	}
 	else
-		gtk_pin_busy(prompt, prompt->busy);
+		gtk_pin_busy(prompt, view->busy);
 }
 
 static void gtk_pin_warning(gpointer user_data, PinPrompt* prompt, const char* message)
 {
 	GtkPinPrompt* ui = gtk_pin(prompt);
 
-	ui->warning_pending = TRUE;
-	set_status(prompt, message, TRUE);
+	/* The retry hint already states the lock; the protected-path status gives only the action. */
+	set_status(prompt, prompt->protected_path ? "Continue to enter the PIN on the reader, or Cancel."
+	                                          : message,
+	           FALSE);
 	if (prompt->protected_path)
 		gtk_widget_grab_focus(ui->cancel_button);
 }

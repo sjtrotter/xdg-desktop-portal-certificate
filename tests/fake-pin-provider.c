@@ -3,33 +3,34 @@
  */
 
 #include "fake-pin-provider.h"
-#include "core/pin-internal.h"
 #include <string.h>
 
-static void fake_show(gpointer user_data, PinPrompt* prompt)
+static void fake_show(gpointer user_data, PinPrompt* prompt, const XccPinView* view)
 {
 	FakePinProvider* fake = user_data;
 
 	g_assert_null(fake->prompt);
 	fake->prompt = prompt;
 	fake->shows++;
-	fake->protected_path = prompt->protected_path;
+	fake->protected_path = view->protected_path;
+	fake->count_low = view->count_low;
+	fake->final_try = view->final_try;
 	if (fake->protected_path)
 		certificate_pin_prompt_submit(prompt);
 }
 
-static void fake_update(gpointer user_data, PinPrompt* prompt, const char* status)
+static void fake_update(gpointer user_data, PinPrompt* prompt, const XccPinView* view)
 {
 	FakePinProvider* fake = user_data;
 
 	g_assert_true(fake->prompt == prompt);
-	fake->busy = prompt->busy;
-	fake->count_low = prompt->token->pin_count_low;
-	fake->final_try = prompt->token->pin_final_try;
-	if (status != NULL)
+	fake->busy = view->busy;
+	fake->count_low = view->count_low;
+	fake->final_try = view->final_try;
+	if (view->status != NULL)
 	{
 		fake->retries++;
-		fake->status = status;
+		fake->status = view->status;
 	}
 	else
 		fake->busy_updates++;

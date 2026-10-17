@@ -39,6 +39,8 @@ typedef struct
 	guint dismiss_idle;
 
 	gboolean passive_confirm;
+
+	XccPinView view; /* Snapshot retained while system prompt open is pending. */
 } SystemPinPrompt;
 
 /* Close the prompt to cancel; gcr 4.4 can complete cancellable rounds twice. */
@@ -167,7 +169,7 @@ static void set_prompt_text(PinPrompt* prompt)
 		g_string_append_printf(description, "\n%s", certificate_pin_prompt_protected_note());
 
 	gcr_prompt_set_description(ui->gcr, description->str);
-	gcr_prompt_set_warning(ui->gcr, certificate_pin_prompt_retry_hint(prompt));
+	gcr_prompt_set_warning(ui->gcr, certificate_pin_prompt_retry_hint(&ui->view));
 
 	/* An empty choice-label suppresses PIN persistence options. */
 	gcr_prompt_set_choice_label(ui->gcr, NULL);
@@ -369,7 +371,7 @@ static void handle_prompt_opened(PinPrompt* prompt, GAsyncResult* result)
 	/* Protected authentication shows no password field and still requires confirmation on FINAL_TRY. */
 	if (prompt->protected_path)
 	{
-		if (!prompt->token->pin_final_try)
+		if (!ui->view.final_try)
 		{
 			ui->passive_confirm = TRUE;
 			gcr_prompt_confirm_async(ui->gcr, NULL, on_confirmed,
@@ -396,11 +398,12 @@ static void on_prompt_opened(GObject* source, GAsyncResult* result, gpointer use
 	certificate_pin_prompt_unref(prompt);
 }
 
-static void system_pin_show(gpointer user_data, PinPrompt* prompt)
+static void system_pin_show(gpointer user_data, PinPrompt* prompt, const XccPinView* view)
 {
 	SystemPinPrompt* ui = g_new0(SystemPinPrompt, 1);
 
 	ui->prompt = prompt;
+	ui->view = *view;
 	prompt->impl_data = ui;
 	prompt->impl_data_free = system_pin_free;
 
@@ -410,10 +413,11 @@ static void system_pin_show(gpointer user_data, PinPrompt* prompt)
 	                                          certificate_pin_prompt_ref(prompt));
 }
 
-static void system_pin_update(gpointer user_data, PinPrompt* prompt, const char* status)
+static void system_pin_update(gpointer user_data, PinPrompt* prompt, const XccPinView* view)
 {
 	SystemPinPrompt* ui = system_pin(prompt);
-	const char* hint = certificate_pin_prompt_retry_hint(prompt);
+	const char* hint = certificate_pin_prompt_retry_hint(view);
+	const char* status = view->status;
 	g_autofree char* warning = NULL;
 
 	if (status == NULL || ui->gcr == NULL || ui->closed)
@@ -438,7 +442,7 @@ static void system_pin_warning(gpointer user_data, PinPrompt* prompt, const char
 	}
 
 	gcr_prompt_set_warning(ui->gcr, message);
-	gcr_prompt_set_continue_label(ui->gcr, "Use the last attempt");
+	gcr_prompt_set_continue_label(ui->gcr, "Continue");
 	gcr_prompt_confirm_async(ui->gcr, NULL, on_confirmed,
 	                         certificate_pin_prompt_ref(prompt));
 }

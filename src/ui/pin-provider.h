@@ -11,6 +11,18 @@
 
 typedef struct _PinPrompt PinPrompt;
 
+/* Borrowed during show/update. Retry flags come only from the token. */
+typedef struct
+{
+	gboolean protected_path;
+	gboolean busy;
+	gboolean count_low;
+	gboolean final_try;
+	gboolean locked;
+	/* NULL updates busy state; non-NULL requests fresh input. */
+	const char* status;
+} XccPinView;
+
 /* Internal precursor to XccUiV1's PIN callbacks; prompt handles become UI IDs later. */
 /* Callbacks run on the main thread; close runs once, including for unshown queued prompts. */
 typedef struct
@@ -18,9 +30,10 @@ typedef struct
 	const char* name;
 	gboolean needs_display;
 	gpointer user_data;
-	void (*pin_show)(gpointer user_data, PinPrompt* prompt);
-	/* NULL status updates busy state; non-NULL status requests fresh input. */
-	void (*pin_update)(gpointer user_data, PinPrompt* prompt, const char* status);
+	/* Typed PIN warnings are presented upfront, without a warning reply. */
+	void (*pin_show)(gpointer user_data, PinPrompt* prompt, const XccPinView* view);
+	void (*pin_update)(gpointer user_data, PinPrompt* prompt, const XccPinView* view);
+	/* Only protected-path FINAL_TRY requires an explicit Continue/Cancel reply. */
 	void (*warning)(gpointer user_data, PinPrompt* prompt, const char* message);
 	void (*hide)(gpointer user_data, PinPrompt* prompt);
 	void (*close)(gpointer user_data, PinPrompt* prompt);
@@ -29,9 +42,9 @@ typedef struct
 /* Main thread only; copied per login; user_data must outlive all retained prompt handles. */
 void certificate_pin_set_provider(const CertificatePinProvider* provider);
 
-/* Consumes provider-filled storage, validates length and holds it through final-try confirmation. */
+/* Consumes provider-filled storage and validates length before transfer to the worker. */
 gboolean certificate_pin_prompt_hold(PinPrompt* prompt, XccSecret* secret, size_t length);
-/* Submit held input or protected-path NULL; policy requests a warning before a final attempt. */
+/* Submit held input or protected-path NULL; only protected-path final attempts require Continue. */
 void certificate_pin_prompt_submit(PinPrompt* prompt);
 void certificate_pin_prompt_warning_reply(PinPrompt* prompt, gboolean accepted);
 void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outcome);
