@@ -189,6 +189,10 @@ if gcr_dep.found()
     'test-pin-system',
     ['test-pin-system.c'] + pin_prompter + fixture_util,
     dependencies: [certificate_service_dep, gcr_dep],
+    link_args: [
+      '-Wl,--wrap=gcr_system_prompt_open_for_prompter_async',
+      '-Wl,--wrap=gcr_system_prompt_close_async',
+    ],
     include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
     c_args: test_args + certificate_log_args,
     install: false,
@@ -215,3 +219,23 @@ if nss_dep.found()
     install: false,
   )
 endif
+
+# Real core transactions with a fake UI and scripted PKCS#11 boundary; no display or bus.
+exe = executable(
+  'test-core-api',
+  ['test-core-api.c'] + fixture_util,
+  dependencies: [certificate_core_dep],
+  include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+  c_args: test_args + certificate_log_args,
+  link_args: [
+    '-Wl,--wrap=certificate_tokens_watch',
+    '-Wl,--wrap=certificate_tokens_stop_watch',
+    '-Wl,--wrap=certificate_tokens_enumerate_async',
+    '-Wl,--wrap=certificate_tokens_enumerate_finish',
+    '-Wl,--wrap=certificate_tokens_open_session',
+    '-Wl,--wrap=certificate_tokens_refresh_flags',
+    '-Wl,--wrap=g_get_monotonic_time',
+  ],
+  install: false,
+)
+test('core-api', exe, protocol: 'tap', env: test_env, timeout: 120)

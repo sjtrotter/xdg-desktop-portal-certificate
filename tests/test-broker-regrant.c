@@ -140,7 +140,8 @@ static void test_regrant_signs_with_the_new_certificate(void)
 	g_checksum_get_digest(checksum, digest, &digest_length);
 	data = g_bytes_new(digest, digest_length);
 
-	session = xcc_session_new("/org/freedesktop/portal/desktop/session/t/regrant", NULL, NULL);
+	session =
+		xcc_session_new_legacy("/org/freedesktop/portal/desktop/session/t/regrant", NULL, NULL);
 
 	xcc_session_grant(session, first, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE, FALSE,
 	                  300);
@@ -204,8 +205,8 @@ static void test_grant_expiry_is_monotonic(void)
 {
 	g_autoptr(CertificateCandidate) candidate =
 	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
-	XccSession* session = xcc_session_new(
-	    "/org/freedesktop/portal/desktop/session/t/expiry", NULL, NULL);
+	XccSession* session =
+		xcc_session_new_legacy("/org/freedesktop/portal/desktop/session/t/expiry", NULL, NULL);
 	gint64 monotonic;
 
 	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
@@ -224,8 +225,8 @@ static void test_sign_logs_ids(void)
 {
 	g_autoptr(CertificateCandidate) candidate =
 	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
-	g_autoptr(XccSession) session = xcc_session_new(
-	    "/org/freedesktop/portal/desktop/session/t/logging", NULL, NULL);
+	g_autoptr(XccSession) session =
+		xcc_session_new_legacy("/org/freedesktop/portal/desktop/session/t/logging", NULL, NULL);
 	g_autofree char* long_id = g_strnfill(200, 'x');
 	g_autofree char* prefix = g_strnfill(128, 'x');
 	g_autofree char* capped_id = g_strconcat(prefix, "...", NULL);

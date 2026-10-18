@@ -13,6 +13,9 @@ static gboolean is_module_request(const CertificateChooserRequest* request)
 	static const char prefix[] = "/org/freedesktop/portal/desktop/request/";
 	const char* token = NULL;
 
+	if (request->generic_purpose)
+		return TRUE;
+
 	if (request->request_handle == NULL || !g_str_has_prefix(request->request_handle, prefix))
 		return FALSE;
 

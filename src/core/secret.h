@@ -8,6 +8,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct _XccSecret XccSecret;
 
 XccSecret* xcc_secret_new(void);
@@ -20,5 +24,9 @@ void xcc_secret_free(XccSecret* secret);
 /* Borrowed until writable access or free; no PIN copy is made. */
 const char* xcc_secret_view(const XccSecret* secret);
 size_t xcc_secret_length(const XccSecret* secret);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

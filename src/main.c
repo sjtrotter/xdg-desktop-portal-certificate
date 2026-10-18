@@ -345,6 +345,31 @@ static int list_tokens(void)
 	return CERTIFICATE_EXIT_SUCCESS;
 }
 
+typedef struct
+{
+	const char* const* paths;
+	GError* error;
+} ModuleLoad;
+static gpointer load_tokens_worker(gpointer data)
+{
+	ModuleLoad* load = data;
+	return certificate_tokens_new(load->paths, &load->error);
+}
+static gpointer free_tokens_worker(gpointer data)
+{
+	certificate_tokens_free(data);
+	return NULL;
+}
+static void release_tokens(CertificateTokens* collection)
+{
+	if (collection != NULL)
+		g_thread_join(g_thread_new("certificate-unload", free_tokens_worker, collection));
+}
+static gpointer list_tokens_worker(gpointer data)
+{
+	return GINT_TO_POINTER(list_tokens());
+}
+
 int main(int argc, char** argv)
 {
 	g_autoptr(GOptionContext) context = NULL;
@@ -404,7 +429,9 @@ int main(int argc, char** argv)
 
 	certificate_chooser_set_provider(certificate_chooser_provider_gtk());
 
-	tokens = certificate_tokens_new((const char* const*) opt_modules, &error);
+	ModuleLoad load = {.paths = (const char* const*)opt_modules};
+	tokens = g_thread_join(g_thread_new("certificate-load", load_tokens_worker, &load));
+	error = load.error;
 	if (tokens == NULL)
 	{
 		g_printerr("xdg-desktop-portal-certificate: %s\n", error->message);
@@ -419,8 +446,9 @@ int main(int argc, char** argv)
 
 	if (opt_list_tokens)
 	{
-		status = list_tokens();
-		g_clear_pointer(&tokens, certificate_tokens_free);
+		status = GPOINTER_TO_INT(
+			g_thread_join(g_thread_new("certificate-list", list_tokens_worker, NULL)));
+		g_clear_pointer(&tokens, release_tokens);
 		return status;
 	}
 
@@ -443,7 +471,7 @@ int main(int argc, char** argv)
 	if (connection == NULL)
 	{
 		g_printerr("xdg-desktop-portal-certificate: no session bus: %s\n", error->message);
-		g_clear_pointer(&tokens, certificate_tokens_free);
+		g_clear_pointer(&tokens, release_tokens);
 		return CERTIFICATE_EXIT_UNAVAILABLE;
 	}
 
@@ -453,7 +481,7 @@ int main(int argc, char** argv)
 		        ": modules loaded, session bus reachable, display %s. "
 		        "Not requesting the bus name.\n",
 		        certificate_ui_has_display() ? "available" : "absent");
-		g_clear_pointer(&tokens, certificate_tokens_free);
+		g_clear_pointer(&tokens, release_tokens);
 		return CERTIFICATE_EXIT_SUCCESS;
 	}
 
@@ -483,7 +511,7 @@ int main(int argc, char** argv)
 	certificate_impl_free(impl);
 	g_bus_unown_name(owner_id);
 	g_main_loop_unref(loop);
-	g_clear_pointer(&tokens, certificate_tokens_free);
+	g_clear_pointer(&tokens, release_tokens);
 	g_strfreev(opt_modules);
 	g_free(opt_pin_prompt);
 

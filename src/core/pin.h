@@ -11,6 +11,8 @@
 
 #include "../tokens/discovery.h"
 
+G_BEGIN_DECLS
+
 /** PIN trust, buffer and interaction guarantees are documented in docs/SECURITY.md. */
 
 typedef enum
@@ -54,6 +56,15 @@ void certificate_pin_login_full(CertificateToken* token, const char* session_id,
                                 GDestroyNotify login_data_free, GCancellable* cancellable,
                                 CertificatePinDone done, gpointer user_data);
 
+void certificate_pin_login_full_kind(CertificateToken* token, const char* session_id,
+									 const char* parent_window, const char* caller_display,
+									 const char* purpose_display, CertificatePinLoginFunc login,
+									 CertificatePinRefreshFunc refresh,
+									 CertificatePinAbandonFunc abandon, gpointer login_data,
+									 GDestroyNotify login_data_free, GCancellable* cancellable,
+									 CertificatePinDone done, gpointer user_data,
+									 gboolean context_specific);
+
 /** Default 60 seconds; 0 disables. On timeout the prompt closes with
  *  CERTIFICATE_PIN_TIMED_OUT and a login that returns later is abandoned. The
  *  module call is not interrupted, so the caller is answered when it returns. */
@@ -62,5 +73,7 @@ guint certificate_pin_login_timeout(void);
 
 void certificate_ui_set_has_display(gboolean has_display);
 gboolean certificate_ui_has_display(void);
+
+G_END_DECLS
 
 #endif

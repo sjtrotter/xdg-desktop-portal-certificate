@@ -84,7 +84,7 @@ static void test_deadline_and_grace(void)
 {
 	Invalidation result = { 0 };
 	g_autoptr(CertificateCandidate) candidate = make_candidate();
-	g_autoptr(XccSession) session = xcc_session_new("session-test", invalidated, &result);
+	g_autoptr(XccSession) session = xcc_session_new_legacy("session-test", invalidated, &result);
 	GSource* expiry;
 
 	now = 100 * G_USEC_PER_SEC;
@@ -136,7 +136,7 @@ static void test_invalidation_reason(gconstpointer data)
 	const char* reason = data;
 	Invalidation result = { .reenter = TRUE };
 	g_autoptr(CertificateCandidate) candidate = make_candidate();
-	g_autoptr(XccSession) session = xcc_session_new("session-test", invalidated, &result);
+	g_autoptr(XccSession) session = xcc_session_new_legacy("session-test", invalidated, &result);
 
 	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE, FALSE, 300);
 	xcc_session_invalidate(session, reason);
@@ -153,7 +153,7 @@ static void test_invalidation_reason(gconstpointer data)
 static void test_invalid_reason(void)
 {
 	Invalidation result = { 0 };
-	g_autoptr(XccSession) session = xcc_session_new("session-test", invalidated, &result);
+	g_autoptr(XccSession) session = xcc_session_new_legacy("session-test", invalidated, &result);
 
 	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_CRITICAL,
 	                      "Invalid SessionInvalidated reason: 'invalid'");
@@ -168,7 +168,7 @@ static void test_close(void)
 {
 	Invalidation result = { 0 };
 	g_autoptr(CertificateCandidate) candidate = make_candidate();
-	g_autoptr(XccSession) session = xcc_session_new("session-test", invalidated, &result);
+	g_autoptr(XccSession) session = xcc_session_new_legacy("session-test", invalidated, &result);
 
 	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE, FALSE, 300);
 	xcc_session_close(session);

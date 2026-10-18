@@ -138,6 +138,7 @@ static void on_unlock(GtkWidget* widget, gpointer user_data)
 	if (!certificate_pin_prompt_hold(prompt, secret, length))
 		return;
 
+	gtk_editable_set_text(GTK_EDITABLE(ui->entry), "");
 	certificate_pin_prompt_submit(prompt);
 }
 
@@ -342,8 +343,7 @@ static void gtk_pin_show(gpointer user_data, PinPrompt* prompt, const XccPinView
 	{
 		gtk_widget_grab_focus(ui->entry);
 	}
-	else
-		certificate_pin_prompt_submit(prompt);
+	certificate_pin_prompt_ready(prompt);
 }
 
 static void gtk_pin_busy(PinPrompt* prompt, gboolean busy)

@@ -108,8 +108,8 @@ static void fixture_set_up(Fixture* fixture, gconstpointer user_data)
 		return;
 	}
 
-	fixture->session = xcc_session_new(
-	    "/org/freedesktop/portal/desktop/session/decrypt/1", NULL, NULL);
+	fixture->session =
+		xcc_session_new_legacy("/org/freedesktop/portal/desktop/session/decrypt/1", NULL, NULL);
 	xcc_session_grant(fixture->session, fixture->rsa,
 	                              CERTIFICATE_PURPOSE_CLIENT_AUTH, FALSE, TRUE, 300);
 

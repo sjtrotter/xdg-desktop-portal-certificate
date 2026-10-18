@@ -104,16 +104,16 @@ static void test_empty_insertion_and_ids(gconstpointer data)
 	g_ptr_array_add(refreshed, candidate_with_key("one"));
 	certificate_chooser_update(chooser, refreshed, TRUE);
 	g_assert_cmpuint(fake.view.candidates[0].id, ==, candidate_id);
-	xcc_choose(id, revision, candidate_id);
-	xcc_choose(id, fake.view.revision, candidate_id + 1);
+	certificate_chooser_choose(id, revision, candidate_id);
+	certificate_chooser_choose(id, fake.view.revision, candidate_id + 1);
 	g_assert_cmpuint(result.calls, ==, 0);
 	g_assert_cmpuint(fake.closes, ==, 0);
 	fake_chooser_provider_choose(&fake, 0);
 	g_assert_cmpuint(result.calls, ==, 1);
 	g_assert_true(result.chosen == g_ptr_array_index(refreshed, 0));
 	g_assert_cmpuint(fake.closes, ==, 1);
-	xcc_choose(id, fake.view.revision, candidate_id);
-	xcc_ui_cancel(id);
+	certificate_chooser_choose(id, fake.view.revision, candidate_id);
+	certificate_chooser_cancel(id);
 	g_assert_cmpuint(result.calls, ==, 1);
 	g_assert_cmpuint(fake.closes, ==, 1);
 	certificate_candidate_unref(result.chosen);
@@ -139,12 +139,12 @@ static void test_removal_and_cancel(void)
 	certificate_chooser_update(chooser, empty, FALSE);
 	g_assert_cmpuint(fake.view.n_candidates, ==, 0);
 	g_assert_false(fake.view.tokens_present);
-	xcc_choose(fake.id, revision, removed_id);
-	xcc_choose(fake.id, fake.view.revision, removed_id);
+	certificate_chooser_choose(fake.id, revision, removed_id);
+	certificate_chooser_choose(fake.id, fake.view.revision, removed_id);
 	g_assert_cmpuint(result.calls, ==, 0);
 	certificate_chooser_update(chooser, candidates, TRUE);
 	g_assert_cmpuint(fake.view.candidates[0].id, !=, removed_id);
-	xcc_choose(fake.id, fake.view.revision, removed_id);
+	certificate_chooser_choose(fake.id, fake.view.revision, removed_id);
 	g_assert_cmpuint(result.calls, ==, 0);
 	fake_chooser_provider_cancel(&fake);
 	g_assert_cmpuint(result.calls, ==, 1);
@@ -181,7 +181,7 @@ static void test_request_cancel(void)
 	g_thread_join(thread);
 	while (g_main_context_iteration(NULL, FALSE))
 		;
-	xcc_choose(id, revision, candidate_id);
+	certificate_chooser_choose(id, revision, candidate_id);
 	g_assert_cmpuint(result.calls, ==, 1);
 	g_assert_null(result.chosen);
 	g_assert_cmpuint(fake.closes, ==, 1);
@@ -207,7 +207,7 @@ static void test_inline_cancel_and_late_reply(void)
 	fake.cancel_on_show = FALSE;
 	show(&fake, empty, FALSE, NULL, &result);
 	g_assert_cmpuint(fake.id, !=, old_id);
-	xcc_ui_cancel(old_id);
+	certificate_chooser_cancel(old_id);
 	g_assert_cmpuint(result.calls, ==, 1);
 	fake_chooser_provider_cancel(&fake);
 	g_assert_cmpuint(result.calls, ==, 2);

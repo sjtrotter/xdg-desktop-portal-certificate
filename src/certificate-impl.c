@@ -20,6 +20,10 @@
 #include "tokens/filter.h"
 #include "core/chooser.h"
 #include "core/pin.h"
+#include "core/core.h"
+#include "core/adapter.h"
+#include "core/ui.h"
+#include "core/dispatch-glib.h"
 #include "xdp-impl-dbus.h"
 
 static void on_session_invalidated(CertificateImplSession* session, const char* reason,
@@ -29,7 +33,9 @@ struct CertificateImpl
 {
 	GDBusConnection* connection;
 	XdpImplExperimentalCertificate1* skeleton;
-	CertificateTokens* tokens;
+	XccContext* context;
+	guint64 owner_generation;
+	gboolean shutdown_complete;
 
 	/* The cached frontend owner may only reject callers; acceptance requires a fresh bus lookup. */
 	char* frontend_owner;
@@ -53,6 +59,8 @@ static void set_frontend_owner(CertificateImpl* impl, const char* owner)
 {
 	if (g_strcmp0(impl->frontend_owner, owner) == 0)
 		return;
+
+	xcc_context_set_owner_generation(impl->context, ++impl->owner_generation);
 
 	/* Grants belong to the frontend connection that created them and cannot pass to a replacement. */
 	invalidate_foreign_sessions(impl, owner);
@@ -293,16 +301,13 @@ typedef struct
 {
 	CertificateImpl* impl;
 	XdpImplExperimentalCertificate1* object;
-	GDBusMethodInvocation* invocation; /* Borrowed until completion. */
+	GDBusMethodInvocation* invocation;
 	CertificateImplRequest* request;
-	CertificateImplSession* session; /* Owned reference. */
-	gulong close_id;
-	gboolean answered;
-	gboolean registered;
-
-	/* A non-user cancellation carries a wire diagnostic and response 2; user cancellation uses response 1. */
+	CertificateImplSession* session;
+	XccRequest* core;
+	gulong close_id, cancel_id;
+	gboolean answered, registered;
 	const char* cancelled_code;
-
 	CertificateCallerIdentity caller;
 	CertificatePurpose purpose;
 	CertificateFilter filter;
@@ -310,13 +315,7 @@ typedef struct
 	char* activation_token;
 	char* reason;
 	guint32 lifetime;
-	gboolean may_sign;
-	gboolean interaction_forbidden;
-	CertificateChooser* chooser;
-	gboolean enumerating;
-	gboolean enumerate_again;
-	gboolean chooser_completed;
-	CertificateCandidate* pending_chosen;
+	gboolean may_sign, interaction_forbidden;
 } Transaction;
 
 typedef enum
@@ -337,7 +336,10 @@ static void transaction_free(Transaction* transaction)
 
 	certificate_caller_identity_clear(&transaction->caller);
 	certificate_filter_clear(&transaction->filter);
-	g_clear_pointer(&transaction->pending_chosen, certificate_candidate_unref);
+	if (transaction->cancel_id != 0 && transaction->request != NULL)
+		g_cancellable_disconnect(certificate_impl_request_get_cancellable(transaction->request),
+								 transaction->cancel_id);
+	xcc_request_unref(transaction->core);
 	g_clear_object(&transaction->request);
 	g_clear_object(&transaction->session);
 	g_free(transaction->parent_window);
@@ -379,8 +381,14 @@ static void cancel_transactions(CertificateImpl* impl, CertificateImplSession* s
 
 		transaction->cancelled_code = code;
 
-		if (transaction->request != NULL)
-			g_cancellable_cancel(certificate_impl_request_get_cancellable(transaction->request));
+		if (transaction->core != NULL)
+		{
+			XccCancelReason reason = g_strcmp0(code, "owner_gone") == 0 ? XCC_CANCEL_OWNER_GONE
+									 : g_strcmp0(code, "backend_gone") == 0
+										 ? XCC_CANCEL_BACKEND_GONE
+										 : XCC_CANCEL_SESSION_CLOSED;
+			xcc_request_cancel(transaction->core, reason);
+		}
 	}
 }
 
@@ -540,7 +548,14 @@ static gboolean handle_create_session(XdpImplExperimentalCertificate1* object,
 		certificate_impl_request_unexport(request);
 	}
 
-	session = certificate_impl_session_new(arg_session_handle, arg_app_id);
+	session = certificate_impl_session_new_for_context(impl->context, impl->owner_generation,
+													   arg_session_handle, arg_app_id);
+	if (session == NULL)
+	{
+		xdp_impl_experimental_certificate1_complete_create_session(
+			object, invocation, 2, error_results("no_such_session"));
+		return TRUE;
+	}
 	session->owner = g_strdup(g_dbus_method_invocation_get_sender(invocation));
 
 	/* Abort creation on export failure because the frontend must be able to close retained sessions. */
@@ -633,214 +648,50 @@ GVariant* certificate_impl_acquire_results(CertificateCandidate* candidate, gboo
 	return g_variant_builder_end(&builder);
 }
 
-static void finish_acquire(Transaction* transaction, CertificateCandidate* candidate)
+static void core_done(XccRequest* request, const XccResult* result, void* data)
 {
-	CertificateImplSession* session = transaction->session;
-
-	/* The session, frontend or token may disappear while the chooser is open. */
-	if (session == NULL || xcc_session_is_closed(session->core))
+	Transaction* transaction = data;
+	TransactionKind kind =
+		result->kind == XCC_RESULT_ACQUIRE ? TRANSACTION_ACQUIRE : TRANSACTION_OPERATION;
+	if (transaction->cancelled_code != NULL)
 	{
-		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
-		                    error_results("no_such_session"));
+		transaction_respond(transaction, kind, CERTIFICATE_RESPONSE_OTHER,
+							error_results(transaction->cancelled_code));
 		return;
 	}
-
-	/* Tokens without serials cannot be rebound reliably at private-key use. */
-	if (candidate->token->serial == NULL || *candidate->token->serial == '\0')
+	if (result->error != XCC_OK)
 	{
-		certificate_log_grant(CERTIFICATE_REASON_OPERATION_REFUSED, session->id,
-		                      "token-without-serial");
-		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
-		                    error_results("device_error"));
+		GVariant* results = result->error == XCC_ERROR_CANCELLED && kind == TRANSACTION_ACQUIRE
+								? empty_results()
+								: error_results(xcc_error_wire_name(result->error));
+		transaction_respond(transaction, kind, xcc_error_wire_response(result->error), results);
 		return;
 	}
-
-	/* The interface exposes Sign only, so no grant permits decryption. */
-	xcc_session_grant(session->core, candidate, transaction->purpose,
-	                  transaction->may_sign && candidate->can_sign, FALSE,
-	                  transaction->lifetime);
-
-	certificate_log_decision(CERTIFICATE_REASON_GRANT_CREATED, transaction->caller.app_id,
-	                         certificate_identity_level_to_string(transaction->caller.level),
-	                         certificate_purpose_to_string(transaction->purpose), TRUE);
-
-	transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_SUCCESS,
-	                    certificate_impl_acquire_results(candidate, transaction->may_sign));
+	if (kind == TRANSACTION_ACQUIRE)
+	{
+		transaction_respond(transaction, kind, 0,
+							certificate_impl_acquire_results(
+								(CertificateCandidate*)xcc_candidate_internal(result->candidate),
+								result->may_sign));
+		return;
+	}
+	GVariantBuilder builder;
+	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+	g_variant_builder_add(&builder, "{sv}", "signature",
+						  g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, result->signature.data,
+													result->signature.size, 1));
+	transaction_respond(transaction, kind, 0, g_variant_builder_end(&builder));
 }
-
-/* Response 1 is reserved for user cancellation; frontend loss requires a diagnostic failure. */
-static gboolean respond_if_owner_gone(Transaction* transaction, TransactionKind kind)
+static void request_cancelled(GCancellable* cancellable, void* data)
 {
-	if (transaction->cancelled_code == NULL)
-		return FALSE;
-
-	transaction_respond(transaction, kind, CERTIFICATE_RESPONSE_OTHER,
-	                    error_results(transaction->cancelled_code));
-	return TRUE;
+	Transaction* transaction = data;
+	xcc_request_cancel(transaction->core, XCC_CANCEL_USER);
 }
-
-static void on_chooser_done(const CertificateChooserResult* result, gpointer user_data)
+static void bind_request(Transaction* transaction)
 {
-	Transaction* transaction = user_data;
-
-	transaction->chooser = NULL;
-	/* A refresh worker retains the transaction until its callback has run. */
-	if (transaction->enumerating)
-	{
-		transaction->chooser_completed = TRUE;
-		transaction->pending_chosen = result->chosen != NULL
-		    ? certificate_candidate_ref(result->chosen) : NULL;
-		return;
-	}
-
-	if (respond_if_owner_gone(transaction, TRANSACTION_ACQUIRE))
-		return;
-
-	if (result->chosen == NULL ||
-	    g_cancellable_is_cancelled(certificate_impl_request_get_cancellable(transaction->request)))
-	{
-		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_CANCELLED,
-		                    empty_results());
-		return;
-	}
-
-	finish_acquire(transaction, result->chosen);
-}
-
-static void start_enumeration(Transaction* transaction);
-
-static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_data)
-{
-	Transaction* transaction = user_data;
-	g_autoptr(GError) error = NULL;
-	g_autoptr(GPtrArray) candidates = NULL;
-	g_autoptr(GPtrArray) matching = NULL;
-	CertificateChooserRequest request;
-	gboolean tokens_present = FALSE;
-
-	candidates = certificate_tokens_enumerate_finish(NULL, result, &tokens_present, &error);
-	transaction->enumerating = FALSE;
-
-	if (transaction->chooser_completed)
-	{
-		CertificateChooserResult completed = { transaction->pending_chosen };
-
-		if (transaction->cancelled_code != NULL || completed.chosen == NULL ||
-		    g_cancellable_is_cancelled(certificate_impl_request_get_cancellable(transaction->request)))
-		{
-			on_chooser_done(&completed, transaction);
-			return;
-		}
-		if (candidates == NULL)
-		{
-			transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
-			                    error_results("device_error"));
-			return;
-		}
-		if (transaction->enumerate_again)
-		{
-			start_enumeration(transaction);
-			return;
-		}
-		matching = certificate_filter_apply(candidates, &transaction->filter);
-		for (guint i = 0; i < matching->len; i++)
-		{
-			CertificateCandidate* candidate = g_ptr_array_index(matching, i);
-
-			if (certificate_candidate_same(completed.chosen, candidate))
-			{
-				completed.chosen = candidate;
-				on_chooser_done(&completed, transaction);
-				return;
-			}
-		}
-		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
-		                    error_results("token_removed"));
-		return;
-	}
-
-	if (transaction->chooser != NULL && candidates == NULL)
-	{
-		if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-			transaction->cancelled_code = "device_error";
-		g_cancellable_cancel(certificate_impl_request_get_cancellable(transaction->request));
-		return;
-	}
-
-	if (candidates == NULL)
-	{
-		if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-		{
-			if (respond_if_owner_gone(transaction, TRANSACTION_ACQUIRE))
-				return;
-
-			transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_CANCELLED,
-			                    empty_results());
-			return;
-		}
-
-		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
-		                    error_results("device_error"));
-		return;
-	}
-
-	if (transaction->interaction_forbidden)
-	{
-		/* Acquisition always requires a chooser, including a single candidate or remembered selection. */
-		certificate_log_decision(CERTIFICATE_REASON_OPERATION_REFUSED,
-		                         transaction->caller.app_id, NULL, NULL, FALSE);
-		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
-		                    error_results("interaction_required"));
-		return;
-	}
-
-	if (!certificate_chooser_available())
-	{
-		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
-		                    error_results("no_display"));
-		return;
-	}
-
-	if (transaction->enumerate_again)
-	{
-		start_enumeration(transaction);
-		return;
-	}
-
-	matching = certificate_filter_apply(candidates, &transaction->filter);
-	if (matching->len == 0)
-		certificate_log_counts(CERTIFICATE_REASON_NO_MATCHING_CERT, candidates->len, 0);
-
-	if (transaction->chooser != NULL)
-	{
-		certificate_chooser_update(transaction->chooser, matching, tokens_present);
-		return;
-	}
-
-	memset(&request, 0, sizeof(request));
-	request.tokens_present = tokens_present;
-	request.caller = &transaction->caller;
-	request.purpose = transaction->purpose;
-	request.may_sign = transaction->may_sign;
-	request.may_decrypt = FALSE;
-	request.lifetime_seconds = transaction->lifetime;
-	request.reason = transaction->reason;
-	request.request_handle =
-	    g_dbus_interface_skeleton_get_object_path(G_DBUS_INTERFACE_SKELETON(transaction->request));
-
-	transaction->chooser = certificate_chooser_show(
-	    transaction->parent_window, transaction->activation_token, matching, &request,
-	    certificate_impl_request_get_cancellable(transaction->request), on_chooser_done,
-	    transaction);
-}
-
-static void start_enumeration(Transaction* transaction)
-{
-	transaction->enumerating = TRUE;
-	transaction->enumerate_again = FALSE;
-	certificate_tokens_enumerate_async(transaction->impl->tokens,
-	                                   certificate_impl_request_get_cancellable(transaction->request),
-	                                   on_enumerated, transaction);
+	transaction->cancel_id =
+		g_cancellable_connect(certificate_impl_request_get_cancellable(transaction->request),
+							  G_CALLBACK(request_cancelled), transaction, NULL);
 }
 
 static gboolean parse_acquire_options(Transaction* transaction, GVariant* options,
@@ -925,6 +776,14 @@ static gboolean parse_acquire_options(Transaction* transaction, GVariant* option
 	return TRUE;
 }
 
+static gboolean module_request_handle(const char* handle)
+{
+	static const char prefix[] = "/org/freedesktop/portal/desktop/request/";
+	if (!g_str_has_prefix(handle, prefix))
+		return FALSE;
+	const char* token = strchr(handle + strlen(prefix), '/');
+	return token != NULL && g_str_has_prefix(token + 1, "pkcs11a");
+}
 static gboolean handle_acquire_credential(XdpImplExperimentalCertificate1* object,
                                           GDBusMethodInvocation* invocation,
                                           const char* arg_handle, const char* arg_session_handle,
@@ -976,25 +835,17 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate1* objec
 		return TRUE;
 	}
 
-	/* A session's identity level may fall but must never rise. */
-	if (session->identity_seen && transaction->caller.level < session->identity_level)
+	XccPrincipal principal = {impl->owner_generation, arg_app_id, transaction->caller.level, TRUE};
+	XccErrorCode identity_error = xcc_session_check_principal(session->core, &principal);
+	if (identity_error != XCC_OK)
 	{
-		certificate_log_decision(CERTIFICATE_REASON_OPERATION_REFUSED, arg_app_id,
-		                         certificate_identity_level_to_string(transaction->caller.level),
-		                         "identity-level-raised", FALSE);
-		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
-		                    error_results("no_such_session"));
+		transaction_respond(transaction, TRANSACTION_ACQUIRE, 2,
+							error_results(xcc_error_wire_name(identity_error)));
 		return TRUE;
 	}
-
-	session->identity_level = transaction->caller.level;
-	session->identity_seen = TRUE;
-
-	transaction->caller.app_display_name = certificate_app_display_name(arg_app_id);
-
 	if (!certificate_filter_parse(arg_options, purpose,
-	                              transaction->may_sign ? CERTIFICATE_OPERATION_SIGN : 0,
-	                              &transaction->filter, &error))
+								  transaction->may_sign ? CERTIFICATE_OPERATION_SIGN : 0,
+								  &transaction->filter, &error))
 	{
 		certificate_log_debug(CERTIFICATE_REASON_OPERATION_REFUSED, "malformed-filter");
 		transaction_respond(transaction, TRANSACTION_ACQUIRE, CERTIFICATE_RESPONSE_OTHER,
@@ -1017,61 +868,47 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate1* objec
 
 	transaction_register(transaction);
 
-	certificate_log_decision(CERTIFICATE_REASON_DISCOVERY_STARTED, arg_app_id,
-	                         certificate_identity_level_to_string(transaction->caller.level),
-	                         certificate_purpose_to_string(purpose), FALSE);
-
-	start_enumeration(transaction);
+	XccAcquireSpec spec = {
+		.struct_size = sizeof(spec),
+		.abi_version = XCC_ABI_VERSION,
+		.principal = {impl->owner_generation, arg_app_id, transaction->caller.level, TRUE},
+		.purpose = purpose,
+		.generic_purpose_present = TRUE,
+		.generic_purpose = module_request_handle(arg_handle),
+		.parent_window = arg_parent_window,
+		.activation_token = transaction->activation_token,
+		.reason = transaction->reason,
+		.lifetime_present = TRUE,
+		.lifetime_seconds = transaction->lifetime,
+		.sign_present = TRUE,
+		.sign = transaction->may_sign,
+		.interaction_present = TRUE,
+		.interaction_forbidden = transaction->interaction_forbidden,
+		.issuers_present = transaction->filter.issuers != NULL,
+		.key_usage_present = transaction->filter.key_usage != NULL,
+		.key_usage = (const char* const*)transaction->filter.key_usage,
+		.eku_oids_present = transaction->filter.eku_oids != NULL,
+		.eku_oids = (const char* const*)transaction->filter.eku_oids,
+		.key_algorithms_present = transaction->filter.key_algorithms != NULL,
+		.key_algorithms = (const char* const*)transaction->filter.key_algorithms,
+		.token_label_present = transaction->filter.token_label != NULL,
+		.token_label = transaction->filter.token_label,
+		.piv_slot_present = transaction->filter.piv_slot != NULL,
+		.piv_slot = transaction->filter.piv_slot};
+	g_autofree XccBytes* issuers = NULL;
+	if (spec.issuers_present)
+	{
+		spec.n_issuers = transaction->filter.issuers->len;
+		issuers = g_new0(XccBytes, spec.n_issuers);
+		for (guint i = 0; i < spec.n_issuers; i++)
+			issuers[i].data = g_bytes_get_data(g_ptr_array_index(transaction->filter.issuers, i),
+											   &issuers[i].size);
+		spec.issuers = issuers;
+	}
+	transaction->core = xcc_acquire_async(session->core, &spec, core_done, transaction);
+	bind_request(transaction);
 
 	return TRUE;
-}
-
-static void on_operation_done(GBytes* result, const GError* error, gpointer user_data)
-{
-	Transaction* transaction = user_data;
-	GVariantBuilder builder;
-	gsize size = 0;
-	const guint8* data = NULL;
-
-	if (result == NULL)
-	{
-		guint32 response = CERTIFICATE_RESPONSE_OTHER;
-		const char* code = "device_error";
-
-		if (respond_if_owner_gone(transaction, TRANSACTION_OPERATION))
-			return;
-
-		/* Request cancellation takes precedence even if the token operation succeeds. */
-		if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_CANCELLED) ||
-		    g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-		{
-			response = CERTIFICATE_RESPONSE_CANCELLED;
-			code = "cancelled";
-		}
-		else if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR,
-		                         CERTIFICATE_PKCS11_ERROR_PIN_LOCKED))
-			code = "pin_locked";
-		else if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR,
-		                         CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED))
-			code = "token_removed";
-		else if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR,
-		                         CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED) ||
-		         g_error_matches(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT) ||
-		         g_error_matches(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED))
-			code = "invalid_request";
-
-		transaction_respond(transaction, TRANSACTION_OPERATION, response, error_results(code));
-		return;
-	}
-
-	data = g_bytes_get_data(result, &size);
-
-	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-	g_variant_builder_add(&builder, "{sv}", "signature",
-	                      g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, data, size, 1));
-
-	transaction_respond(transaction, TRANSACTION_OPERATION, CERTIFICATE_RESPONSE_SUCCESS,
-	                    g_variant_builder_end(&builder));
 }
 
 static gboolean handle_key_operation(CertificateImpl* impl,
@@ -1089,7 +926,6 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	g_autoptr(GVariant) payload = NULL;
 	g_autoptr(GBytes) data = NULL;
 	g_autoptr(GError) error = NULL;
-	g_autofree char* caller_display = NULL;
 	gboolean bad = FALSE;
 	gsize size = 0;
 	gconstpointer bytes = NULL;
@@ -1155,13 +991,38 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 
 	transaction_register(transaction);
 
-	caller_display = certificate_app_display_name(arg_app_id);
-
-	certificate_broker_perform(
-	    impl->tokens, session->core, FALSE, operation_id, mechanism, parameters, data,
-	    arg_parent_window, caller_display != NULL ? caller_display : arg_app_id,
-	    certificate_impl_request_get_cancellable(transaction->request), on_operation_done,
-	    transaction);
+	XccSignSpec spec = {
+		.struct_size = sizeof(spec),
+		.abi_version = XCC_ABI_VERSION,
+		.principal = {impl->owner_generation, arg_app_id, CERTIFICATE_IDENTITY_UNKNOWN, FALSE},
+		.parent_window = arg_parent_window,
+		.operation_id = operation_id,
+		.mechanism = mechanism,
+		.data = {bytes, size}};
+	g_autofree char* hash = NULL;
+	g_autofree char* mgf = NULL;
+	g_autofree char* encoding = NULL;
+	static const char* const keys[] = {"hash", "mgf", "salt_length", "signature_encoding", NULL};
+	if (parameters != NULL)
+	{
+		if (!vardict_keys_known(parameters, keys))
+			bad = TRUE;
+		spec.hash_present = option_take_string(parameters, "hash", &hash, &bad);
+		spec.hash = hash;
+		if (g_strcmp0(mechanism, "RSA_PSS") == 0)
+		{
+			spec.mgf_present = option_take_string(parameters, "mgf", &mgf, &bad);
+			spec.mgf = mgf;
+		}
+		spec.encoding_present =
+			option_take_string(parameters, "signature_encoding", &encoding, &bad);
+		spec.signature_encoding = encoding;
+		if (g_strcmp0(mechanism, "RSA_PSS") == 0)
+			spec.salt_length_present =
+				option_take_uint32(parameters, "salt_length", &spec.salt_length, &bad);
+	}
+	transaction->core = xcc_sign_async_parsed(session->core, &spec, !bad, core_done, transaction);
+	bind_request(transaction);
 
 	return TRUE;
 }
@@ -1176,35 +1037,9 @@ static gboolean handle_sign(XdpImplExperimentalCertificate1* object,
 	                            arg_app_id, arg_parent_window, arg_options);
 }
 
-typedef struct
-{
-	CertificateTokens* tokens;
-	GStrv mechanisms;
-	gboolean protected_path;
-} CapabilitiesQuery;
-
-static void capabilities_query_free(gpointer data)
-{
-	CapabilitiesQuery* query = data;
-
-	g_strfreev(query->mechanisms);
-	g_free(query);
-}
-
-/* Report backend support without inspecting token presence. */
-static void capabilities_thread(GTask* task, gpointer source, gpointer task_data,
-                                GCancellable* cancellable)
-{
-	CapabilitiesQuery* query = task_data;
-
-	certificate_tokens_capabilities(query->tokens, &query->mechanisms, &query->protected_path);
-	g_task_return_boolean(task, TRUE);
-}
-
-static void on_capabilities(GObject* source, GAsyncResult* result, gpointer user_data)
+static void on_capabilities(XccRequest* request, const XccResult* result, void* user_data)
 {
 	g_autoptr(GDBusMethodInvocation) invocation = user_data;
-	CapabilitiesQuery* query = g_task_get_task_data(G_TASK(result));
 	GVariantBuilder builder;
 	static const char* const purposes[] = { "client_auth", "signing", "email", "ssh", NULL };
 	/* The wire interface exposes Sign only; see docs/IMPL-INTERFACE.md. */
@@ -1214,11 +1049,11 @@ static void on_capabilities(GObject* source, GAsyncResult* result, gpointer user
 	g_variant_builder_add(&builder, "{sv}", "purposes", g_variant_new_strv(purposes, -1));
 	g_variant_builder_add(&builder, "{sv}", "operations", g_variant_new_strv(operations, -1));
 	g_variant_builder_add(&builder, "{sv}", "mechanisms",
-	                      g_variant_new_strv((const char* const*) query->mechanisms, -1));
+						  g_variant_new_strv((const char* const*)result->mechanisms, -1));
 	g_variant_builder_add(&builder, "{sv}", "protected_authentication_path",
-	                      g_variant_new_boolean(query->protected_path));
+						  g_variant_new_boolean(result->protected_path));
 	g_variant_builder_add(&builder, "{sv}", "has_display",
-	                      g_variant_new_boolean(certificate_ui_has_display()));
+						  g_variant_new_boolean(result->has_display));
 
 	g_dbus_method_invocation_return_value(invocation,
 	                                      g_variant_new("(@a{sv})",
@@ -1230,91 +1065,15 @@ static gboolean handle_get_capabilities(XdpImplExperimentalCertificate1* object,
                                         GVariant* arg_options, gpointer user_data)
 {
 	CertificateImpl* impl = user_data;
-	g_autoptr(GTask) task = NULL;
-	CapabilitiesQuery* query = NULL;
 
 	if (reject_stranger(impl, invocation))
 		return TRUE;
 
-	/* Capabilities disclose supported mechanisms without identifying present cards. */
-	query = g_new0(CapabilitiesQuery, 1);
-	query->tokens = impl->tokens;
-
-	task = g_task_new(NULL, NULL, on_capabilities, g_object_ref(invocation));
-	g_task_set_task_data(task, query, capabilities_query_free);
-	g_task_run_in_thread(task, capabilities_thread);
+	XccRequest* request =
+		xcc_get_capabilities_async(impl->context, on_capabilities, g_object_ref(invocation));
+	xcc_request_unref(request);
 
 	return TRUE;
-}
-
-/* Token presence is private; grant holders receive only SessionInvalidated. */
-static void on_token_event(CertificateToken* token, gboolean added, gpointer user_data)
-{
-	CertificateImpl* impl = user_data;
-
-	certificate_log_counts(added ? CERTIFICATE_REASON_DISCOVERY_RESULT
-	                             : CERTIFICATE_REASON_TOKEN_REMOVED,
-	                       1, 0);
-
-	for (guint i = 0; i < impl->transactions->len; i++)
-	{
-		Transaction* transaction = g_ptr_array_index(impl->transactions, i);
-
-		if (transaction->chooser_completed)
-		{
-			if (!added && transaction->pending_chosen != NULL &&
-			    certificate_token_same(transaction->pending_chosen->token, token) &&
-			    !g_cancellable_is_cancelled(certificate_impl_request_get_cancellable(transaction->request)))
-			{
-				/* Consent cannot outlive removal, even if the worker already took its snapshot. */
-				transaction->cancelled_code = "token_removed";
-				g_cancellable_cancel(certificate_impl_request_get_cancellable(transaction->request));
-			}
-			else if (transaction->pending_chosen != NULL)
-				transaction->enumerate_again = TRUE;
-			continue;
-		}
-		if (transaction->chooser == NULL && !transaction->enumerating)
-			continue;
-		if (!added && transaction->chooser != NULL)
-		{
-			g_autoptr(GPtrArray) empty = g_ptr_array_new();
-
-			/* Removal disables stale rows before the worker can finish. */
-			certificate_chooser_update(transaction->chooser, empty, FALSE);
-		}
-		if (transaction->enumerating)
-			transaction->enumerate_again = TRUE;
-		else
-			start_enumeration(transaction);
-	}
-
-	if (added)
-		return;
-
-	{
-		GHashTableIter iter;
-		gpointer value = NULL;
-		/* Hold references because invalidation signal handlers can remove other sessions from the table. */
-		g_autoptr(GPtrArray) doomed = g_ptr_array_new_with_free_func(g_object_unref);
-
-		g_hash_table_iter_init(&iter, impl->sessions);
-		while (g_hash_table_iter_next(&iter, NULL, &value))
-		{
-			CertificateImplSession* session = CERTIFICATE_IMPL_SESSION(value);
-
-			if (xcc_session_uses_token(session->core, token))
-				g_ptr_array_add(doomed, g_object_ref(session));
-		}
-
-		/* Keep invalidated sessions exported until the frontend answers with Session.Close(). */
-		for (guint i = 0; i < doomed->len; i++)
-		{
-			CertificateImplSession* session = g_ptr_array_index(doomed, i);
-
-			xcc_session_invalidate(session->core, "token_removed");
-		}
-	}
 }
 
 static void on_session_invalidated(CertificateImplSession* session, const char* reason,
@@ -1332,7 +1091,20 @@ CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTo
 	CertificateImpl* impl = g_new0(CertificateImpl, 1);
 
 	impl->connection = g_object_ref(connection);
-	impl->tokens = tokens;
+	XccConfig config = {.struct_size = sizeof(config),
+						.abi_version = XCC_ABI_VERSION,
+						.tokens = tokens,
+						.has_display = certificate_ui_has_display()};
+	XccDispatch dispatch = xcc_dispatch_glib(g_main_context_get_thread_default());
+	XccError core_error;
+	impl->context = xcc_context_new(&config, NULL, &dispatch, &core_error);
+	if (impl->context == NULL)
+	{
+		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Core initialization failed");
+		g_clear_object(&impl->connection);
+		g_free(impl);
+		return NULL;
+	}
 	impl->sessions = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
 	impl->transactions = g_ptr_array_new();
 	impl->skeleton = XDP_IMPL_EXPERIMENTAL_CERTIFICATE1(
@@ -1362,39 +1134,34 @@ CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTo
 	    connection, CERTIFICATE_FRONTEND_BUS_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
 	    on_frontend_appeared, on_frontend_vanished, impl, NULL);
 
-	certificate_tokens_watch(tokens, on_token_event, impl);
 
 	g_debug("providing %s", CERTIFICATE_IMPL_INTERFACE);
 
 	return impl;
 }
 
+static void shutdown_done(XccContext* context, void* user)
+{
+	CertificateImpl* impl = user;
+	impl->shutdown_complete = TRUE;
+}
 void certificate_impl_shutdown(CertificateImpl* impl)
 {
-	GHashTableIter iter;
-	gpointer value = NULL;
-
-	if (impl == NULL)
+	if (impl == NULL || impl->shutdown_complete)
 		return;
-
-	g_hash_table_iter_init(&iter, impl->sessions);
-	while (g_hash_table_iter_next(&iter, NULL, &value))
-		xcc_session_invalidate(CERTIFICATE_IMPL_SESSION(value)->core, "backend_gone");
-
+	xcc_context_shutdown_async(impl->context, shutdown_done, impl);
+	/* Drain UI deliveries and workers before releasing the receiver or borrowed modules. */
+	while (!impl->shutdown_complete)
+		g_main_context_iteration(NULL, TRUE);
 	close_and_forget_all(impl, NULL);
-
-	cancel_transactions(impl, NULL, "backend_gone");
-
-	certificate_tokens_stop_watch(impl->tokens);
-
-	/* Bound shutdown's wait for worker logouts so an unresponsive reader cannot prevent exit. */
-	xcc_session_drain_releases(2000);
 }
 
 void certificate_impl_free(CertificateImpl* impl)
 {
 	if (impl == NULL)
 		return;
+
+	certificate_impl_shutdown(impl);
 
 	if (impl->frontend_watch != 0)
 		g_bus_unwatch_name(impl->frontend_watch);
@@ -1407,5 +1174,6 @@ void certificate_impl_free(CertificateImpl* impl)
 	g_clear_pointer(&impl->frontend_owner, g_free);
 	g_clear_object(&impl->skeleton);
 	g_clear_object(&impl->connection);
+	xcc_context_unref(impl->context);
 	g_free(impl);
 }

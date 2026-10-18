@@ -6,14 +6,25 @@
 #ifndef CERTIFICATE_UI_PIN_PROVIDER_H
 #define CERTIFICATE_UI_PIN_PROVIDER_H
 
+#include "../core/abi.h"
 #include "../core/pin.h"
 #include "../core/secret.h"
+
+G_BEGIN_DECLS
 
 typedef struct _PinPrompt PinPrompt;
 
 /* Borrowed during show/update. Retry flags come only from the token. */
 typedef struct
 {
+	uint32_t struct_size, abi_version;
+	const char* token_label;
+	const char* reader;
+	const char* caller_display;
+	const char* purpose_display;
+	const char* parent_window;
+	/* USER or CONTEXT_SPECIFIC; no provider/session handles cross the UI boundary. */
+	gboolean context_specific;
 	gboolean protected_path;
 	gboolean busy;
 	gboolean count_low;
@@ -41,9 +52,12 @@ typedef struct
 
 /* Main thread only; copied per login; user_data must outlive all retained prompt handles. */
 void certificate_pin_set_provider(const CertificatePinProvider* provider);
+const CertificatePinProvider* certificate_pin_get_provider(void);
 
 /* Consumes provider-filled storage and validates length before transfer to the worker. */
 gboolean certificate_pin_prompt_hold(PinPrompt* prompt, XccSecret* secret, size_t length);
+/* Signal readiness after presentation/open; starts protected-path confirmation or login. */
+void certificate_pin_prompt_ready(PinPrompt* prompt);
 /* Submit held input or protected-path NULL; only protected-path final attempts require Continue. */
 void certificate_pin_prompt_submit(PinPrompt* prompt);
 void certificate_pin_prompt_warning_reply(PinPrompt* prompt, gboolean accepted);
@@ -52,5 +66,7 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 /* Asynchronous provider callbacks retain the handle until they return. */
 PinPrompt* certificate_pin_prompt_ref(PinPrompt* prompt);
 void certificate_pin_prompt_unref(PinPrompt* prompt);
+
+G_END_DECLS
 
 #endif

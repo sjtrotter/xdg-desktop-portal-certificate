@@ -8,12 +8,22 @@
 #define XCC_SESSION_PRIVATE_H
 
 #include "session.h"
+#include <stdint.h>
 #include "../broker/device.h"
 
-/* Shared by the session and broker; frontend identity belongs to the adapter. */
+G_BEGIN_DECLS
+
+typedef struct XccContext XccContext;
+
+/* Coordinator state; workers use the existing device/operation locks. */
 struct _XccSession
 {
 	GObject parent_instance;
+	XccContext* context;
+	uint64_t owner_generation;
+	char* app_id;
+	CertificateIdentityLevel identity_level;
+	gboolean identity_seen;
 	char* id; /* Redacted logging context; no path interpretation. */
 	gboolean closed;
 	gboolean invalidating;
@@ -42,5 +52,7 @@ struct _XccSession
 	GPtrArray* login_waiters;
 	GCancellable* login_cancellable;
 };
+
+G_END_DECLS
 
 #endif

@@ -10,11 +10,17 @@
 
 #include "../ui/pin-provider.h"
 
+G_BEGIN_DECLS
+
 /** PIN implementations collect input; core policy and ownership rules are documented in docs/SECURITY.md. */
 
 /** Only core/pin.c writes outcome policy state. */
 struct _PinPrompt
 {
+	GMainContext* coordinator;
+	struct XccContext* ui_context; /* Only for the legacy provider's UI-local handle. */
+	guint64 ui_id, warning_id;
+	gboolean context_specific;
 	/* Cancellation, worker and timeout references may be released on different threads. */
 	gint refs;
 
@@ -70,5 +76,7 @@ const char* certificate_pin_prompt_final_try_warning(void);
 
 const char* certificate_pin_prompt_heading(const PinPrompt* prompt);
 const char* certificate_pin_prompt_protected_note(void);
+
+G_END_DECLS
 
 #endif

@@ -24,8 +24,8 @@ G_DECLARE_FINAL_TYPE(XccSession, xcc_session, XCC, SESSION, GObject)
 /** Called at most once, before invalidation closes the session; reason is borrowed. */
 typedef void (*XccSessionInvalidated)(XccSession* session, const char* reason, gpointer user_data);
 
-XccSession* xcc_session_new(const char* log_id, XccSessionInvalidated invalidated,
-                           gpointer user_data);
+XccSession* xcc_session_new_legacy(const char* log_id, XccSessionInvalidated invalidated,
+								   gpointer user_data);
 
 /** Callback runs on the main context; clear it before destroying user_data. */
 void xcc_session_set_invalidated_callback(XccSession* session, XccSessionInvalidated invalidated,
@@ -51,6 +51,7 @@ void xcc_session_release_device_async(XccSession* session);
 
 /** Shutdown only: drain pending worker releases for at most timeout_ms. */
 void xcc_session_drain_releases(guint timeout_ms);
+guint xcc_session_releases_pending(void);
 
 G_END_DECLS
 

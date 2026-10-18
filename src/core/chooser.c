@@ -5,6 +5,7 @@
  */
 
 #include "chooser.h"
+#include "sources.h"
 
 #include "../redact.h"
 #include "../ui/chooser-provider.h"
@@ -18,6 +19,7 @@ typedef struct
 
 struct CertificateChooser
 {
+	GMainContext* coordinator;
 	gint refs;
 	XccUiId id;
 	guint64 next_candidate_id;
@@ -34,6 +36,7 @@ struct CertificateChooser
 	gulong cancel_id;
 	guint cancel_idle;
 	gboolean finished;
+	int error;
 };
 
 typedef CertificateChooser Chooser;
@@ -43,9 +46,20 @@ static GHashTable* choosers;
 static XccUiId next_ui_id;
 static guint provider_depth;
 
+const CertificateChooserProvider* certificate_chooser_get_provider(void)
+{
+	return &chooser_provider;
+}
+
+gboolean xcc_legacy_choose(XccUiId, guint64, guint64);
+
 void certificate_chooser_set_provider(const CertificateChooserProvider* provider)
 {
-	g_return_if_fail(provider != NULL);
+	if (provider == NULL)
+	{
+		chooser_provider = (CertificateChooserProvider){0};
+		return;
+	}
 	g_return_if_fail(provider->chooser_show != NULL && provider->chooser_update != NULL);
 	g_return_if_fail(provider->close != NULL);
 
@@ -85,6 +99,7 @@ static void chooser_unref(gpointer data)
 	g_free(chooser->rows);
 	g_free(chooser->app_id);
 	g_clear_object(&chooser->cancellable);
+	g_main_context_unref(chooser->coordinator);
 	g_free(chooser);
 }
 
@@ -92,7 +107,7 @@ static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen)
 {
 	g_autoptr(CertificateCandidate) retained = chosen != NULL
 	    ? certificate_candidate_ref(chosen) : NULL;
-	CertificateChooserResult result = { retained };
+	CertificateChooserResult result = {retained, chooser->error};
 
 	if (chooser->finished)
 		return;
@@ -110,7 +125,7 @@ static void chooser_finish(Chooser* chooser, CertificateCandidate* chosen)
 	}
 	if (chooser->cancel_idle != 0)
 	{
-		g_source_remove(chooser->cancel_idle);
+		xcc_source_remove(chooser->cancel_idle);
 		chooser->cancel_idle = 0;
 	}
 
@@ -138,9 +153,9 @@ static gboolean reply_idle(gpointer data)
 	Reply* reply = data;
 
 	if (reply->candidate_id != 0)
-		xcc_choose(reply->id, reply->revision, reply->candidate_id);
+		certificate_chooser_choose(reply->id, reply->revision, reply->candidate_id);
 	else
-		xcc_ui_cancel(reply->id);
+		certificate_chooser_cancel(reply->id);
 	return G_SOURCE_REMOVE;
 }
 
@@ -149,11 +164,13 @@ static void defer_reply(XccUiId id, guint64 revision, guint64 candidate_id)
 	Reply* reply = g_new(Reply, 1);
 
 	*reply = (Reply) { id, revision, candidate_id };
-	g_idle_add_full(G_PRIORITY_DEFAULT, reply_idle, reply, g_free);
+	xcc_idle_add(NULL, reply_idle, reply, g_free);
 }
 
-void xcc_choose(XccUiId id, guint64 revision, guint64 candidate_id)
+void certificate_chooser_choose(XccUiId id, guint64 revision, guint64 candidate_id)
 {
+	if (xcc_legacy_choose(id, revision, candidate_id))
+		return;
 	Chooser* chooser = choosers != NULL ? g_hash_table_lookup(choosers, &id) : NULL;
 
 	if (chooser == NULL || revision != chooser->view.revision || candidate_id == 0)
@@ -175,8 +192,10 @@ void xcc_choose(XccUiId id, guint64 revision, guint64 candidate_id)
 	}
 }
 
-void xcc_ui_cancel(XccUiId id)
+void certificate_chooser_cancel(XccUiId id)
 {
+	if (xcc_legacy_choose(id, 0, 0))
+		return;
 	Chooser* chooser = choosers != NULL ? g_hash_table_lookup(choosers, &id) : NULL;
 
 	if (chooser == NULL)
@@ -205,8 +224,8 @@ static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 
 	if (chooser->cancel_idle != 0)
 		return;
-	chooser->cancel_idle = g_idle_add_full(G_PRIORITY_DEFAULT, on_cancelled_idle,
-	                                       chooser_ref(chooser), chooser_unref);
+	chooser->cancel_idle =
+		xcc_idle_add(chooser->coordinator, on_cancelled_idle, chooser_ref(chooser), chooser_unref);
 }
 
 static const char* own_text(GPtrArray* text, char* value)
@@ -259,6 +278,8 @@ static void replace_candidates(Chooser* chooser, GPtrArray* candidates, gboolean
 		if (choice->id == 0)
 			choice->id = ++chooser->next_candidate_id;
 		g_ptr_array_add(choices, choice);
+		row->struct_size = sizeof(*row);
+		row->abi_version = XCC_ABI_VERSION;
 		row->id = choice->id;
 		row->subject = own_text(text, certificate_display_text(
 		    candidate->subject_display, CERTIFICATE_DISPLAY_MAX_SUBJECT, "Unnamed certificate"));
@@ -307,7 +328,7 @@ CertificateChooser* certificate_chooser_show(const char* parent_window,
 
 	if (!certificate_chooser_available())
 	{
-		CertificateChooserResult result = { NULL };
+		CertificateChooserResult result = {NULL, 0};
 
 		done(&result, user_data);
 		return NULL;
@@ -315,6 +336,7 @@ CertificateChooser* certificate_chooser_show(const char* parent_window,
 
 	chooser = g_new0(Chooser, 1);
 	chooser->refs = 1;
+	chooser->coordinator = g_main_context_ref_thread_default();
 	chooser->id = ++next_ui_id;
 	chooser->provider = chooser_provider;
 	chooser->choices = g_ptr_array_new_with_free_func(choice_free);
@@ -326,6 +348,8 @@ CertificateChooser* certificate_chooser_show(const char* parent_window,
 	chooser->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
 	text = chooser->text;
 	view = &chooser->view;
+	view->struct_size = sizeof(*view);
+	view->abi_version = XCC_ABI_VERSION;
 	view->caller_name = own_text(text, certificate_chooser_display_name(request->caller));
 	view->app_id = own_text(text, certificate_display_text(
 	    request->caller->app_id, CERTIFICATE_DISPLAY_MAX_APP_ID, NULL));
@@ -365,4 +389,13 @@ CertificateChooser* certificate_chooser_show(const char* parent_window,
 	/* Activation is consumed by the initial presentation. */
 	view->activation_token = NULL;
 	return chooser;
+}
+
+void certificate_chooser_fail(XccUiId id, int error)
+{
+	Chooser* chooser = choosers != NULL ? g_hash_table_lookup(choosers, &id) : NULL;
+	if (chooser == NULL)
+		return;
+	chooser->error = error;
+	chooser_finish(chooser, NULL);
 }

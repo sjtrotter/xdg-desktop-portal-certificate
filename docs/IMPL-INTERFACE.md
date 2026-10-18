@@ -255,3 +255,41 @@ replace an owner that permits it. D-Bus cannot authenticate who requests replace
 installed activation file passes neither flag. Upgrades require stopping the process and allowing
 activation of the new executable. Development `tools/dev-stack.sh --live` passes both flags;
 [TESTING.md](TESTING.md) §3.8 covers restoration.
+
+
+## Internal core boundary
+
+The wire contract is unchanged. `certificate-impl.c` keeps generated skeleton handlers,
+wire validation, current-owner resolution, path registries and result serialization.
+`Request.Close` cancels its `XccRequest`; `Session.Close` closes its `XccSession`. Both
+methods still require a fresh successful frontend-owner check. Owner replacement advances
+the core generation and drops the old adapter sessions and requests. Core also checks the
+generation and app ID and refuses any increase in identity assurance. Sign inherits the
+session's assurance because its wire options contain no identity or activation token.
+
+Transactions live in `src/core/acquire.c` and `src/core/sign.c`. Their specifications contain
+copied strings, byte spans and explicit presence flags. Core errors map to the existing
+response codes and diagnostic strings: user cancellation is `1`; owner loss and other
+failures are `2`. Acquisition cancellation has empty results; signing cancellation retains
+`error=cancelled`. `PIN_INCORRECT` and `LOGIN_TIMEOUT` remain `device_error` on the wire;
+`NOT_SUPPORTED` remains `invalid_request`. Capabilities retain their dictionary-only reply.
+
+The private coordinator owns transaction policy. UI views, close/hide calls, invalidations
+and completions are queued in order to the desktop dispatcher. No UI callback runs with a
+device lock held. Chooser replies carry an interaction ID, revision and candidate ID;
+PIN replies transfer an `XccSecret`. Stale replies are ignored and their secrets are wiped.
+Chooser close is now observed asynchronously by the adapter's UI, while deferred consent
+still waits for its refresh worker before granting or replying.
+Acceptance drains the discovery event queue before granting, including without an active
+refresh. This ordering covers watcher emissions and injected events already queued at the
+drain's lock boundary; physical removals still inside polling/debounce are discovered later.
+PIN providers acknowledge readiness with `xcc_pin_ready()` before core requests a
+protected-path warning. Late and duplicate readiness replies are ignored.
+
+Chooser views and candidate rows, PIN views, warnings and candidate information include
+`struct_size` and `abi_version` using `XCC_ABI_VERSION`. Consume known fields from a supported
+version and size; skip appended fields. Use `xcc_chooser_view_candidate()` for the producer's
+candidate-row stride. Core headers used by adapters and providers have C++ linkage guards.
+
+The internal headers remain uninstalled in this slice. Installation, dependency separation
+and the exported SDK belong to slice 6.

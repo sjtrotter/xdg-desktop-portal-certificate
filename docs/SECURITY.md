@@ -28,7 +28,7 @@ experimental export conditions.
 | Chooser displays supplied identity and backend-owned purpose text | `src/core/chooser.c`, `src/core/chooser-format.c`, `build_identity()` in `src/ui/chooser.c`; private-bus runs display `unidentified` |
 | Externally sourced display text is sanitized and capped, including combining-mark runs | `certificate_display_text()` in `src/certificate.c`; `test-redact.c`. Applies to app names and ids, subjects, issuers, token labels, readers and `reason` |
 | Expired certificates remain selectable and have textual warnings | `src/tokens/filter.c`, `src/core/chooser-format.c`, `src/ui/chooser.c`; `test-filter.c` |
-| One candidate still requires consent | `src/certificate-impl.c` has no chooser-bypass path |
+| One candidate still requires consent | `src/core/acquire.c` has no chooser-bypass path |
 | Reacquisition rebinds the device and discards old login and key handles | `certificate_device_open()` in `src/broker/device.c`; `test-broker-regrant.c` verifies against the new certificate and `test-broker-device.c` checks device state |
 | Frontend departure cancels windows and answers pending calls `owner_gone` | `cancel_transactions()` in `src/certificate-impl.c`; `test-impl-dbus.c` |
 | PIN handling stays outside Certificate interfaces | `src/core/pin.c` takes a login callback. GTK collects locally; system prompting delivers an encrypted exchange from the shell. See PIN handling below |
@@ -59,15 +59,15 @@ experimental export conditions.
 | Signing requires the named hash's digest length | `src/broker/mechanism.c`, `test-mechanism.c` |
 | OAEP ciphertext is exactly one modulus long and label is at most 256 bytes | Internal decryption code; `test-mechanism.c`, `test-broker-device.c` |
 | Tokens are resolved by manufacturer, model, serial and label | `certificate_tokens_open_session()` in `src/tokens/discovery.c`; slot number alone is insufficient |
-| Tokens without serials are refused during acquisition | `finish_acquire()` in `src/certificate-impl.c` |
+| Tokens without serials are refused during acquisition | `finish_acquire()` in `src/core/acquire.c` |
 | Grant expiry uses a monotonic clock | `src/core/session.c`; closed, expired and cancelled state is checked before and under the device lock; `test-broker-regrant.c` checks clock behavior |
-| Detected token removal invalidates that token's grants | `on_token_event()` in `src/certificate-impl.c` |
+| Detected token removal invalidates that token's grants | `token_event()` in `src/core/context.c` |
 | Frontend disappearance or replacement closes its grants | `on_frontend_vanished()`, `set_frontend_owner()` |
 | Shutdown signals `backend_gone` and flushes; owner replacement closes silently | `src/main.c`, `src/certificate-impl.c`; `test-impl-dbus.c`. Successor knows no old sessions; pending calls get `owner_gone`, which is not a signal reason |
 | Invalidation validates five reasons | `src/core/session.c`: `expired`, `token_removed`, `policy`, `backend_gone`, `error`; unknown internal value logs a critical and sends `error` |
 | Logging accepts structured fields and escapes/caps external values | `src/redact.h`, `src/redact.c`; `test-redact.c` checks PIN-URI truncation and newline injection |
 | Full serials are excluded from logs and all serials from `token_display` | `src/redact.c`, `src/certificate-impl.c` |
-| Runtime PKCS#11 calls run off the main thread | `src/broker/`, `src/tokens/discovery.c`, `src/certificate-impl.c`, `src/core/session.c`; includes capabilities and asynchronous release via `xcc_session_release_device_async()` |
+| Runtime PKCS#11 calls run off the main thread | `src/broker/`, `src/tokens/discovery.c`, `src/core/sign.c`, `src/core/session.c`; includes capabilities and asynchronous release via `xcc_session_release_device_async()` |
 | Requests share one cancellation source | `src/request-impl.c`, `src/certificate-impl.c`; `Close()` cancels it, cancelled operations answer `1`; `test-cancellation.c` |
 | Inventory stays behind consent | `on_enumerated()` always opens the chooser, including empty results; forbidden interaction and no display answer uniformly; capabilities report backend support |
 | Discovery does not log in | `src/tokens/discovery.c`, `test-broker-device.c` |
@@ -76,11 +76,29 @@ experimental export conditions.
 | Worker-visible reference counts are atomic | `src/core/pin.c`, `src/core/chooser.c`, `src/broker/operations.c`: `g_atomic_int_inc`, `g_atomic_int_dec_and_test` |
 | Scratch-directory deletion requires containment and a project marker | `fixture_check()` in `tools/lib.sh`; existing unmarked directories are refused. Full path, ownership and mode rules are in [TESTING.md](TESTING.md) |
 
-Shutdown has synchronous exceptions. `certificate_impl_shutdown()` waits up to two seconds for
-release workers and logs if the wait expires. Before that, `certificate_tokens_stop_watch()`
-joins a presence thread that can be sleeping for its two-second poll interval or blocked in a
-module call. Total shutdown time is unbounded. Session finalization also closes synchronously;
-asynchronous close holds a reference until completion, preventing a finalizer/worker race.
+`XccContext` runs transaction policy on a private coordinator. Frontend generations, app IDs
+and non-increasing identity assurance are checked in core; the D-Bus adapter independently
+keeps its current-owner checks, including both Close methods. `XccUiV1` receives immutable
+views and interaction IDs through an ordered desktop dispatcher. Replies return to the
+coordinator. Stale IDs cannot select a candidate, authorize a warning or submit an attempt;
+stale secrets are consumed and wiped. `ui/provider-bridge.c` retains UI-local PIN snapshots
+for GTK/gcr, rather than exposing a worker's `PinPrompt` across threads.
+Core waits for a provider readiness acknowledgement before protected-path login or a
+final-attempt warning. GTK acknowledges after presentation and gcr after asynchronous open.
+Acquisition drains already emitted presence events before accepting consent, including when
+no refresh is active. Polling/debounce can still delay physical-removal detection; token
+identity is independently resolved again before private-key session opening.
+
+Shutdown waits for transaction completions, PIN interactions (including abandoned submitted
+logins), queued UI callbacks, retained gcr callbacks and device releases before completing.
+The dispatcher receiver and any borrowed module collection must remain alive until then.
+The standalone wrapper keeps servicing the desktop context during this wait. Unlike the old
+two-second device-release drain, shutdown no longer proceeds to module unloading while a
+worker remains. Total shutdown time is still unbounded: polling teardown or middleware can
+block indefinitely. Core-owned module initialization and unloading run on workers; monitoring teardown also
+runs on a worker so the coordinator can continue cancelling UI. The standalone CLI retains
+its startup module preflight and final release after core shutdown, both on workers. Session finalization closes synchronously only after asynchronous release
+has relinquished its retained reference.
 
 ### Missing controls and evidence
 
@@ -194,7 +212,10 @@ GTK fallback after selection.
 
 Common code in `src/core/pin.c` controls attempt limits, protected-path confirmation, flag
 refresh, queueing, deferred cancellation, timeouts and abandonment. Entry implementations collect characters and
-render warnings without deciding whether an attempt is spent.
+render warnings without deciding whether an attempt is spent. Every core UI call and
+completion uses `XccDispatch`; device locks are released before presentation. Shared login
+waiter changes stay on the coordinator, allowing cancellation to hide the final waiter
+prompt while a worker still owns the submitted PIN.
 
 The gcr 4.4 double-completion risk is this project's source analysis and test result;
 no upstream report is recorded [[S57](SOURCES.md)]. `perform_close()` takes a pending round
