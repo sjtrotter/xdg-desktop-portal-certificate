@@ -33,6 +33,10 @@ struct CertificateTokens
 	gpointer watch_data;
 	gboolean watch_stop;
 	GPtrArray* watch_known; /* CertificateToken* elements. */
+	GMutex event_lock;
+	GQueue events;
+	GSource* event_source;
+	gboolean dispatching_events; /* Watch context only; callbacks cannot reorder a detached prefix. */
 };
 
 static CertificateToken* certificate_token_new(void)
@@ -483,6 +487,7 @@ CertificateTokens* certificate_tokens_new(const char* const* module_paths, GErro
 	CertificateTokens* tokens = g_new0(CertificateTokens, 1);
 
 	g_mutex_init(&tokens->lock);
+	g_mutex_init(&tokens->event_lock);
 	tokens->explicit_modules = g_ptr_array_new();
 	tokens->module_names = g_hash_table_new_full(NULL, NULL, NULL, g_free);
 
@@ -552,6 +557,7 @@ void certificate_tokens_free(CertificateTokens* tokens)
 		return;
 
 	certificate_tokens_stop_watch(tokens);
+	certificate_tokens_clear_watch(tokens);
 
 	if (tokens->modules != NULL)
 		p11_kit_modules_finalize_and_release(tokens->modules);
@@ -567,7 +573,9 @@ void certificate_tokens_free(CertificateTokens* tokens)
 	g_clear_pointer(&tokens->module_names, g_hash_table_unref);
 
 	g_clear_pointer(&tokens->watch_known, g_ptr_array_unref);
+	g_clear_pointer(&tokens->watch_context, g_main_context_unref);
 	g_mutex_clear(&tokens->lock);
+	g_mutex_clear(&tokens->event_lock);
 	g_free(tokens);
 }
 
@@ -953,6 +961,7 @@ void certificate_tokens_enumerate_async(CertificateTokens* tokens, GCancellable*
 	data->tokens = tokens;
 
 	task = g_task_new(NULL, cancellable, callback, user_data);
+	/* Acceptance explicitly drains presence events; completion needs no idle-priority barrier. */
 	g_task_set_source_tag(task, certificate_tokens_enumerate_async);
 	g_task_set_task_data(task, data, g_free);
 	/* Card enumeration may block for seconds and must run on a worker. */
@@ -1124,26 +1133,9 @@ void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanism
 
 typedef struct
 {
-	CertificateTokens* tokens;
 	CertificateToken* token;
 	gboolean added;
 } WatchEvent;
-
-static gboolean watch_dispatch(gpointer user_data)
-{
-	WatchEvent* event = user_data;
-
-	certificate_tokens_emit_event(event->tokens, event->token, event->added);
-
-	return G_SOURCE_REMOVE;
-}
-
-void certificate_tokens_emit_event(CertificateTokens* tokens, CertificateToken* token,
-                                   gboolean added)
-{
-	if (tokens->watch_event != NULL)
-		tokens->watch_event(token, added, tokens->watch_data);
-}
 
 static void watch_event_free(gpointer user_data)
 {
@@ -1153,18 +1145,65 @@ static void watch_event_free(gpointer user_data)
 	g_free(event);
 }
 
+void certificate_tokens_dispatch_pending(CertificateTokens* tokens)
+{
+	GQueue pending;
+	if (tokens->dispatching_events)
+		return;
+	tokens->dispatching_events = TRUE;
+	/* Detach a finite FIFO prefix. This is the acceptance ordering boundary, also
+	 * for events whose idle source has not run. Do not iterate the main context. */
+	g_mutex_lock(&tokens->event_lock);
+	pending = tokens->events;
+	g_queue_init(&tokens->events);
+	g_mutex_unlock(&tokens->event_lock);
+	while (!g_queue_is_empty(&pending))
+	{
+		WatchEvent* event = g_queue_pop_head(&pending);
+		if (tokens->watch_event != NULL)
+			tokens->watch_event(event->token, event->added, tokens->watch_data);
+		watch_event_free(event);
+	}
+	tokens->dispatching_events = FALSE;
+}
+
+static gboolean watch_dispatch(gpointer user_data)
+{
+	CertificateTokens* tokens = user_data;
+	g_mutex_lock(&tokens->event_lock);
+	g_clear_pointer(&tokens->event_source, g_source_unref);
+	g_mutex_unlock(&tokens->event_lock);
+	certificate_tokens_dispatch_pending(tokens);
+	return G_SOURCE_REMOVE;
+}
+
 static void watch_emit(CertificateTokens* tokens, CertificateToken* token, gboolean added)
 {
 	WatchEvent* event = g_new0(WatchEvent, 1);
-	GSource* source = g_idle_source_new();
 
-	event->tokens = tokens;
 	event->token = certificate_token_ref(token);
 	event->added = added;
 
-	g_source_set_callback(source, watch_dispatch, event, watch_event_free);
-	g_source_attach(source, tokens->watch_context);
-	g_source_unref(source);
+	/* Queue at the event source, before attaching/waking any main-context source. */
+	g_mutex_lock(&tokens->event_lock);
+	g_queue_push_tail(&tokens->events, event);
+	if (tokens->event_source == NULL)
+	{
+		tokens->event_source = g_idle_source_new();
+		g_source_set_callback(tokens->event_source, watch_dispatch, tokens, NULL);
+		g_source_attach(tokens->event_source, tokens->watch_context);
+	}
+	g_mutex_unlock(&tokens->event_lock);
+}
+
+void certificate_tokens_emit_event(CertificateTokens* tokens, CertificateToken* token,
+                                   gboolean added)
+{
+	watch_emit(tokens, token, added);
+	if (tokens->watch_context == g_main_context_get_thread_default() ||
+		(tokens->watch_context == g_main_context_default() &&
+		 g_main_context_get_thread_default() == NULL))
+		certificate_tokens_dispatch_pending(tokens);
 }
 
 static gboolean list_contains_token(GPtrArray* list, const CertificateToken* token)
@@ -1183,6 +1222,7 @@ static gpointer watch_thread(gpointer user_data)
 	CertificateTokens* tokens = user_data;
 	guint stable = 0;
 
+	g_clear_pointer(&tokens->watch_known, g_ptr_array_unref);
 	tokens->watch_known = certificate_tokens_list(tokens, NULL);
 
 	while (!g_atomic_int_get(&tokens->watch_stop))
@@ -1250,6 +1290,7 @@ void certificate_tokens_watch(CertificateTokens* tokens, CertificateTokenEvent e
 
 	tokens->watch_event = event;
 	tokens->watch_data = user_data;
+	g_clear_pointer(&tokens->watch_context, g_main_context_unref);
 	tokens->watch_context = g_main_context_ref_thread_default();
 	g_atomic_int_set(&tokens->watch_stop, FALSE);
 	tokens->watch_thread = g_thread_new("certificate-tokens", watch_thread, tokens);
@@ -1263,5 +1304,19 @@ void certificate_tokens_stop_watch(CertificateTokens* tokens)
 	g_atomic_int_set(&tokens->watch_stop, TRUE);
 	g_thread_join(tokens->watch_thread);
 	tokens->watch_thread = NULL;
-	g_clear_pointer(&tokens->watch_context, g_main_context_unref);
+	/* The receiver remains valid for queued events and explicit test injection. */
+}
+
+void certificate_tokens_clear_watch(CertificateTokens* tokens)
+{
+	tokens->watch_event = NULL;
+	tokens->watch_data = NULL;
+	g_mutex_lock(&tokens->event_lock);
+	if (tokens->event_source != NULL)
+	{
+		g_source_destroy(tokens->event_source);
+		g_clear_pointer(&tokens->event_source, g_source_unref);
+	}
+	g_queue_clear_full(&tokens->events, watch_event_free);
+	g_mutex_unlock(&tokens->event_lock);
 }

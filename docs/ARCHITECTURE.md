@@ -112,9 +112,53 @@ at-most-one-terminal-response rule.
 
 [`core/session.h`](../src/core/session.h) defines `XccSession`, which owns grants,
 monotonic expiry, token devices, shared login state and operation locks. The broker uses
-this core object. `session-impl.c` retains the Session export, frontend identity and Close
-authorization, forwarding core invalidation to the existing D-Bus signals. Invalidated
-sessions stay exported until frontend Close().
+this core object. `session-impl.c` retains the Session export and Close authorization,
+forwarding core invalidation to the existing D-Bus signals. Invalidated sessions stay
+exported until frontend Close(). Owner generations, app IDs and non-increasing identity
+assurance are enforced in core as well as the adapter's sender and path checks.
+
+[`core/core.h`](../src/core/core.h) defines the internal typed API: one `XccContext`,
+reference-counted `XccRequest` transactions and immutable `XccCandidate` result snapshots.
+Acquire and Sign specifications copy their inputs and distinguish absent constraints from
+present empty values. [`core/acquire.c`](../src/core/acquire.c) owns discovery, filtering,
+chooser refresh and deferred consent; [`core/sign.c`](../src/core/sign.c) owns signing and
+capability queries. `certificate-impl.c` parses wire options, authorizes callers, manages
+exports and serializes typed results. The standalone service retains its startup module
+preflight; `XccConfig.tokens` permits borrowing those modules until shutdown completes.
+A native caller can instead supply module paths for core-owned loading and teardown.
+
+The core runs a private GLib coordinator. Module startup, enumeration, capabilities,
+login, signing, monitoring teardown and device/module release use workers. The standalone
+startup preflight and diagnostic token listing also run on workers.
+Cancellation and timer sources attach to the interaction's coordinator, including
+context-specific authentication requested by a signing worker. Login waiter bookkeeping
+belongs to the coordinator, so cancelling the last waiter can hide an in-flight prompt
+without waiting for the worker's device lock.
+
+[`core/ui.h`](../src/core/ui.h) combines chooser and PIN presentation in the versioned
+`XccUiV1` table. Core sends copied views, IDs and typed warnings through `XccDispatch.post`.
+Every presentation callback, transaction completion and invalidation runs on that FIFO
+receiver. Replies enqueue onto the coordinator; stale IDs and revisions are ignored and
+stale PIN submissions are destroyed. [`core/dispatch-glib.c`](../src/core/dispatch-glib.c)
+provides an always-queued GLib/GTK receiver bridge.
+`pin_show` starts presentation; the provider calls `xcc_pin_ready()` only after it
+can receive warnings. The core then starts protected-path login or requests final-attempt
+confirmation. GTK acknowledges after presentation; gcr acknowledges after asynchronous open.
+[`ui/provider-bridge.c`](../src/ui/provider-bridge.c) composes the existing GTK chooser and
+GTK/gcr PIN providers into the table. Its retained PIN handles are UI-local snapshots;
+worker state and provider handles do not cross the dispatcher.
+The core/UI headers have C linkage guards. Chooser views and rows, PIN views, warnings and
+candidate information carry `struct_size` and `abi_version`. Providers use
+`xcc_chooser_view_candidate()` to walk rows by the producer's byte stride, so adding fields
+does not change the array stride assumed by an older provider.
+
+Keep the dispatcher receiver alive through `xcc_context_shutdown_async()` completion.
+Shutdown cancels requests, invalidates sessions, drains UI deliveries and retained gcr
+callbacks, and waits for submitted token work and release workers before unloading owned
+modules. The synchronous standalone shutdown wrapper keeps dispatching the desktop context
+until that callback arrives. Middleware that never returns can still prevent shutdown.
+The asynchronous gcr close retains both its gcr object and a counted bridge prompt through
+the close callback, including when open completes after cancellation.
 
 The frontend's `xdp_request_dex_new()` needs a separate `xdp_request_dex_export()` call.
 Shared request/session dependencies are in [UPSTREAMING.md](UPSTREAMING.md#frontend-dependencies).
@@ -124,6 +168,20 @@ Shared request/session dependencies are in [UPSTREAMING.md](UPSTREAMING.md#front
 [`tokens/discovery.h`](../src/tokens/discovery.h) loads p11-kit managed modules,
 enumerates asynchronously under a `GCancellable` and watches insertion and removal.
 Discovery uses the p11-kit API directly.
+Watcher emissions and test injection enter one mutex-protected FIFO at their source.
+Before accepting chooser consent, and before consuming an enumeration result, the
+coordinator detaches and dispatches the already queued prefix. A matching removal rejects
+consent with `token_removed`, even if its idle notification has not run and no refresh is
+active. Enumeration completion uses normal priority; there is no priority-201 barrier.
+The finite prefix drain cannot be extended indefinitely by incoming events or priority-0
+traffic. Background presence delivery still uses an idle source; acceptance explicitly
+drains it instead of waiting for that source to be scheduled.
+
+This orders events once discovery has emitted them. Physical removals still awaiting the
+two-second polling loop or two-poll debounce are not yet queued, and can precede a grant
+without rejecting it at acceptance. Their eventual event invalidates the grant; private-key
+session opening independently re-resolves stable token identity. Events enqueued after the
+acceptance drain's lock boundary are processed as later presence changes.
 
 The Remmina RDP plugin's
 [PKCS#11 patches](https://gitlab.com/Remmina/Remmina), GPL-2.0-or-later, are prior art;
@@ -169,7 +227,7 @@ chooser requirements; [grant lifetime](SECURITY.md#grant-lifetime-and-delegation
 
 [`core/chooser.h`](../src/core/chooser.h) owns chooser state and safe display formatting.
 [`ui/chooser-provider.h`](../src/ui/chooser-provider.h) supplies borrowed `XccChooserView`
-snapshots and revisioned candidate IDs to the selected provider. GTK presentation lives in
+snapshots and revisioned candidate IDs to the policy/provider bridge behind `XccUiV1`. GTK presentation lives in
 [`ui/chooser.c`](../src/ui/chooser.c), parented to a valid `parent_window` when available
 and unparented otherwise. Its contents follow the
 [trusted-dialog requirements](SECURITY.md#trusted-dialog) and
@@ -186,7 +244,8 @@ The prefix is caller-chosen and affects only display text; `reason` remains sepa
 operation on keys with `CKA_ALWAYS_AUTHENTICATE`. Context-specific login follows operation
 initialization; operations on the same session remain serialized during PIN entry.
 The core owns PIN policy and [`XccSecret`](../src/core/secret.h) storage; GTK and gcr
-providers remain in `src/ui/`. `XccPinView` carries token retry flags in show/update callbacks.
+providers remain in `src/ui/`. `XccPinView` carries sanitized display context, authentication
+kind, busy state and token retry flags in show/update callbacks.
 Typed PIN warnings appear before input; Unlock submits directly. Only protected-path final tries
 use the warning reply for a single Continue before starting the reader; other protected-path
 entry starts automatically. The backend logs into its own session; protected-path tokens

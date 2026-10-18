@@ -5,6 +5,8 @@
  */
 
 #include "pin.h"
+#include "sources.h"
+#include "context-private.h"
 
 #include "../certificate.h"
 #include "../redact.h"
@@ -24,9 +26,18 @@ gboolean certificate_ui_has_display(void)
 
 static CertificatePinProvider pin_provider;
 
+const CertificatePinProvider* certificate_pin_get_provider(void)
+{
+	return &pin_provider;
+}
+
 void certificate_pin_set_provider(const CertificatePinProvider* provider)
 {
-	g_return_if_fail(provider != NULL);
+	if (provider == NULL)
+	{
+		pin_provider = (CertificatePinProvider){0};
+		return;
+	}
 	g_return_if_fail(provider->pin_show != NULL && provider->pin_update != NULL);
 	g_return_if_fail(provider->warning != NULL && provider->hide != NULL && provider->close != NULL);
 
@@ -75,6 +86,12 @@ static void pin_prompt_free(PinPrompt* prompt)
 	if (prompt->login_data_free != NULL)
 		prompt->login_data_free(prompt->login_data);
 
+	if (prompt->ui_context != NULL)
+	{
+		g_atomic_int_add(&prompt->ui_context->ui_handles, -1);
+		xcc_context_unref(prompt->ui_context);
+	}
+	g_main_context_unref(prompt->coordinator);
 	g_free(prompt);
 }
 
@@ -109,6 +126,17 @@ void certificate_pin_prompt_unref(PinPrompt* prompt)
 
 void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outcome)
 {
+	if (prompt->ui_context != NULL)
+	{
+		if (!prompt->finished)
+		{
+			if (outcome == CERTIFICATE_PIN_CANCELLED)
+				xcc_ui_cancel(prompt->ui_context, prompt->ui_id);
+			else
+				xcc_ui_failed(prompt->ui_context, prompt->ui_id, XCC_ERROR_DEVICE);
+		}
+		return;
+	}
 	CertificatePinDone done = NULL;
 	gpointer user_data = NULL;
 	CertificatePinAbandonFunc abandon = NULL;
@@ -152,13 +180,13 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 
 	if (prompt->cancel_idle != 0)
 	{
-		g_source_remove(prompt->cancel_idle);
+		xcc_source_remove(prompt->cancel_idle);
 		prompt->cancel_idle = 0;
 	}
 
 	if (prompt->login_timeout_id != 0)
 	{
-		g_source_remove(prompt->login_timeout_id);
+		xcc_source_remove(prompt->login_timeout_id);
 		prompt->login_timeout_id = 0;
 	}
 
@@ -235,7 +263,15 @@ static void login_thread(GTask* task, gpointer source, gpointer task_data,
 
 static XccPinView pin_view(const PinPrompt* prompt, const char* status)
 {
-	return (XccPinView) {
+	return (XccPinView){
+		.struct_size = sizeof(XccPinView),
+		.abi_version = XCC_ABI_VERSION,
+		.token_label = prompt->token->label,
+		.reader = prompt->token->reader_name,
+		.caller_display = prompt->caller_display,
+		.purpose_display = prompt->purpose_display,
+		.parent_window = prompt->parent_window,
+		.context_specific = prompt->context_specific,
 		.protected_path = prompt->protected_path,
 		.busy = prompt->busy,
 		.count_low = prompt->token->pin_count_low,
@@ -291,6 +327,11 @@ const char* certificate_pin_prompt_protected_note(void)
 
 void certificate_pin_prompt_warning_reply(PinPrompt* prompt, gboolean accepted)
 {
+	if (prompt->ui_context != NULL)
+	{
+		xcc_warning_reply(prompt->ui_context, prompt->ui_id, prompt->warning_id, accepted);
+		return;
+	}
 	if (!prompt->protected_path || prompt->finished || prompt->login_in_flight ||
 	    !prompt->warning_pending)
 		return;
@@ -316,7 +357,7 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 	if (prompt->login_timeout_id != 0)
 	{
-		g_source_remove(prompt->login_timeout_id);
+		xcc_source_remove(prompt->login_timeout_id);
 		prompt->login_timeout_id = 0;
 	}
 
@@ -434,8 +475,25 @@ gboolean certificate_pin_prompt_hold(PinPrompt* prompt, XccSecret* secret, size_
 	return TRUE;
 }
 
+void certificate_pin_prompt_ready(PinPrompt* prompt)
+{
+	if (prompt->finished)
+		return;
+	if (prompt->ui_context != NULL)
+		xcc_pin_ready(prompt->ui_context, prompt->ui_id);
+	else if (prompt->protected_path)
+		certificate_pin_prompt_submit(prompt);
+}
+
 void certificate_pin_prompt_submit(PinPrompt* prompt)
 {
+	if (prompt->ui_context != NULL)
+	{
+		if (prompt->finished || prompt->busy)
+			return;
+		xcc_pin_submit(prompt->ui_context, prompt->ui_id, g_steal_pointer(&prompt->secret));
+		return;
+	}
 	g_autoptr(GTask) task = NULL;
 	LoginTask* data = NULL;
 
@@ -473,7 +531,7 @@ void certificate_pin_prompt_submit(PinPrompt* prompt)
 
 	if (pin_login_timeout_seconds > 0)
 		prompt->login_timeout_id =
-		    g_timeout_add_seconds(pin_login_timeout_seconds, on_login_timeout, prompt);
+			xcc_timeout_add(pin_login_timeout_seconds, on_login_timeout, prompt);
 
 	task = g_task_new(NULL, NULL, on_login_done, prompt);
 	g_task_set_task_data(task, data, login_task_free);
@@ -497,8 +555,8 @@ static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 	if (prompt->cancel_idle != 0)
 		return;
 
-	prompt->cancel_idle = g_idle_add_full(G_PRIORITY_DEFAULT, on_cancelled_idle,
-	                                      pin_prompt_ref(prompt), pin_prompt_unref);
+	prompt->cancel_idle = xcc_idle_add(prompt->coordinator, on_cancelled_idle,
+									   pin_prompt_ref(prompt), pin_prompt_unref);
 }
 
 static void pin_prompt_start(PinPrompt* prompt)
@@ -513,13 +571,14 @@ static void pin_prompt_start(PinPrompt* prompt)
 	prompt->provider.pin_show(prompt->provider.user_data, prompt, &view);
 }
 
-void certificate_pin_login_full(CertificateToken* token, const char* session_id,
-                                const char* parent_window,
-                                const char* caller_display, const char* purpose_display,
-                                CertificatePinLoginFunc login, CertificatePinRefreshFunc refresh,
-                                CertificatePinAbandonFunc abandon, gpointer login_data,
-                                GDestroyNotify login_data_free, GCancellable* cancellable,
-                                CertificatePinDone done, gpointer user_data)
+void certificate_pin_login_full_kind(CertificateToken* token, const char* session_id,
+									 const char* parent_window, const char* caller_display,
+									 const char* purpose_display, CertificatePinLoginFunc login,
+									 CertificatePinRefreshFunc refresh,
+									 CertificatePinAbandonFunc abandon, gpointer login_data,
+									 GDestroyNotify login_data_free, GCancellable* cancellable,
+									 CertificatePinDone done, gpointer user_data,
+									 gboolean context_specific)
 {
 	PinPrompt* prompt = NULL;
 	CertificatePinProvider provider = pin_provider;
@@ -547,6 +606,8 @@ void certificate_pin_login_full(CertificateToken* token, const char* session_id,
 
 	prompt = g_new0(PinPrompt, 1);
 	prompt->refs = 1;
+	prompt->context_specific = context_specific;
+	prompt->coordinator = g_main_context_ref_thread_default();
 	prompt->provider = provider;
 	prompt->token = certificate_token_ref(token);
 	prompt->session_id = g_strdup(session_id);
@@ -585,4 +646,17 @@ void certificate_pin_login(CertificateToken* token, const char* parent_window,
 {
 	certificate_pin_login_full(token, NULL, parent_window, caller_display, purpose_display, login,
 	                           refresh, abandon, login_data, NULL, cancellable, done, user_data);
+}
+
+void certificate_pin_login_full(CertificateToken* token, const char* session_id,
+								const char* parent_window, const char* caller_display,
+								const char* purpose_display, CertificatePinLoginFunc login,
+								CertificatePinRefreshFunc refresh,
+								CertificatePinAbandonFunc abandon, gpointer login_data,
+								GDestroyNotify login_data_free, GCancellable* cancellable,
+								CertificatePinDone done, gpointer user_data)
+{
+	certificate_pin_login_full_kind(token, session_id, parent_window, caller_display,
+									purpose_display, login, refresh, abandon, login_data,
+									login_data_free, cancellable, done, user_data, FALSE);
 }

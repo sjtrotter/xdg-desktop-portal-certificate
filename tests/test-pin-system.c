@@ -6,6 +6,8 @@
 
 #include <glib.h>
 #include <gnutls/abstract.h>
+#define GCR_API_SUBJECT_TO_CHANGE 1
+#include <gcr/gcr.h>
 
 #include "pin-prompter.h"
 #include "broker/operations.h"
@@ -13,6 +15,8 @@
 #include "fixture-util.h"
 #include "tokens/discovery.h"
 #include "core/pin.h"
+#include "core/context-private.h"
+#include "core/dispatch-glib.h"
 #include "ui/pin-backends.h"
 
 #define GOOD_PIN "1234"
@@ -924,8 +928,8 @@ static void test_broker_context_login(Fixture* fixture, gconstpointer user_data)
 {
 	g_autoptr(CertificateCandidate) candidate =
 	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
-	g_autoptr(XccSession) session = xcc_session_new(
-	    "/org/freedesktop/portal/desktop/session/t/context", NULL, NULL);
+	g_autoptr(XccSession) session =
+		xcc_session_new_legacy("/org/freedesktop/portal/desktop/session/t/context", NULL, NULL);
 	g_autoptr(GBytes) digest = g_bytes_new_static("01234567890123456789012345678901", 32);
 	g_autoptr(GVariant) parameters =
 	    g_variant_parse(G_VARIANT_TYPE_VARDICT, "{'hash': <'SHA256'>}", NULL, NULL, NULL);
@@ -1132,7 +1136,8 @@ static void run_context_cancel_queued(gboolean hold_open)
 	g_byte_array_set_size(candidate->cka_id, 0);
 	g_byte_array_append(candidate->cka_id, id, sizeof(id));
 
-	session = xcc_session_new("/org/freedesktop/portal/desktop/session/t/queued", NULL, NULL);
+	session =
+		xcc_session_new_legacy("/org/freedesktop/portal/desktop/session/t/queued", NULL, NULL);
 	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
 	                  FALSE, 300);
 	g_assert_true(certificate_device_open(&session->device, tokens, candidate, &error));
@@ -1236,6 +1241,221 @@ static void test_broker_context_cancel_before_opened(Fixture* fixture, gconstpoi
 	run_context_cancel_queued(TRUE);
 }
 
+/* Gate delivery of real gcr completions, without replacing gcr or the bridge.
+ * This makes open/close races independent of D-Bus scheduling and machine speed. */
+typedef struct
+{
+	gboolean hold, pending;
+	GAsyncReadyCallback callback;
+	gpointer data;
+	GObject* source;
+	GAsyncResult* result;
+	guint completed;
+} ProviderGate;
+static ProviderGate provider_open, provider_close;
+void __real_gcr_system_prompt_open_for_prompter_async(const gchar*, gint, GCancellable*,
+														 GAsyncReadyCallback, gpointer);
+void __wrap_gcr_system_prompt_open_for_prompter_async(const gchar*, gint, GCancellable*,
+														 GAsyncReadyCallback, gpointer);
+void __real_gcr_system_prompt_close_async(GcrSystemPrompt*, GCancellable*, GAsyncReadyCallback,
+											 gpointer);
+void __wrap_gcr_system_prompt_close_async(GcrSystemPrompt*, GCancellable*, GAsyncReadyCallback,
+											 gpointer);
+static void provider_arrived(GObject* source, GAsyncResult* result, gpointer data)
+{
+	ProviderGate* gate = data;
+	g_assert_false(gate->pending);
+	gate->source = source != NULL ? g_object_ref(source) : NULL;
+	gate->result = g_object_ref(result);
+	gate->pending = TRUE;
+}
+static void provider_resume(ProviderGate* gate)
+{
+	g_assert_true(gate->pending);
+	gate->hold = gate->pending = FALSE;
+	gate->callback(gate->source, gate->result, gate->data);
+	gate->completed++;
+	g_clear_object(&gate->source);
+	g_clear_object(&gate->result);
+}
+void __wrap_gcr_system_prompt_open_for_prompter_async(const gchar* name, gint timeout,
+														 GCancellable* cancellable,
+														 GAsyncReadyCallback callback, gpointer data)
+{
+	if (!provider_open.hold)
+	{
+		__real_gcr_system_prompt_open_for_prompter_async(name, timeout, cancellable, callback, data);
+		return;
+	}
+	provider_open.callback = callback;
+	provider_open.data = data;
+	__real_gcr_system_prompt_open_for_prompter_async(name, timeout, cancellable, provider_arrived,
+													   &provider_open);
+}
+void __wrap_gcr_system_prompt_close_async(GcrSystemPrompt* prompt, GCancellable* cancellable,
+											 GAsyncReadyCallback callback, gpointer data)
+{
+	if (!provider_close.hold)
+	{
+		__real_gcr_system_prompt_close_async(prompt, cancellable, callback, data);
+		return;
+	}
+	provider_close.callback = callback;
+	provider_close.data = data;
+	__real_gcr_system_prompt_close_async(prompt, cancellable, provider_arrived, &provider_close);
+}
+
+typedef struct
+{
+	XccContext* context;
+	LoginScript script;
+	gboolean shutdown, settled;
+	gboolean check_close;
+} BridgeLogin;
+static void bridge_done_delivered(void* data)
+{
+	BridgeLogin* b = data;
+	b->script.done_called = TRUE;
+}
+static void bridge_policy_done(CertificatePinOutcome outcome, gpointer data)
+{
+	BridgeLogin* b = data;
+	b->script.outcome = outcome;
+	XccDispatch dispatch = xcc_dispatch_glib(NULL);
+	dispatch.post(dispatch.user, bridge_done_delivered, b);
+}
+static void bridge_start_login(void* data)
+{
+	BridgeLogin* b = data;
+	certificate_pin_login(b->script.token, NULL, "Bridge test", "prove who you are", script_login,
+						  NULL, NULL, &b->script, NULL, bridge_policy_done, b);
+}
+static void bridge_start(BridgeLogin* b)
+{
+	const char* modules[] = {NULL};
+	XccConfig config = {
+		.struct_size = sizeof(config), .abi_version = XCC_ABI_VERSION, .module_paths = modules};
+	XccDispatch dispatch = xcc_dispatch_glib(NULL);
+	XccError error;
+	/* NULL UI composes core policy, provider-bridge.c and the real system provider. */
+	b->context = xcc_context_new(&config, NULL, &dispatch, &error);
+	g_assert_cmpint(error.code, ==, XCC_OK);
+	g_assert_nonnull(b->context);
+	g_assert_true(xcc_context_post(b->context, bridge_start_login, b));
+}
+static void bridge_shutdown_done(XccContext* context, void* data)
+{
+	BridgeLogin* b = data;
+	if (b->check_close)
+	{
+		g_assert_cmpuint(provider_close.completed, ==, 1);
+		g_assert_cmpint(g_atomic_int_get(&context->ui_handles), ==, 0);
+	}
+	b->shutdown = TRUE;
+}
+#define BRIDGE_WAIT(condition)                                                                      \
+	G_STMT_START                                                                                   \
+	{                                                                                              \
+		gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;                           \
+		while (!(condition) && g_get_monotonic_time() < deadline)                                \
+		{                                                                                          \
+			g_main_context_iteration(NULL, FALSE);                                                 \
+			g_usleep(1000);                                                                        \
+		}                                                                                          \
+		g_assert_true(condition);                                                                  \
+	}                                                                                              \
+	G_STMT_END
+static void bridge_barrier_done(XccRequest* request, const XccResult* result, void* data)
+{
+	g_assert_cmpint(result->error, ==, XCC_OK);
+	*(gboolean*)data = TRUE;
+}
+static void test_bridge_protected_final_try(Fixture* fixture, gconstpointer user_data)
+{
+	const char* answers[] = {"ok"};
+	BridgeLogin b = {.script = {.token = make_token(), .answers = answers}};
+	b.script.token->protected_authentication_path = TRUE;
+	b.script.token->pin_final_try = TRUE;
+	provider_open = (ProviderGate){.hold = TRUE};
+	certificate_test_prompter_set_delay(300);
+	certificate_test_prompter_expect_confirm(TRUE);
+	bridge_start(&b);
+	BRIDGE_WAIT(provider_open.pending);
+	/* Drain replies and UI deliveries while gcr's open callback is held. The
+	 * previous eager warning cancelled the interaction at this point. */
+	gboolean ready = FALSE;
+	XccRequest* query = xcc_get_capabilities_async(b.context, bridge_barrier_done, &ready);
+	BRIDGE_WAIT(ready);
+	xcc_request_unref(query);
+	g_assert_false(b.script.done_called);
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 0);
+	g_assert_cmpuint(b.script.attempts, ==, 0);
+	provider_resume(&provider_open);
+	wait_for_confirm_round(1, 10000);
+	g_assert_cmpuint(b.script.attempts, ==, 0);
+	g_autofree char* warning = certificate_test_prompter_last_warning();
+	g_assert_nonnull(warning);
+	g_assert_nonnull(strstr(warning, "last attempt"));
+	run_until_done(&b.script, 10000);
+	g_assert_cmpint(b.script.outcome, ==, CERTIFICATE_PIN_OK);
+	g_assert_cmpuint(b.script.attempts, ==, 1);
+	g_assert_null(b.script.last_pin);
+	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 0);
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 1);
+	xcc_context_shutdown_async(b.context, bridge_shutdown_done, &b);
+	BRIDGE_WAIT(b.shutdown);
+	xcc_context_unref(b.context);
+	script_clear(&b.script);
+	certificate_test_prompter_set_delay(40);
+}
+static void bridge_settled_delivered(void* data)
+{
+	((BridgeLogin*)data)->settled = TRUE;
+}
+static gboolean bridge_wait_shutdown_settled(gpointer data)
+{
+	BridgeLogin* b = data;
+	XccContext* c = b->context;
+	if (!c->watch_stopped || c->requests->len != 0 || g_hash_table_size(c->interactions) != 0 ||
+		g_atomic_int_get(&c->ui_pending) != 0)
+		return G_SOURCE_CONTINUE;
+	g_assert_false(c->shutdown_posted);
+	XccDispatch dispatch = xcc_dispatch_glib(NULL);
+	dispatch.post(dispatch.user, bridge_settled_delivered, b);
+	return G_SOURCE_REMOVE;
+}
+static void bridge_probe_shutdown(void* data)
+{
+	GSource* source = g_timeout_source_new(10);
+	g_source_set_callback(source, bridge_wait_shutdown_settled, data, NULL);
+	g_source_attach(source, g_main_context_get_thread_default());
+	g_source_unref(source);
+}
+static void test_bridge_shutdown_pending_close(Fixture* fixture, gconstpointer user_data)
+{
+	const char* answers[] = {"ok"};
+	BridgeLogin b = {.script = {.token = make_token(), .answers = answers}, .check_close = TRUE};
+	provider_close = (ProviderGate){.hold = TRUE};
+	certificate_test_prompter_expect_password(GOOD_PIN);
+	bridge_start(&b);
+	BRIDGE_WAIT(b.script.done_called && provider_close.pending);
+	g_assert_cmpint(b.script.outcome, ==, CERTIFICATE_PIN_OK);
+	/* The password round and policy are finished; only close retains the counted
+	 * UI-local prompt. This assertion fails if close retains just the gcr object. */
+	g_assert_cmpint(g_atomic_int_get(&b.context->ui_handles), ==, 1);
+	xcc_context_shutdown_async(b.context, bridge_shutdown_done, &b);
+	g_assert_true(xcc_context_post(b.context, bridge_probe_shutdown, &b));
+	/* Exercise callback ownership with the caller's context reference gone. */
+	xcc_context_unref(b.context);
+	BRIDGE_WAIT(b.settled);
+	g_assert_false(b.shutdown);
+	g_assert_cmpuint(provider_close.completed, ==, 0);
+	provider_resume(&provider_close);
+	BRIDGE_WAIT(b.shutdown);
+	g_assert_cmpuint(provider_close.completed, ==, 1);
+	script_clear(&b.script);
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -1248,6 +1468,8 @@ int main(int argc, char** argv)
 	ADD("/pin-system/broker-context-cancel-before-opened",
 	    test_broker_context_cancel_before_opened);
 	ADD("/pin-system/auto-picks-the-prompter", test_auto_picks_the_prompter);
+	ADD("/pin-system/bridge-protected-final-try-async-open", test_bridge_protected_final_try);
+	ADD("/pin-system/bridge-shutdown-pending-close", test_bridge_shutdown_pending_close);
 	ADD("/pin-system/happy-path", test_happy_path);
 	ADD("/pin-system/caller-window-is-passed", test_caller_window_is_passed);
 	ADD("/pin-system/wrong-pin-then-right", test_wrong_pin_then_right);

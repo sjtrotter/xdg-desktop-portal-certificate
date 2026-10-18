@@ -17,6 +17,7 @@ static void snapshot(FakeChooserProvider* fake, const XccChooserView* view)
 	g_clear_pointer(&fake->candidates, g_free);
 	g_ptr_array_set_size(fake->text, 0);
 	fake->view = *view;
+	fake->view.struct_size = sizeof(fake->view);
 #define COPY(field) fake->view.field = copy_text(fake, view->field)
 	COPY(caller_name);
 	COPY(app_id);
@@ -34,8 +35,10 @@ static void snapshot(FakeChooserProvider* fake, const XccChooserView* view)
 	fake->candidates = g_new0(XccChooserCandidateView, view->n_candidates);
 	for (gsize i = 0; i < view->n_candidates; i++)
 	{
-		fake->candidates[i] = view->candidates[i];
-#define COPY(field) fake->candidates[i].field = copy_text(fake, view->candidates[i].field)
+		const XccChooserCandidateView* row = xcc_chooser_view_candidate(view, i);
+		fake->candidates[i] = *row;
+		fake->candidates[i].struct_size = sizeof(fake->candidates[i]);
+#define COPY(field) fake->candidates[i].field = copy_text(fake, row->field)
 		COPY(subject);
 		COPY(issuer);
 		COPY(token);
@@ -57,7 +60,7 @@ static void fake_show(gpointer user_data, XccUiId id, const XccChooserView* view
 	fake->shows++;
 	snapshot(fake, view);
 	if (fake->cancel_on_show)
-		xcc_ui_cancel(id);
+		certificate_chooser_cancel(id);
 }
 
 static void fake_update(gpointer user_data, XccUiId id, const XccChooserView* view)
@@ -104,11 +107,11 @@ void fake_chooser_provider_choose(FakeChooserProvider* fake, gsize index)
 {
 	g_assert_cmpuint(fake->id, !=, 0);
 	g_assert_cmpuint(index, <, fake->view.n_candidates);
-	xcc_choose(fake->id, fake->view.revision, fake->view.candidates[index].id);
+	certificate_chooser_choose(fake->id, fake->view.revision, fake->view.candidates[index].id);
 }
 
 void fake_chooser_provider_cancel(FakeChooserProvider* fake)
 {
 	g_assert_cmpuint(fake->id, !=, 0);
-	xcc_ui_cancel(fake->id);
+	certificate_chooser_cancel(fake->id);
 }

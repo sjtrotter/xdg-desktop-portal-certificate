@@ -15,8 +15,7 @@ static void fake_show(gpointer user_data, PinPrompt* prompt, const XccPinView* v
 	fake->protected_path = view->protected_path;
 	fake->count_low = view->count_low;
 	fake->final_try = view->final_try;
-	if (fake->protected_path)
-		certificate_pin_prompt_submit(prompt);
+	certificate_pin_prompt_ready(prompt);
 }
 
 static void fake_update(gpointer user_data, PinPrompt* prompt, const XccPinView* view)

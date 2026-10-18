@@ -378,11 +378,12 @@ static void handle_prompt_opened(PinPrompt* prompt, GAsyncResult* result)
 			                         certificate_pin_prompt_ref(prompt));
 		}
 
-		certificate_pin_prompt_submit(prompt);
+		certificate_pin_prompt_ready(prompt);
 
 		return;
 	}
 
+	certificate_pin_prompt_ready(prompt);
 	ask_for_password(prompt);
 }
 
@@ -447,18 +448,27 @@ static void system_pin_warning(gpointer user_data, PinPrompt* prompt, const char
 	                         certificate_pin_prompt_ref(prompt));
 }
 
-/* Release the reference held across asynchronous close. */
+typedef struct
+{
+	GcrSystemPrompt* gcr;
+	PinPrompt* prompt; /* Keeps the bridge handle counted until the callback returns. */
+} SystemPinClose;
+
+/* Release both the gcr object and counted provider handle after close finishes. */
 static void on_system_prompt_closed(GObject* source, GAsyncResult* result, gpointer user_data)
 {
-	g_autoptr(GcrSystemPrompt) prompt = user_data;
+	SystemPinClose* close = user_data;
 	g_autoptr(GError) error = NULL;
 
-	if (!gcr_system_prompt_close_finish(prompt, result, &error) && error != NULL)
+	if (!gcr_system_prompt_close_finish(close->gcr, result, &error) && error != NULL)
 	{
 		g_autofree char* text = certificate_redact_error_text(error->message);
 
 		g_message("pin-prompt-close-failed detail=system-prompter: %s", text);
 	}
+	g_object_unref(close->gcr);
+	certificate_pin_prompt_unref(close->prompt);
+	g_free(close);
 }
 
 /* Close asynchronously and release gcr's password storage immediately; callbacks retain their own references. */
@@ -495,8 +505,13 @@ static void system_pin_release(PinPrompt* prompt)
 
 	/* Close asynchronously because synchronous gcr_system_prompt_close() leaks a nested GMainContext per prompt on gcr 4.4. */
 	if (GCR_IS_SYSTEM_PROMPT(ui->gcr))
+	{
+		SystemPinClose* close = g_new(SystemPinClose, 1);
+		close->gcr = g_object_ref(GCR_SYSTEM_PROMPT(ui->gcr));
+		close->prompt = certificate_pin_prompt_ref(prompt);
 		gcr_system_prompt_close_async(GCR_SYSTEM_PROMPT(ui->gcr), NULL, on_system_prompt_closed,
-		                              g_object_ref(ui->gcr));
+		                              close);
+	}
 
 	g_clear_object(&ui->gcr);
 }

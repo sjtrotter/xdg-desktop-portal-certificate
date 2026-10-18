@@ -5,6 +5,7 @@
  */
 
 #include "operations.h"
+#include "../core/sources.h"
 
 #include <string.h>
 
@@ -16,6 +17,7 @@
 typedef struct
 {
 	/* References are released from both workers and the main thread. */
+	GMainContext* coordinator;
 	gint refs;
 	gboolean answered;
 
@@ -49,6 +51,7 @@ static void operation_free(Operation* operation)
 	g_free(operation->parent_window);
 	g_free(operation->caller_display);
 	g_free(operation->purpose_display);
+	g_main_context_unref(operation->coordinator);
 	g_free(operation);
 }
 
@@ -118,7 +121,7 @@ static gboolean operation_still_authorised(Operation* operation, GError** error)
 		return FALSE;
 	}
 
-	if (session->closed)
+	if (xcc_session_is_closed(session))
 	{
 		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
 		                    "Session closed");
@@ -218,9 +221,7 @@ static void do_abandon(gpointer user_data)
 		return;
 
 	/* Keep the login while any waiter still needs it. */
-	g_mutex_lock(&session->device_lock);
 	still_wanted = session->login_waiters != NULL && session->login_waiters->len > 0;
-	g_mutex_unlock(&session->device_lock);
 
 	if (still_wanted)
 		return;
@@ -288,10 +289,10 @@ static gboolean prompt_context_pin(gpointer user_data)
 	Operation* operation = authentication->operation;
 	XccSession* session = operation->session;
 
-	certificate_pin_login_full(session->candidate->token, session->id, operation->parent_window,
-	                           operation->caller_display, operation->purpose_display,
-	                           do_context_login, refresh_context_flags, NULL, authentication,
-	                           NULL, operation->cancellable, on_context_pin_done, authentication);
+	certificate_pin_login_full_kind(
+		session->candidate->token, session->id, operation->parent_window, operation->caller_display,
+		operation->purpose_display, do_context_login, refresh_context_flags, NULL, authentication,
+		NULL, operation->cancellable, on_context_pin_done, authentication, TRUE);
 	return G_SOURCE_REMOVE;
 }
 
@@ -309,7 +310,7 @@ static gboolean authenticate_context(gpointer user_data, GError** error)
 	g_mutex_unlock(&session->device_lock);
 
 	g_mutex_lock(&authentication.lock);
-	g_idle_add(prompt_context_pin, &authentication);
+	xcc_idle_add(operation->coordinator, prompt_context_pin, &authentication, NULL);
 	while (!authentication.done)
 		g_cond_wait(&authentication.cond, &authentication.lock);
 	g_mutex_unlock(&authentication.lock);
@@ -526,6 +527,12 @@ static void apply_login_outcome(Operation* operation, CertificatePinOutcome outc
 			                                   "Token removed"));
 			return;
 
+		case CERTIFICATE_PIN_INCORRECT:
+			operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
+														  CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT,
+														  "Token refused login"));
+			return;
+
 		case CERTIFICATE_PIN_TIMED_OUT:
 			/* A timed-out login may still complete; the abandon callback then closes the session. */
 			operation_fail(operation,
@@ -559,7 +566,7 @@ static void detach_waiter_cancel(Operation* operation)
 
 	if (operation->login_cancel_idle != 0)
 	{
-		g_source_remove(operation->login_cancel_idle);
+		xcc_source_remove(operation->login_cancel_idle);
 		operation->login_cancel_idle = 0;
 	}
 }
@@ -601,7 +608,6 @@ static gboolean waiter_cancelled_idle(gpointer user_data)
 
 	operation->login_cancel_idle = 0;
 
-	g_mutex_lock(&session->device_lock);
 	if (session->login_waiters != NULL)
 	{
 		/* The idle reference keeps the operation alive after removal from the waiter list. */
@@ -611,7 +617,6 @@ static gboolean waiter_cancelled_idle(gpointer user_data)
 		    session->login_cancellable != NULL)
 			close_the_window = g_object_ref(session->login_cancellable);
 	}
-	g_mutex_unlock(&session->device_lock);
 
 	if (was_waiting)
 	{
@@ -635,8 +640,8 @@ static void on_waiter_cancelled(GCancellable* cancellable, gpointer user_data)
 	if (operation->login_cancel_idle != 0)
 		return;
 
-	operation->login_cancel_idle = g_idle_add_full(G_PRIORITY_DEFAULT, waiter_cancelled_idle,
-	                                               operation_ref(operation), operation_unref);
+	operation->login_cancel_idle = xcc_idle_add(operation->coordinator, waiter_cancelled_idle,
+												operation_ref(operation), operation_unref);
 }
 
 static void open_thread(GTask* task, gpointer source, gpointer task_data,
@@ -691,6 +696,12 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 		return;
 	}
 
+	/* Waiter bookkeeping belongs to the coordinator; C_Login may hold device_lock. */
+	if (session->login_in_progress)
+	{
+		g_ptr_array_add(session->login_waiters, operation_ref(operation));
+		goto attach_waiter;
+	}
 	/* Lazy login state is shared with workers and read under device_lock. */
 	g_mutex_lock(&session->device_lock);
 
@@ -737,11 +748,12 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 		return;
 	}
 
+attach_waiter:
 	if (operation->cancellable != NULL)
 		operation->login_cancel_id = g_cancellable_connect(
 		    operation->cancellable, G_CALLBACK(on_waiter_cancelled), operation, NULL);
 
-	if (wait_for_login)
+	if (wait_for_login || interaction == NULL)
 		return;
 
 	/* The prompt and on_pin_done() each own a reference until their callbacks finish. */
@@ -780,7 +792,7 @@ void certificate_broker_perform(CertificateTokens* tokens, XccSession* session,
 		return;
 	}
 
-	if (session->closed)
+	if (xcc_session_is_closed(session))
 	{
 		g_set_error_literal(&error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_FAILED,
 		                    "Session closed");
@@ -839,6 +851,7 @@ void certificate_broker_perform(CertificateTokens* tokens, XccSession* session,
 
 	operation = g_new0(Operation, 1);
 	operation->refs = 1;
+	operation->coordinator = g_main_context_ref_thread_default();
 	operation->tokens = tokens;
 	operation->session = g_object_ref(session);
 	operation->decrypt = decrypt;

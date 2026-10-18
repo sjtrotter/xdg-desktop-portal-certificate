@@ -42,14 +42,14 @@ static void on_use(GtkWidget* widget, gpointer user_data)
 	guint64 candidate = selected_candidate(chooser);
 
 	if (candidate != 0)
-		xcc_choose(chooser->id, chooser->revision, candidate);
+		certificate_chooser_choose(chooser->id, chooser->revision, candidate);
 }
 
 static void on_cancel(GtkWidget* widget, gpointer user_data)
 {
 	Chooser* chooser = user_data;
 
-	xcc_ui_cancel(chooser->id);
+	certificate_chooser_cancel(chooser->id);
 }
 
 static gboolean on_close_request(GtkWindow* window, gpointer user_data)
@@ -243,7 +243,7 @@ static void gtk_chooser_update(gpointer user_data, XccUiId id, const XccChooserV
 
 	for (guint i = 0; i < view->n_candidates; i++)
 	{
-		const XccChooserCandidateView* candidate = &view->candidates[i];
+		const XccChooserCandidateView* candidate = xcc_chooser_view_candidate(view, i);
 		GtkWidget* row = build_row(candidate);
 
 		gtk_list_box_append(GTK_LIST_BOX(chooser->list), row);

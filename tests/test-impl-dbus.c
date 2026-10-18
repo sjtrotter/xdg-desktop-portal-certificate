@@ -37,6 +37,7 @@ typedef struct
 	GDBusConnection* frontend;
 	GDBusConnection* stranger;
 	guint owner_id;
+	gboolean acquired;
 	CertificateTokens* tokens;
 	CertificateImpl* impl;
 	gboolean has_softhsm;
@@ -70,7 +71,6 @@ static void on_name_acquired(GDBusConnection* connection, const char* name, gpoi
 static void fixture_set_up(Fixture* fixture, gconstpointer user_data)
 {
 	g_autoptr(GError) error = NULL;
-	gboolean acquired = FALSE;
 	const char* modules[2] = { NULL, NULL };
 	g_autofree char* module = NULL;
 	g_autofree char* directory = NULL;
@@ -89,9 +89,9 @@ static void fixture_set_up(Fixture* fixture, gconstpointer user_data)
 	fixture->owner_id =
 	    g_bus_own_name_on_connection(fixture->frontend, FRONTEND_NAME,
 	                                 G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT, on_name_acquired,
-	                                 NULL, &acquired, NULL);
+	                                 NULL, &fixture->acquired, NULL);
 
-	while (!acquired)
+	while (!fixture->acquired)
 		g_main_context_iteration(NULL, TRUE);
 
 	directory = g_strdup(g_getenv("SOFTHSM_FIXTURE_DIR"));
@@ -925,6 +925,8 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	}
 	if (!require_matching_fixture(fixture))
 		return;
+	certificate_impl_free(fixture->impl);
+	fixture->impl = NULL;
 	if (fake_ui)
 	{
 		fake_chooser_provider_init(&fake);
@@ -932,6 +934,8 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	}
 	else
 		certificate_ui_set_has_display(TRUE);
+	fixture->impl = certificate_impl_new(fixture->backend, fixture->tokens, &error);
+	g_assert_no_error(error);
 	certificate_tokens_stop_watch(fixture->tokens);
 	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
 	options = acquire_options(NULL);
@@ -989,12 +993,19 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 			fake_chooser_provider_cancel(&fake);
 		else
 			fake_chooser_provider_choose(&fake, 0);
+		deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+		while (fake.closes == 0 && g_get_monotonic_time() < deadline)
+			g_main_context_iteration(NULL, FALSE);
 		g_assert_cmpuint(fake.closes, ==, 1);
 	}
 	else
 	{
 		gtk_list_box_select_row(GTK_LIST_BOX(list), row);
 		g_signal_emit_by_name(list, "row-activated", row);
+		deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+		while (g_list_model_get_n_items(gtk_window_get_toplevels()) != 0 &&
+			   g_get_monotonic_time() < deadline)
+			g_main_context_iteration(NULL, FALSE);
 		g_assert_cmpuint(g_list_model_get_n_items(gtk_window_get_toplevels()), ==, 0);
 	}
 	g_assert_false(call.done);
@@ -1007,6 +1018,8 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 		g_assert_nonnull(closed);
 	}
 	else if (outcome == DEFERRED_REMOVAL)
+		/* Queue removal before releasing the snapshot; do not wait for delivery.
+		 * Refresh completion must not overtake it on the coordinator. */
 		certificate_tokens_emit_event(fixture->tokens, token, FALSE);
 	g_assert_false(call.done);
 
@@ -1043,6 +1056,8 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	g_mutex_clear(&gate.lock);
 	g_cond_clear(&gate.cond);
 	g_variant_unref(call.reply);
+	certificate_impl_free(fixture->impl);
+	fixture->impl = NULL;
 	if (fake_ui)
 	{
 		fake_chooser_provider_clear(&fake);

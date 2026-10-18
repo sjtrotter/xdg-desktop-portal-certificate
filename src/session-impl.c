@@ -103,8 +103,7 @@ CertificateImplSession* certificate_impl_session_new(const char* session_handle,
 
 	session->id = g_strdup(session_handle);
 	session->app_id = g_strdup(app_id);
-	session->identity_level = CERTIFICATE_IDENTITY_UNKNOWN;
-	session->core = xcc_session_new(session_handle, on_core_invalidated, session);
+	session->core = xcc_session_new_legacy(session_handle, on_core_invalidated, session);
 
 	return session;
 }
@@ -137,4 +136,23 @@ void certificate_impl_session_unexport(CertificateImplSession* session)
 void certificate_impl_session_close(CertificateImplSession* session)
 {
 	xcc_session_close(session->core);
+}
+
+CertificateImplSession* certificate_impl_session_new_for_context(XccContext* context,
+																 uint64_t generation,
+																 const char* id, const char* app_id)
+{
+	XccSessionSpec spec = {.struct_size = sizeof(spec),
+						   .abi_version = XCC_ABI_VERSION,
+						   .owner_generation = generation,
+						   .app_id = app_id,
+						   .log_id = id};
+	XccSession* core = xcc_session_new(context, &spec, NULL);
+	if (core == NULL)
+		return NULL;
+	CertificateImplSession* session = certificate_impl_session_new(id, app_id);
+	g_clear_object(&session->core);
+	session->core = core;
+	xcc_session_set_invalidated_callback(core, on_core_invalidated, session);
+	return session;
 }

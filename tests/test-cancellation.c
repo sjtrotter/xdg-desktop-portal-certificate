@@ -567,7 +567,7 @@ static void test_cancel_during_sign(void)
 		return;
 	}
 
-	session = xcc_session_new("/org/freedesktop/portal/desktop/session/t/1", NULL, NULL);
+	session = xcc_session_new_legacy("/org/freedesktop/portal/desktop/session/t/1", NULL, NULL);
 	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
 	                  FALSE, 300);
 
@@ -703,7 +703,8 @@ static void test_one_waiter_cancels_alone(void)
 		return;
 	}
 
-	session = xcc_session_new("/org/freedesktop/portal/desktop/session/t/waiters", NULL, NULL);
+	session =
+		xcc_session_new_legacy("/org/freedesktop/portal/desktop/session/t/waiters", NULL, NULL);
 	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
 	                  FALSE, 300);
 
@@ -818,7 +819,8 @@ static void test_broker_cancelled_login_is_abandoned(void)
 		return;
 	}
 
-	session = xcc_session_new("/org/freedesktop/portal/desktop/session/t/abandon", NULL, NULL);
+	session =
+		xcc_session_new_legacy("/org/freedesktop/portal/desktop/session/t/abandon", NULL, NULL);
 	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE,
 	                  FALSE, 300);
 

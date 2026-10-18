@@ -12,6 +12,8 @@
 #include "../certificate.h"
 #include "../tokens/discovery.h"
 
+G_BEGIN_DECLS
+
 /** Chooser trust and accessibility requirements are documented in docs/IMPL-INTERFACE.md. */
 
 typedef struct
@@ -24,11 +26,13 @@ typedef struct
 	const char* reason; /**< Untrusted subordinate text; never logged. */
 	const char* request_handle;
 	gboolean tokens_present;
+	gboolean generic_purpose;
 } CertificateChooserRequest;
 
 typedef struct
 {
 	CertificateCandidate* chosen; /**< NULL on user cancellation. */
+	int error;					  /* Typed UI failure; zero for normal consent/cancellation. */
 } CertificateChooserResult;
 
 typedef void (*CertificateChooserDone)(const CertificateChooserResult* result, gpointer user_data);
@@ -64,5 +68,7 @@ char* certificate_chooser_format_lifetime(guint32 seconds);
 char* certificate_chooser_format_expiry(const CertificateCandidate* candidate, gint64 now);
 
 char* certificate_chooser_format_detail(const CertificateCandidate* candidate, gint64 now);
+
+G_END_DECLS
 
 #endif

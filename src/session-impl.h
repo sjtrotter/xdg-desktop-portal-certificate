@@ -14,6 +14,7 @@
 
 #include "certificate.h"
 #include "core/session.h"
+#include "core/core.h"
 #include "xdp-impl-dbus.h"
 
 /** Backend session ownership and teardown rules are documented in docs/IMPL-INTERFACE.md. */
@@ -31,15 +32,15 @@ struct _CertificateImplSession
 	char* app_id; /**< App ID established by the frontend. */
 	char* owner;  /**< Frontend connection owner at CreateSession. */
 
-	/* Identity assurance may fall but must never rise within a session. */
-	CertificateIdentityLevel identity_level;
-	gboolean identity_seen;
 
 	XccSession* core;
 };
 
 CertificateImplSession* certificate_impl_session_new(const char* session_handle,
                                                      const char* app_id);
+
+CertificateImplSession* certificate_impl_session_new_for_context(XccContext*, uint64_t, const char*,
+																 const char*);
 
 /** Abort creation if export fails, since the frontend must be able to close the session. */
 gboolean certificate_impl_session_export(CertificateImplSession* session,

@@ -141,6 +141,13 @@ typedef void (*CertificateTokenEvent)(CertificateToken* token, gboolean added, g
 void certificate_tokens_watch(CertificateTokens* tokens, CertificateTokenEvent event,
                               gpointer user_data);
 void certificate_tokens_stop_watch(CertificateTokens* tokens);
+/* After stop, detach the receiver before destroying it. Coordinator only. */
+void certificate_tokens_clear_watch(CertificateTokens* tokens);
+
+/** Watch context only: deliver the finite FIFO prefix queued before this call's
+ * lock acquisition. Acceptance calls this before granting, independently of
+ * source priorities. Polling/debounce precedes enqueue and is not covered. */
+void certificate_tokens_dispatch_pending(CertificateTokens* tokens);
 
 /** Main-context test hook delivers a presence event through the active watch callback. */
 void certificate_tokens_emit_event(CertificateTokens* tokens, CertificateToken* token,
