@@ -15,6 +15,7 @@ static void fake_show(gpointer user_data, PinPrompt* prompt, const XccPinView* v
 	fake->protected_path = view->protected_path;
 	fake->count_low = view->count_low;
 	fake->final_try = view->final_try;
+	g_assert_cmpuint(view->status_code, ==, XCC_PIN_STATUS_NONE);
 	certificate_pin_prompt_ready(prompt);
 }
 
@@ -28,11 +29,15 @@ static void fake_update(gpointer user_data, PinPrompt* prompt, const XccPinView*
 	fake->final_try = view->final_try;
 	if (view->status != NULL)
 	{
+		g_assert_cmpuint(view->status_code, !=, XCC_PIN_STATUS_NONE);
 		fake->retries++;
 		fake->status = view->status;
 	}
 	else
+	{
+		g_assert_cmpuint(view->status_code, ==, XCC_PIN_STATUS_NONE);
 		fake->busy_updates++;
+	}
 }
 
 static void fake_warning(gpointer user_data, PinPrompt* prompt, const char* message)

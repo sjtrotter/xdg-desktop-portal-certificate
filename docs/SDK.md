@@ -77,13 +77,79 @@ sizeof(const char*)` (and the ABI version). Older producers supply only the orig
 prefix. `protected_path` still supplies `protected_authentication_path` on the wire.
 This append-only extension keeps the SONAME, ABI version and exported symbol list.
 
+Desktops should build user-visible wording from structured view fields and their
+own translation catalogs. The SDK's English strings are a compatibility fallback
+for producers whose `struct_size` lacks the corresponding structured fields.
+Do not parse or compare English sentences to discover state. Continue to render
+external certificate, token, reader, caller and reason text literally as plain text.
+
+`XccChooserCandidateView` appends, in order, `int64_t not_before, not_after`
+(Unix seconds), `uint32_t validity` (`XccValidity`), `const char *key_type`,
+`uint32_t key_size`, and `uint32_t display_flags`. Nonpositive timestamps are
+unknown. The core decides `VALID`, `EXPIRED`, `NOT_YET_VALID` or `UNKNOWN` using
+the same wall-clock sample as the existing `expiry`, `detail` and `invalid`
+fields. Expired and not-yet-valid checks retain their existing precedence;
+otherwise either missing date produces `UNKNOWN`. Desktops must use this state,
+not recompute validity with a second clock. Format dates in the user's locale
+and key details from the algorithm identifier and bit count (`key_type` is NULL
+when unknown; `unsupported` is an algorithm identifier for unsupported keys).
+The original `expiry` and `detail` fields keep their previous content.
+
+Gate each appended field with `struct_size >= offsetof(Type, field) +
+sizeof(view->field)` and check the ABI version. For example, the complete key
+metadata is available through `key_size`; validity is independently available
+through `validity`. The `XCC_CHOOSER_CANDIDATE_VIEW_V1_SIZE`,
+`XCC_CHOOSER_VIEW_V1_SIZE` and `XCC_PIN_VIEW_V1_SIZE` constants retain the original
+minimum sizes, including alignment padding. Do not require the new `sizeof`
+when accepting older views. The chooser stride walker accepts original, partial
+and larger producer layouts; always use it instead of indexing the array.
+Dispatched snapshots own the appended key string as well as the original text.
+Each extension starts on an eight-byte boundary using `XCC_ALIGNAS(8)` (C11
+`_Alignas` / C++ `alignas`), including the token metadata in `XccCandidateInfo`.
+V1 minimum sizes round the last original field's end to the original struct's
+alignment, independently of that extension boundary. On ARM EABI the original
+chooser occupies 96 bytes; `generic_purpose` starts at 96, beyond its tail
+padding. On i386 the original chooser remains 92 bytes and the extension starts
+at 96. Original field offsets on both ABIs and x86_64 are preserved.
+
+The remaining public UI views have been audited for SDK-owned English:
+
+| View / English fields | Structured source for desktop translations |
+| --- | --- |
+| `XccChooserView.caller_name` unidentified-app fallback | Appended `display_flags`, `XCC_DISPLAY_CALLER_FALLBACK`; actual caller names remain external text. |
+| `identity_detail` | Existing `identity_level`. |
+| `purpose_text`, `purpose_detail` | Existing `purpose` plus appended `bool generic_purpose`, which selects generic module disclosure without changing permissions. |
+| `operation_scope` | Existing `may_sign`, `may_decrypt`. |
+| `duration` | Existing `lifetime_seconds`. |
+| `later_prompt` | Invariant disclosure that the first key use may prompt for a PIN; desktops translate this fixed contract. |
+| `reason_label` | Invariant label introducing application-supplied, untrusted reason text; desktops translate the label. `untrusted_reason` itself is external text. |
+| `XccPinView.purpose_display` | Appended `uint32_t purpose` (`XccPurpose`) and `bool generic_purpose`; generic ignores `purpose`. The core resolves the private legacy purpose strings before publishing these fields. |
+| `XccPinView.status` | Appended `uint32_t status_code` (`XccPinStatus`): `NONE`, `INCORRECT`, `REQUIRED`, `TOO_LONG`, `MEMORY_UNAVAILABLE`. `NONE` preserves input on busy-only updates; other codes request fresh input. The English `status` and its NULL convention are retained. |
+| `XccPinView.token_label` unnamed-token fallback | Appended `uint32_t display_flags`, `XCC_DISPLAY_TOKEN_FALLBACK`. `reader` and `caller_display` are external display text with NULL for absence, not English policy sentences. |
+| `XccWarning.message` | Existing `code` (`XCC_WARNING_FINAL_TRY`); no extension needed. |
+
+The chooser candidate's `display_flags` also distinguishes the SDK's unnamed
+certificate, issuer and token placeholders using `XCC_DISPLAY_SUBJECT_FALLBACK`,
+`XCC_DISPLAY_ISSUER_FALLBACK` and `XCC_DISPLAY_TOKEN_FALLBACK`. Translate only
+flagged placeholders; an external label that happens to match English must stay
+literal. These flags and the chooser/PIN extensions are append-only and leave
+the SONAME, ABI version and exported symbol list unchanged. All other view
+fields are IDs, state, external display data or opaque window/activation data.
+
 `meson test -C build --suite sdk` covers staged C/C++ consumers, all installed headers,
 ABI prefixes, complete public/private export lists and their symbol versions, `NODELETE`,
 a separate `-Dservice=false --auto-features=enabled` configuration and stride bounds.
 The new consumers use an explicit empty module list, so they need no SoftHSM fixture.
 Existing token suites retain their missing-fixture skips and private static link seams.
-`sdk-headers` also freezes the original `XccCandidateInfo` offsets and the appended
-metadata order in C and C++. `sdk-token-metadata` checks original and absent metadata,
+`sdk-headers` also freezes the original `XccCandidateInfo` and UI-view offsets,
+original UI minimum sizes, and appended metadata order in C and C++.
+The header checks also compile with `-m32` and `-m32 -malign-double` when the
+compiler and standard headers support them. Static ILP32 models cover both
+four- and eight-byte `uint64_t` alignment even on hosts without multilib support;
+the test output explicitly reports unavailable compiler modes.
+`sdk-stride` includes an original chooser-row array; chooser-policy checks all
+four validity states, key metadata and placeholder flags, and core-api checks
+the dispatched metadata snapshot. `sdk-token-metadata` checks original and absent metadata,
 and compares all four fields with discovered SoftHSM token values when a fixture is
 available (`SOFTHSM_FIXTURE_DIR`, optionally `SOFTHSM_MODULE`, or the usual
 `/tmp/xdp-certificate-softhsm` fixture from `tools/softhsm-fixture.sh`).

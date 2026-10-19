@@ -46,6 +46,7 @@ static void snapshot(FakeChooserProvider* fake, const XccChooserView* view)
 		COPY(expiry);
 		COPY(detail);
 		COPY(fingerprint);
+		COPY(key_type);
 #undef COPY
 	}
 	fake->view.candidates = fake->candidates;

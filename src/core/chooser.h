@@ -59,6 +59,8 @@ char* certificate_chooser_display_name(const CertificateCallerIdentity* caller);
 
 char* certificate_chooser_format_purpose(const CertificateChooserRequest* request);
 
+gboolean certificate_chooser_is_generic_purpose(const CertificateChooserRequest* request);
+
 const char* certificate_chooser_purpose_detail(const CertificateChooserRequest* request);
 
 /** Lifetime is positive before display formatting. */

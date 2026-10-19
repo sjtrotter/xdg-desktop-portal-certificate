@@ -85,6 +85,8 @@ static void test_empty_insertion_and_ids(gconstpointer data)
 	g_assert_cmpstr(fake.view.reason_label, ==, "The application says");
 	g_assert_cmpstr(fake.view.duration, ==, "5 minutes");
 	g_assert_cmpstr(fake.view.operation_scope, ==, "It allows signing only.");
+	g_assert_false(fake.view.generic_purpose);
+	g_assert_cmpuint(fake.view.display_flags, ==, 0);
 	g_assert_cmpstr(fake.view.parent_window, ==, "x11:123");
 	g_assert_cmpstr(fake.view.activation_token, ==, "activate-once");
 
@@ -150,6 +152,60 @@ static void test_removal_and_cancel(void)
 	g_assert_cmpuint(result.calls, ==, 1);
 	g_assert_null(result.chosen);
 	g_assert_cmpuint(fake.closes, ==, 1);
+	fake_chooser_provider_clear(&fake);
+}
+
+static void test_structured_fields(void)
+{
+	FakeChooserProvider fake;
+	Result result = {0};
+	g_autoptr(GPtrArray) candidates = g_ptr_array_new_with_free_func(
+	    (GDestroyNotify)certificate_candidate_unref);
+	CertificateCandidate* candidate = candidate_with_key("metadata");
+	gint64 now = g_get_real_time() / G_USEC_PER_SEC;
+	candidate->not_before = now - 3600;
+	candidate->not_after = now + 3600;
+	g_ptr_array_add(candidates, candidate);
+	fake_chooser_provider_init(&fake);
+	CertificateChooser* chooser = show(&fake, candidates, TRUE, NULL, &result);
+	const XccChooserCandidateView* row = xcc_chooser_view_candidate(&fake.view, 0);
+	g_assert_cmpuint(row->struct_size, ==, sizeof(*row));
+	g_assert_cmpint(row->not_before, ==, candidate->not_before);
+	g_assert_cmpint(row->not_after, ==, candidate->not_after);
+	g_assert_cmpuint(row->validity, ==, XCC_VALIDITY_VALID);
+	g_assert_cmpstr(row->key_type, ==, "RSA");
+	g_assert_cmpuint(row->key_size, ==, candidate->key_size);
+	g_assert_true(row->key_type != candidate->key_type);
+	g_autofree char* expiry = certificate_chooser_format_expiry(candidate, now);
+	g_autofree char* detail = certificate_chooser_format_detail(candidate, now);
+	g_assert_cmpstr(row->expiry, ==, expiry);
+	g_assert_cmpstr(row->detail, ==, detail);
+	static const XccValidity states[] = {
+	    XCC_VALIDITY_EXPIRED, XCC_VALIDITY_NOT_YET_VALID, XCC_VALIDITY_UNKNOWN
+	};
+	for (gsize i = 0; i < G_N_ELEMENTS(states); i++)
+	{
+		candidate->not_before = states[i] == XCC_VALIDITY_NOT_YET_VALID ? now + 3600 : now - 7200;
+		candidate->not_after = states[i] == XCC_VALIDITY_EXPIRED ? now - 3600 : now + 7200;
+		if (states[i] == XCC_VALIDITY_UNKNOWN)
+			candidate->not_before = candidate->not_after = 0;
+		certificate_chooser_update(chooser, candidates, TRUE);
+		row = xcc_chooser_view_candidate(&fake.view, 0);
+		g_assert_cmpuint(row->validity, ==, states[i]);
+		g_assert_cmpint(row->invalid, ==, states[i] != XCC_VALIDITY_UNKNOWN);
+	}
+	g_clear_pointer(&candidate->subject_display, g_free);
+	g_clear_pointer(&candidate->issuer_display, g_free);
+	g_clear_pointer(&candidate->token->label, g_free);
+	certificate_chooser_update(chooser, candidates, TRUE);
+	row = xcc_chooser_view_candidate(&fake.view, 0);
+	g_assert_cmpuint(row->display_flags, ==, XCC_DISPLAY_SUBJECT_FALLBACK |
+	    XCC_DISPLAY_ISSUER_FALLBACK | XCC_DISPLAY_TOKEN_FALLBACK);
+	/* A literal external name matching English is not an SDK placeholder. */
+	candidate->token->label = g_strdup("unnamed token");
+	certificate_chooser_update(chooser, candidates, TRUE);
+	g_assert_false((fake.view.candidates[0].display_flags & XCC_DISPLAY_TOKEN_FALLBACK) != 0);
+	fake_chooser_provider_cancel(&fake);
 	fake_chooser_provider_clear(&fake);
 }
 
@@ -224,6 +280,7 @@ int main(int argc, char** argv)
 	g_test_add_data_func("/chooser-policy/no-match-insert", GINT_TO_POINTER(TRUE),
 	                     test_empty_insertion_and_ids);
 	g_test_add_func("/chooser-policy/removal-cancel", test_removal_and_cancel);
+	g_test_add_func("/chooser-policy/structured-fields", test_structured_fields);
 	g_test_add_func("/chooser-policy/request-cancel", test_request_cancel);
 	g_test_add_func("/chooser-policy/inline-cancel-late-reply", test_inline_cancel_and_late_reply);
 	return g_test_run();

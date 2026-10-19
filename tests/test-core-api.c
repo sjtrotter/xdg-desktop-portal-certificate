@@ -216,6 +216,16 @@ static void choose(void* data, XccUiId id, const XccChooserView* view)
 	f->chooser_id = id;
 	f->revision = view->revision;
 	g_assert_cmpuint(view->n_candidates, ==, f->empty ? 0 : 1);
+	if (!f->empty)
+	{
+		/* Exercise the dispatched snapshot, including its owned appended string. */
+		const XccChooserCandidateView* row = xcc_chooser_view_candidate(view, 0);
+		g_assert_cmpint(row->not_before, ==, f->candidate->not_before);
+		g_assert_cmpint(row->not_after, ==, f->candidate->not_after);
+		g_assert_cmpstr(row->key_type, ==, f->candidate->key_type);
+		g_assert_true(row->key_type != f->candidate->key_type);
+		g_assert_cmpuint(row->key_size, ==, f->candidate->key_size);
+	}
 	f->choice = view->n_candidates != 0 ? view->candidates[0].id : 0;
 	g_string_append_c(f->deliveries, 'C');
 	if (f->choose)
@@ -242,6 +252,8 @@ static void pin_show(void* data, XccUiId id, const XccPinView* view)
 	assert_desktop(f);
 	f->pin_shows++;
 	f->pin_id = id;
+	g_assert_cmpuint(view->status_code, ==, XCC_PIN_STATUS_NONE);
+	g_assert_false(view->generic_purpose);
 	xcc_pin_ready(f->context, id);
 	g_string_append_c(f->deliveries, 'P');
 	if (view->context_specific)

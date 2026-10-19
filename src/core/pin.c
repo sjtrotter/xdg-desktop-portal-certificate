@@ -261,8 +261,40 @@ static void login_thread(GTask* task, gpointer source, gpointer task_data,
 	g_task_return_error(task, g_steal_pointer(&error));
 }
 
-static XccPinView pin_view(const PinPrompt* prompt, const char* status)
+static const char* pin_status_text(XccPinStatus status)
 {
+	switch (status)
+	{
+	case XCC_PIN_STATUS_INCORRECT:
+		return "That PIN was not accepted. Try again.";
+	case XCC_PIN_STATUS_REQUIRED:
+		return "Enter the PIN for this token.";
+	case XCC_PIN_STATUS_TOO_LONG:
+		return "PIN exceeds the supported length.";
+	case XCC_PIN_STATUS_MEMORY_UNAVAILABLE:
+		return "The PIN could not be held in locked memory.";
+	default:
+		return NULL;
+	}
+}
+
+static XccPinView pin_view(const PinPrompt* prompt, XccPinStatus status)
+{
+	/* The private legacy PIN entry point takes core-owned purpose wording.
+	 * Resolve it here so desktop consumers never have to inspect English. */
+	uint32_t purpose = XCC_PURPOSE_CLIENT_AUTH;
+	gboolean generic = TRUE;
+	for (uint32_t p = XCC_PURPOSE_CLIENT_AUTH; p <= XCC_PURPOSE_SSH; p++)
+	{
+		if (g_strcmp0(prompt->purpose_display, certificate_purpose_display(p)) == 0)
+		{
+			purpose = p;
+			generic = FALSE;
+			break;
+		}
+	}
+	g_autofree char* label = certificate_display_text(prompt->token->label,
+	    CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, NULL);
 	return (XccPinView){
 		.struct_size = sizeof(XccPinView),
 		.abi_version = XCC_ABI_VERSION,
@@ -277,11 +309,15 @@ static XccPinView pin_view(const PinPrompt* prompt, const char* status)
 		.count_low = prompt->token->pin_count_low,
 		.final_try = prompt->token->pin_final_try,
 		.locked = prompt->token->pin_locked,
-		.status = status,
+		.status = pin_status_text(status),
+		.purpose = purpose,
+		.generic_purpose = generic,
+		.status_code = status,
+		.display_flags = label == NULL ? XCC_DISPLAY_TOKEN_FALLBACK : 0,
 	};
 }
 
-static void pin_update(PinPrompt* prompt, const char* status)
+static void pin_update(PinPrompt* prompt, XccPinStatus status)
 {
 	XccPinView view = pin_view(prompt, status);
 
@@ -292,7 +328,7 @@ static void set_busy(PinPrompt* prompt, gboolean busy)
 {
 	prompt->busy = busy;
 
-	pin_update(prompt, NULL);
+	pin_update(prompt, XCC_PIN_STATUS_NONE);
 }
 
 void certificate_pin_prompt_warning_reply(PinPrompt* prompt, gboolean accepted)
@@ -387,7 +423,7 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 		/* Retries require user input after the entry has been cleared. */
 		g_clear_pointer(&prompt->secret, xcc_secret_free);
-		pin_update(prompt, "That PIN was not accepted. Try again.");
+		pin_update(prompt, XCC_PIN_STATUS_INCORRECT);
 		return;
 	}
 
@@ -432,9 +468,9 @@ gboolean certificate_pin_prompt_hold(PinPrompt* prompt, XccSecret* secret, size_
 	g_clear_pointer(&prompt->secret, xcc_secret_free);
 	if (secret == NULL || !xcc_secret_set_length(secret, length))
 	{
-		const char* status = secret == NULL ? "The PIN could not be held in locked memory."
-		                    : length == 0 ? "Enter the PIN for this token."
-		                                  : "PIN exceeds the supported length.";
+		XccPinStatus status = secret == NULL ? XCC_PIN_STATUS_MEMORY_UNAVAILABLE
+		                    : length == 0 ? XCC_PIN_STATUS_REQUIRED
+		                                  : XCC_PIN_STATUS_TOO_LONG;
 
 		xcc_secret_free(secret);
 		pin_update(prompt, status);
@@ -489,7 +525,7 @@ void certificate_pin_prompt_submit(PinPrompt* prompt)
 	if (!prompt->protected_path && xcc_secret_length(prompt->secret) == 0)
 	{
 		login_task_free(data);
-		pin_update(prompt, "Enter the PIN for this token.");
+		pin_update(prompt, XCC_PIN_STATUS_REQUIRED);
 		return;
 	}
 
@@ -531,7 +567,7 @@ static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 
 static void pin_prompt_start(PinPrompt* prompt)
 {
-	XccPinView view = pin_view(prompt, NULL);
+	XccPinView view = pin_view(prompt, XCC_PIN_STATUS_NONE);
 
 	pin_active = prompt;
 

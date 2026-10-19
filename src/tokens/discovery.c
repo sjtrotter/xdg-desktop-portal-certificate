@@ -12,6 +12,7 @@
 #include <gnutls/x509.h>
 
 #include "../module/constants.h"
+#include "../core/ui.h"
 #include "../redact.h"
 
 /* Poll because C_WaitForSlotEvent is optional and its blocking implementation may stall. */
@@ -204,7 +205,7 @@ static char* dn_full(gnutls_x509_crt_t crt, gboolean issuer)
 }
 
 /* Use CN, then DN, then a placeholder so chooser rows always have a name. */
-static char* display_name(gnutls_x509_crt_t crt, gboolean issuer)
+static char* display_name(gnutls_x509_crt_t crt, gboolean issuer, guint32* flags)
 {
 	char* name = dn_component(crt, GNUTLS_OID_X520_COMMON_NAME, issuer);
 
@@ -222,6 +223,7 @@ static char* display_name(gnutls_x509_crt_t crt, gboolean issuer)
 		return name;
 	g_free(name);
 
+	*flags |= issuer ? XCC_DISPLAY_ISSUER_FALLBACK : XCC_DISPLAY_SUBJECT_FALLBACK;
 	return g_strdup(issuer ? "Unnamed issuer" : "Unnamed certificate");
 }
 
@@ -348,8 +350,8 @@ static gboolean certificate_parse_der(const guint8* der, gsize length,
 		return FALSE;
 	}
 
-	out->subject_display = display_name(crt, FALSE);
-	out->issuer_display = display_name(crt, TRUE);
+	out->subject_display = display_name(crt, FALSE, &out->display_flags);
+	out->issuer_display = display_name(crt, TRUE, &out->display_flags);
 	out->subject_dn = dn_full(crt, FALSE);
 	out->not_before = (gint64) gnutls_x509_crt_get_activation_time(crt);
 	out->not_after = (gint64) gnutls_x509_crt_get_expiration_time(crt);
