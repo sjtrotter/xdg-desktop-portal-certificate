@@ -10,7 +10,6 @@ REPO="$(here)"
 
 BUILD="${BUILD:-$REPO/build}"
 XDP_BUILD="${XDP_BUILD:-$REPO/../xdg-desktop-portal/build}"
-BACKEND="${BACKEND:-$BUILD/src/xdg-desktop-portal-certificate}"
 MODULE_SO="${MODULE_SO:-$BUILD/src/module/libpkcs11-portal-certificate.so}"
 GTLS_CLIENT="${GTLS_CLIENT:-$BUILD/tests/gtls-client}"
 XDP_ENV="${XDP_ENV:-$REPO/.xdp-env}"
@@ -34,6 +33,7 @@ die() {
 
 # shellcheck source=tools/lib.sh
 . "$REPO/tools/lib.sh"
+xdp_smoke_select_backend "$BUILD/src/xdg-desktop-portal-certificate"
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -69,12 +69,14 @@ fixture_check "$SOFTHSM_DIR" softhsm
 
 DEVDIR="$LOGDIR/portals"
 (umask 077 && mkdir -p "$DEVDIR")
-xdp_write_portal_dir "$DEVDIR" "$REPO" private
+xdp_smoke_prepare "$LOGDIR" "$REPO" "$SOFTHSM_DIR"
 
 # The build-tree module needs an absolute path in the run's private p11-kit configuration.
+# A distinct file name: p11-kit merges same-named files, and an installed
+# xdg-desktop-portal-certificate.module would lend its enable-in list, excluding gtls-client.
 CONFDIR="$LOGDIR/config"
 (umask 077 && mkdir -p "$CONFDIR/pkcs11/modules")
-cat >"$CONFDIR/pkcs11/modules/xdg-desktop-portal-certificate.module" <<EOF
+cat >"$CONFDIR/pkcs11/modules/portal-certificate-smoke.module" <<EOF
 module: $MODULE_SO
 critical: no
 priority: -10
@@ -185,10 +187,10 @@ handle() {
 }
 
 while [ ! -f "$LOGDIR/driver-stop" ]; do
-	for wid in $("$XDOTOOL" search --onlyvisible --name "Use a Certificate" 2>/dev/null); do
+	for wid in $("$XDOTOOL" search --onlyvisible --name "$CHOOSER_TITLE" 2>/dev/null); do
 		handle "$wid" Down Return
 	done
-	for wid in $("$XDOTOOL" search --onlyvisible --name "Unlock Security Token" 2>/dev/null); do
+	for wid in $("$XDOTOOL" search --onlyvisible --name "$PIN_TITLE" 2>/dev/null); do
 		handle "$wid" "type:" Return
 	done
 	sleep 1
@@ -205,6 +207,10 @@ phase_wanted() {
 
 inner() {
 	local rc=0
+	. "$REPO/tools/lib.sh"
+	if [ "$BACKEND_KIND" = kde ]; then
+		xdp_smoke_start_kde_backend || return 40
+	fi
 
 	"$XDP_BUILD/document-portal/xdg-permission-store" >"$LOGDIR/permission-store.log" 2>&1 &
 	PERM=$!
@@ -219,14 +225,16 @@ inner() {
 		return 40
 	}
 
-	"$BACKEND" --verbose --module "$SOFTHSM_MODULE" --allow-software-tokens \
-		--pin-prompt gtk >"$LOGDIR/backend.log" 2>&1 &
-	BE=$!
-	xdp_wait_for_name org.freedesktop.impl.portal.desktop.certificate "$BE" || {
-		echo "module-smoke: the backend never took its bus name"
-		tail -20 "$LOGDIR/backend.log"
-		return 40
-	}
+	if [ "$BACKEND_KIND" = gtk ]; then
+		"$BACKEND" --verbose --module "$SOFTHSM_MODULE" --allow-software-tokens \
+			--pin-prompt gtk >"$LOGDIR/backend.log" 2>&1 &
+		BE=$!
+		xdp_wait_for_name org.freedesktop.impl.portal.desktop.certificate "$BE" || {
+			echo "module-smoke: the backend never took its bus name"
+			tail -20 "$LOGDIR/backend.log"
+			return 40
+		}
+	fi
 
 	rm -f "$LOGDIR/driver-stop"
 	"$LOGDIR/driver.sh" >"$LOGDIR/driver.log" 2>&1 &
@@ -361,7 +369,7 @@ inner() {
 
 export PIN LOGDIR REPO XDP_BUILD BACKEND MODULE_SO GTLS_CLIENT XDOTOOL SOFTHSM_MODULE \
 	SOFTHSM_DIR PHASES CERT_LABEL CERT_URI KEY_URI URI_TOKEN
-dbus-run-session -- bash -c \
+xdp_smoke_run_session bash -c \
 	"$(declare -f xdp_experimental_portals); $(declare -f xdp_wait_for_name); $(declare -f phase_wanted); $(declare -f inner); inner"
 rc=$?
 
