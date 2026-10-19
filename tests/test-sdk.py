@@ -30,6 +30,23 @@ PRIVATE_SYMBOLS = (
 STRUCTS = ('XccError', 'XccDispatch', 'XccBytes', 'XccCandidateInfo', 'XccSessionSpec',
            'XccPrincipal', 'XccAcquireSpec', 'XccSignSpec', 'XccResult', 'XccConfig',
            'XccChooserCandidateView', 'XccChooserView', 'XccPinView', 'XccWarning', 'XccUiV1')
+# Freeze the original candidate prefix independently of the installed header.
+CANDIDATE_PREFIX = '''typedef struct {
+    uint32_t struct_size, abi_version;
+    XccBytes certificate;
+    const char *subject, *issuer, *token, *reader, *key_type, *key_curve;
+    uint32_t key_size;
+    bool key_curve_present;
+    const char *const *mechanisms;
+    int64_t not_before, not_after;
+    bool protected_path;
+} CandidatePrefix;
+'''
+CANDIDATE_PREFIX_FIELDS = ('struct_size', 'abi_version', 'certificate', 'subject', 'issuer',
+                           'token', 'reader', 'key_type', 'key_curve', 'key_size',
+                           'key_curve_present', 'mechanisms', 'not_before', 'not_after',
+                           'protected_path')
+TOKEN_FIELDS = ('token_label', 'token_manufacturer', 'token_model', 'token_reader')
 
 
 def run(command, **kwargs):
@@ -115,7 +132,14 @@ def compile_headers(args, directory, include):
         source.write_text('#include <xdp-certificate/ui.h>\n#include <stddef.h>\n' + ''.join(
             f'{assertion}(offsetof({struct}, struct_size) == 0, "struct_size first");\n'
             f'{assertion}(offsetof({struct}, abi_version) == sizeof(uint32_t), "abi_version second");\n'
-            for struct in STRUCTS))
+            for struct in STRUCTS) + CANDIDATE_PREFIX + ''.join(
+                f'{assertion}(offsetof(XccCandidateInfo, {field}) == '
+                f'offsetof(CandidatePrefix, {field}), "candidate prefix: {field}");\n'
+                for field in CANDIDATE_PREFIX_FIELDS) + ''.join(
+                f'{assertion}(offsetof(XccCandidateInfo, {field}) == '
+                f'sizeof(CandidatePrefix) + {index} * sizeof(const char *), '
+                f'"appended metadata: {field}");\n'
+                for index, field in enumerate(TOKEN_FIELDS)))
         run(compiler + ['-x', language, '-std=' + standard, '-Wall', '-Wextra', '-Werror',
                         '-I' + str(include), '-fsyntax-only', str(source)])
 
