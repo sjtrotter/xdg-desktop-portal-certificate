@@ -544,6 +544,8 @@ static void test_protected_path_asks_for_nothing(Fixture* fixture, gconstpointer
 	g_assert_null(script.last_pin);
 	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 0);
 
+	/* Login does not wait for the passive notice; its PerformPrompt still precedes StopPrompting. */
+	wait_for_confirm_round(1, 5000);
 	description = certificate_test_prompter_last_description();
 	g_assert_nonnull(strstr(description, "reader collects the PIN itself"));
 

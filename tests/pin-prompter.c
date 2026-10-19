@@ -567,8 +567,20 @@ void certificate_test_prompter_vanish(CertificateTestPrompter* self)
 
 void certificate_test_prompter_stop(CertificateTestPrompter* self)
 {
+	gint64 deadline = 0;
+
 	if (self == NULL)
 		return;
+
+	/* Let closing prompts send their last PromptReady/PromptDone before the connection goes. */
+	deadline = g_get_monotonic_time() + 2 * G_USEC_PER_SEC;
+	while ((gcr_system_prompter_get_prompting(self->prompter) ||
+	        g_main_context_pending(NULL)) &&
+	       g_get_monotonic_time() < deadline)
+	{
+		if (!g_main_context_iteration(NULL, FALSE))
+			g_usleep(1000);
+	}
 
 	if (self->owner_id != 0)
 		g_bus_unown_name(self->owner_id);
