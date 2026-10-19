@@ -374,7 +374,13 @@ xdp_smoke_select_backend() {
 		CHOOSER_TITLE="Choose a Certificate"
 		PIN_TITLE="Security Token PIN"
 		;;
-	*) lib_die "BACKEND_KIND takes gtk (default) or kde" ;;
+	gnome)
+		BACKEND="${BACKEND:-$(command -v xdg-desktop-portal-gnome || printf '%s' /usr/libexec/xdg-desktop-portal-gnome)}"
+		# AdwWindow titles from certificatedialog.ui / certificatepindialog.ui.
+		CHOOSER_TITLE="Choose a Certificate"
+		PIN_TITLE="Security Token PIN"
+		;;
+	*) lib_die "BACKEND_KIND takes gtk (default), kde or gnome" ;;
 	esac
 	export BACKEND_KIND BACKEND CHOOSER_TITLE PIN_TITLE
 }
@@ -384,6 +390,11 @@ xdp_smoke_prepare() {
 
 	if [ "$BACKEND_KIND" = gtk ]; then
 		xdp_write_portal_dir "$logdir/portals" "$repo" private
+		return
+	fi
+
+	if [ "$BACKEND_KIND" = gnome ]; then
+		xdp_smoke_prepare_gnome "$logdir" "$fixture"
 		return
 	fi
 
@@ -463,6 +474,92 @@ xdp_smoke_start_kde_backend() {
 
 xdp_smoke_run_session() {
 	local bus_args=()
-	[ "$BACKEND_KIND" = kde ] && bus_args=(--config-file="$LOGDIR/bus.conf")
+	case "$BACKEND_KIND" in
+	kde | gnome) bus_args=(--config-file="$LOGDIR/bus.conf") ;;
+	esac
 	dbus-run-session "${bus_args[@]}" -- "$@"
+}
+
+# GNOME shares KDE's private-bus isolation, with its native keyfile and GTK UI.
+xdp_smoke_prepare_gnome() {
+	local logdir="$1" fixture="$2" module
+
+	module="$(cat "$fixture/module-path")"
+	case "$module" in
+	*[$'\n\r']*) lib_die "SoftHSM module path contains a line break" ;;
+	esac
+	# GLib keyfile string-list escaping (semicolon separator).
+	module="${module//\\/\\\\}"
+	module="${module//;/\\;}"
+	module="${module//$'\t'/\\t}"
+	module="${module// /\\s}"
+	(umask 077 && mkdir -p "$logdir/gnome-config/xdg-desktop-portal-gnome" \
+		"$logdir/gnome-runtime" "$logdir/gnome-cache" "$logdir/gnome-data") ||
+		lib_die "could not create GNOME's private XDG directories"
+	chmod 700 "$logdir/gnome-runtime"
+	rm -f -- "$logdir/portals/"*.portal "$logdir/portals/"*-portals.conf
+	cat >"$logdir/gnome-config/xdg-desktop-portal-gnome/certificate.conf" <<EOF
+[Certificate]
+Modules=$module;
+AllowSoftwareTokens=true
+EOF
+	cat >"$logdir/portals/gnome.portal" <<'EOF'
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.gnome
+Interfaces=org.freedesktop.impl.portal.experimental.Certificate1;
+UseIn=portal-certificate-smoke;
+EOF
+	cat >"$logdir/portals/portals.conf" <<'EOF'
+[preferred]
+default=none;
+org.freedesktop.impl.portal.experimental.Certificate1=gnome;
+EOF
+	# No includes, service directories or systemd activation on this bus.
+	cat >"$logdir/bus.conf" <<'EOF'
+<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=/tmp</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+EOF
+	unset DBUS_STARTER_ADDRESS DBUS_STARTER_BUS_TYPE
+	export XDG_CURRENT_DESKTOP=portal-certificate-smoke LC_ALL=C LANGUAGE=C
+}
+
+xdp_smoke_start_gnome_backend() {
+	# Only this backend sees the temporary configuration. Client p11-kit module
+	# registrations and the real session's configuration remain independent.
+	env XDG_CONFIG_HOME="$LOGDIR/gnome-config" XDG_CONFIG_DIRS="$LOGDIR/gnome-config" \
+		XDG_RUNTIME_DIR="$LOGDIR/gnome-runtime" XDG_CACHE_HOME="$LOGDIR/gnome-cache" \
+		XDG_DATA_HOME="$LOGDIR/gnome-data" XDG_SESSION_TYPE=x11 \
+		GDK_BACKEND=x11 GSK_RENDERER=cairo GDK_DISABLE=gl,egl,vulkan \
+		GTK_A11Y=none "$BACKEND" --verbose >"$LOGDIR/backend.log" 2>&1 &
+	BE=$!
+	# SIGHUP lets GNOME drain SDK workers/UI before exiting.
+	trap 'kill -HUP "$BE" 2>/dev/null; kill ${FE:+"$FE"} ${PERM:+"$PERM"} ${DRIVER:+"$DRIVER"} ${E2E:+"$E2E"} ${SERVER:+"$SERVER"} 2>/dev/null' EXIT
+	xdp_wait_for_name org.freedesktop.impl.portal.desktop.gnome "$BE" || {
+		echo "${0##*/}: GNOME never took its private bus name"
+		tail -40 "$LOGDIR/backend.log"
+		return 40
+	}
+	gdbus introspect --session --dest org.freedesktop.impl.portal.desktop.gnome \
+		--object-path /org/freedesktop/portal/desktop >"$LOGDIR/gnome-interfaces.log" 2>&1 || return 40
+	grep -q 'interface org.freedesktop.impl.portal.experimental.Certificate1' "$LOGDIR/gnome-interfaces.log" || {
+		echo "${0##*/}: GNOME has no Certificate1 (check -Dcertificate=enabled and X11 initialization)"
+		tail -40 "$LOGDIR/backend.log"
+		return 40
+	}
+	# Preserve startup diagnostics about unavailable Shell/Mutter services. They
+	# must be nonfatal; no fake compositor is installed to mask a dependency.
+	grep -Ei 'shell|mutter|warning|error|failed' "$LOGDIR/backend.log" \
+		>"$LOGDIR/gnome-startup.log" || true
+	if [ -s "$LOGDIR/gnome-startup.log" ]; then
+		echo "${0##*/}: GNOME private-bus startup diagnostics:"
+		cat "$LOGDIR/gnome-startup.log"
+	fi
 }
