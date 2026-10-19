@@ -145,21 +145,22 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 	if (prompt->finished)
 		return;
 
-	/* Cancellation cannot withdraw C_Login; retain buffers and defer completion until the worker returns. */
-	if (prompt->login_in_flight)
+	/* Workers borrow login_data; defer completion until refresh or C_Login returns. */
+	if (prompt->refresh_in_flight || prompt->login_in_flight)
 	{
 		if (!prompt->cancel_deferred)
 		{
 			prompt->cancel_deferred = TRUE;
 			prompt->deferred_outcome = outcome;
 
-			if (prompt->provider.hide != NULL)
+			if (!prompt->refresh_in_flight && prompt->provider.hide != NULL)
 				prompt->provider.hide(prompt->provider.user_data, prompt);
 
 			certificate_log_grant(outcome == CERTIFICATE_PIN_TIMED_OUT
 			                          ? CERTIFICATE_REASON_PIN_TIMEOUT
 			                          : CERTIFICATE_REASON_CHOOSER_CANCELLED,
-			                      prompt->session_id, "deferred-login-in-flight");
+			                      prompt->session_id, prompt->refresh_in_flight
+			                          ? "deferred-refresh-in-flight" : "deferred-login-in-flight");
 		}
 
 		return;
@@ -247,16 +248,17 @@ static void login_thread(GTask* task, gpointer source, gpointer task_data,
 	/* C_Login may block indefinitely and must run on a worker. */
 	ok = data->prompt->login(pin, data->prompt->login_data, &error);
 	g_clear_pointer(&data->secret, xcc_secret_free);
+	/* Refusal may set FINAL_TRY; success may clear it. Trust the module in both cases. */
+	if (data->prompt->refresh != NULL &&
+	    (ok || g_error_matches(error, CERTIFICATE_PKCS11_ERROR,
+	                           CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT)))
+		data->prompt->refresh(data->prompt->token, data->prompt->login_data);
+
 	if (ok)
 	{
 		g_task_return_boolean(task, TRUE);
 		return;
 	}
-
-	/* Refresh flags after refusal because the failed attempt may newly set FINAL_TRY. */
-	if (data->prompt->refresh != NULL &&
-	    g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT))
-		data->prompt->refresh(data->prompt->token, data->prompt->login_data);
 
 	g_task_return_error(task, g_steal_pointer(&error));
 }
@@ -565,16 +567,75 @@ static void on_cancelled(GCancellable* cancellable, gpointer user_data)
 									   pin_prompt_ref(prompt), pin_prompt_unref);
 }
 
-static void pin_prompt_start(PinPrompt* prompt)
+static void pin_prompt_show(PinPrompt* prompt)
 {
-	XccPinView view = pin_view(prompt, XCC_PIN_STATUS_NONE);
+	XccPinView view;
 
-	pin_active = prompt;
+	if (prompt->token->pin_locked)
+	{
+		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_LOCKED);
+		return;
+	}
+	view = pin_view(prompt, XCC_PIN_STATUS_NONE);
 
 	certificate_log_grant(CERTIFICATE_REASON_PIN_PROMPTED, prompt->session_id,
 	                      prompt->protected_path ? "protected-path" : "on-screen");
 
 	prompt->provider.pin_show(prompt->provider.user_data, prompt, &view);
+}
+
+static void refresh_thread(GTask* task, gpointer source, gpointer task_data,
+                           GCancellable* cancellable)
+{
+	PinPrompt* prompt = task_data;
+
+	/* C_GetTokenInfo can block just like C_Login. No UI is visible yet. */
+	prompt->refresh(prompt->token, prompt->login_data);
+	g_task_return_boolean(task, TRUE);
+}
+
+static void on_refresh_done(GObject* source, GAsyncResult* result, gpointer user_data)
+{
+	PinPrompt* prompt = user_data;
+
+	g_task_propagate_boolean(G_TASK(result), NULL);
+	prompt->refresh_in_flight = FALSE;
+	if (prompt->cancel_deferred)
+	{
+		prompt->cancel_deferred = FALSE;
+		certificate_pin_prompt_answer(prompt, prompt->deferred_outcome);
+		return;
+	}
+	if (g_cancellable_is_cancelled(prompt->cancellable))
+	{
+		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_CANCELLED);
+		return;
+	}
+	if (!prompt->finished)
+		pin_prompt_show(prompt);
+}
+
+static void pin_prompt_start(PinPrompt* prompt)
+{
+	g_autoptr(GTask) task = NULL;
+
+	pin_active = prompt;
+	if (g_cancellable_is_cancelled(prompt->cancellable))
+	{
+		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_CANCELLED);
+		return;
+	}
+	if (prompt->refresh == NULL)
+	{
+		pin_prompt_show(prompt);
+		return;
+	}
+
+	/* Refresh only once this prompt reaches the head of the process-wide queue. */
+	prompt->refresh_in_flight = TRUE;
+	task = g_task_new(NULL, NULL, on_refresh_done, prompt);
+	g_task_set_task_data(task, pin_prompt_ref(prompt), pin_prompt_unref);
+	g_task_run_in_thread(task, refresh_thread);
 }
 
 void certificate_pin_login_full_kind(CertificateToken* token, const char* session_id,
@@ -593,16 +654,6 @@ void certificate_pin_login_full_kind(CertificateToken* token, const char* sessio
 	if (provider.pin_show == NULL || (provider.needs_display && !certificate_ui_has_display()))
 	{
 		done(CERTIFICATE_PIN_NO_DISPLAY, user_data);
-
-		if (login_data_free != NULL)
-			login_data_free(login_data);
-
-		return;
-	}
-
-	if (token->pin_locked)
-	{
-		done(CERTIFICATE_PIN_LOCKED, user_data);
 
 		if (login_data_free != NULL)
 			login_data_free(login_data);

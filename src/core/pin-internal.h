@@ -51,7 +51,8 @@ struct _PinPrompt
 	gboolean finished;
 	gboolean busy;
 
-	/* Cancellation hides the prompt immediately; buffers and callbacks wait for the login worker. */
+	/* Workers retain login_data through completion, including cancellation before presentation. */
+	gboolean refresh_in_flight;
 	gboolean login_in_flight;
 	gboolean cancel_deferred;
 	CertificatePinOutcome deferred_outcome;

@@ -154,7 +154,7 @@ void certificate_tokens_dispatch_pending(CertificateTokens* tokens);
 void certificate_tokens_emit_event(CertificateTokens* tokens, CertificateToken* token,
                                    gboolean added);
 
-/** Refresh PIN flags after each refused login because that attempt may set FINAL_TRY. */
+/** Blocking: re-read module PIN flags before each prompt and after successful or refused login. */
 void certificate_tokens_refresh_flags(CertificateTokens* tokens, CertificateToken* token);
 
 /** Backend support only; never inspect inserted tokens or reader flags. */

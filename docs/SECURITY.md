@@ -45,7 +45,7 @@ experimental export conditions.
 | PINs are never persisted | No keyring entry, configuration key or retention option |
 | Protected authentication path uses a null PIN and no editable field | `src/ui/pin-gtk.c`, `src/ui/pin-system.c`; system tests check zero password rounds |
 | Empty PINs consume no login attempt | `xcc_secret_set_length()` and `certificate_pin_prompt_hold()`; `/pin-system/empty-answer-never-reaches-the-card` checks one login for two prompt rounds |
-| Retry flags are reread after every refusal, without invented counts | `certificate_pin_prompt_retry_hint()`, `certificate_tokens_refresh_flags()`; system tests check warning text |
+| Retry flags are reread before every PIN prompt and after successful or refused login, without invented counts | `certificate_pin_prompt_retry_hint()`, `certificate_tokens_refresh_flags()`; system tests check warning text |
 | `FINAL_TRY` warns before typed input; protected-path login requires one Continue | `src/core/pin.c`, GTK warning label, system prompt warning; policy and system tests cover both paths |
 | Shell dismissal ends interaction after PIN submission too | `on_gcr_prompt_close()`; `/pin-system/shell-cancel-after-the-pin-was-submitted` checks cancellation and abandonment |
 | Card administration is absent; every PIN attempt requires user action | No `C_InitToken`, `C_InitPIN` or `C_SetPIN` surface. These and repeated incorrect PINs are the threats named by Ueno on 2023-06-23 in [#662](https://github.com/flatpak/xdg-desktop-portal/issues/662). Host applications with direct card access remain able to perform them |
@@ -277,7 +277,7 @@ the secret. Entry starts automatically unless `FINAL_TRY` is set; then one expli
 starts the reader and Cancel spends no attempt. Repeated Continue replies cannot restart login.
 
 Retry warnings use `CKF_USER_PIN_COUNT_LOW`, `CKF_USER_PIN_FINAL_TRY` and
-`CKF_USER_PIN_LOCKED`. Flags are reread after each refusal; remaining counts are never invented.
+`CKF_USER_PIN_LOCKED`. Flags are reread before each prompt and after successful or refused login; remaining counts are never invented.
 The specification allows tokens to report flags false and does not specify update timing
 [[S13](SOURCES.md)]. Typed PIN prompts show the final-try warning from the start of the input
 round, including after a refusal refreshes the flags. Unlock submits directly. GTK places a

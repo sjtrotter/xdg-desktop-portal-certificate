@@ -31,7 +31,7 @@ typedef enum
 /** Worker-only login borrows the PIN or protected-path NULL; cancellation cannot withdraw the submitted attempt. */
 typedef gboolean (*CertificatePinLoginFunc)(const char* pin, gpointer user_data, GError** error);
 
-/** Refresh token flags on the login worker after refusal; NULL disables refresh. */
+/** Worker-only refresh before presentation and after successful or refused login; NULL disables refresh. */
 typedef void (*CertificatePinRefreshFunc)(CertificateToken* token, gpointer user_data);
 
 /** After done(), the main-thread abandon callback must undo a successful discarded login; NULL leaves it authenticated. */
