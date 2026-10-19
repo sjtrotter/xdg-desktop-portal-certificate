@@ -243,10 +243,12 @@ module and NSS assertions remain the same. `--pin-prompt=system` prints a skip
 reason for gcr and exercises KDE's native PIN dialog instead. `BACKEND_KIND=gtk`
 (the default) keeps the standalone backend. Logs stay in each printed `$LOGDIR`.
 
-For GNOME, install the public SDK, build the GNOME 50.0 fork with
-`meson setup build -Dcertificate=enabled`, then `meson compile -C build -j2`.
-Use a Fedora 44 container with xdg-desktop-portal-devel and GNOME build dependencies.
-The host checkout does not have those dependencies. The SDK version must include
+For GNOME, install the public SDK and gcr-4 development files, then build the
+GNOME 50.0 fork with `meson setup build -Dcertificate=enabled` and
+`meson compile -C build -j1`. gcr-4 is required only with Certificate enabled.
+GNOME builds/tests can run on a host with its build dependencies; smoke runs use
+a Fedora 44 container with xdg-desktop-portal-devel and GNOME build dependencies.
+The SDK version must include
 `XccCandidateInfo.token_label`, `token_manufacturer`, `token_model`, `token_reader`.
 Do not build the standalone service into the GNOME process; GNOME links only the SDK.
 
@@ -258,6 +260,8 @@ export XDP_BUILD=/path/to/experimental-frontend/build
 export BUILD=/path/to/certificate/build
 tools/softhsm-fixture.sh
 tools/ui-smoke.sh
+tools/ui-smoke.sh --pin-prompt=system
+tools/ui-smoke.sh --pin-prompt=system -- --key-algorithm RSA --regrant EC
 tools/ui-smoke.sh -- --key-algorithm RSA --regrant EC
 tools/ui-smoke.sh --cancel-chooser
 tools/ui-smoke.sh --cancel-pin
@@ -269,7 +273,29 @@ GNOME gets a temporary `gnome.portal` advertising only Certificate1 and a matchi
 `portals.conf`, on the same activation-free private-bus model as KDE. Only the
 backend gets `XDG_CONFIG_HOME=$LOGDIR/gnome-config`: its
 `xdg-desktop-portal-gnome/certificate.conf` selects the SoftHSM module and
-`AllowSoftwareTokens=true`. Module settings are GLib keyfile string lists
+`AllowSoftwareTokens=true` and `PinPrompt=dialog` for all ordinary UI, module
+and NSS drives. `tools/ui-smoke.sh --pin-prompt=system` instead writes
+`PinPrompt=system` into that temporary file and starts the repository's
+`$BUILD/tests/certificate-test-prompter` (built from `tests/pin-prompter.c`)
+on the private bus before the backend. Set `PROMPTER_BIN` to override the helper
+path. Build the certificate repository with `-Dgcr=enabled` for this helper.
+The helper supplies the fixture PIN via Gcr's secret exchange; xdotool still
+drives the chooser, but does not type a PIN. It refuses an already-owned
+prompter name, and the activation-free bus cannot launch a host prompter.
+Use the ordinary dialog run for `--cancel-pin`; the scripted helper automatically
+answers password requests.
+
+GNOME's `[Certificate] PinPrompt=auto|system|dialog` defaults to `auto` for real
+sessions. `auto` chooses Gcr only when `org.gnome.keyring.SystemPrompter` has an
+owner on the session bus, otherwise the backend's GTK dialog. `system` requires
+an owner. If absent, the backend reports `XCC_ERROR_NO_DISPLAY` to the SDK, but
+the SDK's PIN failure path discards that error and `Sign` returns `device_error`.
+`dialog` always uses GTK.
+An open failure or prompter disappearance ends the request without switching UI.
+In a GNOME session the prompt belongs to gnome-shell, is session-modal, and is
+not attached to the caller's window. KDE retains its own PIN dialog.
+
+Module settings are GLib keyfile string lists
 (semicolon separator), not environment policy switches. Client p11-kit
 registrations and the real desktop configuration stay independent.
 
@@ -288,14 +314,14 @@ xdotool finds the visible AdwWindow titles `Choose a Certificate` and
 the list (Cancel when empty); Down/Return selects and activates a row. Allow is
 the default widget. The PIN window focuses GtkPasswordEntry and makes Unlock the
 default widget; typing then Return submits once. Escape cancels either window.
-`--pin-prompt=system` reports that gcr is skipped and drives GNOME's native dialog.
 Protected-path devices have no PIN entry: login auto-starts after presentation,
 except FINAL_TRY requires explicit Continue; these hardware interactions, live
 hotplug/no-match states, and Wayland parenting need manual coverage beyond SoftHSM.
 
-GNOME preserves process dumpability/core limits and uses GTK secure entry plus
-SDK XccSecret storage. See the fork's `src/certificate.md` for transient input-copy
-risk and the open process-hardening/helper question. The standalone GTK4 service
+GNOME preserves process dumpability/core limits. The dialog uses GTK secure entry;
+the system path receives the PIN typed in gnome-shell over Gcr's secret exchange
+and copies it directly into SDK XccSecret storage. See the fork's
+`src/certificate.md` for transient input-copy risk and the open process-hardening/helper question. The standalone GTK4 service
 remains the fallback; xdg-desktop-portal-gtk (GTK3) needs its own UI adapter.
 
 ### Portal configuration
@@ -951,7 +977,7 @@ no display or hardware.
 
 ### 3.6 Wrong PIN and final attempt
 
-Optional and unrun on hardware. Use a healthy card that you can unblock; a typical PIV card
+Optional. Use a healthy card that you can unblock; a typical PIV card
 allows three failed attempts. This check intentionally spends one:
 
 ```console
@@ -966,6 +992,12 @@ attempt. A PIN-pad reader instead requires one Continue before starting on the f
 Cancel must leave the counter unchanged, and repeated Continue must not restart the reader.
 Expect `pin-incorrect ... detail=retry-offered`. One prompt stops
 after three refusals; a new application request is a separate prompt.
+
+Run 2026-10-19: pass, once, with the GNOME backend fork's own PIN dialog, a PIV card, OpenSC
+and an SCR 331-class reader on GNOME 50. An empty submission spent no attempt. Two wrong PINs
+logged `pin-incorrect detail=retry-offered` twice; the final-attempt warning appeared before the
+third entry, and the correct PIN logged `login-ok detail=pin-accepted` and signed. The PIN-pad
+and Cancel-on-final-try cases remain unrun.
 
 ### 3.7 Removal and other hardware checks
 

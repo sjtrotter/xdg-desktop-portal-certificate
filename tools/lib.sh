@@ -502,6 +502,7 @@ xdp_smoke_prepare_gnome() {
 [Certificate]
 Modules=$module;
 AllowSoftwareTokens=true
+PinPrompt=dialog
 EOF
 	cat >"$logdir/portals/gnome.portal" <<'EOF'
 [portal]
@@ -541,7 +542,7 @@ xdp_smoke_start_gnome_backend() {
 		GTK_A11Y=none "$BACKEND" --verbose >"$LOGDIR/backend.log" 2>&1 &
 	BE=$!
 	# SIGHUP lets GNOME drain SDK workers/UI before exiting.
-	trap 'kill -HUP "$BE" 2>/dev/null; kill ${FE:+"$FE"} ${PERM:+"$PERM"} ${DRIVER:+"$DRIVER"} ${E2E:+"$E2E"} ${SERVER:+"$SERVER"} 2>/dev/null' EXIT
+	trap 'kill -HUP "$BE" 2>/dev/null; kill ${PROMPTER:+"$PROMPTER"} ${FE:+"$FE"} ${PERM:+"$PERM"} ${DRIVER:+"$DRIVER"} ${E2E:+"$E2E"} ${SERVER:+"$SERVER"} 2>/dev/null' EXIT
 	xdp_wait_for_name org.freedesktop.impl.portal.desktop.gnome "$BE" || {
 		echo "${0##*/}: GNOME never took its private bus name"
 		tail -40 "$LOGDIR/backend.log"
