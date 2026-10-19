@@ -371,14 +371,14 @@ xdp_smoke_select_backend() {
 		;;
 	kde)
 		BACKEND="${BACKEND:-$(command -v xdg-desktop-portal-kde || printf '%s' /usr/libexec/xdg-desktop-portal-kde)}"
-		CHOOSER_TITLE="Choose a Certificate"
-		PIN_TITLE="Security Token PIN"
+		CHOOSER_TITLE="Choose Certificate"
+		PIN_TITLE="Unlock Security Token"
 		;;
 	gnome)
 		BACKEND="${BACKEND:-$(command -v xdg-desktop-portal-gnome || printf '%s' /usr/libexec/xdg-desktop-portal-gnome)}"
 		# AdwWindow titles from certificatedialog.ui / certificatepindialog.ui.
-		CHOOSER_TITLE="Choose a Certificate"
-		PIN_TITLE="Security Token PIN"
+		CHOOSER_TITLE="Choose Certificate"
+		PIN_TITLE="Unlock Security Token"
 		;;
 	*) lib_die "BACKEND_KIND takes gtk (default), kde or gnome" ;;
 	esac

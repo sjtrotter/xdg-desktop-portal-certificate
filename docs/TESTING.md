@@ -309,8 +309,8 @@ reporting container errors. It starts no fake Shell or compositor services.
 Actual missing-service diagnostics require a container run; they have not been
 measured on the host.
 
-xdotool finds the visible AdwWindow titles `Choose a Certificate` and
-`Security Token PIN` from the GNOME `.ui` templates. The chooser initially focuses
+xdotool finds the visible AdwWindow titles `Choose Certificate` and
+`Unlock Security Token` from the GNOME `.ui` templates. The chooser initially focuses
 the list (Cancel when empty); Down/Return selects and activates a row. Allow is
 the default widget. The PIN window focuses GtkPasswordEntry and makes Unlock the
 default widget; typing then Return submits once. Escape cancels either window.
