@@ -95,7 +95,7 @@ extern "C"
 		bool protected_path;
 		/* Original wire metadata, not sanitized display text. Never NULL; no serial.
 		 * Gate this extension through token_reader on struct_size. */
-		const char* token_label;
+		XCC_ALIGNAS(8) const char* token_label;
 		const char* token_manufacturer;
 		const char* token_model;
 		const char* token_reader;

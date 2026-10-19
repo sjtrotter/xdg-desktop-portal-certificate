@@ -83,6 +83,7 @@ typedef struct
 	gboolean can_sign;
 	gboolean can_decrypt;
 	char** supported_mechanisms; /**< Portal mechanism names supported by both key and token. */
+	guint32 display_flags; /**< SDK placeholder provenance; never infer from external names. */
 } CertificateCandidate;
 
 CertificateCandidate* certificate_candidate_ref(CertificateCandidate* candidate);

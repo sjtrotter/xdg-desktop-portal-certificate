@@ -144,6 +144,7 @@ static void chooser_message(XccContext* c, XccUiId id, const XccChooserView* vie
 		COPY(expiry);
 		COPY(detail);
 		COPY(fingerprint);
+		COPY(key_type);
 #undef COPY
 	}
 	m->chooser.candidates = m->rows;
@@ -186,6 +187,10 @@ static void pin_message(XccContext* c, PinPrompt* prompt, const XccPinView* view
 		m->pin.field = copy(m, text);                                                              \
 		g_free(text);                                                                              \
 	} while (0)
+	g_autofree char* token_label = certificate_display_text(view->token_label,
+	    CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, NULL);
+	if (token_label == NULL)
+		m->pin.display_flags |= XCC_DISPLAY_TOKEN_FALLBACK;
 	COPY(token_label, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "Unnamed token");
 	COPY(reader, CERTIFICATE_DISPLAY_MAX_READER, NULL);
 	COPY(caller_display, CERTIFICATE_DISPLAY_MAX_APP_NAME, NULL);

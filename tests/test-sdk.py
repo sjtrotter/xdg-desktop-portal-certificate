@@ -48,6 +48,136 @@ CANDIDATE_PREFIX_FIELDS = ('struct_size', 'abi_version', 'certificate', 'subject
                            'protected_path')
 TOKEN_FIELDS = ('token_label', 'token_manufacturer', 'token_model', 'token_reader')
 
+# Independent original UI layouts. Freeze every old offset and the exact order
+# of each append-only extension in both C and C++, including alignment padding.
+UI_LAYOUTS = (
+    ('XccChooserCandidateView', 'ChooserCandidate', '''
+    uint32_t struct_size, abi_version;
+    uint64_t id;
+    const char *subject, *issuer, *token, *reader, *expiry, *detail, *fingerprint;
+    bool invalid;
+''', ('struct_size', 'abi_version', 'id', 'subject', 'issuer', 'token', 'reader',
+      'expiry', 'detail', 'fingerprint', 'invalid'), '''
+    XCC_ALIGNAS(8) int64_t not_before;
+    int64_t not_after;
+    uint32_t validity;
+    const char *key_type;
+    uint32_t key_size, display_flags;
+''', ('not_before', 'not_after', 'validity', 'key_type', 'key_size', 'display_flags'),
+     'XCC_CHOOSER_CANDIDATE_VIEW_V1_SIZE'),
+    ('XccChooserView', 'Chooser', '''
+    uint32_t struct_size, abi_version;
+    uint64_t revision;
+    const XccChooserCandidateView *candidates;
+    size_t n_candidates;
+    const char *caller_name, *app_id;
+    XccIdentityLevel identity_level;
+    const char *identity_detail;
+    XccPurpose purpose;
+    const char *purpose_text, *purpose_detail;
+    bool may_sign, may_decrypt;
+    const char *operation_scope;
+    uint32_t lifetime_seconds;
+    const char *duration, *later_prompt, *reason_label, *untrusted_reason;
+    bool tokens_present;
+    const char *parent_window, *activation_token;
+''', ('struct_size', 'abi_version', 'revision', 'candidates', 'n_candidates',
+      'caller_name', 'app_id', 'identity_level', 'identity_detail', 'purpose',
+      'purpose_text', 'purpose_detail', 'may_sign', 'may_decrypt', 'operation_scope',
+      'lifetime_seconds', 'duration', 'later_prompt', 'reason_label', 'untrusted_reason',
+      'tokens_present', 'parent_window', 'activation_token'), '''
+    XCC_ALIGNAS(8) bool generic_purpose;
+    uint32_t display_flags;
+''', ('generic_purpose', 'display_flags'), 'XCC_CHOOSER_VIEW_V1_SIZE'),
+    ('XccPinView', 'Pin', '''
+    uint32_t struct_size, abi_version;
+    const char *token_label, *reader, *caller_display, *purpose_display, *parent_window;
+    bool context_specific, protected_path, busy, count_low, final_try, locked;
+    const char *status;
+''', ('struct_size', 'abi_version', 'token_label', 'reader', 'caller_display',
+      'purpose_display', 'parent_window', 'context_specific', 'protected_path', 'busy',
+      'count_low', 'final_try', 'locked', 'status'), '''
+    XCC_ALIGNAS(8) uint32_t purpose;
+    bool generic_purpose;
+    uint32_t status_code, display_flags;
+''', ('purpose', 'generic_purpose', 'status_code', 'display_flags'), 'XCC_PIN_VIEW_V1_SIZE'),
+    ('XccWarning', 'Warning', '''
+    uint32_t struct_size, abi_version;
+    XccWarningCode code;
+    uint64_t warning_id;
+    const char *message;
+''', ('struct_size', 'abi_version', 'code', 'warning_id', 'message'), '', (), None),
+)
+
+
+def ui_layout_assertions(assertion):
+    source = ''
+    for struct, name, prefix, fields, extension, appended, minimum in UI_LAYOUTS:
+        source += f'typedef struct {{{prefix}}} {name}Prefix;\n'
+        for field in fields:
+            source += (f'{assertion}(offsetof({struct}, {field}) == '
+                       f'offsetof({name}Prefix, {field}), "UI prefix: {struct}.{field}");\n')
+        if minimum:
+            source += (f'{assertion}({minimum} == sizeof({name}Prefix), "UI minimum: {struct}");\n'
+                       f'{assertion}(offsetof({struct}, {appended[0]}) >= {minimum}, '
+                       f'"extension outside V1 padding: {struct}");\n'
+                       f'typedef struct {{ {name}Prefix prefix; {extension} }} {name}Extended;\n')
+            for field in appended:
+                source += (f'{assertion}(offsetof({struct}, {field}) == '
+                           f'offsetof({name}Extended, {field}), "UI extension: {struct}.{field}");\n')
+        else:
+            source += f'{assertion}(sizeof({struct}) == sizeof({name}Prefix), "UI size: {struct}");\n'
+    source += (f'{assertion}(XCC_VALIDITY_VALID == 0 && XCC_VALIDITY_EXPIRED == 1 && '
+               'XCC_VALIDITY_NOT_YET_VALID == 2 && XCC_VALIDITY_UNKNOWN == 3, "validity values");\n')
+    source += (f'{assertion}(XCC_PIN_STATUS_NONE == 0 && XCC_PIN_STATUS_INCORRECT == 1 && '
+               'XCC_PIN_STATUS_REQUIRED == 2 && XCC_PIN_STATUS_TOO_LONG == 3 && '
+               'XCC_PIN_STATUS_MEMORY_UNAVAILABLE == 4, "PIN status values");\n')
+    return source
+
+
+def ilp32_layout_assertions(assertion):
+    # Fixed-width pointer/size surrogates let a native compiler check the layout
+    # arithmetic even without multilib headers. Model both i386 and ARM EABI's
+    # uint64_t alignment. The real headers are also compiled with -m32 if usable.
+    source = 'typedef struct { uint32_t words[4]; } ModelBytes32;\n'
+    candidate_prefix = CANDIDATE_PREFIX.split('{', 1)[1].split('}', 1)[0]
+    layouts = [(name, prefix, extension, appended[0], fields[-1], 48 if name == 'ChooserCandidate' else
+                40 if name == 'Pin' else None)
+               for _, name, prefix, fields, extension, appended, minimum in UI_LAYOUTS if minimum]
+    layouts.append(('CandidateInfo', candidate_prefix,
+                    'XCC_ALIGNAS(8) const char *token_label;', 'token_label', 'protected_path', None))
+    for alignment in (4, 8):
+        integer = f'ModelU64A{alignment}'
+        source += (f'typedef struct {{ XCC_ALIGNAS({alignment}) uint32_t words[2]; }} {integer};\n'
+                   f'{assertion}(XCC_ALIGNOF({integer}) == {alignment}, "model integer alignment");\n')
+        for name, prefix, extension, first, last, size in layouts:
+            def model_fields(fields):
+                fields = re.sub(r'const char\s*\*const\s*\*', 'uint32_t ', fields)
+                fields = re.sub(r'const (?:char|XccChooserCandidateView)\s*\*', 'uint32_t ', fields)
+                fields = fields.replace('*', '')  # Remaining comma-separated pointer declarators.
+                fields = re.sub(r'\b(?:size_t|XccIdentityLevel|XccPurpose)\b', 'uint32_t', fields)
+                fields = fields.replace('XccBytes', 'ModelBytes32')
+                return re.sub(r'\b(?:u?int64_t)\b', integer, fields)
+            original = f'{name}32A{alignment}Prefix'
+            extended = f'{name}32A{alignment}Extended'
+            if name == 'Chooser':
+                size = 92 if alignment == 4 else 96
+            elif name == 'CandidateInfo':
+                size = 80 if alignment == 4 else 88
+            offset = (size + 7) // 8 * 8
+            original_alignment = 'uint32_t' if name == 'Pin' else integer
+            source += (f'typedef struct {{ {model_fields(prefix)} }} {original};\n'
+                       f'typedef struct {{ {model_fields(prefix + extension)} }} {extended};\n'
+                       f'{assertion}(sizeof({original}) == {size}, "ILP32 original size: {original}");\n'
+                       f'{assertion}(XCC_PADDED_SIZE(offsetof({original}, {last}) + '
+                       f'sizeof((({original} *)0)->{last}), XCC_MAX_ALIGNOF({original_alignment}, uint32_t)) '
+                       f'== sizeof({original}), "ILP32 padded minimum: {original}");\n'
+                       f'{assertion}(offsetof({extended}, {first}) == {offset}, '
+                       f'"ILP32 extension offset: {extended}");\n'
+                       f'{assertion}(offsetof({extended}, {first}) >= sizeof({original}), '
+                       f'"ILP32 extension outside original padding: {extended}");\n')
+    return source
+
 
 def run(command, **kwargs):
     print(shlex.join(str(arg) for arg in command), flush=True)
@@ -139,9 +269,27 @@ def compile_headers(args, directory, include):
                 f'{assertion}(offsetof(XccCandidateInfo, {field}) == '
                 f'sizeof(CandidatePrefix) + {index} * sizeof(const char *), '
                 f'"appended metadata: {field}");\n'
-                for index, field in enumerate(TOKEN_FIELDS)))
+                for index, field in enumerate(TOKEN_FIELDS)) +
+            f'{assertion}(offsetof(XccCandidateInfo, token_label) >= sizeof(CandidatePrefix), '
+            '"token extension outside V1 padding");\n' + ui_layout_assertions(assertion) +
+            ilp32_layout_assertions(assertion))
         run(compiler + ['-x', language, '-std=' + standard, '-Wall', '-Wextra', '-Werror',
                         '-I' + str(include), '-fsyntax-only', str(source)])
+        # Probe standard headers separately so an ABI assertion failure cannot
+        # accidentally be treated as an unavailable 32-bit toolchain.
+        probe = directory / ('probe32.' + ('cc' if language == 'c++' else 'c'))
+        probe.write_text('#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n')
+        for abi_flags in (['-m32'], ['-m32', '-malign-double']):
+            flags = compiler + abi_flags + ['-x', language, '-std=' + standard]
+            available = subprocess.run(flags + ['-fsyntax-only', str(probe)], text=True,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if available.returncode == 0:
+                run(flags + ['-Wall', '-Wextra', '-Werror', '-I' + str(include),
+                             '-fsyntax-only', str(source)])
+            else:
+                print(f'{language} {shlex.join(abi_flags)} unavailable; native header compilation '
+                      'includes static ILP32 models with 4- and 8-byte uint64_t alignment.\n' +
+                      available.stderr, flush=True)
 
 
 def consumers(args, directory, library, env):

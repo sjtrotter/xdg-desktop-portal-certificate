@@ -63,6 +63,7 @@ static void test_purpose_wording(void)
 			request.request_handle = handles[j].handle;
 			request.reason = "Application-provided explanation";
 			text = certificate_chooser_format_purpose(&request);
+			g_assert_cmpint(certificate_chooser_is_generic_purpose(&request), ==, handles[j].module);
 
 			if (handles[j].module)
 			{

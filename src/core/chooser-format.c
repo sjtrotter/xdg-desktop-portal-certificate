@@ -8,7 +8,7 @@
 
 #include <string.h>
 
-static gboolean is_module_request(const CertificateChooserRequest* request)
+gboolean certificate_chooser_is_generic_purpose(const CertificateChooserRequest* request)
 {
 	static const char prefix[] = "/org/freedesktop/portal/desktop/request/";
 	const char* token = NULL;
@@ -27,7 +27,7 @@ static gboolean is_module_request(const CertificateChooserRequest* request)
 
 char* certificate_chooser_format_purpose(const CertificateChooserRequest* request)
 {
-	if (is_module_request(request))
+	if (certificate_chooser_is_generic_purpose(request))
 		return g_strdup("is asking to use a certificate on your security token.");
 
 	return g_strdup_printf("wants to use a certificate on your security token to %s.",
@@ -36,7 +36,7 @@ char* certificate_chooser_format_purpose(const CertificateChooserRequest* reques
 
 const char* certificate_chooser_purpose_detail(const CertificateChooserRequest* request)
 {
-	if (is_module_request(request))
+	if (certificate_chooser_is_generic_purpose(request))
 		return "The application will be able to use this key until the "
 		       "grant expires. It cannot read the private key.";
 

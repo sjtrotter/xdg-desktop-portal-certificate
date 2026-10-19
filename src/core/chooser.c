@@ -234,6 +234,18 @@ static const char* own_text(GPtrArray* text, char* value)
 	return value;
 }
 
+static const char* display_text(GPtrArray* text, const char* value, gsize cap,
+                                const char* fallback, uint32_t flag, uint32_t* flags)
+{
+	char* sanitized = certificate_display_text(value, cap, NULL);
+	if (sanitized == NULL)
+	{
+		*flags |= flag;
+		sanitized = g_strdup(fallback);
+	}
+	return own_text(text, sanitized);
+}
+
 static const char* identity_detail(CertificateIdentityLevel level)
 {
 	switch (level)
@@ -281,12 +293,16 @@ static void replace_candidates(Chooser* chooser, GPtrArray* candidates, gboolean
 		row->struct_size = sizeof(*row);
 		row->abi_version = XCC_ABI_VERSION;
 		row->id = choice->id;
-		row->subject = own_text(text, certificate_display_text(
-		    candidate->subject_display, CERTIFICATE_DISPLAY_MAX_SUBJECT, "Unnamed certificate"));
-		row->issuer = own_text(text, certificate_display_text(
-		    candidate->issuer_display, CERTIFICATE_DISPLAY_MAX_ISSUER, "an unnamed issuer"));
-		row->token = own_text(text, certificate_display_text(
-		    candidate->token->label, CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "unnamed token"));
+		row->display_flags = candidate->display_flags;
+		row->subject = display_text(text, candidate->subject_display,
+		    CERTIFICATE_DISPLAY_MAX_SUBJECT, "Unnamed certificate",
+		    XCC_DISPLAY_SUBJECT_FALLBACK, &row->display_flags);
+		row->issuer = display_text(text, candidate->issuer_display,
+		    CERTIFICATE_DISPLAY_MAX_ISSUER, "an unnamed issuer",
+		    XCC_DISPLAY_ISSUER_FALLBACK, &row->display_flags);
+		row->token = display_text(text, candidate->token->label,
+		    CERTIFICATE_DISPLAY_MAX_TOKEN_LABEL, "unnamed token",
+		    XCC_DISPLAY_TOKEN_FALLBACK, &row->display_flags);
 		row->reader = own_text(text, certificate_display_text(
 		    candidate->token->reader_name, CERTIFICATE_DISPLAY_MAX_READER, NULL));
 		row->expiry = own_text(text, certificate_chooser_format_expiry(candidate, now));
@@ -294,6 +310,14 @@ static void replace_candidates(Chooser* chooser, GPtrArray* candidates, gboolean
 		row->fingerprint = own_text(text, certificate_display_text(candidate->certificate_id, 64, NULL));
 		row->invalid = certificate_candidate_is_expired(candidate, now) ||
 		               certificate_candidate_is_not_yet_valid(candidate, now);
+		row->not_before = candidate->not_before;
+		row->not_after = candidate->not_after;
+		row->validity = certificate_candidate_is_expired(candidate, now) ? XCC_VALIDITY_EXPIRED
+		    : certificate_candidate_is_not_yet_valid(candidate, now) ? XCC_VALIDITY_NOT_YET_VALID
+		    : candidate->not_before <= 0 || candidate->not_after <= 0 ? XCC_VALIDITY_UNKNOWN
+		    : XCC_VALIDITY_VALID;
+		row->key_type = own_text(text, g_strdup(candidate->key_type));
+		row->key_size = candidate->key_size;
 	}
 	g_ptr_array_unref(chooser->choices);
 	chooser->choices = choices;
@@ -351,11 +375,19 @@ CertificateChooser* certificate_chooser_show(const char* parent_window,
 	view->struct_size = sizeof(*view);
 	view->abi_version = XCC_ABI_VERSION;
 	view->caller_name = own_text(text, certificate_chooser_display_name(request->caller));
+	/* Test presence before adding the English compatibility placeholder. */
+	g_autofree char* caller_name = certificate_display_text(request->caller->app_display_name,
+	    CERTIFICATE_DISPLAY_MAX_APP_NAME, NULL);
+	g_autofree char* caller_id = certificate_display_text(request->caller->app_id,
+	    CERTIFICATE_DISPLAY_MAX_APP_ID, NULL);
+	if (caller_name == NULL && caller_id == NULL)
+		view->display_flags |= XCC_DISPLAY_CALLER_FALLBACK;
 	view->app_id = own_text(text, certificate_display_text(
 	    request->caller->app_id, CERTIFICATE_DISPLAY_MAX_APP_ID, NULL));
 	view->identity_level = request->caller->level;
 	view->identity_detail = identity_detail(view->identity_level);
 	view->purpose = request->purpose;
+	view->generic_purpose = certificate_chooser_is_generic_purpose(request);
 	view->purpose_text = own_text(text, certificate_chooser_format_purpose(request));
 	view->purpose_detail = certificate_chooser_purpose_detail(request);
 	view->may_sign = request->may_sign;
