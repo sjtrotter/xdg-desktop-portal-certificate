@@ -358,3 +358,111 @@ xdp_wait_for_name() {
 
 	return 1
 }
+
+# Only the smoke runners opt into backend selection; dev-stack/live helpers keep
+# their existing GTK behaviour. BACKEND is always an executable path.
+xdp_smoke_select_backend() {
+	BACKEND_KIND="${BACKEND_KIND:-gtk}"
+	case "$BACKEND_KIND" in
+	gtk)
+		BACKEND="${BACKEND:-$1}"
+		CHOOSER_TITLE="Use a Certificate"
+		PIN_TITLE="Unlock Security Token"
+		;;
+	kde)
+		BACKEND="${BACKEND:-$(command -v xdg-desktop-portal-kde || printf '%s' /usr/libexec/xdg-desktop-portal-kde)}"
+		CHOOSER_TITLE="Choose a Certificate"
+		PIN_TITLE="Security Token PIN"
+		;;
+	*) lib_die "BACKEND_KIND takes gtk (default) or kde" ;;
+	esac
+	export BACKEND_KIND BACKEND CHOOSER_TITLE PIN_TITLE
+}
+
+xdp_smoke_prepare() {
+	local logdir="$1" repo="$2" fixture="$3" module
+
+	if [ "$BACKEND_KIND" = gtk ]; then
+		xdp_write_portal_dir "$logdir/portals" "$repo" private
+		return
+	fi
+
+	module="$(cat "$fixture/module-path")"
+	# KConfig string lists and the INI backend each escape backslashes.
+	# Reject line breaks so a fixture path cannot introduce another key/group.
+	case "$module" in
+	*[$'\n\r']*) lib_die "SoftHSM module path contains a line break" ;;
+	esac
+	module="${module//\\/\\\\}"
+	module="${module//,/\\,}"
+	module="${module//\\/\\\\}"
+	module="${module//$'\t'/\\t}"
+	module="${module// /\\s}"
+	(umask 077 && mkdir -p "$logdir/kde-config" "$logdir/kde-runtime" "$logdir/kde-cache" "$logdir/kde-data") ||
+		lib_die "could not create KDE's private XDG directories"
+	chmod 700 "$logdir/kde-runtime"
+	# LOGDIR can be reused; do not retain descriptors from a previous GTK run.
+	rm -f -- "$logdir/portals/"*.portal "$logdir/portals/"*-portals.conf
+	cat >"$logdir/kde-config/xdg-desktop-portal-kderc" <<EOF
+[Certificate]
+Modules=$module
+AllowSoftwareTokens=true
+EOF
+	cat >"$logdir/portals/kde.portal" <<'EOF'
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.kde
+Interfaces=org.freedesktop.impl.portal.experimental.Certificate1;
+UseIn=portal-certificate-smoke;
+EOF
+	cat >"$logdir/portals/portals.conf" <<'EOF'
+[preferred]
+default=none;
+org.freedesktop.impl.portal.experimental.Certificate1=kde;
+EOF
+	# Do not activate installed backends or delegate activation to the real
+	# session's systemd. All KDE interfaces/names remain on this private bus.
+	cat >"$logdir/bus.conf" <<'EOF'
+<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=/tmp</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+EOF
+	# Skip DesktopPortal's compositor-specific services on the Xvfb display.
+	export XDG_CURRENT_DESKTOP=portal-certificate-smoke
+	# Inherited platform themes/plugins can probe portals during QApplication
+	# construction. They are unnecessary for these real X11 dialogs.
+	unset QT_QPA_PLATFORMTHEME QT_QPA_GENERIC_PLUGINS DBUS_STARTER_ADDRESS DBUS_STARTER_BUS_TYPE
+	# Stable English window titles, irrespective of the container's locale.
+	export LC_ALL=C LANGUAGE=C
+}
+
+# Call only inside dbus-run-session, before the frontend can activate a backend.
+xdp_smoke_start_kde_backend() {
+	# Only the backend gets the private XDG directories; clients keep theirs so
+	# p11-kit still finds the module registration the scripts install.
+	env XDG_CONFIG_HOME="$LOGDIR/kde-config" XDG_CONFIG_DIRS="$LOGDIR/kde-config" \
+		XDG_RUNTIME_DIR="$LOGDIR/kde-runtime" XDG_CACHE_HOME="$LOGDIR/kde-cache" \
+		XDG_DATA_HOME="$LOGDIR/kde-data" \
+		QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software QT_NO_XDG_DESKTOP_PORTAL=1 \
+		"$BACKEND" >"$LOGDIR/backend.log" 2>&1 &
+	BE=$!
+	# Include early frontend failure/interrupt paths in KDE teardown.
+	trap 'kill "$BE" ${FE:+"$FE"} ${PERM:+"$PERM"} ${DRIVER:+"$DRIVER"} ${E2E:+"$E2E"} ${SERVER:+"$SERVER"} 2>/dev/null' EXIT
+	xdp_wait_for_name org.freedesktop.impl.portal.desktop.kde "$BE" || {
+		echo "${0##*/}: KDE never took its private bus name"
+		tail -20 "$LOGDIR/backend.log"
+		return 40
+	}
+}
+
+xdp_smoke_run_session() {
+	local bus_args=()
+	[ "$BACKEND_KIND" = kde ] && bus_args=(--config-file="$LOGDIR/bus.conf")
+	dbus-run-session "${bus_args[@]}" -- "$@"
+}

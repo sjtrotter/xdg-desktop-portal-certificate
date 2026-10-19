@@ -215,10 +215,39 @@ A private bus can activate `/usr/libexec/gcr-prompter` from system service direc
 `auto` would depend on the machine. With gcr-4 on a live bus, `auto` selects an owned or
 activatable system prompter. Prompt options survive script re-execution.
 
+### KDE backend smoke tests
+
+Build KDE with `-DBUILD_CERTIFICATE_PORTAL=ON`. In the test container, set the
+backend executable and the experimental frontend build directory, then use the
+same SoftHSM fixture and smoke tools:
+
+```sh
+export BACKEND_KIND=kde
+export BACKEND=/path/to/kde-build/bin/xdg-desktop-portal-kde
+export XDP_BUILD=/path/to/xdg-desktop-portal/build
+tools/softhsm-fixture.sh
+tools/ui-smoke.sh
+tools/ui-smoke.sh -- --key-algorithm RSA --regrant EC
+tools/ui-smoke.sh --cancel-chooser
+tools/ui-smoke.sh --cancel-pin
+tools/module-smoke.sh
+tools/nss-smoke.sh
+```
+
+Each run creates a private bus without service activation, an Xvfb display,
+isolated XDG directories, a Certificate1-only `kde.portal` and routing config.
+Its `xdg-desktop-portal-kderc` selects the fixture module and enables software
+tokens. xdotool chooses with Down/Return and types the PIN with real key events
+into KDE's `CertificatePinField`; cancellation sends Escape. Wire/signature,
+module and NSS assertions remain the same. `--pin-prompt=system` prints a skip
+reason for gcr and exercises KDE's native PIN dialog instead. `BACKEND_KIND=gtk`
+(the default) keeps the standalone backend. Logs stay in each printed `$LOGDIR`.
+
 ### Portal configuration
 
-The scripts symlink installed `.portal` files and add this backend to a temporary portal
-directory. `tools/lib.sh` resolves each interface across the machine's configuration chain
+With `BACKEND_KIND=gtk`, the scripts symlink installed `.portal` files and add this backend
+to a temporary portal directory. `BACKEND_KIND=kde` instead writes a minimal `kde.portal`
+advertising only Certificate1 and a `portals.conf` routing it to kde. `tools/lib.sh` resolves each interface across the machine's configuration chain
 and flattens the effective choices into `portals.conf`, replacing the Certificate entry.
 This preserves later-directory values such as `Screenshot=none`. `XDG_DESKTOP_PORTAL_DIR`
 replaces all normal portal/configuration search directories, so the development directory

@@ -432,6 +432,8 @@ def parse_args(argv):
                         help="close AcquireCredential after this many milliseconds and check for no grant")
     parser.add_argument("--expect-cancelled", action="store_true",
                         help="pass if acquisition is cancelled; use with --cancel-after")
+    parser.add_argument("--expect-user-cancelled", choices=["chooser", "pin"],
+                        help="require user cancellation (response 1) at this dialog")
     parser.add_argument("--regrant", metavar="KEY_ALGORITHM",
                         help="acquire on a second session with this key algorithm and verify its signature")
     parser.add_argument("--expect-no-certificate", action="store_true",
@@ -458,6 +460,14 @@ def main(argv):
     print(f"session   {session}")
 
     response, results = acquire(portal, session, args)
+
+    if args.expect_user_cancelled == "chooser":
+        if response != 1:
+            release(portal, session)
+            die(EXIT_FAIL, f"expected chooser cancellation (1), got {response}")
+        print("PASS cancel: chooser answered 1, no grant")
+        release(portal, session)
+        return EXIT_PASS
 
     if args.expect_cancelled:
         # Frontend Close() unexports the Request before forwarding, so no Response follows.
@@ -528,10 +538,17 @@ def main(argv):
     if response == 1:
         print("cancelled by the user")
         release(portal, session)
+        if args.expect_user_cancelled == "pin":
+            print("PASS cancel: PIN dialog answered 1, no signature")
+            return EXIT_PASS
         return EXIT_CANCELLED
     if response != 0:
         release(portal, session)
         die(EXIT_FAIL, f"Sign answered {response}")
+
+    if args.expect_user_cancelled:
+        release(portal, session)
+        die(EXIT_FAIL, "expected user cancellation, but Sign succeeded")
 
     signature = bytes(results["signature"])
     print(f"signature {len(signature)} bytes, operation_id={results.get('operation_id')}")

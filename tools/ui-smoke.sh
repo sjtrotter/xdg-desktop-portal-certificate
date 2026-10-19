@@ -9,7 +9,6 @@ here() { cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd; }
 REPO="$(here)"
 
 XDP_BUILD="${XDP_BUILD:-$REPO/../xdg-desktop-portal/build}"
-BACKEND="${BACKEND:-$REPO/build/src/xdg-desktop-portal-certificate}"
 XDP_ENV="${XDP_ENV:-$REPO/.xdp-env}"
 SOFTHSM_DIR="${SOFTHSM_DIR:-${TMPDIR:-/tmp}/xdp-certificate-softhsm}"
 XVFB="${XVFB:-$(command -v Xvfb || true)}"
@@ -24,6 +23,7 @@ die() {
 
 # shellcheck source=tools/lib.sh
 . "$REPO/tools/lib.sh"
+xdp_smoke_select_backend "$REPO/build/src/xdg-desktop-portal-certificate"
 
 if [ -n "${LOGDIR:-}" ]; then
 	fixture_make "$LOGDIR" ui-smoke
@@ -44,7 +44,7 @@ fixture_check "$SOFTHSM_DIR" softhsm
 
 DEVDIR="$LOGDIR/portals"
 (umask 077 && mkdir -p "$DEVDIR")
-xdp_write_portal_dir "$DEVDIR" "$REPO" private
+xdp_smoke_prepare "$LOGDIR" "$REPO" "$SOFTHSM_DIR"
 
 "$XVFB" "$SCREEN" -screen 0 1280x1024x24 -nolisten tcp >"$LOGDIR/xvfb.log" 2>&1 &
 XVFB_PID=$!
@@ -69,8 +69,13 @@ MODULE="$(cat "$SOFTHSM_DIR/module-path")"
 
 DRIVE_WINDOWS=1
 PIN_PROMPT=gtk
+CANCEL_DIALOG=""
 while [ $# -gt 0 ]; do
 	case "$1" in
+	--cancel-chooser | --cancel-pin)
+		CANCEL_DIALOG="${1#--cancel-}"
+		shift
+		;;
 	--no-drive)
 		DRIVE_WINDOWS=0
 		shift
@@ -89,6 +94,14 @@ gtk | system) ;;
 *) die "--pin-prompt takes gtk or system here; 'auto' would depend on what is on the bus" ;;
 esac
 
+if [ "$BACKEND_KIND" = kde ]; then
+	if [ "$PIN_PROMPT" = system ]; then
+		echo "ui-smoke: SKIP gcr system prompter: KDE uses its native PIN dialog; exercising that dialog instead"
+	fi
+	PIN_PROMPT=kde
+fi
+[ -z "$CANCEL_DIALOG" ] || set -- --expect-user-cancelled "$CANCEL_DIALOG" "$@"
+
 PROMPTER_BIN="${PROMPTER_BIN:-$(dirname -- "$BACKEND")/../tests/certificate-test-prompter}"
 if [ "$PIN_PROMPT" = system ]; then
 	[ -x "$PROMPTER_BIN" ] ||
@@ -97,6 +110,12 @@ It is built only when the build found gcr-4; check 'meson configure build | grep
 fi
 
 inner() {
+	# Sourced inside the new bus; KDE must be running before frontend discovery.
+	. "$REPO/tools/lib.sh"
+	if [ "$BACKEND_KIND" = kde ]; then
+		xdp_smoke_start_kde_backend || return 40
+	fi
+
 	"$XDP_BUILD/document-portal/xdg-permission-store" >"$LOGDIR/permission-store.log" 2>&1 &
 	PERM=$!
 	sleep 1
@@ -124,14 +143,16 @@ inner() {
 		}
 	fi
 
-	"$BACKEND" --verbose --module "$MODULE" --allow-software-tokens \
-		--pin-prompt "$PIN_PROMPT" >"$LOGDIR/backend.log" 2>&1 &
-	BE=$!
-	xdp_wait_for_name org.freedesktop.impl.portal.desktop.certificate "$BE" || {
-		echo "ui-smoke: the backend never took its bus name"
-		tail -20 "$LOGDIR/backend.log"
-		return 40
-	}
+	if [ "$BACKEND_KIND" = gtk ]; then
+		"$BACKEND" --verbose --module "$MODULE" --allow-software-tokens \
+			--pin-prompt "$PIN_PROMPT" >"$LOGDIR/backend.log" 2>&1 &
+		BE=$!
+		xdp_wait_for_name org.freedesktop.impl.portal.desktop.certificate "$BE" || {
+			echo "ui-smoke: the backend never took its bus name"
+			tail -20 "$LOGDIR/backend.log"
+			return 40
+		}
+	fi
 
 	python3 "$REPO/tools/certificate-e2e.py" --timeout 45000 "$@" >"$LOGDIR/e2e.log" 2>&1 &
 	E2E=$!
@@ -140,9 +161,11 @@ inner() {
 		local title="$1"
 		shift
 		local wid=""
+		local visibility=()
+		[ "$BACKEND_KIND" = kde ] && visibility=(--onlyvisible)
 
 		for _ in $(seq 1 40); do
-			wid="$("$XDOTOOL" search --name "$title" 2>/dev/null | tail -1)"
+			wid="$("$XDOTOOL" search "${visibility[@]}" --name "$title" 2>/dev/null | tail -1)"
 			[ -n "$wid" ] && break
 			sleep 0.5
 		done
@@ -169,14 +192,22 @@ inner() {
 	}
 
 	if [ "$DRIVE_WINDOWS" = 1 ]; then
-		drive "Use a Certificate" Down Return
-		[ "$PIN_PROMPT" = gtk ] && drive "Unlock Security Token" "type:" Return
+		if [ "$CANCEL_DIALOG" = chooser ]; then
+			drive "$CHOOSER_TITLE" Escape
+		else
+			drive "$CHOOSER_TITLE" Down Return
+			if [ "$CANCEL_DIALOG" = pin ]; then
+				drive "$PIN_TITLE" Escape
+			elif [ "$PIN_PROMPT" != system ]; then
+				drive "$PIN_TITLE" "type:" Return
+			fi
+		fi
 
 		# Regrant uses a second session and requires another chooser and PIN interaction.
 		for arg in "$@"; do
 			if [ "$arg" = --regrant ]; then
-				drive "Use a Certificate" Down Return
-				[ "$PIN_PROMPT" = gtk ] && drive "Unlock Security Token" "type:" Return
+				drive "$CHOOSER_TITLE" Down Return
+				[ "$PIN_PROMPT" != system ] && drive "$PIN_TITLE" "type:" Return
 				break
 			fi
 		done
@@ -192,8 +223,8 @@ inner() {
 }
 
 # Pass the PIN through the environment to keep it out of the public command line.
-export PIN LOGDIR REPO XDP_BUILD BACKEND MODULE XDOTOOL DRIVE_WINDOWS PIN_PROMPT PROMPTER_BIN
-dbus-run-session -- bash -c "$(declare -f xdp_experimental_portals); $(declare -f xdp_wait_for_name); $(declare -f inner); inner \"\$@\"" -- "$@"
+export PIN LOGDIR REPO XDP_BUILD BACKEND MODULE XDOTOOL DRIVE_WINDOWS PIN_PROMPT PROMPTER_BIN CANCEL_DIALOG
+xdp_smoke_run_session bash -c "$(declare -f xdp_experimental_portals); $(declare -f xdp_wait_for_name); $(declare -f inner); inner \"\$@\"" -- "$@"
 rc=$?
 
 echo
