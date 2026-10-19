@@ -72,9 +72,8 @@ if ! gdbus introspect --session --dest org.freedesktop.portal.Desktop \
 	grep -q "org.freedesktop.portal.experimental.Certificate1"; then
 	die "the session's xdg-desktop-portal does not export the Certificate interface; run tools/dev-stack.sh --live --keep --no-e2e --pin-prompt=system first"
 fi
-if ! busctl --user list 2>/dev/null | grep -q "org.freedesktop.impl.portal.desktop.certificate"; then
-	echo "${0##*/}: Backend service has no owner; start tools/dev-stack.sh --live" >&2
-fi
+# Certificate1 visibility above covers standalone, GNOME and KDE routing. Do
+# not infer availability from the standalone backend's well-known name.
 
 RUN_ARGS=(--env=PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1)
 if [ "$KEEP_PCSC" = 0 ]; then

@@ -101,13 +101,21 @@ if [ "$BACKEND_KIND" = kde ]; then
 	PIN_PROMPT=kde
 elif [ "$BACKEND_KIND" = gnome ]; then
 	if [ "$PIN_PROMPT" = system ]; then
-		echo "ui-smoke: SKIP gcr system prompter: GNOME uses its native PIN dialog; exercising that dialog instead"
+		# Preparation defaults every GNOME smoke runner to the GTK dialog.
+		# Only this explicit run selects Gcr on the temporary private-bus config.
+		sed -i 's/^PinPrompt=dialog$/PinPrompt=system/' \
+			"$LOGDIR/gnome-config/xdg-desktop-portal-gnome/certificate.conf"
+	else
+		PIN_PROMPT=gnome
 	fi
-	PIN_PROMPT=gnome
 fi
 [ -z "$CANCEL_DIALOG" ] || set -- --expect-user-cancelled "$CANCEL_DIALOG" "$@"
 
-PROMPTER_BIN="${PROMPTER_BIN:-$(dirname -- "$BACKEND")/../tests/certificate-test-prompter}"
+if [ "$BACKEND_KIND" = gnome ]; then
+	PROMPTER_BIN="${PROMPTER_BIN:-${BUILD:-$REPO/build}/tests/certificate-test-prompter}"
+else
+	PROMPTER_BIN="${PROMPTER_BIN:-$(dirname -- "$BACKEND")/../tests/certificate-test-prompter}"
+fi
 if [ "$PIN_PROMPT" = system ]; then
 	[ -x "$PROMPTER_BIN" ] ||
 		die "no test prompter at $PROMPTER_BIN.
@@ -117,6 +125,20 @@ fi
 inner() {
 	# Sourced inside the new bus; KDE must be running before frontend discovery.
 	. "$REPO/tools/lib.sh"
+	trap 'kill ${PROMPTER:+"$PROMPTER"} ${BE:+"$BE"} ${FE:+"$FE"} ${PERM:+"$PERM"} ${E2E:+"$E2E"} 2>/dev/null' EXIT
+	# The system prompter must own its name before the backend's first private-key operation.
+	PROMPTER=""
+	if [ "$PIN_PROMPT" = system ]; then
+		TEST_PROMPTER_PIN="$PIN" "$PROMPTER_BIN" >"$LOGDIR/prompter.log" 2>&1 &
+		PROMPTER=$!
+		xdp_wait_for_name org.gnome.keyring.SystemPrompter "$PROMPTER" &&
+			grep -q 'serving' "$LOGDIR/prompter.log" || {
+			echo "ui-smoke: the test prompter did not start:"
+			cat "$LOGDIR/prompter.log"
+			return 40
+		}
+	fi
+
 	if [ "$BACKEND_KIND" = kde ]; then
 		xdp_smoke_start_kde_backend || return 40
 	elif [ "$BACKEND_KIND" = gnome ]; then
@@ -136,19 +158,6 @@ inner() {
 		tail -20 "$LOGDIR/frontend.log"
 		return 40
 	}
-
-	# The system prompter must own its name before the backend's first private-key operation.
-	PROMPTER=""
-	if [ "$PIN_PROMPT" = system ]; then
-		TEST_PROMPTER_PIN="$PIN" "$PROMPTER_BIN" >"$LOGDIR/prompter.log" 2>&1 &
-		PROMPTER=$!
-		sleep 1
-		grep -q 'serving' "$LOGDIR/prompter.log" || {
-			echo "ui-smoke: the test prompter did not start:"
-			cat "$LOGDIR/prompter.log"
-			return 40
-		}
-	fi
 
 	if [ "$BACKEND_KIND" = gtk ]; then
 		"$BACKEND" --verbose --module "$MODULE" --allow-software-tokens \
