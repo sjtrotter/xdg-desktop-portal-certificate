@@ -215,7 +215,7 @@ A private bus can activate `/usr/libexec/gcr-prompter` from system service direc
 `auto` would depend on the machine. With gcr-4 on a live bus, `auto` selects an owned or
 activatable system prompter. Prompt options survive script re-execution.
 
-### KDE backend smoke tests
+### KDE and GNOME backend smoke tests
 
 Build KDE with `-DBUILD_CERTIFICATE_PORTAL=ON`. In the test container, set the
 backend executable and the experimental frontend build directory, then use the
@@ -243,11 +243,67 @@ module and NSS assertions remain the same. `--pin-prompt=system` prints a skip
 reason for gcr and exercises KDE's native PIN dialog instead. `BACKEND_KIND=gtk`
 (the default) keeps the standalone backend. Logs stay in each printed `$LOGDIR`.
 
+For GNOME, install the public SDK, build the GNOME 50.0 fork with
+`meson setup build -Dcertificate=enabled`, then `meson compile -C build -j2`.
+Use a Fedora 44 container with xdg-desktop-portal-devel and GNOME build dependencies.
+The host checkout does not have those dependencies. The SDK version must include
+`XccCandidateInfo.token_label`, `token_manufacturer`, `token_model`, `token_reader`.
+Do not build the standalone service into the GNOME process; GNOME links only the SDK.
+
+```sh
+export BACKEND_KIND=gnome
+export BACKEND=/path/to/gnome-build/src/xdg-desktop-portal-gnome
+export XDP_BUILD=/path/to/experimental-frontend/build
+# BUILD selects the certificate repository's client module and test helpers.
+export BUILD=/path/to/certificate/build
+tools/softhsm-fixture.sh
+tools/ui-smoke.sh
+tools/ui-smoke.sh -- --key-algorithm RSA --regrant EC
+tools/ui-smoke.sh --cancel-chooser
+tools/ui-smoke.sh --cancel-pin
+tools/module-smoke.sh
+tools/nss-smoke.sh
+```
+
+GNOME gets a temporary `gnome.portal` advertising only Certificate1 and a matching
+`portals.conf`, on the same activation-free private-bus model as KDE. Only the
+backend gets `XDG_CONFIG_HOME=$LOGDIR/gnome-config`: its
+`xdg-desktop-portal-gnome/certificate.conf` selects the SoftHSM module and
+`AllowSoftwareTokens=true`. Module settings are GLib keyfile string lists
+(semicolon separator), not environment policy switches. Client p11-kit
+registrations and the real desktop configuration stay independent.
+
+The GNOME backend uses `XDG_SESSION_TYPE=x11`, `GDK_BACKEND=x11`,
+`GSK_RENDERER=cairo`, and `GDK_DISABLE=gl,egl,vulkan` on Xvfb. libgxdp requires the
+session type as well as the GDK backend. The backend still initializes its other
+portals; missing org.gnome.Shell / Mutter services must be nonfatal. The launcher
+checks Certificate1 introspection and saves `gnome-interfaces.log` plus filtered
+startup diagnostics in `gnome-startup.log`; retain the full `backend.log` when
+reporting container errors. It starts no fake Shell or compositor services.
+Actual missing-service diagnostics require a container run; they have not been
+measured on the host.
+
+xdotool finds the visible AdwWindow titles `Choose a Certificate` and
+`Security Token PIN` from the GNOME `.ui` templates. The chooser initially focuses
+the list (Cancel when empty); Down/Return selects and activates a row. Allow is
+the default widget. The PIN window focuses GtkPasswordEntry and makes Unlock the
+default widget; typing then Return submits once. Escape cancels either window.
+`--pin-prompt=system` reports that gcr is skipped and drives GNOME's native dialog.
+Protected-path devices have no PIN entry: login auto-starts after presentation,
+except FINAL_TRY requires explicit Continue; these hardware interactions, live
+hotplug/no-match states, and Wayland parenting need manual coverage beyond SoftHSM.
+
+GNOME preserves process dumpability/core limits and uses GTK secure entry plus
+SDK XccSecret storage. See the fork's `src/certificate.md` for transient input-copy
+risk and the open process-hardening/helper question. The standalone GTK4 service
+remains the fallback; xdg-desktop-portal-gtk (GTK3) needs its own UI adapter.
+
 ### Portal configuration
 
 With `BACKEND_KIND=gtk`, the scripts symlink installed `.portal` files and add this backend
 to a temporary portal directory. `BACKEND_KIND=kde` instead writes a minimal `kde.portal`
-advertising only Certificate1 and a `portals.conf` routing it to kde. `tools/lib.sh` resolves each interface across the machine's configuration chain
+advertising only Certificate1 and a `portals.conf` routing it to kde; GNOME uses
+`gnome.portal` and routes to gnome. For GTK, `tools/lib.sh` resolves each interface across the machine's configuration chain
 and flattens the effective choices into `portals.conf`, replacing the Certificate entry.
 This preserves later-directory values such as `Screenshot=none`. `XDG_DESKTOP_PORTAL_DIR`
 replaces all normal portal/configuration search directories, so the development directory

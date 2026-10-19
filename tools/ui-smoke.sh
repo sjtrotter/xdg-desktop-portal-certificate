@@ -99,6 +99,11 @@ if [ "$BACKEND_KIND" = kde ]; then
 		echo "ui-smoke: SKIP gcr system prompter: KDE uses its native PIN dialog; exercising that dialog instead"
 	fi
 	PIN_PROMPT=kde
+elif [ "$BACKEND_KIND" = gnome ]; then
+	if [ "$PIN_PROMPT" = system ]; then
+		echo "ui-smoke: SKIP gcr system prompter: GNOME uses its native PIN dialog; exercising that dialog instead"
+	fi
+	PIN_PROMPT=gnome
 fi
 [ -z "$CANCEL_DIALOG" ] || set -- --expect-user-cancelled "$CANCEL_DIALOG" "$@"
 
@@ -114,6 +119,8 @@ inner() {
 	. "$REPO/tools/lib.sh"
 	if [ "$BACKEND_KIND" = kde ]; then
 		xdp_smoke_start_kde_backend || return 40
+	elif [ "$BACKEND_KIND" = gnome ]; then
+		xdp_smoke_start_gnome_backend || return 40
 	fi
 
 	"$XDP_BUILD/document-portal/xdg-permission-store" >"$LOGDIR/permission-store.log" 2>&1 &
@@ -162,7 +169,7 @@ inner() {
 		shift
 		local wid=""
 		local visibility=()
-		[ "$BACKEND_KIND" = kde ] && visibility=(--onlyvisible)
+		[ "$BACKEND_KIND" != gtk ] && visibility=(--onlyvisible)
 
 		for _ in $(seq 1 40); do
 			wid="$("$XDOTOOL" search "${visibility[@]}" --name "$title" 2>/dev/null | tail -1)"

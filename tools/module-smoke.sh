@@ -210,6 +210,8 @@ inner() {
 	. "$REPO/tools/lib.sh"
 	if [ "$BACKEND_KIND" = kde ]; then
 		xdp_smoke_start_kde_backend || return 40
+	elif [ "$BACKEND_KIND" = gnome ]; then
+		xdp_smoke_start_gnome_backend || return 40
 	fi
 
 	"$XDP_BUILD/document-portal/xdg-permission-store" >"$LOGDIR/permission-store.log" 2>&1 &
