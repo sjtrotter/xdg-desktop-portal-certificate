@@ -55,8 +55,8 @@ including PIN memory handling and the attacks a same-UID host process can still 
 |---|---|---|
 | Frontend (`org.freedesktop.portal.experimental.Certificate1`) | [sjtrotter/xdg-desktop-portal `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate) | `a2a13dd` |
 | Card library (`libxdp-certificate-core`), standalone GTK/libadwaita backend and PKCS#11 module | [sjtrotter/xdg-desktop-portal-certificate](https://github.com/sjtrotter/xdg-desktop-portal-certificate) | tag `proposal-2026-10` |
-| GNOME backend, `-Dcertificate=enabled` | [sjtrotter/xdg-desktop-portal-gnome `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-gnome/tree/experimental/certificate) on 50.0 | `625296d` |
-| KDE backend, `-DBUILD_CERTIFICATE_PORTAL=ON` | [sjtrotter/xdg-desktop-portal-kde `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-kde/tree/experimental/certificate) on v6.7.5 | `39948a3` |
+| GNOME backend, `-Dcertificate=enabled` | [sjtrotter/xdg-desktop-portal-gnome `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-gnome/tree/experimental/certificate) on 50.0 | `121e2eb` |
+| KDE backend, `-DBUILD_CERTIFICATE_PORTAL=ON` | [sjtrotter/xdg-desktop-portal-kde `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-kde/tree/experimental/certificate) on v6.7.5 | `c7c5648` |
 
 The frontend follows the experimental convention merged in #2129 and is enabled with
 `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1`. The current interface:
@@ -92,8 +92,10 @@ untested. Procedures and full results are in [TESTING.md](TESTING.md).
 The GNOME and KDE backends were run against the same frontend, PKCS#11 module, NSS and
 GnuTLS clients with a SoftHSM token, in a Fedora 44 container under Xvfb: certificate choice,
 PIN entry, RSA and ECDSA signatures, regrant, cancellation at each dialog, mutual TLS through
-GnuTLS, and NSS across grant expiry. They have not run in a live desktop session or with a
-card.
+GnuTLS, and NSS across grant expiry. The GNOME backend has also run in a live GNOME 50
+session with the PIV card: signing from the test client, sign-in from Flathub Firefox, the
+chooser filling in when the card is inserted, and wrong PINs up to the final-attempt warning.
+The KDE backend has not run in a live session or with a card.
 
 Both browser settings are deployment policy. Firefox's applies to every site and every
 certificate. Chrome's must name the host that requests the certificate, which for the tested
@@ -176,8 +178,11 @@ The library has a C API with no GLib, GTK or PKCS#11 types in its core and UI he
 ([SDK.md](SDK.md)). A backend supplies a table of UI callbacks and a dispatcher that queues
 calls onto its UI thread; the library calls back to show the chooser or the PIN prompt and
 takes the user's answers. The dialog submits the PIN in a library-owned buffer that is
-locked and excluded from core dumps where the kernel allows. The GNOME backend adds about
-2,400 lines (adapter, two libadwaita dialogs, build glue); the KDE backend adds a Qt adapter,
+locked and excluded from core dumps where the kernel allows. In a GNOME session the GNOME
+backend collects the PIN through GNOME Shell's system prompt (Gcr), the prompt gnome-keyring
+uses, and receives it over Gcr's secret exchange; its own libadwaita dialog is the fallback.
+The GNOME backend adds about 3,200 lines (adapter, chooser and PIN dialogs, system-prompt
+support, build glue); the KDE backend adds a Qt adapter,
 Kirigami dialogs and a PIN field that stores typed bytes only in that buffer. A fix in card handling lands once, in the library.
 
 Linking the library into a desktop backend has a cost. The standalone backend makes its
