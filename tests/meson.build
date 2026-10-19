@@ -19,6 +19,7 @@ core_test_cases = {
   'discovery-limits': 'test-discovery-limits.c',
   # Skip when the SoftHSM fixture is unavailable.
   'broker-device': 'test-broker-device.c',
+  'sdk-token-metadata': 'test-sdk-token-metadata.c',
 }
 
 foreach name, source : core_test_cases
@@ -32,7 +33,8 @@ foreach name, source : core_test_cases
     install: false,
   )
 
-  test(name, exe, protocol: 'tap', env: test_env)
+  test(name, exe, protocol: 'tap', env: test_env,
+    suite: name == 'sdk-token-metadata' ? ['sdk'] : [])
 endforeach
 
 # Clock and timer seams keep lifecycle coverage independent of D-Bus and token fixtures.
@@ -87,6 +89,14 @@ exe = executable(
 test('secret', exe, protocol: 'tap', env: test_env)
 
 if service_enabled
+  # Headless reference wire adapter for cross-desktop SoftHSM parity tests.
+  # It exports the real GDBus adapter on a caller-supplied private bus.
+  executable('certificate-reference-adapter', 'certificate-reference-adapter.c',
+    dependencies: [certificate_core_dep],
+    c_args: certificate_log_args,
+    install: false,
+  )
+
   service_test_cases = {
     'impl-dbus': 'test-impl-dbus.c',
     'cancellation': 'test-cancellation.c',

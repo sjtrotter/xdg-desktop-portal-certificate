@@ -575,7 +575,11 @@ XccCandidate* xcc_candidate_snapshot(CertificateCandidate* value)
 		.mechanisms = (const char* const*)value->supported_mechanisms,
 		.not_before = value->not_before,
 		.not_after = value->not_after,
-		.protected_path = value->token->protected_authentication_path};
+		.protected_path = value->token->protected_authentication_path,
+		.token_label = value->token->label != NULL ? value->token->label : "",
+		.token_manufacturer = value->token->manufacturer != NULL ? value->token->manufacturer : "",
+		.token_model = value->token->model != NULL ? value->token->model : "",
+		.token_reader = value->token->reader_name != NULL ? value->token->reader_name : ""};
 	return c;
 }
 const XccCandidateInfo* xcc_candidate_info(const XccCandidate* c)

@@ -93,6 +93,12 @@ extern "C"
 		const char* const* mechanisms;
 		int64_t not_before, not_after;
 		bool protected_path;
+		/* Original wire metadata, not sanitized display text. Never NULL; no serial.
+		 * Gate this extension through token_reader on struct_size. */
+		const char* token_label;
+		const char* token_manufacturer;
+		const char* token_model;
+		const char* token_reader;
 	} XccCandidateInfo;
 	typedef struct
 	{

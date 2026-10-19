@@ -65,8 +65,25 @@ consumers gate appended fields on `struct_size`. Embedded/value-returned structs
 fixed error output keep their layout for this SONAME. Incompatible changes require both a new SONAME and a new pkg-config
 API name, including during experimentation. The Certificate1 wire version is independent.
 
+`xcc_candidate_info()` returns borrowed metadata valid while the candidate is retained.
+`subject`, `issuer`, `token` and `reader` are sanitized display strings. The appended
+`token_label`, `token_manufacturer`, `token_model` and `token_reader` fields carry the
+original token label, manufacturer, model and reader name used by the reference
+adapter's `token_display` dictionary. They are empty strings, never NULL, when absent;
+no serial number is exposed. These strings are external input: render them as plain
+text and use the sanitized fields for chooser presentation. Before reading the four
+fields, check `info->struct_size >= offsetof(XccCandidateInfo, token_reader) +
+sizeof(const char*)` (and the ABI version). Older producers supply only the original
+prefix. `protected_path` still supplies `protected_authentication_path` on the wire.
+This append-only extension keeps the SONAME, ABI version and exported symbol list.
+
 `meson test -C build --suite sdk` covers staged C/C++ consumers, all installed headers,
 ABI prefixes, complete public/private export lists and their symbol versions, `NODELETE`,
 a separate `-Dservice=false --auto-features=enabled` configuration and stride bounds.
 The new consumers use an explicit empty module list, so they need no SoftHSM fixture.
 Existing token suites retain their missing-fixture skips and private static link seams.
+`sdk-headers` also freezes the original `XccCandidateInfo` offsets and the appended
+metadata order in C and C++. `sdk-token-metadata` checks original and absent metadata,
+and compares all four fields with discovered SoftHSM token values when a fixture is
+available (`SOFTHSM_FIXTURE_DIR`, optionally `SOFTHSM_MODULE`, or the usual
+`/tmp/xdp-certificate-softhsm` fixture from `tools/softhsm-fixture.sh`).
