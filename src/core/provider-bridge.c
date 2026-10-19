@@ -36,6 +36,8 @@ static void pin_show(void* data, XccUiId id, const XccPinView* view)
 	p->token->label = g_strdup(view->token_label);
 	p->token->reader_name = g_strdup(view->reader);
 	p->token->pin_final_try = view->final_try;
+	p->token->pin_count_low = view->count_low;
+	p->token->pin_locked = view->locked;
 	p->parent_window = g_strdup(view->parent_window);
 	p->caller_display = g_strdup(view->caller_display);
 	p->purpose_display = g_strdup(view->purpose_display);
@@ -57,6 +59,8 @@ static void pin_update(void* c, XccUiId id, const XccPinView* v)
 		return;
 	p->busy = v->busy;
 	p->token->pin_final_try = v->final_try;
+	p->token->pin_count_low = v->count_low;
+	p->token->pin_locked = v->locked;
 	if (old_pin.pin_update != NULL)
 		old_pin.pin_update(old_pin.user_data, p, v);
 }

@@ -11,13 +11,19 @@
 typedef struct
 {
 	FakePinProvider ui;
+	CertificateTokens* tokens;
 	CertificateToken* token;
+	GThread* coordinator;
 	GCancellable* cancellable;
 	guint attempts;
 	guint refusals;
 	guint refreshes;
-	gboolean refresh_final_try;
-	gboolean refresh_locked;
+	CK_FLAGS flags;
+	CK_FLAGS refusal_flags;
+	gboolean keep_flags_on_success;
+	gboolean serial_less;
+	CK_SESSION_HANDLE session;
+	guint sessions;
 	guint done_calls;
 	guint expected_closes;
 	guint abandons;
@@ -27,11 +33,116 @@ typedef struct
 	GCond cond;
 	gboolean block;
 	gboolean release;
+	gboolean block_refresh;
+	guint refreshing;
 } Fixture;
+
+static Fixture* active;
+
+static CK_RV get_slot_list(CK_BBOOL present, CK_SLOT_ID_PTR slots, CK_ULONG_PTR count)
+{
+	if (slots != NULL)
+	{
+		g_assert_cmpuint(*count, >=, 1);
+		slots[0] = 1;
+	}
+	*count = 1;
+	return CKR_OK;
+}
+
+static CK_RV get_slot_info(CK_SLOT_ID slot, CK_SLOT_INFO_PTR info)
+{
+	memset(info, 0, sizeof(*info));
+	memset(info->slotDescription, ' ', sizeof(info->slotDescription));
+	memcpy(info->slotDescription, "Test reader", strlen("Test reader"));
+	info->flags = CKF_HW_SLOT | CKF_TOKEN_PRESENT;
+	return CKR_OK;
+}
+
+static CK_RV get_token_info(CK_SLOT_ID slot, CK_TOKEN_INFO_PTR info)
+{
+	memset(info, 0, sizeof(*info));
+	memset(info->label, ' ', sizeof(info->label));
+	memcpy(info->label, "Test token", strlen("Test token"));
+	memset(info->manufacturerID, ' ', sizeof(info->manufacturerID));
+	memset(info->model, ' ', sizeof(info->model));
+	memset(info->serialNumber, ' ', sizeof(info->serialNumber));
+	if (!active->serial_less)
+		memcpy(info->serialNumber, "123456", 6);
+	info->flags = CKF_TOKEN_INITIALIZED | CKF_LOGIN_REQUIRED | active->flags;
+	return CKR_OK;
+}
+
+static CK_RV module_login(CK_SESSION_HANDLE session, CK_USER_TYPE user,
+                           CK_UTF8CHAR_PTR pin, CK_ULONG length)
+{
+	g_assert_true(g_thread_self() != active->coordinator);
+	if (active->attempts <= active->refusals)
+	{
+		active->flags = active->refusal_flags;
+		return CKR_PIN_INCORRECT;
+	}
+	if (!active->keep_flags_on_success)
+		active->flags = 0;
+	return CKR_OK;
+}
+
+static CK_RV open_session(CK_SLOT_ID slot, CK_FLAGS flags, CK_VOID_PTR application,
+                          CK_NOTIFY notify, CK_SESSION_HANDLE_PTR session)
+{
+	*session = ++active->sessions;
+	return CKR_OK;
+}
+
+static CK_RV close_session(CK_SESSION_HANDLE session)
+{
+	return CKR_OK;
+}
+
+static CK_FUNCTION_LIST module = {
+	.C_GetSlotList = get_slot_list,
+	.C_GetSlotInfo = get_slot_info,
+	.C_GetTokenInfo = get_token_info,
+	.C_OpenSession = open_session,
+	.C_CloseSession = close_session,
+	.C_Login = module_login,
+};
+
+/* Replace only module loading: discovery and C_GetTokenInfo refresh remain real. */
+CK_FUNCTION_LIST** __wrap_p11_kit_modules_load_and_initialize(int flags);
+void __wrap_p11_kit_modules_finalize_and_release(CK_FUNCTION_LIST** modules);
+char* __wrap_p11_kit_module_get_name(CK_FUNCTION_LIST* value);
+char* __wrap_p11_kit_module_get_filename(CK_FUNCTION_LIST* value);
+
+CK_FUNCTION_LIST** __wrap_p11_kit_modules_load_and_initialize(int flags)
+{
+	CK_FUNCTION_LIST** modules = g_new0(CK_FUNCTION_LIST*, 2);
+	modules[0] = &module;
+	return modules;
+}
+
+void __wrap_p11_kit_modules_finalize_and_release(CK_FUNCTION_LIST** modules)
+{
+	g_free(modules);
+}
+
+char* __wrap_p11_kit_module_get_name(CK_FUNCTION_LIST* value)
+{
+	g_assert_true(value == &module);
+	return g_strdup("test-pin-module");
+}
+
+char* __wrap_p11_kit_module_get_filename(CK_FUNCTION_LIST* value)
+{
+	g_assert_true(value == &module);
+	return NULL;
+}
 
 static gboolean login(const char* pin, gpointer user_data, GError** error)
 {
 	Fixture* fixture = user_data;
+	CK_FUNCTION_LIST* resolved = NULL;
+	CK_RV rv;
 
 	if (fixture->token->protected_authentication_path)
 		g_assert_null(pin);
@@ -49,11 +160,16 @@ static gboolean login(const char* pin, gpointer user_data, GError** error)
 	if (!fixture->token->protected_authentication_path)
 		g_assert_cmpstr(pin, ==, fixture->attempts <= fixture->refusals ? BAD_PIN : GOOD_PIN);
 
-	if (fixture->attempts > fixture->refusals)
+	if (fixture->session == CK_INVALID_HANDLE &&
+	    !certificate_tokens_open_session(fixture->tokens, fixture->token, &resolved,
+	                                      &fixture->session, error))
+		return FALSE;
+	rv = module.C_Login(fixture->session, CKU_USER, (CK_UTF8CHAR_PTR) pin,
+	                    pin != NULL ? strlen(pin) : 0);
+	if (rv == CKR_OK)
 		return TRUE;
 
-	g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT,
-	                    "refused");
+	certificate_pkcs11_set_error(error, rv, "C_Login");
 	return FALSE;
 }
 
@@ -61,10 +177,14 @@ static void refresh(CertificateToken* token, gpointer user_data)
 {
 	Fixture* fixture = user_data;
 
+	g_assert_true(g_thread_self() != fixture->coordinator);
+	g_mutex_lock(&fixture->lock);
+	g_atomic_int_inc(&fixture->refreshing);
+	while (fixture->block_refresh && !fixture->release)
+		g_cond_wait(&fixture->cond, &fixture->lock);
+	g_mutex_unlock(&fixture->lock);
+	certificate_tokens_refresh_flags(fixture->tokens, token);
 	fixture->refreshes++;
-	token->pin_count_low = TRUE;
-	token->pin_final_try = fixture->refresh_final_try;
-	token->pin_locked = fixture->refresh_locked;
 }
 
 static void done(CertificatePinOutcome outcome, gpointer user_data)
@@ -90,6 +210,11 @@ static void login_data_free(gpointer user_data)
 	Fixture* fixture = user_data;
 
 	g_assert_cmpuint(fixture->done_calls, ==, 1);
+	if (fixture->session != CK_INVALID_HANDLE)
+	{
+		module.C_CloseSession(fixture->session);
+		fixture->session = CK_INVALID_HANDLE;
+	}
 	g_atomic_int_inc(&fixture->frees);
 }
 
@@ -112,13 +237,24 @@ static void wait_for(const guint* counter, guint target)
 
 static void fixture_set_up(Fixture* fixture, gconstpointer user_data)
 {
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GPtrArray) list = NULL;
+
+	active = fixture;
+	fixture->coordinator = g_thread_self();
+	fixture->refusal_flags = CKF_USER_PIN_COUNT_LOW;
 	fixture->expected_closes = 1;
 	fake_pin_provider_init(&fixture->ui);
 	certificate_pin_set_provider(&fixture->ui.provider);
 	certificate_ui_set_has_display(FALSE);
 	certificate_pin_set_login_timeout(60);
-	fixture->token = g_new0(CertificateToken, 1);
-	g_atomic_ref_count_init(&fixture->token->ref_count);
+	fixture->tokens = certificate_tokens_new(NULL, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(fixture->tokens);
+	list = certificate_tokens_list(fixture->tokens, &error);
+	g_assert_no_error(error);
+	g_assert_cmpuint(list->len, ==, 1);
+	fixture->token = certificate_token_ref(g_ptr_array_index(list, 0));
 	fixture->cancellable = g_cancellable_new();
 	g_mutex_init(&fixture->lock);
 	g_cond_init(&fixture->cond);
@@ -130,6 +266,8 @@ static void fixture_tear_down(Fixture* fixture, gconstpointer user_data)
 	g_assert_cmpuint(fixture->frees, ==, 1);
 	g_assert_null(fixture->ui.prompt);
 	certificate_token_unref(fixture->token);
+	certificate_tokens_free(fixture->tokens);
+	active = NULL;
 	g_object_unref(fixture->cancellable);
 	g_mutex_clear(&fixture->lock);
 	g_cond_clear(&fixture->cond);
@@ -141,6 +279,8 @@ static void start(Fixture* fixture)
 	certificate_pin_login_full(fixture->token, NULL, NULL, "Test application", "test PIN policy",
 	                           login, refresh, abandon, fixture, login_data_free,
 	                           fixture->cancellable, done, fixture);
+	if (fixture->expected_closes != 0)
+		wait_for(&fixture->ui.shows, 1);
 }
 
 static void finish(Fixture* fixture, CertificatePinOutcome outcome, guint attempts)
@@ -149,6 +289,16 @@ static void finish(Fixture* fixture, CertificatePinOutcome outcome, guint attemp
 	g_assert_cmpint(fixture->outcome, ==, outcome);
 	g_assert_cmpuint(fixture->attempts, ==, attempts);
 	g_assert_cmpuint(fixture->ui.closes, ==, fixture->expected_closes);
+}
+
+static void next_session(Fixture* fixture, const char* session_id)
+{
+	fixture->done_calls = fixture->frees = 0;
+	fixture->expected_closes++;
+	certificate_pin_login_full(fixture->token, session_id, NULL, "Test application",
+	                           "test PIN policy", login, refresh, abandon, fixture,
+	                           login_data_free, fixture->cancellable, done, fixture);
+	wait_for(&fixture->ui.shows, fixture->expected_closes);
 }
 
 static void test_correct_pin(Fixture* fixture, gconstpointer user_data)
@@ -179,7 +329,7 @@ static void test_wrong_then_right(Fixture* fixture, gconstpointer user_data)
 	start(fixture);
 	fake_pin_provider_submit(&fixture->ui, BAD_PIN);
 	wait_for(&fixture->ui.retries, 1);
-	g_assert_cmpuint(fixture->refreshes, ==, 1);
+	g_assert_cmpuint(fixture->refreshes, ==, 2);
 	g_assert_true(fixture->ui.count_low);
 	g_assert_false(fixture->ui.busy);
 	fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
@@ -198,7 +348,7 @@ static void test_attempt_cap(Fixture* fixture, gconstpointer user_data)
 			wait_for(&fixture->ui.retries, i + 1);
 	}
 	finish(fixture, CERTIFICATE_PIN_INCORRECT, 3);
-	g_assert_cmpuint(fixture->refreshes, ==, 3);
+	g_assert_cmpuint(fixture->refreshes, ==, 4);
 	g_assert_cmpuint(fixture->ui.retries, ==, 2);
 }
 
@@ -213,7 +363,7 @@ static void test_final_try(Fixture* fixture, gconstpointer user_data)
 {
 	gboolean accepted = GPOINTER_TO_INT(user_data);
 
-	fixture->token->pin_final_try = TRUE;
+	fixture->flags = CKF_USER_PIN_FINAL_TRY;
 	start(fixture);
 	g_assert_true(fixture->ui.final_try);
 	g_assert_cmpuint(fixture->ui.warnings, ==, 0);
@@ -228,7 +378,7 @@ static void test_final_try(Fixture* fixture, gconstpointer user_data)
 
 static void test_count_low_at_open(Fixture* fixture, gconstpointer user_data)
 {
-	fixture->token->pin_count_low = TRUE;
+	fixture->flags = CKF_USER_PIN_COUNT_LOW;
 	start(fixture);
 	g_assert_true(fixture->ui.count_low);
 	g_assert_false(fixture->ui.final_try);
@@ -240,7 +390,7 @@ static void test_count_low_at_open(Fixture* fixture, gconstpointer user_data)
 static void test_refreshed_final_try(Fixture* fixture, gconstpointer user_data)
 {
 	fixture->refusals = 1;
-	fixture->refresh_final_try = TRUE;
+	fixture->refusal_flags |= CKF_USER_PIN_FINAL_TRY;
 	start(fixture);
 	fake_pin_provider_submit(&fixture->ui, BAD_PIN);
 	wait_for(&fixture->ui.retries, 1);
@@ -255,11 +405,107 @@ static void test_refreshed_final_try(Fixture* fixture, gconstpointer user_data)
 static void test_refreshed_locked(Fixture* fixture, gconstpointer user_data)
 {
 	fixture->refusals = 1;
-	fixture->refresh_locked = TRUE;
+	fixture->refusal_flags |= CKF_USER_PIN_LOCKED;
 	start(fixture);
 	fake_pin_provider_submit(&fixture->ui, BAD_PIN);
 	finish(fixture, CERTIFICATE_PIN_LOCKED, 1);
 	g_assert_cmpuint(fixture->ui.retries, ==, 0);
+}
+
+static void test_flags_across_sessions(Fixture* fixture, gconstpointer user_data)
+{
+	gboolean final_try = GPOINTER_TO_INT(user_data);
+	g_autoptr(GPtrArray) rediscovered = NULL;
+
+	fixture->refusals = 1;
+	if (final_try)
+		fixture->refusal_flags |= CKF_USER_PIN_FINAL_TRY;
+	start(fixture);
+	g_assert_false(fixture->ui.count_low);
+	g_assert_false(fixture->ui.final_try);
+	fake_pin_provider_submit(&fixture->ui, BAD_PIN);
+	wait_for(&fixture->ui.retries, 1);
+	g_assert_true(fixture->ui.count_low);
+	g_assert_cmpint(fixture->ui.final_try, ==, final_try);
+	fake_pin_provider_cancel(&fixture->ui);
+	finish(fixture, CERTIFICATE_PIN_CANCELLED, 1);
+
+	/* A new prompt must still warn while the module reports the failed attempt. */
+	next_session(fixture, "/test/session2");
+	g_assert_true(fixture->ui.count_low);
+	g_assert_cmpint(fixture->ui.final_try, ==, final_try);
+	fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
+	finish(fixture, CERTIFICATE_PIN_OK, 2);
+	/* C_Login reset the module flags, and the success refresh updated our copy. */
+	g_assert_false(fixture->token->pin_count_low);
+	g_assert_false(fixture->token->pin_final_try);
+	g_assert_cmpuint(fixture->refreshes, ==, 4);
+	g_assert_cmpuint(fixture->sessions, ==, 2);
+	rediscovered = certificate_tokens_list(fixture->tokens, NULL);
+	g_assert_cmpuint(rediscovered->len, ==, 1);
+	CertificateToken* fresh = g_ptr_array_index(rediscovered, 0);
+	g_assert_true(certificate_token_same_presence(fresh, fixture->token));
+	g_assert_false(fresh->pin_count_low);
+	g_assert_false(fresh->pin_final_try);
+
+	/* A new prompt/session deliberately reuses the original token record. */
+	next_session(fixture, "/test/session3");
+	g_assert_false(fixture->ui.count_low);
+	g_assert_false(fixture->ui.final_try);
+	fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
+	finish(fixture, CERTIFICATE_PIN_OK, 3);
+	g_assert_cmpuint(fixture->sessions, ==, 3);
+	g_assert_cmpuint(fixture->refreshes, ==, 6);
+}
+
+static void test_success_preserves_module_flags(Fixture* fixture, gconstpointer user_data)
+{
+	fixture->flags = CKF_USER_PIN_COUNT_LOW | CKF_USER_PIN_FINAL_TRY;
+	fixture->keep_flags_on_success = TRUE;
+	start(fixture);
+	fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
+	finish(fixture, CERTIFICATE_PIN_OK, 1);
+	g_assert_true(fixture->token->pin_count_low);
+	g_assert_true(fixture->token->pin_final_try);
+	g_assert_cmpuint(fixture->refreshes, ==, 2);
+
+	next_session(fixture, "/test/session2");
+	g_assert_true(fixture->ui.count_low);
+	g_assert_true(fixture->ui.final_try);
+	fake_pin_provider_cancel(&fixture->ui);
+	finish(fixture, CERTIFICATE_PIN_CANCELLED, 1);
+}
+
+static void test_stale_flags_at_open(Fixture* fixture, gconstpointer user_data)
+{
+	/* Also exercise same-presence matching for serial-less discovery records. */
+	if (GPOINTER_TO_INT(user_data))
+	{
+		fixture->serial_less = TRUE;
+		g_free(fixture->token->serial);
+		fixture->token->serial = g_strdup("");
+	}
+	fixture->token->pin_count_low = TRUE;
+	fixture->token->pin_final_try = TRUE;
+	fixture->token->pin_locked = TRUE;
+	start(fixture);
+	g_assert_false(fixture->ui.count_low);
+	g_assert_false(fixture->ui.final_try);
+	g_assert_false(fixture->token->pin_locked);
+	g_assert_cmpuint(fixture->refreshes, ==, 1);
+	fake_pin_provider_cancel(&fixture->ui);
+	finish(fixture, CERTIFICATE_PIN_CANCELLED, 0);
+}
+
+static void test_locked_at_open(Fixture* fixture, gconstpointer user_data)
+{
+	fixture->flags = CKF_USER_PIN_LOCKED;
+	certificate_pin_login_full(fixture->token, NULL, NULL, "Test application", "test PIN policy",
+	                           login, refresh, abandon, fixture, login_data_free,
+	                           fixture->cancellable, done, fixture);
+	finish(fixture, CERTIFICATE_PIN_LOCKED, 0);
+	g_assert_cmpuint(fixture->ui.shows, ==, 0);
+	g_assert_cmpuint(fixture->refreshes, ==, 1);
 }
 
 static void test_protected_path(Fixture* fixture, gconstpointer user_data)
@@ -278,7 +524,7 @@ static void test_protected_final_try(Fixture* fixture, gconstpointer user_data)
 	PinPrompt* prompt;
 
 	fixture->token->protected_authentication_path = TRUE;
-	fixture->token->pin_final_try = TRUE;
+	fixture->flags = CKF_USER_PIN_FINAL_TRY;
 	start(fixture);
 	prompt = certificate_pin_prompt_ref(fixture->ui.prompt);
 	g_assert_true(fixture->ui.final_try);
@@ -305,6 +551,26 @@ static void release_login(Fixture* fixture)
 	fixture->release = TRUE;
 	g_cond_signal(&fixture->cond);
 	g_mutex_unlock(&fixture->lock);
+}
+
+static void test_cancel_during_refresh(Fixture* fixture, gconstpointer user_data)
+{
+	fixture->block_refresh = TRUE;
+	certificate_pin_login_full(fixture->token, NULL, NULL, "Test application", "test PIN policy",
+	                           login, refresh, abandon, fixture, login_data_free,
+	                           fixture->cancellable, done, fixture);
+	wait_for(&fixture->refreshing, 1);
+	g_cancellable_cancel(fixture->cancellable);
+	while (g_main_context_iteration(NULL, FALSE))
+		;
+	g_assert_cmpuint(fixture->ui.shows, ==, 0);
+	g_assert_cmpuint(fixture->done_calls, ==, 0);
+	g_assert_cmpuint(fixture->frees, ==, 0);
+	release_login(fixture);
+	finish(fixture, CERTIFICATE_PIN_CANCELLED, 0);
+	g_assert_cmpuint(fixture->ui.shows, ==, 0);
+	g_assert_cmpuint(fixture->ui.hides, ==, 0);
+	g_assert_cmpuint(fixture->abandons, ==, 0);
 }
 
 static void test_in_flight(Fixture* fixture, gconstpointer user_data)
@@ -407,6 +673,13 @@ int main(int argc, char** argv)
 	ADD("count-low-at-open", 0, test_count_low_at_open);
 	ADD("refreshed-final-try", 0, test_refreshed_final_try);
 	ADD("refreshed-locked", 0, test_refreshed_locked);
+	ADD("final-try-clears-across-sessions", TRUE, test_flags_across_sessions);
+	ADD("count-low-clears-across-sessions", FALSE, test_flags_across_sessions);
+	ADD("success-preserves-module-flags", 0, test_success_preserves_module_flags);
+	ADD("stale-flags-at-open", FALSE, test_stale_flags_at_open);
+	ADD("serial-less-stale-flags-at-open", TRUE, test_stale_flags_at_open);
+	ADD("locked-at-open", 0, test_locked_at_open);
+	ADD("cancel-during-refresh", 0, test_cancel_during_refresh);
 	ADD("protected-path", 0, test_protected_path);
 	ADD("protected-path-refused", 1, test_protected_path);
 	ADD("protected-final-try-refused", FALSE, test_protected_final_try);

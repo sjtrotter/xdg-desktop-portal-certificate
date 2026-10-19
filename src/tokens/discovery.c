@@ -1106,7 +1106,7 @@ void certificate_tokens_refresh_flags(CertificateTokens* tokens, CertificateToke
 			if (present == NULL || !certificate_token_same_presence(present, token))
 				continue;
 
-			/* The login worker updates PIN flags; task completion makes them visible to the main thread. */
+			/* Refresh/login workers publish these flags through task completion before UI reads them. */
 			token->pin_count_low = present->pin_count_low;
 			token->pin_final_try = present->pin_final_try;
 			token->pin_locked = present->pin_locked;

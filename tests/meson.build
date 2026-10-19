@@ -66,6 +66,12 @@ exe = executable(
   'test-pin-policy',
   ['test-pin-policy.c', 'fake-pin-provider.c'],
   link_with: certificate_core,
+  link_args: [
+    '-Wl,--wrap=p11_kit_modules_load_and_initialize',
+    '-Wl,--wrap=p11_kit_modules_finalize_and_release',
+    '-Wl,--wrap=p11_kit_module_get_name',
+    '-Wl,--wrap=p11_kit_module_get_filename',
+  ],
   dependencies: certificate_deps,
   include_directories: [config_inc, include_directories('..' / 'src')],
   c_args: certificate_log_args,
