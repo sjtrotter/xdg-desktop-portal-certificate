@@ -1,0 +1,55 @@
+XDP_CERTIFICATE_CORE_0 {
+  global:
+    xcc_acquire_async;
+    xcc_candidate_certificate;
+    xcc_candidate_info;
+    xcc_candidate_ref;
+    xcc_candidate_unref;
+    xcc_choose;
+    xcc_context_hold_ui;
+    xcc_context_new;
+    xcc_context_ref;
+    xcc_context_release_ui;
+    xcc_context_set_owner_generation;
+    xcc_context_shutdown_async;
+    xcc_context_unref;
+    xcc_dispatch_glib;
+    xcc_error_wire_name;
+    xcc_error_wire_response;
+    xcc_get_capabilities_async;
+    xcc_pin_ready;
+    xcc_pin_submit;
+    xcc_request_cancel;
+    xcc_request_ref;
+    xcc_request_unref;
+    xcc_secret_data;
+    xcc_secret_free;
+    xcc_secret_length;
+    xcc_secret_new;
+    xcc_secret_set_length;
+    xcc_secret_view;
+    xcc_session_close;
+    xcc_session_new;
+    xcc_session_ref;
+    xcc_session_unref;
+    xcc_sign_async;
+    xcc_ui_cancel;
+    xcc_ui_failed;
+    xcc_warning_reply;
+};
+
+# Internal service compatibility only: no stability promise. Ship service and library
+# from the same build.
+XDP_CERTIFICATE_CORE_PRIVATE_0 {
+  global:
+    xcc_adapter_settings;
+    xcc_candidate_internal;
+    xcc_context_new_for_tokens;
+    xcc_session_check_principal;
+    xcc_session_invalidate;
+    xcc_session_is_closed;
+    xcc_session_new_legacy;
+    xcc_session_set_invalidated_callback;
+    xcc_sign_async_parsed;
+  local: *;
+};

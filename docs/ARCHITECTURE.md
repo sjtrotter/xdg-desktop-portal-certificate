@@ -117,15 +117,19 @@ forwarding core invalidation to the existing D-Bus signals. Invalidated sessions
 exported until frontend Close(). Owner generations, app IDs and non-increasing identity
 assurance are enforced in core as well as the adapter's sender and path checks.
 
-[`core/core.h`](../src/core/core.h) defines the internal typed API: one `XccContext`,
+[`core/core.h`](../src/core/core.h) defines the installed toolkit-neutral API: one `XccContext`,
 reference-counted `XccRequest` transactions and immutable `XccCandidate` result snapshots.
 Acquire and Sign specifications copy their inputs and distinguish absent constraints from
 present empty values. [`core/acquire.c`](../src/core/acquire.c) owns discovery, filtering,
 chooser refresh and deferred consent; [`core/sign.c`](../src/core/sign.c) owns signing and
 capability queries. `certificate-impl.c` parses wire options, authorizes callers, manages
 exports and serializes typed results. The standalone service retains its startup module
-preflight; `XccConfig.tokens` permits borrowing those modules until shutdown completes.
-A native caller can instead supply module paths for core-owned loading and teardown.
+preflight through a private adapter constructor that borrows those modules until shutdown
+completes. Native SDK callers supply module paths for core-owned loading and teardown.
+The service links `libxdp-certificate-core.so.0`; non-`xcc_*` CLI, wire and provider helpers
+stay in private static archives. Test binaries use a private static core for linker seams.
+The installed headers, optional GLib bridge, core-only build and ABI rules are documented
+in [SDK.md](SDK.md).
 
 The core runs a private GLib coordinator. Module startup, enumeration, capabilities,
 login, signing, monitoring teardown and device/module release use workers. The standalone
@@ -144,7 +148,7 @@ provides an always-queued GLib/GTK receiver bridge.
 `pin_show` starts presentation; the provider calls `xcc_pin_ready()` only after it
 can receive warnings. The core then starts protected-path login or requests final-attempt
 confirmation. GTK acknowledges after presentation; gcr acknowledges after asynchronous open.
-[`ui/provider-bridge.c`](../src/ui/provider-bridge.c) composes the existing GTK chooser and
+[`ui/legacy-bridge.c`](../src/ui/legacy-bridge.c) composes the existing GTK chooser and
 GTK/gcr PIN providers into the table. Its retained PIN handles are UI-local snapshots;
 worker state and provider handles do not cross the dispatcher.
 The core/UI headers have C linkage guards. Chooser views and rows, PIN views, warnings and
@@ -157,6 +161,10 @@ Shutdown cancels requests, invalidates sessions, drains UI deliveries and retain
 callbacks, and waits for submitted token work and release workers before unloading owned
 modules. The synchronous standalone shutdown wrapper keeps dispatching the desktop context
 until that callback arrives. Middleware that never returns can still prevent shutdown.
+The core DSO must stay loaded for the life of the process because its static GObject
+types retain metadata and function pointers even after all handles are released.
+Shutdown completion promises resource drainage, not DSO unloadability; the core links
+with `-Wl,-z,nodelete` so `dlclose()` cannot unmap it.
 The asynchronous gcr close retains both its gcr object and a counted bridge prompt through
 the close callback, including when open completes after cancellation.
 
@@ -226,7 +234,7 @@ chooser requirements; [grant lifetime](SECURITY.md#grant-lifetime-and-delegation
 ### Chooser UI
 
 [`core/chooser.h`](../src/core/chooser.h) owns chooser state and safe display formatting.
-[`ui/chooser-provider.h`](../src/ui/chooser-provider.h) supplies borrowed `XccChooserView`
+[`core/ui.h`](../src/core/ui.h) supplies borrowed `XccChooserView`
 snapshots and revisioned candidate IDs to the policy/provider bridge behind `XccUiV1`. GTK presentation lives in
 [`ui/chooser.c`](../src/ui/chooser.c), parented to a valid `parent_window` when available
 and unparented otherwise. Its contents follow the

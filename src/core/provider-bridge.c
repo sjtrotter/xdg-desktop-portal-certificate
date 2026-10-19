@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
-#include "../core/context-private.h"
-#include "../core/pin-internal.h"
+#include "context-private.h"
+#include "pin-internal.h"
 static CertificateChooserProvider old_chooser;
 static CertificatePinProvider old_pin;
 static XccContext* legacy_context;

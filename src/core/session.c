@@ -383,7 +383,7 @@ static void session_new_register(void* data)
 XccSession* xcc_session_new(XccContext* c, const XccSessionSpec* spec, XccError* error)
 {
 	if (error != NULL)
-		error->code = XCC_OK;
+		*error = (XccError){sizeof(XccError), XCC_ABI_VERSION, XCC_OK};
 	if (c == NULL || spec == NULL || spec->struct_size < sizeof(*spec) ||
 		spec->abi_version != XCC_ABI_VERSION || spec->app_id == NULL ||
 		(spec->identity_present && spec->identity_level > CERTIFICATE_IDENTITY_UNKNOWN))
@@ -438,6 +438,11 @@ static void principal_check(void* data)
 	PrincipalCheck* call = data;
 	XccSession* s = call->session;
 	const XccPrincipal* p = call->principal;
+	if (p == NULL || p->struct_size < sizeof(*p) || p->abi_version != XCC_ABI_VERSION)
+	{
+		call->error = XCC_ERROR_INVALID_REQUEST;
+		goto completed;
+	}
 	if (xcc_session_is_closed(s) || s->owner_generation != s->context->generation ||
 		p->owner_generation != s->owner_generation || g_strcmp0(s->app_id, p->app_id) != 0)
 		call->error = XCC_ERROR_NO_SUCH_SESSION;
@@ -458,6 +463,7 @@ static void principal_check(void* data)
 			s->identity_seen = TRUE;
 		}
 	}
+completed:
 	g_mutex_lock(&call->mutex);
 	call->ready = TRUE;
 	g_cond_signal(&call->cond);
@@ -487,4 +493,14 @@ XccErrorCode xcc_session_check_principal(XccSession* session, const XccPrincipal
 	g_cond_clear(&call.cond);
 	g_mutex_clear(&call.mutex);
 	return call.error;
+}
+
+XccSession* xcc_session_ref(XccSession* session)
+{
+	return g_object_ref(session);
+}
+void xcc_session_unref(XccSession* session)
+{
+	if (session != NULL)
+		g_object_unref(session);
 }

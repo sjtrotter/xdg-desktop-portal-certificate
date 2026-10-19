@@ -61,6 +61,14 @@ shell. Without gcr-4, `--pin-prompt=gtk` and `auto` use the backend's GTK window
 `system` exits with a usage error (64). `-Dp11_module_path=` and `-Dp11_module_configs=` set
 where the PKCS#11 module and its p11-kit configuration are installed.
 
+For the toolkit-neutral SDK alone, use `meson setup build-sdk -Dservice=false`,
+then `ninja -C build-sdk` and `meson install -C build-sdk`. This skips all GTK, libadwaita
+and gcr dependency lookups, even with `--auto-features=enabled`, and installs only the
+shared core, headers and pkg-config file. `service` defaults to `true`; the earlier
+`-Dauto_features=disabled` shortcut also continues to select the SDK alone.
+Link native desktop backends with `pkg-config --cflags --libs xdp-certificate-core-0`;
+[SDK.md](docs/SDK.md) describes ownership, dispatch and ABI rules.
+
 To run the whole stack on a private bus with a software token, build the frontend branch and
 the backend, then run:
 
@@ -92,7 +100,7 @@ the portal chooser and PIN prompt without Firefox's certificate picker.
 | KDE, translations, packaging | missing | |
 | Independent security review | missing | |
 
-Tests: 16 Meson tests with gcr-4 (15 without), an ASan/UBSan build, and a DER corpus replay.
+Tests: 26 Meson tests with gcr-4 (25 without), an ASan/UBSan build, and a DER corpus replay.
 
 Sign operation logs include the session handle and the supplied `operation_id`, or `(none)`
 when the operation id is absent. Both follow the [log field rules](docs/SECURITY.md#logging).

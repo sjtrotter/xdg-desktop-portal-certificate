@@ -26,7 +26,7 @@ experimental export conditions.
 | Wrong types, unknown enums and unknown security-relevant nested keys fail; defaults apply to absent fields | `parse_acquire_options()`, `src/tokens/filter.c`, `src/broker/mechanism.c`, `lookup_string()`; malformed-option tests in `test-impl-dbus.c` and parameter tests in `test-mechanism.c`, including `signature_encoding`, `mgf`, `mgf1_hash` and mismatched hashes |
 | Export failure aborts a call before inserting a session | `src/certificate-impl.c`, `src/request-impl.c`, `src/session-impl.c` |
 | Chooser displays supplied identity and backend-owned purpose text | `src/core/chooser.c`, `src/core/chooser-format.c`, `build_identity()` in `src/ui/chooser.c`; private-bus runs display `unidentified` |
-| Externally sourced display text is sanitized and capped, including combining-mark runs | `certificate_display_text()` in `src/certificate.c`; `test-redact.c`. Applies to app names and ids, subjects, issuers, token labels, readers and `reason` |
+| Externally sourced display text is sanitized and capped, including combining-mark runs | `certificate_display_text()` in `src/core/identity.c`; `test-redact.c`. Applies to app names and ids, subjects, issuers, token labels, readers and `reason` |
 | Expired certificates remain selectable and have textual warnings | `src/tokens/filter.c`, `src/core/chooser-format.c`, `src/ui/chooser.c`; `test-filter.c` |
 | One candidate still requires consent | `src/core/acquire.c` has no chooser-bypass path |
 | Reacquisition rebinds the device and discards old login and key handles | `certificate_device_open()` in `src/broker/device.c`; `test-broker-regrant.c` verifies against the new certificate and `test-broker-device.c` checks device state |
@@ -81,7 +81,7 @@ and non-increasing identity assurance are checked in core; the D-Bus adapter ind
 keeps its current-owner checks, including both Close methods. `XccUiV1` receives immutable
 views and interaction IDs through an ordered desktop dispatcher. Replies return to the
 coordinator. Stale IDs cannot select a candidate, authorize a warning or submit an attempt;
-stale secrets are consumed and wiped. `ui/provider-bridge.c` retains UI-local PIN snapshots
+stale secrets are consumed and wiped. `ui/legacy-bridge.c` retains UI-local PIN snapshots
 for GTK/gcr, rather than exposing a worker's `PinPrompt` across threads.
 Core waits for a provider readiness acknowledgement before protected-path login or a
 final-attempt warning. GTK acknowledges after presentation and gcr after asynchronous open.
@@ -99,6 +99,12 @@ block indefinitely. Core-owned module initialization and unloading run on worker
 runs on a worker so the coordinator can continue cancelling UI. The standalone CLI retains
 its startup module preflight and final release after core shutdown, both on workers. Session finalization closes synchronously only after asynchronous release
 has relinquished its retained reference.
+
+The core library itself must stay loaded for the life of the process. Static GObject
+type registrations retain metadata and function pointers after all handles are released.
+Shutdown completion drains resources and releases owned PKCS#11 modules; it does not
+permit unloading the core DSO. The core links with `-Wl,-z,nodelete` to prevent
+`dlclose()` from unmapping it; see [SDK.md](SDK.md).
 
 ### Missing controls and evidence
 

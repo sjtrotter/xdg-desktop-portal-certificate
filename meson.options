@@ -2,6 +2,13 @@
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
 
 option(
+  'service',
+  type: 'boolean',
+  value: true,
+  description: 'Build and install the standalone GTK service and client PKCS#11 module. Disable for the toolkit-neutral SDK alone.',
+)
+
+option(
   'gcr',
   type: 'feature',
   value: 'auto',

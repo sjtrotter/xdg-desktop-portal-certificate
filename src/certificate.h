@@ -7,6 +7,7 @@
 #define CERTIFICATE_H
 
 #include <glib.h>
+#include "core/core.h"
 
 /** The interface tracks the frontend branch; see docs/IMPL-INTERFACE.md. */
 
@@ -32,13 +33,11 @@
 #define CERTIFICATE_IDENTITY_LEVEL_DERIVED "host"
 #define CERTIFICATE_IDENTITY_LEVEL_UNKNOWN "unidentified"
 
-typedef enum
-{
-	CERTIFICATE_PURPOSE_CLIENT_AUTH,
-	CERTIFICATE_PURPOSE_SIGNING,
-	CERTIFICATE_PURPOSE_EMAIL,
-	CERTIFICATE_PURPOSE_SSH
-} CertificatePurpose;
+typedef XccPurpose CertificatePurpose;
+#define CERTIFICATE_PURPOSE_CLIENT_AUTH XCC_PURPOSE_CLIENT_AUTH
+#define CERTIFICATE_PURPOSE_SIGNING XCC_PURPOSE_SIGNING
+#define CERTIFICATE_PURPOSE_EMAIL XCC_PURPOSE_EMAIL
+#define CERTIFICATE_PURPOSE_SSH XCC_PURPOSE_SSH
 
 gboolean certificate_purpose_parse(const char* text, CertificatePurpose* out);
 const char* certificate_purpose_to_string(CertificatePurpose purpose);
@@ -48,12 +47,10 @@ const char* certificate_purpose_display(CertificatePurpose purpose);
 
 const char* certificate_purpose_detail(CertificatePurpose purpose);
 
-typedef enum
-{
-	CERTIFICATE_IDENTITY_VERIFIED_SANDBOXED,
-	CERTIFICATE_IDENTITY_DERIVED_HOST,
-	CERTIFICATE_IDENTITY_UNKNOWN
-} CertificateIdentityLevel;
+typedef XccIdentityLevel CertificateIdentityLevel;
+#define CERTIFICATE_IDENTITY_VERIFIED_SANDBOXED XCC_IDENTITY_VERIFIED_SANDBOXED
+#define CERTIFICATE_IDENTITY_DERIVED_HOST XCC_IDENTITY_DERIVED_HOST
+#define CERTIFICATE_IDENTITY_UNKNOWN XCC_IDENTITY_UNKNOWN
 
 CertificateIdentityLevel certificate_identity_level_parse(const char* level);
 const char* certificate_identity_level_to_string(CertificateIdentityLevel level);

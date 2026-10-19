@@ -4,7 +4,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "abi.h"
-#include "session.h"
 #include "secret.h"
 
 #ifdef __cplusplus
@@ -13,10 +12,24 @@ extern "C"
 #endif
 
 	typedef struct XccContext XccContext;
+	typedef struct _XccSession XccSession;
 	typedef struct XccRequest XccRequest;
 	typedef struct XccCandidate XccCandidate;
 	typedef struct XccUiV1 XccUiV1;
 
+	typedef enum
+	{
+		XCC_PURPOSE_CLIENT_AUTH,
+		XCC_PURPOSE_SIGNING,
+		XCC_PURPOSE_EMAIL,
+		XCC_PURPOSE_SSH
+	} XccPurpose;
+	typedef enum
+	{
+		XCC_IDENTITY_VERIFIED_SANDBOXED,
+		XCC_IDENTITY_DERIVED_HOST,
+		XCC_IDENTITY_UNKNOWN
+	} XccIdentityLevel;
 	typedef enum
 	{
 		XCC_OK,
@@ -38,6 +51,7 @@ extern "C"
 	} XccErrorCode;
 	typedef struct
 	{
+		uint32_t struct_size, abi_version;
 		XccErrorCode code;
 	} XccError;
 	typedef enum
@@ -60,6 +74,7 @@ extern "C"
 
 	typedef struct
 	{
+		uint32_t struct_size, abi_version;
 		const uint8_t* data;
 		size_t size;
 	} XccBytes;
@@ -84,15 +99,16 @@ extern "C"
 		uint32_t struct_size, abi_version;
 		uint64_t owner_generation;
 		const char* app_id;
-		CertificateIdentityLevel identity_level;
+		XccIdentityLevel identity_level;
 		bool identity_present;
 		const char* log_id;
 	} XccSessionSpec;
 	typedef struct
 	{
+		uint32_t struct_size, abi_version;
 		uint64_t owner_generation;
 		const char* app_id;
-		CertificateIdentityLevel identity_level;
+		XccIdentityLevel identity_level;
 		bool identity_present;
 	} XccPrincipal;
 
@@ -100,7 +116,7 @@ extern "C"
 	{
 		uint32_t struct_size, abi_version;
 		XccPrincipal principal;
-		CertificatePurpose purpose;
+		XccPurpose purpose;
 		bool generic_purpose_present, generic_purpose;
 		const char* parent_window;
 		const char* activation_token;
@@ -110,7 +126,7 @@ extern "C"
 		bool sign_present, sign;
 		bool interaction_present, interaction_forbidden;
 		bool issuers_present;
-		const XccBytes* issuers;
+		const XccBytes* issuers; /* Uniform stride from the first row's struct_size. */
 		size_t n_issuers;
 		bool key_usage_present, eku_oids_present, key_algorithms_present;
 		const char* const* key_usage;
@@ -120,6 +136,21 @@ extern "C"
 		const char* token_label;
 		const char* piv_slot;
 	} XccAcquireSpec;
+	/* Uniform producer stride permits larger rows. The producer owns the backing
+	 * allocation; a malformed size/version/offset returns NULL. */
+	static inline const XccBytes* xcc_acquire_spec_issuer(const XccAcquireSpec* spec, size_t index)
+	{
+		if (spec == NULL || spec->struct_size < sizeof(*spec) ||
+			spec->abi_version != XCC_ABI_VERSION || spec->issuers == NULL ||
+			index >= spec->n_issuers)
+			return NULL;
+		size_t stride = spec->issuers->struct_size;
+		if (stride < sizeof(XccBytes) || spec->issuers->abi_version != XCC_ABI_VERSION ||
+			index > (SIZE_MAX - sizeof(XccBytes)) / stride)
+			return NULL;
+		return (const XccBytes*)((const uint8_t*)spec->issuers + index * stride);
+	}
+
 	typedef struct
 	{
 		uint32_t struct_size, abi_version;
@@ -161,36 +192,40 @@ extern "C"
 		bool allow_software, has_display;
 		void (*session_invalidated)(XccSession*, const char*, void*);
 		void* user;
-		/* Transitional injection: borrowed until shutdown completion. */
-		CertificateTokens* tokens;
 	} XccConfig;
 
-	/* One active context; constructors copy their inputs before returning. UI may be NULL
-	 * only to compose the registered standalone providers. Receiver lives through shutdown. */
-	XccContext* xcc_context_new(const XccConfig*, const XccUiV1*, const XccDispatch*, XccError*);
-	XccContext* xcc_context_ref(XccContext*);
-	void xcc_context_unref(XccContext*);
-	XccSession* xcc_session_new(XccContext*, const XccSessionSpec*, XccError*);
+	/* One active context; constructors copy inputs before returning.
+	 * Supply a complete UI table; NULL is reserved for repository compatibility.
+	 * The dispatcher receiver lives through shutdown. */
+	XCC_API XccContext* xcc_context_new(const XccConfig*, const XccUiV1*, const XccDispatch*,
+										XccError*);
+	XCC_API XccContext* xcc_context_ref(XccContext*);
+	XCC_API void xcc_context_unref(XccContext*);
+	XCC_API XccSession* xcc_session_ref(XccSession*);
+	XCC_API void xcc_session_unref(XccSession*);
+	XCC_API void xcc_session_close(XccSession*);
+	/* Retain asynchronous UI callbacks until they settle, including after close. */
+	XCC_API void xcc_context_hold_ui(XccContext*);
+	XCC_API void xcc_context_release_ui(XccContext*);
+	XCC_API XccSession* xcc_session_new(XccContext*, const XccSessionSpec*, XccError*);
 	/* Caller owns a request reference. Result fields are borrowed during exactly one done
 	 * callback on the dispatcher; retain candidates explicitly for a longer lifetime. */
-	XccRequest* xcc_acquire_async(XccSession*, const XccAcquireSpec*, XccDone, void*);
-	XccRequest* xcc_sign_async(XccSession*, const XccSignSpec*, XccDone, void*);
-	XccRequest* xcc_get_capabilities_async(XccContext*, XccDone, void*);
-	XccRequest* xcc_request_ref(XccRequest*);
-	void xcc_request_unref(XccRequest*);
-	void xcc_request_cancel(XccRequest*, XccCancelReason);
+	XCC_API XccRequest* xcc_acquire_async(XccSession*, const XccAcquireSpec*, XccDone, void*);
+	XCC_API XccRequest* xcc_sign_async(XccSession*, const XccSignSpec*, XccDone, void*);
+	XCC_API XccRequest* xcc_get_capabilities_async(XccContext*, XccDone, void*);
+	XCC_API XccRequest* xcc_request_ref(XccRequest*);
+	XCC_API void xcc_request_unref(XccRequest*);
+	XCC_API void xcc_request_cancel(XccRequest*, XccCancelReason);
 	/* Call once; completion follows workers, UI deliveries and retained provider callbacks. */
-	void xcc_context_shutdown_async(XccContext*, XccShutdownDone, void*);
+	XCC_API void xcc_context_shutdown_async(XccContext*, XccShutdownDone, void*);
 	/* The adapter advances this after authorizing a new frontend owner. */
-	void xcc_context_set_owner_generation(XccContext*, uint64_t);
-	const char* xcc_error_wire_name(XccErrorCode);
-	uint32_t xcc_error_wire_response(XccErrorCode);
-	XccCandidate* xcc_candidate_ref(const XccCandidate*);
-	void xcc_candidate_unref(XccCandidate*);
-	XccBytes xcc_candidate_certificate(const XccCandidate*);
-	const XccCandidateInfo* xcc_candidate_info(const XccCandidate*);
-	/* Internal serialization accessor; never exported as SDK. */
-	const CertificateCandidate* xcc_candidate_internal(const XccCandidate*);
+	XCC_API void xcc_context_set_owner_generation(XccContext*, uint64_t);
+	XCC_API const char* xcc_error_wire_name(XccErrorCode);
+	XCC_API uint32_t xcc_error_wire_response(XccErrorCode);
+	XCC_API XccCandidate* xcc_candidate_ref(const XccCandidate*);
+	XCC_API void xcc_candidate_unref(XccCandidate*);
+	XCC_API XccBytes xcc_candidate_certificate(const XccCandidate*);
+	XCC_API const XccCandidateInfo* xcc_candidate_info(const XccCandidate*);
 #ifdef __cplusplus
 }
 #endif

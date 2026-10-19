@@ -380,11 +380,12 @@ static void teardown(Fixture* f, gconstpointer data)
 }
 static XccAcquireSpec acquire_spec(void)
 {
-	return (XccAcquireSpec){
-		.struct_size = sizeof(XccAcquireSpec),
-		.abi_version = XCC_ABI_VERSION,
-		.principal = {7, "org.example.Core", CERTIFICATE_IDENTITY_VERIFIED_SANDBOXED, TRUE},
-		.purpose = CERTIFICATE_PURPOSE_CLIENT_AUTH};
+	return (XccAcquireSpec){.struct_size = sizeof(XccAcquireSpec),
+							.abi_version = XCC_ABI_VERSION,
+							.principal = {sizeof(XccPrincipal), XCC_ABI_VERSION, 7,
+										  "org.example.Core",
+										  CERTIFICATE_IDENTITY_VERIFIED_SANDBOXED, TRUE},
+							.purpose = CERTIFICATE_PURPOSE_CLIENT_AUTH};
 }
 static XccRequest* acquire(Fixture* f, Done* d)
 {
@@ -394,14 +395,14 @@ static XccRequest* acquire(Fixture* f, Done* d)
 static XccRequest* sign_request(Fixture* f, Done* d)
 {
 	static const uint8_t digest[32] = {0};
-	XccSignSpec spec = {
-		.struct_size = sizeof(spec),
-		.abi_version = XCC_ABI_VERSION,
-		.principal = {7, "org.example.Core", CERTIFICATE_IDENTITY_VERIFIED_SANDBOXED, TRUE},
-		.mechanism = "RSA_PKCS1_V1_5",
-		.hash_present = TRUE,
-		.hash = "SHA256",
-		.data = {digest, sizeof(digest)}};
+	XccSignSpec spec = {.struct_size = sizeof(spec),
+						.abi_version = XCC_ABI_VERSION,
+						.principal = {sizeof(XccPrincipal), XCC_ABI_VERSION, 7, "org.example.Core",
+									  CERTIFICATE_IDENTITY_VERIFIED_SANDBOXED, TRUE},
+						.mechanism = "RSA_PKCS1_V1_5",
+						.hash_present = TRUE,
+						.hash = "SHA256",
+						.data = {sizeof(XccBytes), XCC_ABI_VERSION, digest, sizeof(digest)}};
 	return xcc_sign_async(f->session, &spec, done, d);
 }
 static void grant(Fixture* f)

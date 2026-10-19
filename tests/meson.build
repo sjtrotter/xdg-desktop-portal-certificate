@@ -49,14 +49,6 @@ exe = executable(
 
 test('session', exe, protocol: 'tap', env: test_env)
 
-service_test_cases = {
-  'impl-dbus': 'test-impl-dbus.c',
-  'cancellation': 'test-cancellation.c',
-  'chooser': 'test-chooser.c',
-  'broker-decrypt': 'test-broker-decrypt.c',
-  'broker-regrant': 'test-broker-regrant.c',
-}
-
 exe = executable(
   'test-chooser-policy',
   ['test-chooser-policy.c', 'fake-chooser-provider.c'] + fixture_util,
@@ -94,130 +86,140 @@ exe = executable(
 
 test('secret', exe, protocol: 'tap', env: test_env)
 
-foreach name, source : service_test_cases
+if service_enabled
+  service_test_cases = {
+    'impl-dbus': 'test-impl-dbus.c',
+    'cancellation': 'test-cancellation.c',
+    'chooser': 'test-chooser.c',
+    'broker-decrypt': 'test-broker-decrypt.c',
+    'broker-regrant': 'test-broker-regrant.c',
+  }
+  foreach name, source : service_test_cases
+    exe = executable(
+      'test-' + name,
+      [source] + fixture_util + (name == 'impl-dbus' ? files('fake-chooser-provider.c') : []),
+      dependencies: [certificate_service_dep],
+      include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+      c_args: test_args + certificate_log_args,
+      install: false,
+    )
+
+    # Worker waits need a longer timeout under sanitizers.
+    test(name, exe, protocol: 'tap', env: test_env, timeout: 120)
+  endforeach
+
   exe = executable(
-    'test-' + name,
-    [source] + fixture_util + (name == 'impl-dbus' ? files('fake-chooser-provider.c') : []),
-    dependencies: [certificate_service_dep],
+    'test-module',
+    ['test-module.c'],
+    dependencies: [module_core_dep],
     include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
-    c_args: test_args + certificate_log_args,
+    c_args: test_args,
     install: false,
   )
 
-  # Worker waits need a longer timeout under sanitizers.
-  test(name, exe, protocol: 'tap', env: test_env, timeout: 120)
-endforeach
+  test('module', exe, protocol: 'tap', env: test_env)
 
-exe = executable(
-  'test-module',
-  ['test-module.c'],
-  dependencies: [module_core_dep],
-  include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
-  c_args: test_args,
-  install: false,
-)
+  exe = executable(
+    'test-module-portal',
+    ['test-module-portal.c'],
+    link_with: pkcs11_portal_module,
+    dependencies: module_deps,
+    include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+    c_args: test_args + ['-DPORTAL_MODULE_PATH="' + pkcs11_portal_module.full_path() + '"'],
+    install: false,
+  )
 
-test('module', exe, protocol: 'tap', env: test_env)
+  test('module-portal', exe, protocol: 'tap', env: test_env, timeout: 120)
 
-exe = executable(
-  'test-module-portal',
-  ['test-module-portal.c'],
-  link_with: pkcs11_portal_module,
-  dependencies: module_deps,
-  include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
-  c_args: test_args + ['-DPORTAL_MODULE_PATH="' + pkcs11_portal_module.full_path() + '"'],
-  install: false,
-)
-
-test('module-portal', exe, protocol: 'tap', env: test_env, timeout: 120)
-
-exe = executable(
-  'fuzz-der',
-  ['fuzz-der.c'],
-  dependencies: [module_core_dep],
-  include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
-  c_args: test_args,
-  install: false,
-)
-
-test('fuzz-der', exe, protocol: 'tap', env: test_env, timeout: 120)
-
-# libFuzzer requires an explicit runtime limit and is not a Meson test.
-if cc.get_id() == 'clang' and cc.has_link_argument('-fsanitize=fuzzer')
-  executable(
-    'fuzz-der-libfuzzer',
+  exe = executable(
+    'fuzz-der',
     ['fuzz-der.c'],
     dependencies: [module_core_dep],
     include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
-    c_args: test_args + ['-DPKCS11_PORTAL_FUZZING_ENGINE=1', '-fsanitize=fuzzer-no-link'],
-    link_args: ['-fsanitize=fuzzer'],
-    install: false,
-  )
-endif
-
-# tools/module-smoke.sh supplies the display and input needed to run this client.
-if glib_dep.version().version_compare('>= 2.68')
-  executable(
-    'gtls-client',
-    ['gtls-client.c'],
-    dependencies: [glib_dep, gobject_dep, gio_dep],
-    include_directories: [config_inc],
-    install: false,
-  )
-endif
-
-test(
-  'tools-lib',
-  find_program('test-tools-lib.sh'),
-  protocol: 'tap',
-  env: test_env,
-)
-
-test(
-  'cli',
-  find_program('test-cli.sh'),
-  args: [certificate_backend, gcr_dep.found() ? 'gcr' : 'no-gcr'],
-  protocol: 'tap',
-  env: test_env,
-)
-
-# The scripted prompter runs on a private bus and must never reach the user's real prompter.
-if gcr_dep.found()
-  pin_prompter = files('pin-prompter.c')
-
-  exe = executable(
-    'test-pin-system',
-    ['test-pin-system.c'] + pin_prompter + fixture_util,
-    dependencies: [certificate_service_dep, gcr_dep],
-    link_args: [
-      '-Wl,--wrap=gcr_system_prompt_open_for_prompter_async',
-      '-Wl,--wrap=gcr_system_prompt_close_async',
-    ],
-    include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
-    c_args: test_args + certificate_log_args,
+    c_args: test_args,
     install: false,
   )
 
-  test('pin-system', exe, protocol: 'tap', env: test_env, timeout: 180)
+  test('fuzz-der', exe, protocol: 'tap', env: test_env, timeout: 120)
 
-  executable(
-    'certificate-test-prompter',
-    ['test-prompter-main.c'] + pin_prompter,
-    dependencies: [glib_dep, gio_dep, gcr_dep],
-    include_directories: [config_inc, include_directories('.')],
-    install: false,
-  )
-endif
+  # libFuzzer requires an explicit runtime limit and is not a Meson test.
+  if cc.get_id() == 'clang' and cc.has_link_argument('-fsanitize=fuzzer')
+    executable(
+      'fuzz-der-libfuzzer',
+      ['fuzz-der.c'],
+      dependencies: [module_core_dep],
+      include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+      c_args: test_args + ['-DPKCS11_PORTAL_FUZZING_ENGINE=1', '-fsanitize=fuzzer-no-link'],
+      link_args: ['-fsanitize=fuzzer'],
+      install: false,
+    )
+  endif
 
-# NSS is optional for normal builds; tools/nss-smoke.sh phase 4 requires this client.
-nss_dep = dependency('nss', required: false)
-if nss_dep.found()
-  executable(
-    'nss-refresh-client',
-    ['nss-refresh-client.c'],
-    dependencies: [nss_dep],
-    install: false,
+  # tools/module-smoke.sh supplies the display and input needed to run this client.
+  if glib_dep.version().version_compare('>= 2.68')
+    executable(
+      'gtls-client',
+      ['gtls-client.c'],
+      dependencies: [glib_dep, gobject_dep, gio_dep],
+      include_directories: [config_inc],
+      install: false,
+    )
+  endif
+
+  test(
+    'tools-lib',
+    find_program('test-tools-lib.sh'),
+    protocol: 'tap',
+    env: test_env,
   )
+
+  test(
+    'cli',
+    find_program('test-cli.sh'),
+    args: [certificate_backend, gcr_dep.found() ? 'gcr' : 'no-gcr'],
+    protocol: 'tap',
+    env: test_env,
+  )
+
+  # The scripted prompter runs on a private bus and must never reach the user's real prompter.
+  if gcr_dep.found()
+    pin_prompter = files('pin-prompter.c')
+
+    exe = executable(
+      'test-pin-system',
+      ['test-pin-system.c'] + pin_prompter + fixture_util,
+      dependencies: [certificate_service_dep, gcr_dep],
+      link_args: [
+        '-Wl,--wrap=gcr_system_prompt_open_for_prompter_async',
+        '-Wl,--wrap=gcr_system_prompt_close_async',
+      ],
+      include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+      c_args: test_args + certificate_log_args,
+      install: false,
+    )
+
+    test('pin-system', exe, protocol: 'tap', env: test_env, timeout: 180)
+
+    executable(
+      'certificate-test-prompter',
+      ['test-prompter-main.c'] + pin_prompter,
+      dependencies: [glib_dep, gio_dep, gcr_dep],
+      include_directories: [config_inc, include_directories('.')],
+      install: false,
+    )
+  endif
+
+  # NSS is optional for normal builds; tools/nss-smoke.sh phase 4 requires this client.
+  nss_dep = dependency('nss', required: false)
+  if nss_dep.found()
+    executable(
+      'nss-refresh-client',
+      ['nss-refresh-client.c'],
+      dependencies: [nss_dep],
+      install: false,
+    )
+  endif
+
 endif
 
 # Real core transactions with a fake UI and scripted PKCS#11 boundary; no display or bus.
@@ -239,3 +241,26 @@ exe = executable(
   install: false,
 )
 test('core-api', exe, protocol: 'tap', env: test_env, timeout: 120)
+
+# Installed SDK tests use a real FIFO dispatcher and an empty module list. No
+# display, bus or SoftHSM fixture is required by these consumers.
+python = import('python').find_installation('python3')
+cxx = find_program('c++', 'g++', 'clang++')
+sdk_test_args = [
+  '--source', meson.project_source_root(), '--build', meson.project_build_root(),
+  '--cxx', cxx.full_path(),
+]
+foreach arg : cc.cmd_array()
+  sdk_test_args += '--cc-arg=' + arg
+endforeach
+foreach mode : ['install', 'headers', 'symbols', 'core-only']
+  test('sdk-' + mode, python,
+    args: [files('test-sdk.py'), mode] + sdk_test_args,
+    timeout: 180,
+    suite: 'sdk',
+    env: test_env,
+  )
+endforeach
+exe = executable('test-sdk-stride', 'test-sdk-stride.c',
+  include_directories: include_directories('..' / 'src'), install: false)
+test('sdk-stride', exe, suite: 'sdk')

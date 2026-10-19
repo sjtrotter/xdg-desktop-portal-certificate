@@ -6,33 +6,13 @@
 #ifndef CERTIFICATE_UI_PIN_PROVIDER_H
 #define CERTIFICATE_UI_PIN_PROVIDER_H
 
-#include "../core/abi.h"
+#include "../core/ui.h"
 #include "../core/pin.h"
 #include "../core/secret.h"
 
 G_BEGIN_DECLS
 
 typedef struct _PinPrompt PinPrompt;
-
-/* Borrowed during show/update. Retry flags come only from the token. */
-typedef struct
-{
-	uint32_t struct_size, abi_version;
-	const char* token_label;
-	const char* reader;
-	const char* caller_display;
-	const char* purpose_display;
-	const char* parent_window;
-	/* USER or CONTEXT_SPECIFIC; no provider/session handles cross the UI boundary. */
-	gboolean context_specific;
-	gboolean protected_path;
-	gboolean busy;
-	gboolean count_low;
-	gboolean final_try;
-	gboolean locked;
-	/* NULL updates busy state; non-NULL requests fresh input. */
-	const char* status;
-} XccPinView;
 
 /* Internal precursor to XccUiV1's PIN callbacks; prompt handles become UI IDs later. */
 /* Callbacks run on the main thread; close runs once, including for unshown queued prompts. */

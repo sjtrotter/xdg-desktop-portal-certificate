@@ -56,6 +56,9 @@ XccRequest* xcc_sign_async_parsed(XccSession* s, const XccSignSpec* spec, bool v
 	g_return_val_if_fail(s != NULL && s->context != NULL, NULL);
 	XccRequest* r = xcc_request_new(s->context, s, XCC_RESULT_SIGN, done, user);
 	if (spec == NULL || spec->struct_size < sizeof(*spec) || spec->abi_version != XCC_ABI_VERSION ||
+		spec->principal.struct_size < sizeof(XccPrincipal) ||
+		spec->principal.abi_version != XCC_ABI_VERSION ||
+		spec->data.struct_size < sizeof(XccBytes) || spec->data.abi_version != XCC_ABI_VERSION ||
 		spec->mechanism == NULL || (spec->hash_present && spec->hash == NULL) ||
 		(spec->mgf_present && spec->mgf == NULL) ||
 		(spec->encoding_present && spec->signature_encoding == NULL) ||

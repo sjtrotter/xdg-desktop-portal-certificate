@@ -141,8 +141,14 @@ static gpointer coordinator(void* data)
 XccContext* xcc_context_new(const XccConfig* config, const XccUiV1* ui, const XccDispatch* dispatch,
 							XccError* error)
 {
+	return xcc_context_new_for_tokens(config, ui, dispatch, error, NULL);
+}
+XccContext* xcc_context_new_for_tokens(const XccConfig* config, const XccUiV1* ui,
+									   const XccDispatch* dispatch, XccError* error,
+									   CertificateTokens* tokens)
+{
 	if (error != NULL)
-		error->code = XCC_OK;
+		*error = (XccError){sizeof(XccError), XCC_ABI_VERSION, XCC_OK};
 	if (config == NULL || config->struct_size < sizeof(*config) ||
 		config->abi_version != XCC_ABI_VERSION || dispatch == NULL ||
 		dispatch->struct_size < sizeof(*dispatch) || dispatch->abi_version != XCC_ABI_VERSION ||
@@ -162,7 +168,7 @@ XccContext* xcc_context_new(const XccConfig* config, const XccUiV1* ui, const Xc
 	g_mutex_init(&c->queue_lock);
 	c->config = *config;
 	c->dispatch = *dispatch;
-	c->tokens = config->tokens;
+	c->tokens = tokens;
 	c->coordinator = g_main_context_new();
 	c->loop = g_main_loop_new(c->coordinator, FALSE);
 	c->requests = g_ptr_array_new();
@@ -239,6 +245,7 @@ XccRequest* xcc_request_new(XccContext* c, XccSession* s, XccResultKind kind, Xc
 	r->result.struct_size = sizeof(r->result);
 	r->result.abi_version = XCC_ABI_VERSION;
 	r->result.kind = kind;
+	r->result.signature = (XccBytes){sizeof(XccBytes), XCC_ABI_VERSION, NULL, 0};
 	return r;
 }
 static void completion_ack(void* data)
@@ -262,7 +269,8 @@ static void completion(void* data)
 		r->result.candidate_present = r->result.signature_present = r->result.mechanisms_present =
 			false;
 		r->result.candidate = NULL;
-		r->result.signature = (XccBytes){0};
+		r->result.signature =
+			(XccBytes){.struct_size = sizeof(XccBytes), .abi_version = XCC_ABI_VERSION};
 	}
 	if (r->done != NULL)
 		r->done(r, &r->result, r->user);
@@ -536,7 +544,7 @@ void xcc_candidate_unref(XccCandidate* c)
 }
 XccBytes xcc_candidate_certificate(const XccCandidate* c)
 {
-	return (XccBytes){c->value->der->data, c->value->der->len};
+	return (XccBytes){sizeof(XccBytes), XCC_ABI_VERSION, c->value->der->data, c->value->der->len};
 }
 const CertificateCandidate* xcc_candidate_internal(const XccCandidate* c)
 {
@@ -551,7 +559,7 @@ XccCandidate* xcc_candidate_snapshot(CertificateCandidate* value)
 	c->info = (XccCandidateInfo){
 		.struct_size = sizeof(c->info),
 		.abi_version = XCC_ABI_VERSION,
-		.certificate = {value->der->data, value->der->len},
+		.certificate = {sizeof(XccBytes), XCC_ABI_VERSION, value->der->data, value->der->len},
 		.subject = certificate_display_text(value->subject_display, CERTIFICATE_DISPLAY_MAX_SUBJECT,
 											"Unnamed certificate"),
 		.issuer = certificate_display_text(value->issuer_display, CERTIFICATE_DISPLAY_MAX_ISSUER,
@@ -573,4 +581,20 @@ XccCandidate* xcc_candidate_snapshot(CertificateCandidate* value)
 const XccCandidateInfo* xcc_candidate_info(const XccCandidate* c)
 {
 	return &c->info;
+}
+
+void xcc_context_hold_ui(XccContext* c)
+{
+	xcc_context_ref(c);
+	g_atomic_int_inc(&c->ui_handles);
+}
+void xcc_context_release_ui(XccContext* c)
+{
+	g_atomic_int_add(&c->ui_handles, -1);
+	xcc_context_unref(c);
+}
+void xcc_adapter_settings(bool verbose, uint32_t login_timeout)
+{
+	certificate_log_set_verbose(verbose);
+	certificate_pin_set_login_timeout(login_timeout);
 }

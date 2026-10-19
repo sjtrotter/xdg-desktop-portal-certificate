@@ -24,12 +24,13 @@ G_DECLARE_FINAL_TYPE(XccSession, xcc_session, XCC, SESSION, GObject)
 /** Called at most once, before invalidation closes the session; reason is borrowed. */
 typedef void (*XccSessionInvalidated)(XccSession* session, const char* reason, gpointer user_data);
 
-XccSession* xcc_session_new_legacy(const char* log_id, XccSessionInvalidated invalidated,
-								   gpointer user_data);
+XCC_API XccSession* xcc_session_new_legacy(const char* log_id, XccSessionInvalidated invalidated,
+										   gpointer user_data);
 
 /** Callback runs on the main context; clear it before destroying user_data. */
-void xcc_session_set_invalidated_callback(XccSession* session, XccSessionInvalidated invalidated,
-                                          gpointer user_data);
+XCC_API void xcc_session_set_invalidated_callback(XccSession* session,
+												  XccSessionInvalidated invalidated,
+												  gpointer user_data);
 
 /** Main-context grant with the validated, frontend-approved lifetime in seconds. */
 void xcc_session_grant(XccSession* session, CertificateCandidate* candidate,
@@ -37,11 +38,11 @@ void xcc_session_grant(XccSession* session, CertificateCandidate* candidate,
                         guint32 lifetime);
 
 gboolean xcc_session_is_expired(XccSession* session);
-gboolean xcc_session_is_closed(XccSession* session);
+XCC_API gboolean xcc_session_is_closed(XccSession* session);
 gboolean xcc_session_uses_token(XccSession* session, const CertificateToken* token);
 
 /** Main-context invalidation: expired, token_removed, policy, backend_gone, error. */
-void xcc_session_invalidate(XccSession* session, const char* reason);
+XCC_API void xcc_session_invalidate(XccSession* session, const char* reason);
 /** Main-context, idempotent close without invalidation notification. */
 void xcc_session_close(XccSession* session);
 
