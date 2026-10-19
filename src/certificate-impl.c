@@ -22,6 +22,9 @@
 #include "core/pin.h"
 #include "core/core.h"
 #include "core/adapter.h"
+#ifdef XCC_SHARED_ADAPTER
+#include "ui/legacy-bridge.h"
+#endif
 #include "core/ui.h"
 #include "core/dispatch-glib.h"
 #include "xdp-impl-dbus.h"
@@ -835,7 +838,9 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate1* objec
 		return TRUE;
 	}
 
-	XccPrincipal principal = {impl->owner_generation, arg_app_id, transaction->caller.level, TRUE};
+	XccPrincipal principal = {sizeof(XccPrincipal),		 XCC_ABI_VERSION,
+							  impl->owner_generation,	 arg_app_id,
+							  transaction->caller.level, TRUE};
 	XccErrorCode identity_error = xcc_session_check_principal(session->core, &principal);
 	if (identity_error != XCC_OK)
 	{
@@ -868,41 +873,46 @@ static gboolean handle_acquire_credential(XdpImplExperimentalCertificate1* objec
 
 	transaction_register(transaction);
 
-	XccAcquireSpec spec = {
-		.struct_size = sizeof(spec),
-		.abi_version = XCC_ABI_VERSION,
-		.principal = {impl->owner_generation, arg_app_id, transaction->caller.level, TRUE},
-		.purpose = purpose,
-		.generic_purpose_present = TRUE,
-		.generic_purpose = module_request_handle(arg_handle),
-		.parent_window = arg_parent_window,
-		.activation_token = transaction->activation_token,
-		.reason = transaction->reason,
-		.lifetime_present = TRUE,
-		.lifetime_seconds = transaction->lifetime,
-		.sign_present = TRUE,
-		.sign = transaction->may_sign,
-		.interaction_present = TRUE,
-		.interaction_forbidden = transaction->interaction_forbidden,
-		.issuers_present = transaction->filter.issuers != NULL,
-		.key_usage_present = transaction->filter.key_usage != NULL,
-		.key_usage = (const char* const*)transaction->filter.key_usage,
-		.eku_oids_present = transaction->filter.eku_oids != NULL,
-		.eku_oids = (const char* const*)transaction->filter.eku_oids,
-		.key_algorithms_present = transaction->filter.key_algorithms != NULL,
-		.key_algorithms = (const char* const*)transaction->filter.key_algorithms,
-		.token_label_present = transaction->filter.token_label != NULL,
-		.token_label = transaction->filter.token_label,
-		.piv_slot_present = transaction->filter.piv_slot != NULL,
-		.piv_slot = transaction->filter.piv_slot};
+	XccAcquireSpec spec = {.struct_size = sizeof(spec),
+						   .abi_version = XCC_ABI_VERSION,
+						   .principal = {sizeof(XccPrincipal), XCC_ABI_VERSION,
+										 impl->owner_generation, arg_app_id,
+										 transaction->caller.level, TRUE},
+						   .purpose = purpose,
+						   .generic_purpose_present = TRUE,
+						   .generic_purpose = module_request_handle(arg_handle),
+						   .parent_window = arg_parent_window,
+						   .activation_token = transaction->activation_token,
+						   .reason = transaction->reason,
+						   .lifetime_present = TRUE,
+						   .lifetime_seconds = transaction->lifetime,
+						   .sign_present = TRUE,
+						   .sign = transaction->may_sign,
+						   .interaction_present = TRUE,
+						   .interaction_forbidden = transaction->interaction_forbidden,
+						   .issuers_present = transaction->filter.issuers != NULL,
+						   .key_usage_present = transaction->filter.key_usage != NULL,
+						   .key_usage = (const char* const*)transaction->filter.key_usage,
+						   .eku_oids_present = transaction->filter.eku_oids != NULL,
+						   .eku_oids = (const char* const*)transaction->filter.eku_oids,
+						   .key_algorithms_present = transaction->filter.key_algorithms != NULL,
+						   .key_algorithms = (const char* const*)transaction->filter.key_algorithms,
+						   .token_label_present = transaction->filter.token_label != NULL,
+						   .token_label = transaction->filter.token_label,
+						   .piv_slot_present = transaction->filter.piv_slot != NULL,
+						   .piv_slot = transaction->filter.piv_slot};
 	g_autofree XccBytes* issuers = NULL;
 	if (spec.issuers_present)
 	{
 		spec.n_issuers = transaction->filter.issuers->len;
 		issuers = g_new0(XccBytes, spec.n_issuers);
 		for (guint i = 0; i < spec.n_issuers; i++)
+		{
+			issuers[i].struct_size = sizeof(XccBytes);
+			issuers[i].abi_version = XCC_ABI_VERSION;
 			issuers[i].data = g_bytes_get_data(g_ptr_array_index(transaction->filter.issuers, i),
 											   &issuers[i].size);
+		}
 		spec.issuers = issuers;
 	}
 	transaction->core = xcc_acquire_async(session->core, &spec, core_done, transaction);
@@ -991,14 +1001,14 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 
 	transaction_register(transaction);
 
-	XccSignSpec spec = {
-		.struct_size = sizeof(spec),
-		.abi_version = XCC_ABI_VERSION,
-		.principal = {impl->owner_generation, arg_app_id, CERTIFICATE_IDENTITY_UNKNOWN, FALSE},
-		.parent_window = arg_parent_window,
-		.operation_id = operation_id,
-		.mechanism = mechanism,
-		.data = {bytes, size}};
+	XccSignSpec spec = {.struct_size = sizeof(spec),
+						.abi_version = XCC_ABI_VERSION,
+						.principal = {sizeof(XccPrincipal), XCC_ABI_VERSION, impl->owner_generation,
+									  arg_app_id, CERTIFICATE_IDENTITY_UNKNOWN, FALSE},
+						.parent_window = arg_parent_window,
+						.operation_id = operation_id,
+						.mechanism = mechanism,
+						.data = {sizeof(XccBytes), XCC_ABI_VERSION, bytes, size}};
 	g_autofree char* hash = NULL;
 	g_autofree char* mgf = NULL;
 	g_autofree char* encoding = NULL;
@@ -1093,11 +1103,17 @@ CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTo
 	impl->connection = g_object_ref(connection);
 	XccConfig config = {.struct_size = sizeof(config),
 						.abi_version = XCC_ABI_VERSION,
-						.tokens = tokens,
 						.has_display = certificate_ui_has_display()};
 	XccDispatch dispatch = xcc_dispatch_glib(g_main_context_get_thread_default());
 	XccError core_error;
-	impl->context = xcc_context_new(&config, NULL, &dispatch, &core_error);
+#ifdef XCC_SHARED_ADAPTER
+	xcc_adapter_settings(certificate_log_get_verbose(), certificate_pin_login_timeout());
+	impl->context = xcc_context_new_for_tokens(&config, certificate_ui_bridge_table(), &dispatch,
+											   &core_error, tokens);
+	certificate_ui_bridge_attach(impl->context);
+#else
+	impl->context = xcc_context_new_for_tokens(&config, NULL, &dispatch, &core_error, tokens);
+#endif
 	if (impl->context == NULL)
 	{
 		g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Core initialization failed");
@@ -1143,6 +1159,9 @@ CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTo
 static void shutdown_done(XccContext* context, void* user)
 {
 	CertificateImpl* impl = user;
+#ifdef XCC_SHARED_ADAPTER
+	certificate_ui_bridge_attach(NULL);
+#endif
 	impl->shutdown_complete = TRUE;
 }
 void certificate_impl_shutdown(CertificateImpl* impl)

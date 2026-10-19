@@ -4,7 +4,7 @@
  * xdg-desktop-portal-certificate
  */
 
-#include "certificate.h"
+#include "../certificate.h"
 
 #include <gio/gdesktopappinfo.h>
 

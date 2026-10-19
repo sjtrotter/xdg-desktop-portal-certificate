@@ -233,7 +233,9 @@ XccRequest* xcc_acquire_async(XccSession* session, const XccAcquireSpec* spec, X
 {
 	g_return_val_if_fail(session != NULL && session->context != NULL, NULL);
 	XccRequest* r = xcc_request_new(session->context, session, XCC_RESULT_ACQUIRE, done, user);
-	if (spec == NULL || spec->struct_size < sizeof(*spec) || spec->abi_version != XCC_ABI_VERSION)
+	if (spec == NULL || spec->struct_size < sizeof(*spec) || spec->abi_version != XCC_ABI_VERSION ||
+		spec->principal.struct_size < sizeof(XccPrincipal) ||
+		spec->principal.abi_version != XCC_ABI_VERSION)
 	{
 		r->validation_error = XCC_ERROR_INVALID_REQUEST;
 	}
@@ -261,14 +263,15 @@ XccRequest* xcc_acquire_async(XccSession* session, const XccAcquireSpec* spec, X
 			r->filter.issuers = g_ptr_array_new_with_free_func((GDestroyNotify)g_bytes_unref);
 			for (size_t i = 0; i < spec->n_issuers; i++)
 			{
-				if (spec->issuers == NULL ||
-					(spec->issuers[i].size != 0 && spec->issuers[i].data == NULL))
+				const XccBytes* issuer = xcc_acquire_spec_issuer(spec, i);
+				if (issuer == NULL || issuer->struct_size < sizeof(XccBytes) ||
+					issuer->abi_version != XCC_ABI_VERSION ||
+					(issuer->size != 0 && issuer->data == NULL))
 				{
 					r->validation_error = XCC_ERROR_INVALID_FILTER;
 					break;
 				}
-				g_ptr_array_add(r->filter.issuers,
-								g_bytes_new(spec->issuers[i].data, spec->issuers[i].size));
+				g_ptr_array_add(r->filter.issuers, g_bytes_new(issuer->data, issuer->size));
 			}
 		}
 		if (spec->key_usage_present)

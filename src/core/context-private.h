@@ -2,6 +2,8 @@
 #ifndef XCC_CONTEXT_PRIVATE_H
 #define XCC_CONTEXT_PRIVATE_H
 #include "ui.h"
+#include "../ui/chooser-provider.h"
+#include "../ui/pin-provider.h"
 #include "adapter.h"
 #include "session-private.h"
 #include "chooser.h"
