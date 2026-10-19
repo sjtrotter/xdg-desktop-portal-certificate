@@ -54,7 +54,9 @@ including PIN memory handling and the attacks a same-UID host process can still 
 | Part | Location | Revision |
 |---|---|---|
 | Frontend (`org.freedesktop.portal.experimental.Certificate1`) | [sjtrotter/xdg-desktop-portal `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate) | `a2a13dd` |
-| Backend, GTK/libadwaita UI and PKCS#11 module | [sjtrotter/xdg-desktop-portal-certificate](https://github.com/sjtrotter/xdg-desktop-portal-certificate) | tag `proposal-2026-10` |
+| Card library (`libxdp-certificate-core`), standalone GTK/libadwaita backend and PKCS#11 module | [sjtrotter/xdg-desktop-portal-certificate](https://github.com/sjtrotter/xdg-desktop-portal-certificate) | tag `proposal-2026-10` |
+| GNOME backend, `-Dcertificate=enabled` | [sjtrotter/xdg-desktop-portal-gnome `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-gnome/tree/experimental/certificate) on 50.0 | `625296d` |
+| KDE backend, `-DBUILD_CERTIFICATE_PORTAL=ON` | [sjtrotter/xdg-desktop-portal-kde `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-kde/tree/experimental/certificate) on v6.7.5 | `39948a3` |
 
 The frontend follows the experimental convention merged in #2129 and is enabled with
 `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1`. The current interface:
@@ -76,7 +78,7 @@ automatically today; how it should reach sandboxed applications is question 3 be
 
 ### Evidence
 
-All results are from one PIV card in one reader with OpenSC on GNOME 50. Other hardware is
+The browser results below are from one PIV card in one reader with OpenSC on GNOME 50. Other hardware is
 untested. Procedures and full results are in [TESTING.md](TESTING.md).
 
 | Client | Setup | Result |
@@ -86,6 +88,12 @@ untested. Procedures and full results are in [TESTING.md](TESTING.md).
 | Flathub Chrome, no pcsc socket or devices | Module registered in Chrome's NSS database | Portal chooser, then Chrome's picker |
 | Same | `AutoSelectCertificateForUrls` for the authenticating host | Portal chooser and PIN prompt only; sign-in succeeded |
 | Either browser | Server whose CA list the card does not match | Portal chooser, then rejection; no PIN prompt |
+
+The GNOME and KDE backends were run against the same frontend, PKCS#11 module, NSS and
+GnuTLS clients with a SoftHSM token, in a Fedora 44 container under Xvfb: certificate choice,
+PIN entry, RSA and ECDSA signatures, regrant, cancellation at each dialog, mutual TLS through
+GnuTLS, and NSS across grant expiry. They have not run in a live desktop session or with a
+card.
 
 Both browser settings are deployment policy. Firefox's applies to every site and every
 certificate. Chrome's must name the host that requests the certificate, which for the tested
@@ -149,30 +157,45 @@ for the steps above.
 
 Most of the backend is card handling: token discovery through p11-kit, certificate
 filtering, PIN memory hardening, login and retry state, and the signing broker. The
-desktop-specific part is two dialogs, the chooser and the PIN prompt.
-
-That suggests a split:
+desktop-specific part is two dialogs, the chooser and the PIN prompt. The prototype splits
+along that line:
 
 ```text
 application ── PKCS#11 module ── xdg-desktop-portal (frontend)
                                         │
-                              desktop backend (GNOME, KDE)
-                              chooser and PIN dialogs only
+                     desktop backend (GNOME, KDE, or the standalone GTK one)
+                     D-Bus adapter, chooser and PIN dialogs
                                         │
-                                  card broker
+                     libxdp-certificate-core (linked in)
               discovery, filtering, grants, PIN handling, signing
                                         │
                               p11-kit ── OpenSC ── pcscd
 ```
 
-The GNOME and KDE backends would then contain only UI, and a security fix in card handling
-lands once. The prototype keeps everything in one process today.
+The library has a C API with no GLib, GTK or PKCS#11 types in its core and UI headers
+([SDK.md](SDK.md)). A backend supplies a table of UI callbacks and a dispatcher that queues
+calls onto its UI thread; the library calls back to show the chooser or the PIN prompt and
+takes the user's answers. The dialog submits the PIN in a library-owned buffer that is
+locked and excluded from core dumps where the kernel allows. The GNOME backend adds about
+2,400 lines (adapter, two libadwaita dialogs, build glue); the KDE backend adds a Qt adapter,
+Kirigami dialogs and a PIN field that stores typed bytes only in that buffer. A fix in card handling lands once, in the library.
 
-As a shared library linked into each backend, the broker adds no new trust boundary. As a
-separate service it would own grants, expiry and revocation, accept calls only from the
-portal backend (as the backend now accepts calls only from the frontend), and receive the
-PIN from the dialog over a private channel. A service could be its own user unit, part of
-p11-kit, or part of gnome-keyring.
+Linking the library into a desktop backend has a cost. The standalone backend makes its
+process non-dumpable and disables core dumps before it collects a PIN. The GNOME and KDE
+backends host the other portals too, so the same settings would remove crash reports for all
+of them, and children they launch would inherit the core limit. In the KDE backend it would
+also break document-path translation for file chooser results, which relies on the frontend
+identifying the backend process. The forks therefore leave process settings alone. A crash
+report of the desktop backend can contain copies of PIN input from the input stack, and a
+same-user debugger can read the PIN while it is typed. The forks describe this in
+[`src/certificate.md`](https://github.com/sjtrotter/xdg-desktop-portal-gnome/blob/experimental/certificate/src/certificate.md)
+and [`autotests/README.certificate.md`](https://github.com/sjtrotter/xdg-desktop-portal-kde/blob/experimental/certificate/autotests/README.certificate.md).
+
+A separate broker service avoids that cost. It would own grants, expiry, revocation and PIN
+collection in a hardened process of its own, accept calls only from the portal backend, and
+leave the desktop backends with the dialogs that show what is being asked. It could be its
+own user unit, part of p11-kit, or part of gnome-keyring. It is not built yet
+([#40](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/40)).
 
 ## Why not forward PKCS#11 to the sandbox
 
@@ -214,7 +237,7 @@ compromised application can still use every key and operation the token offers.
 
 ## Known limits
 
-- One card, one reader and OpenSC PIV tested. No independent security review.
+- No independent security review.
 - Only the leaf certificate is returned; `chain_status` is always `leaf_only`.
 - Through PKCS#11 the portal cannot show the site, detect private windows or distinguish
   listing from authenticating. That needs browser cooperation, such as the direct call above.
@@ -228,15 +251,17 @@ compromised application can still use every key and operation the token offers.
    Do you see a problem with that, such as per-signature D-Bus round trips?
 3. How should the PKCS#11 module reach sandboxed applications: in the runtime, as a Flatpak
    extension, or bundled by each application?
-4. Should the card broker be a library shared by the backends, or a service (its own, in
-   p11-kit or in gnome-keyring)?
+4. The card broker is a library linked into each desktop backend, which leaves PIN input in
+   a process kept dumpable for the sake of the other portals (see Architecture). Is that acceptable for
+   an experimental portal, or should PIN collection and the broker move into a separate
+   service first?
 5. Is remembered consent per application instance acceptable, given that it lets grants
    renew without a prompt?
 6. Is there someone on the GNOME side and someone on the KDE side who could review the API?
 
 ## Who does the work
 
-I will develop the frontend, the card broker and a GNOME UI, and maintain them while the
-portal is experimental, as offered in
+I will develop the frontend, the card library and the GNOME and KDE backends, and maintain them
+while the portal is experimental, as offered in
 [flatpak/flatpak#5756](https://github.com/flatpak/flatpak/issues/5756). I am asking for
-design review before writing more code, not for someone to take it over.
+design review before further interface changes, not for someone to take it over.
