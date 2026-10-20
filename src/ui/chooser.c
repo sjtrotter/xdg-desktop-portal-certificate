@@ -18,22 +18,44 @@ typedef struct
 	GtkWindow* window;
 	GtkWidget* list;
 	GtkWidget* empty;
+	GtkWidget* empty_status;
 	GtkWidget* empty_detail;
+	GtkWidget* spinner;
 	GtkWidget* use_button;
 	GtkWidget* cancel_button;
 	GtkEventController* keys;
 	char* announcement;
+	gboolean announcement_pending;
 	gboolean finished;
 } Chooser;
 
+typedef struct
+{
+	guint64 id;
+	char* subject;
+	char* issuer;
+	char* detail;
+	gboolean invalid;
+} ChooserRow;
+
 static GHashTable* choosers;
+
+static void row_free(gpointer data)
+{
+	ChooserRow* row = data;
+
+	g_free(row->subject);
+	g_free(row->issuer);
+	g_free(row->detail);
+	g_free(row);
+}
 
 static guint64 selected_candidate(Chooser* chooser)
 {
 	GtkListBoxRow* row = gtk_list_box_get_selected_row(GTK_LIST_BOX(chooser->list));
-	guint64* id = row != NULL ? g_object_get_data(G_OBJECT(row), "candidate-id") : NULL;
+	ChooserRow* candidate = row != NULL ? g_object_get_data(G_OBJECT(row), "candidate") : NULL;
 
-	return id != NULL ? *id : 0;
+	return candidate != NULL ? candidate->id : 0;
 }
 
 static void on_use(GtkWidget* widget, gpointer user_data)
@@ -139,7 +161,7 @@ static GtkWidget* build_row(const XccChooserCandidateView* candidate)
 	g_autoptr(GString) accessible = g_string_new(NULL);
 	const char* subject_text = candidate->subject;
 	const char* issuer_text = candidate->issuer;
-	guint64* id = g_new(guint64, 1);
+	ChooserRow* data = g_new0(ChooserRow, 1);
 
 	gtk_widget_set_margin_top(box, 8);
 	gtk_widget_set_margin_bottom(box, 8);
@@ -179,10 +201,33 @@ static GtkWidget* build_row(const XccChooserCandidateView* candidate)
 	gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
 	gtk_accessible_update_property(GTK_ACCESSIBLE(row), GTK_ACCESSIBLE_PROPERTY_LABEL,
 	                               accessible->str, -1);
-	*id = candidate->id;
-	g_object_set_data_full(G_OBJECT(row), "candidate-id", id, g_free);
+	data->id = candidate->id;
+	data->subject = g_strdup(subject_text);
+	data->issuer = g_strdup(issuer_text);
+	data->detail = g_strdup(detail);
+	data->invalid = candidate->invalid;
+	g_object_set_data_full(G_OBJECT(row), "candidate", data, row_free);
 
 	return row;
+}
+
+static gboolean rows_match(Chooser* chooser, const XccChooserView* view)
+{
+	GtkWidget* row = gtk_widget_get_first_child(chooser->list);
+
+	for (gsize i = 0; i < view->n_candidates; i++)
+	{
+		const XccChooserCandidateView* candidate = xcc_chooser_view_candidate(view, i);
+		const ChooserRow* data = row != NULL ? g_object_get_data(G_OBJECT(row), "candidate") : NULL;
+
+		if (data == NULL || candidate == NULL || data->id != candidate->id ||
+		    g_strcmp0(data->subject, candidate->subject) != 0 ||
+		    g_strcmp0(data->issuer, candidate->issuer) != 0 ||
+		    g_strcmp0(data->detail, candidate->detail) != 0 || data->invalid != candidate->invalid)
+			return FALSE;
+		row = gtk_widget_get_next_sibling(row);
+	}
+	return row == NULL;
 }
 
 static CertificateChooserAnnounceHook announce_hook = NULL;
@@ -213,8 +258,9 @@ static void announce_empty_state(GtkWidget* window, gpointer user_data)
 {
 	Chooser* chooser = user_data;
 
-	if (chooser->announcement == NULL || !gtk_widget_get_mapped(window))
+	if (!chooser->announcement_pending || !gtk_widget_get_mapped(window))
 		return;
+	chooser->announcement_pending = FALSE;
 	if (announce_hook != NULL)
 		announce_hook(chooser->announcement, announce_hook_data);
 	announce_accessible(GTK_ACCESSIBLE(window), chooser->announcement);
@@ -230,54 +276,78 @@ static void gtk_chooser_update(gpointer user_data, XccUiId id, const XccChooserV
 	gboolean list_focused = FALSE;
 	const char* empty_text = "Insert your security token";
 	const char* detail = "No certificate on the inserted token can be used for this request";
+	gboolean reading = view->n_candidates == 0 && xcc_chooser_view_tokens_reading(view);
+	g_autofree char* announcement = NULL;
 
 	if (chooser->finished)
 		return;
-
-	focus = gtk_root_get_focus(GTK_ROOT(chooser->window));
-	list_focused = focus != NULL && (focus == chooser->list ||
-	                                 gtk_widget_is_ancestor(focus, chooser->list));
-	while ((child = gtk_widget_get_first_child(chooser->list)) != NULL)
-		gtk_list_box_remove(GTK_LIST_BOX(chooser->list), child);
 	chooser->revision = view->revision;
 
-	for (guint i = 0; i < view->n_candidates; i++)
+	/* Reading updates advance consent without changing the rows. */
+	if (!rows_match(chooser, view))
 	{
-		const XccChooserCandidateView* candidate = xcc_chooser_view_candidate(view, i);
-		GtkWidget* row = build_row(candidate);
+		focus = gtk_root_get_focus(GTK_ROOT(chooser->window));
+		list_focused = focus != NULL && (focus == chooser->list ||
+		                                 gtk_widget_is_ancestor(focus, chooser->list));
+		while ((child = gtk_widget_get_first_child(chooser->list)) != NULL)
+			gtk_list_box_remove(GTK_LIST_BOX(chooser->list), child);
 
-		gtk_list_box_append(GTK_LIST_BOX(chooser->list), row);
-		if (selected != 0 && selected == candidate->id)
-			selected_row = GTK_LIST_BOX_ROW(row);
+		for (guint i = 0; i < view->n_candidates; i++)
+		{
+			const XccChooserCandidateView* candidate = xcc_chooser_view_candidate(view, i);
+			GtkWidget* row = build_row(candidate);
+
+			gtk_list_box_append(GTK_LIST_BOX(chooser->list), row);
+			if (selected != 0 && selected == candidate->id)
+				selected_row = GTK_LIST_BOX_ROW(row);
+		}
+		gtk_list_box_select_row(GTK_LIST_BOX(chooser->list), selected_row);
+		gtk_widget_set_sensitive(chooser->use_button, selected_row != NULL);
+		/* Removing rows drops keyboard focus; return it to the list or to Cancel. */
+		if (list_focused)
+		{
+			if (selected_row != NULL)
+				gtk_widget_grab_focus(GTK_WIDGET(selected_row));
+			else if (view->n_candidates > 0)
+				gtk_widget_grab_focus(chooser->list);
+			else
+				gtk_widget_grab_focus(chooser->cancel_button);
+		}
 	}
-	gtk_list_box_select_row(GTK_LIST_BOX(chooser->list), selected_row);
-	gtk_widget_set_sensitive(chooser->use_button, selected_row != NULL);
-	/* Removing rows drops keyboard focus; return it to the list or to Cancel. */
-	if (list_focused)
+	if (reading)
 	{
-		if (selected_row != NULL)
-			gtk_widget_grab_focus(GTK_WIDGET(selected_row));
-		else if (view->n_candidates > 0)
-			gtk_widget_grab_focus(chooser->list);
-		else
-			gtk_widget_grab_focus(chooser->cancel_button);
+		empty_text = "Reading security token…";
+		detail = "This can take a few seconds.";
 	}
+	gtk_label_set_text(GTK_LABEL(chooser->empty), empty_text);
+	gtk_label_set_text(GTK_LABEL(chooser->empty_detail), detail);
 	gtk_widget_set_visible(chooser->empty, view->n_candidates == 0);
-	gtk_widget_set_visible(chooser->empty_detail, view->n_candidates == 0 && view->tokens_present);
-	g_clear_pointer(&chooser->announcement, g_free);
+	gtk_widget_set_visible(chooser->empty_status, view->n_candidates == 0);
+	gtk_widget_set_visible(chooser->empty_detail,
+	                       view->n_candidates == 0 && (reading || view->tokens_present));
+	gtk_widget_set_visible(chooser->spinner, reading);
+	gtk_spinner_set_spinning(GTK_SPINNER(chooser->spinner), reading);
 	if (view->n_candidates == 0)
 	{
-		chooser->announcement = view->tokens_present
-		    ? g_strdup_printf("%s. %s", empty_text, detail) : g_strdup(empty_text);
-
+		announcement = reading ? g_strdup_printf("%s %s", empty_text, detail)
+		    : view->tokens_present ? g_strdup_printf("%s. %s", empty_text, detail)
+		    : g_strdup(empty_text);
+		if (g_strcmp0(chooser->announcement, announcement) != 0)
+			chooser->announcement_pending = TRUE;
+		g_free(chooser->announcement);
+		chooser->announcement = g_steal_pointer(&announcement);
 		gtk_accessible_update_property(GTK_ACCESSIBLE(chooser->list),
 		                               GTK_ACCESSIBLE_PROPERTY_LABEL, chooser->announcement, -1);
 		announce_empty_state(GTK_WIDGET(chooser->window), chooser);
 	}
 	else
+	{
+		g_clear_pointer(&chooser->announcement, g_free);
+		chooser->announcement_pending = FALSE;
 		gtk_accessible_update_property(GTK_ACCESSIBLE(chooser->list),
 		                               GTK_ACCESSIBLE_PROPERTY_LABEL,
 		                               "Certificates available on your security tokens", -1);
+	}
 }
 
 static void gtk_chooser_show(gpointer user_data, XccUiId id, const XccChooserView* view)
@@ -358,7 +428,17 @@ static void gtk_chooser_show(gpointer user_data, XccUiId id, const XccChooserVie
 	chooser->empty = gtk_label_new("Insert your security token");
 	gtk_label_set_wrap(GTK_LABEL(chooser->empty), TRUE);
 	gtk_widget_add_css_class(chooser->empty, "heading");
-	gtk_box_append(GTK_BOX(content), chooser->empty);
+	{
+		GtkWidget* status = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+
+		chooser->empty_status = status;
+		gtk_widget_set_halign(status, GTK_ALIGN_CENTER);
+		chooser->spinner = gtk_spinner_new();
+		gtk_widget_set_valign(chooser->spinner, GTK_ALIGN_CENTER);
+		gtk_box_append(GTK_BOX(status), chooser->spinner);
+		gtk_box_append(GTK_BOX(status), chooser->empty);
+		gtk_box_append(GTK_BOX(content), status);
+	}
 	chooser->empty_detail = gtk_label_new(
 	    "No certificate on the inserted token can be used for this request");
 	gtk_label_set_wrap(GTK_LABEL(chooser->empty_detail), TRUE);

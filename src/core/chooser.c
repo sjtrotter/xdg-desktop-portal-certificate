@@ -333,7 +333,20 @@ void certificate_chooser_update(CertificateChooser* chooser, GPtrArray* candidat
 	if (chooser->finished)
 		return;
 
+	chooser->view.tokens_reading = FALSE;
 	replace_candidates(chooser, candidates, tokens_present);
+	provider_depth++;
+	chooser->provider.chooser_update(chooser->provider.user_data, chooser->id, &chooser->view);
+	provider_depth--;
+}
+
+void certificate_chooser_set_tokens_reading(CertificateChooser* chooser, gboolean reading)
+{
+	if (chooser->finished || chooser->view.tokens_reading == reading)
+		return;
+
+	chooser->view.tokens_reading = reading;
+	chooser->view.revision++;
 	provider_depth++;
 	chooser->provider.chooser_update(chooser->provider.user_data, chooser->id, &chooser->view);
 	provider_depth--;

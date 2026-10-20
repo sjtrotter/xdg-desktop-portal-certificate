@@ -380,6 +380,8 @@ void xcc_acquire_token_event(XccContext* c, CertificateToken* token, gboolean ad
 			g_autoptr(GPtrArray) empty = g_ptr_array_new();
 			certificate_chooser_update(r->chooser, empty, FALSE);
 		}
+		else if (added && r->chooser != NULL)
+			certificate_chooser_set_tokens_reading(r->chooser, TRUE);
 		if (r->enumerating)
 			r->enumerate_again = TRUE;
 		else

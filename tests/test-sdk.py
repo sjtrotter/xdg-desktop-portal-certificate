@@ -88,7 +88,8 @@ UI_LAYOUTS = (
       'tokens_present', 'parent_window', 'activation_token'), '''
     XCC_ALIGNAS(8) bool generic_purpose;
     uint32_t display_flags;
-''', ('generic_purpose', 'display_flags'), 'XCC_CHOOSER_VIEW_V1_SIZE'),
+    bool tokens_reading;
+''', ('generic_purpose', 'display_flags', 'tokens_reading'), 'XCC_CHOOSER_VIEW_V1_SIZE'),
     ('XccPinView', 'Pin', '''
     uint32_t struct_size, abi_version;
     const char *token_label, *reader, *caller_display, *purpose_display, *parent_window;

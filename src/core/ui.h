@@ -71,6 +71,7 @@ extern "C"
 		const char* activation_token;
 		XCC_ALIGNAS(8) bool generic_purpose; /* Generic disclosure; purpose still governs permissions. */
 		uint32_t display_flags;
+		bool tokens_reading;
 	} XccChooserView;
 
 	/* Original padded sizeof: round the last original member's end to the
@@ -79,6 +80,14 @@ extern "C"
 	XCC_PADDED_SIZE(offsetof(XccChooserCandidateView, invalid) + sizeof(bool), XCC_MAX_ALIGNOF(uint64_t, const char*))
 #define XCC_CHOOSER_VIEW_V1_SIZE \
 	XCC_PADDED_SIZE(offsetof(XccChooserView, activation_token) + sizeof(const char*), XCC_MAX_ALIGNOF(uint64_t, const char*))
+
+	/* Older producers have no reading state. */
+	static inline bool xcc_chooser_view_tokens_reading(const XccChooserView* view)
+	{
+		return view != NULL && view->abi_version == XCC_ABI_VERSION &&
+			view->struct_size >= offsetof(XccChooserView, tokens_reading) + sizeof(view->tokens_reading) &&
+			view->tokens_reading;
+	}
 
 	/* Rows have a uniform byte stride supplied by the producer, allowing fields to
 	 * be appended without changing how an older UI walks the candidate array. */

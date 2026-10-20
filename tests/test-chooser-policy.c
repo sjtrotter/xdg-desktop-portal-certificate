@@ -142,9 +142,12 @@ static void test_removal_and_cancel(void)
 	chooser = show(&fake, candidates, TRUE, NULL, &result);
 	removed_id = fake.view.candidates[0].id;
 	revision = fake.view.revision;
+	certificate_chooser_set_tokens_reading(chooser, TRUE);
+	g_assert_true(fake.view.tokens_reading);
 	certificate_chooser_update(chooser, empty, FALSE);
 	g_assert_cmpuint(fake.view.n_candidates, ==, 0);
 	g_assert_false(fake.view.tokens_present);
+	g_assert_false(fake.view.tokens_reading);
 	certificate_chooser_choose(fake.id, revision, removed_id);
 	certificate_chooser_choose(fake.id, fake.view.revision, removed_id);
 	g_assert_cmpuint(result.calls, ==, 0);
@@ -176,6 +179,67 @@ static void test_unknown_identity_wording(void)
 	g_assert_null(fake.view.later_prompt);
 	fake_chooser_provider_cancel(&fake);
 	g_assert_cmpuint(result.calls, ==, 1);
+	fake_chooser_provider_clear(&fake);
+}
+
+static void test_reading_preserves_candidates(void)
+{
+	FakeChooserProvider fake;
+	Result result = {0};
+	g_autoptr(GPtrArray) candidates = g_ptr_array_new_with_free_func(
+	    (GDestroyNotify)certificate_candidate_unref);
+	g_ptr_array_add(candidates, candidate_with_key("one"));
+	fake_chooser_provider_init(&fake);
+	CertificateChooser* chooser = show(&fake, candidates, TRUE, NULL, &result);
+	guint64 revision = fake.view.revision;
+	guint64 id = fake.view.candidates[0].id;
+	g_assert_false(xcc_chooser_view_tokens_reading(&fake.view));
+	certificate_chooser_set_tokens_reading(chooser, FALSE);
+	g_assert_cmpuint(fake.updates, ==, 0);
+	g_assert_cmpuint(fake.view.revision, ==, revision);
+	certificate_chooser_set_tokens_reading(chooser, TRUE);
+	g_assert_true(xcc_chooser_view_tokens_reading(&fake.view));
+	g_assert_cmpuint(fake.view.n_candidates, ==, 1);
+	g_assert_cmpuint(fake.view.revision, >, revision);
+	g_assert_cmpuint(fake.view.candidates[0].id, ==, id);
+	g_assert_cmpuint(fake.updates, ==, 1);
+	certificate_chooser_choose(fake.id, revision, id);
+	g_assert_cmpuint(result.calls, ==, 0);
+	revision = fake.view.revision;
+	certificate_chooser_set_tokens_reading(chooser, TRUE);
+	g_assert_cmpuint(fake.updates, ==, 1);
+	g_assert_cmpuint(fake.view.revision, ==, revision);
+	certificate_chooser_set_tokens_reading(chooser, FALSE);
+	g_assert_false(xcc_chooser_view_tokens_reading(&fake.view));
+	g_assert_cmpuint(fake.view.revision, >, revision);
+	g_assert_cmpuint(fake.view.n_candidates, ==, 1);
+	g_assert_cmpuint(fake.view.candidates[0].id, ==, id);
+	g_assert_cmpuint(fake.updates, ==, 2);
+	certificate_chooser_choose(fake.id, revision, id);
+	g_assert_cmpuint(result.calls, ==, 0);
+	revision = fake.view.revision;
+	certificate_chooser_set_tokens_reading(chooser, FALSE);
+	g_assert_cmpuint(fake.updates, ==, 2);
+	g_assert_cmpuint(fake.view.revision, ==, revision);
+	certificate_chooser_set_tokens_reading(chooser, TRUE);
+	g_assert_true(xcc_chooser_view_tokens_reading(&fake.view));
+	g_assert_cmpuint(fake.view.revision, >, revision);
+	g_assert_cmpuint(fake.updates, ==, 3);
+	revision = fake.view.revision;
+	certificate_chooser_update(chooser, candidates, TRUE);
+	g_assert_false(xcc_chooser_view_tokens_reading(&fake.view));
+	g_assert_cmpuint(fake.view.revision, >, revision);
+	g_assert_cmpuint(fake.view.n_candidates, ==, 1);
+	g_assert_cmpuint(fake.view.candidates[0].id, ==, id);
+	g_assert_cmpuint(fake.updates, ==, 4);
+	certificate_chooser_choose(fake.id, revision, id);
+	g_assert_cmpuint(result.calls, ==, 0);
+	g_assert_cmpuint(fake.closes, ==, 0);
+	fake_chooser_provider_choose(&fake, 0);
+	g_assert_cmpuint(result.calls, ==, 1);
+	g_assert_true(result.chosen == g_ptr_array_index(candidates, 0));
+	g_assert_cmpuint(fake.closes, ==, 1);
+	certificate_candidate_unref(result.chosen);
 	fake_chooser_provider_clear(&fake);
 }
 
@@ -304,6 +368,7 @@ int main(int argc, char** argv)
 	g_test_add_data_func("/chooser-policy/no-match-insert", GINT_TO_POINTER(TRUE),
 	                     test_empty_insertion_and_ids);
 	g_test_add_func("/chooser-policy/removal-cancel", test_removal_and_cancel);
+	g_test_add_func("/chooser-policy/reading-preserves-candidates", test_reading_preserves_candidates);
 	g_test_add_func("/chooser-policy/structured-fields", test_structured_fields);
 	g_test_add_func("/chooser-policy/unknown-identity-wording", test_unknown_identity_wording);
 	g_test_add_func("/chooser-policy/request-cancel", test_request_cancel);
