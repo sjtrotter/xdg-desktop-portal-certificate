@@ -14,6 +14,7 @@
 
 #define METHOD_TIMEOUT_MS 30000
 #define CAPABILITIES_TIMEOUT_MS 5000
+#define CAPABILITIES_RETRY_MS 1000
 #define DEFAULT_REQUEST_TIMEOUT_MS 300000
 
 /* Bound each teardown wait for outstanding method replies. */
@@ -28,6 +29,14 @@ struct _PortalClient
 
 	GStrv mechanisms;
 	gboolean available;
+	gboolean capabilities_dirty;
+	gint64 capabilities_retry_at;
+	GMutex probe_lock;
+	char* owner;
+	guint64 owner_generation;
+	guint owner_watch;
+	gboolean owner_known;
+	GCond owner_cond;
 
 	int request_timeout_ms;
 	gint counter;
@@ -41,7 +50,7 @@ struct _PortalClient
 	gboolean draining;
 	GCancellable* call_cancellable;
 
-	/* Signal writes and PKCS#11 reads use a separate lock from module_lock. */
+	/* Owner, capability and invalidation state use a separate lock from module_lock. */
 	GMutex invalid_lock;
 	GHashTable* invalidated;
 	guint invalidated_subscription;
@@ -60,6 +69,8 @@ typedef struct
 	char* request_path;
 	char* returned_path;
 	char* closed_path;
+	char* owner;
+	guint64 owner_generation;
 
 	GMutex lock;
 	GCond cond;
@@ -76,6 +87,28 @@ typedef struct
 	guint subscription;
 	guint timeout_id;
 } PortalRequest;
+
+static void request_complete(PortalRequest* request);
+
+static gboolean stop_loop(gpointer data)
+{
+	PortalClient* client = data;
+
+	g_main_loop_quit(client->loop);
+
+	return G_SOURCE_REMOVE;
+}
+
+/* Let queued subscription cleanup run before stopping the context. */
+static void finish_drain(PortalClient* client)
+{
+	GSource* source = g_idle_source_new();
+
+	g_source_set_priority(source, G_PRIORITY_DEFAULT_IDLE);
+	g_source_set_callback(source, stop_loop, client, NULL);
+	g_source_attach(source, client->context);
+	g_source_unref(source);
+}
 
 static PortalRequest* request_ref(PortalRequest* request)
 {
@@ -96,6 +129,7 @@ static void request_unref(gpointer data)
 	g_free(request->request_path);
 	g_free(request->returned_path);
 	g_free(request->closed_path);
+	g_free(request->owner);
 	g_cond_clear(&request->cond);
 	g_mutex_clear(&request->lock);
 	g_free(request);
@@ -150,6 +184,50 @@ static void on_session_closed(GDBusConnection* connection, const char* sender,
 	g_mutex_unlock(&client->invalid_lock);
 }
 
+static void owner_changed(PortalClient* client, const char* owner)
+{
+	gboolean changed;
+
+	g_mutex_lock(&client->invalid_lock);
+	changed = g_strcmp0(client->owner, owner) != 0;
+	if (changed)
+	{
+		g_free(client->owner);
+		client->owner = g_strdup(owner);
+		client->owner_generation++;
+		client->available = FALSE;
+		client->capabilities_dirty = TRUE;
+		client->capabilities_retry_at = 0;
+		g_clear_pointer(&client->mechanisms, g_strfreev);
+	}
+	client->owner_known = TRUE;
+	g_cond_broadcast(&client->owner_cond);
+	g_mutex_unlock(&client->invalid_lock);
+
+	if (!changed)
+		return;
+
+	while (client->live != NULL)
+	{
+		PortalRequest* request = client->live->data;
+
+		g_set_error_literal(&request->error, PKCS11_PORTAL_ERROR,
+		                    PKCS11_PORTAL_ERROR_INVALIDATED, "Frontend owner changed");
+		request_complete(request);
+	}
+}
+
+static void on_owner_appeared(GDBusConnection* connection, const char* name,
+                              const char* owner, gpointer data)
+{
+	owner_changed(data, owner);
+}
+
+static void on_owner_vanished(GDBusConnection* connection, const char* name, gpointer data)
+{
+	owner_changed(data, NULL);
+}
+
 static gboolean subscribe_invalidated(gpointer data)
 {
 	PortalClient* client = data;
@@ -162,6 +240,9 @@ static gboolean subscribe_invalidated(gpointer data)
 	client->closed_subscription = g_dbus_connection_signal_subscribe(
 	    client->connection, PKCS11_PORTAL_BUS_NAME, "org.freedesktop.portal.Session", "Closed",
 	    NULL, NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_session_closed, client, NULL);
+	client->owner_watch = g_bus_watch_name_on_connection(
+	    client->connection, PKCS11_PORTAL_BUS_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
+	    on_owner_appeared, on_owner_vanished, client, NULL);
 
 	return G_SOURCE_REMOVE;
 }
@@ -174,17 +255,19 @@ gboolean portal_client_grant_gone(PortalClient* client, const PortalGrant* grant
 		return TRUE;
 
 	g_mutex_lock(&client->invalid_lock);
-	gone = g_hash_table_contains(client->invalidated, grant->session_handle);
+	gone = client->owner == NULL || client->owner_generation != grant->owner_generation ||
+	       g_hash_table_contains(client->invalidated, grant->session_handle);
 	g_mutex_unlock(&client->invalid_lock);
 
 	return gone;
 }
 
 /* Close replies cannot be dispatched after C_Finalize stops the client's context. */
-static void send_close(PortalClient* client, const char* path, const char* interface)
+static void send_close(PortalClient* client, const char* owner, const char* path,
+                        const char* interface)
 {
 	g_autoptr(GDBusMessage) message =
-	    g_dbus_message_new_method_call(PKCS11_PORTAL_BUS_NAME, path, interface, "Close");
+	    g_dbus_message_new_method_call(owner, path, interface, "Close");
 
 	g_dbus_message_set_flags(message, G_DBUS_MESSAGE_FLAGS_NO_REPLY_EXPECTED);
 	g_dbus_connection_send_message(client->connection, message,
@@ -200,7 +283,7 @@ static void request_close_at_portal(PortalRequest* request, const char* path)
 	g_free(request->closed_path);
 	request->closed_path = g_strdup(path);
 
-	send_close(request->client, path, PKCS11_PORTAL_REQUEST_INTERFACE);
+	send_close(request->client, request->owner, path, PKCS11_PORTAL_REQUEST_INTERFACE);
 }
 
 /* Only the client's thread accesses completed. */
@@ -263,7 +346,7 @@ static void subscribe_response(PortalRequest* request, const char* path)
 		                                     request->subscription);
 
 	request->subscription = g_dbus_connection_signal_subscribe(
-	    request->client->connection, PKCS11_PORTAL_BUS_NAME, PKCS11_PORTAL_REQUEST_INTERFACE,
+	    request->client->connection, request->owner, PKCS11_PORTAL_REQUEST_INTERFACE,
 	    "Response", path, NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_response, request_ref(request),
 	    request_unref);
 }
@@ -290,7 +373,7 @@ static void call_finished(PortalClient* client)
 
 	/* Flush the Close message queued by the last callback. */
 	g_dbus_connection_flush_sync(client->connection, NULL, NULL);
-	g_main_loop_quit(client->loop);
+	finish_drain(client);
 }
 
 static void on_method_returned(GObject* source, GAsyncResult* result, gpointer user_data)
@@ -339,13 +422,23 @@ static void on_method_returned(GObject* source, GAsyncResult* result, gpointer u
 static gboolean request_start(gpointer data)
 {
 	PortalRequest* request = data;
+	PortalClient* client = request->client;
 	GSource* source = NULL;
+	gboolean current;
 
-	if (request->client->cancelled)
+	g_mutex_lock(&client->invalid_lock);
+	current = client->owner != NULL && client->owner_generation == request->owner_generation;
+	if (current)
+		request->owner = g_strdup(client->owner);
+	g_mutex_unlock(&client->invalid_lock);
+
+	if (client->cancelled || !current)
 	{
 		g_variant_unref(g_variant_ref_sink(request->parameters));
 		request->parameters = NULL;
-		g_set_error(&request->error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_CANCELLED,
+		g_set_error(&request->error, PKCS11_PORTAL_ERROR,
+		            client->cancelled ? PKCS11_PORTAL_ERROR_CANCELLED
+		                              : PKCS11_PORTAL_ERROR_INVALIDATED,
 		            "%s was abandoned", request->method);
 		request_complete(request);
 		return G_SOURCE_REMOVE;
@@ -357,7 +450,7 @@ static gboolean request_start(gpointer data)
 	subscribe_response(request, request->request_path);
 
 	request->client->calls++;
-	g_dbus_connection_call(request->client->connection, PKCS11_PORTAL_BUS_NAME,
+	g_dbus_connection_call(request->client->connection, request->owner,
 	                       PKCS11_PORTAL_OBJECT_PATH, PKCS11_PORTAL_INTERFACE,
 	                       request->method,
 	                       request->parameters, G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE,
@@ -462,7 +555,8 @@ static PortalModuleErrorCode response_error(GVariant* results)
 
 /** Consumes @parameters and blocks for the request's Response. */
 static GVariant* portal_request(PortalClient* client, const char* method, GVariant* parameters,
-                                const char* request_path, GError** error)
+                                const char* request_path, guint64 owner_generation,
+                                GError** error)
 {
 	PortalRequest* request = g_new0(PortalRequest, 1);
 	GSource* source = g_idle_source_new();
@@ -473,6 +567,7 @@ static GVariant* portal_request(PortalClient* client, const char* method, GVaria
 	request->method = method;
 	request->parameters = parameters;
 	request->request_path = g_strdup(request_path);
+	request->owner_generation = owner_generation;
 	g_mutex_init(&request->lock);
 	g_cond_init(&request->cond);
 
@@ -625,12 +720,28 @@ static void probe_capabilities(PortalClient* client)
 	g_autoptr(GVariant) reply = NULL;
 	g_autoptr(GVariant) capabilities = NULL;
 	g_autoptr(GError) error = NULL;
+	g_auto(GStrv) mechanisms = NULL;
+	g_autofree char* owner = NULL;
+	guint64 generation;
 	GVariantBuilder empty;
+
+	g_mutex_lock(&client->probe_lock);
+	g_mutex_lock(&client->invalid_lock);
+	if (!client->capabilities_dirty || client->owner == NULL ||
+	    g_get_monotonic_time() < client->capabilities_retry_at)
+	{
+		g_mutex_unlock(&client->invalid_lock);
+		g_mutex_unlock(&client->probe_lock);
+		return;
+	}
+	owner = g_strdup(client->owner);
+	generation = client->owner_generation;
+	g_mutex_unlock(&client->invalid_lock);
 
 	g_variant_builder_init(&empty, G_VARIANT_TYPE_VARDICT);
 
 	reply = g_dbus_connection_call_sync(
-	    client->connection, PKCS11_PORTAL_BUS_NAME, PKCS11_PORTAL_OBJECT_PATH,
+	    client->connection, owner, PKCS11_PORTAL_OBJECT_PATH,
 	    PKCS11_PORTAL_INTERFACE, "GetCapabilities",
 	    g_variant_new("(a{sv})", &empty), G_VARIANT_TYPE("(a{sv})"),
 	    G_DBUS_CALL_FLAGS_NO_AUTO_START, CAPABILITIES_TIMEOUT_MS, NULL, &error);
@@ -640,22 +751,26 @@ static void probe_capabilities(PortalClient* client)
 		g_debug("the Certificate portal is not available; check "
 		        "XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1 "
 		        "in the frontend environment: %s", error->message);
-		return;
 	}
-
-	capabilities = g_variant_get_child_value(reply, 0);
-	g_variant_lookup(capabilities, "mechanisms", "^as", &client->mechanisms);
-
-	if (client->mechanisms == NULL || client->mechanisms[0] == NULL)
+	else
 	{
-		g_debug("Certificate portal advertises no mechanisms");
-		g_clear_pointer(&client->mechanisms, g_strfreev);
-		return;
+		capabilities = g_variant_get_child_value(reply, 0);
+		g_variant_lookup(capabilities, "mechanisms", "^as", &mechanisms);
 	}
 
-	client->available = TRUE;
-	g_debug("Certificate portal offers %u mechanisms",
-	        g_strv_length(client->mechanisms));
+	g_mutex_lock(&client->invalid_lock);
+	/* A reply from a previous owner cannot restore availability. */
+	if (client->owner_generation == generation)
+	{
+		g_clear_pointer(&client->mechanisms, g_strfreev);
+		client->mechanisms = g_steal_pointer(&mechanisms);
+		client->available = client->mechanisms != NULL && client->mechanisms[0] != NULL;
+		client->capabilities_dirty = reply == NULL;
+		client->capabilities_retry_at = reply == NULL
+		    ? g_get_monotonic_time() + CAPABILITIES_RETRY_MS * G_TIME_SPAN_MILLISECOND : 0;
+	}
+	g_mutex_unlock(&client->invalid_lock);
+	g_mutex_unlock(&client->probe_lock);
 }
 
 PortalClient* portal_client_new(void)
@@ -665,6 +780,8 @@ PortalClient* portal_client_new(void)
 	const char* timeout = g_getenv(PKCS11_PORTAL_ENV_TIMEOUT);
 
 	g_mutex_init(&client->invalid_lock);
+	g_mutex_init(&client->probe_lock);
+	g_cond_init(&client->owner_cond);
 	client->invalidated = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 	client->request_timeout_ms = DEFAULT_REQUEST_TIMEOUT_MS;
 
@@ -690,7 +807,10 @@ PortalClient* portal_client_new(void)
 
 	schedule(client, subscribe_invalidated, client);
 
-	probe_capabilities(client);
+	g_mutex_lock(&client->invalid_lock);
+	while (!client->owner_known)
+		g_cond_wait(&client->owner_cond, &client->invalid_lock);
+	g_mutex_unlock(&client->invalid_lock);
 
 	return client;
 }
@@ -706,7 +826,7 @@ static gboolean drain_expired(gpointer data)
 	}
 
 	g_debug("Portal reply drain timed out; closing the client");
-	g_main_loop_quit(client->loop);
+	finish_drain(client);
 
 	return G_SOURCE_REMOVE;
 }
@@ -719,10 +839,27 @@ static gboolean begin_drain(gpointer data)
 
 	client->cancelled = TRUE;
 	client->draining = TRUE;
+	if (client->owner_watch != 0)
+	{
+		g_bus_unwatch_name(client->owner_watch);
+		client->owner_watch = 0;
+	}
+	if (client->invalidated_subscription != 0)
+	{
+		g_dbus_connection_signal_unsubscribe(client->connection,
+		                                     client->invalidated_subscription);
+		client->invalidated_subscription = 0;
+	}
+	if (client->closed_subscription != 0)
+	{
+		g_dbus_connection_signal_unsubscribe(client->connection,
+		                                     client->closed_subscription);
+		client->closed_subscription = 0;
+	}
 
 	if (client->calls == 0)
 	{
-		g_main_loop_quit(client->loop);
+		finish_drain(client);
 		return G_SOURCE_REMOVE;
 	}
 
@@ -741,14 +878,6 @@ void portal_client_free(PortalClient* client)
 
 	if (client->thread != NULL)
 	{
-		if (client->invalidated_subscription != 0)
-			g_dbus_connection_signal_unsubscribe(client->connection,
-			                                     client->invalidated_subscription);
-
-		if (client->closed_subscription != 0)
-			g_dbus_connection_signal_unsubscribe(client->connection,
-			                                     client->closed_subscription);
-
 		/* Flush the final queued Close before disconnecting. */
 		g_dbus_connection_flush_sync(client->connection, NULL, NULL);
 
@@ -761,31 +890,53 @@ void portal_client_free(PortalClient* client)
 	g_clear_object(&client->call_cancellable);
 	g_clear_object(&client->connection);
 	g_clear_pointer(&client->mechanisms, g_strfreev);
+	g_free(client->owner);
 	g_clear_pointer(&client->invalidated, g_hash_table_unref);
+	g_cond_clear(&client->owner_cond);
+	g_mutex_clear(&client->probe_lock);
 	g_mutex_clear(&client->invalid_lock);
 	g_free(client);
 }
 
 gboolean portal_client_available(PortalClient* client)
 {
-	return client != NULL && client->available;
+	gboolean available;
+
+	if (client == NULL || client->connection == NULL)
+		return FALSE;
+
+	probe_capabilities(client);
+	g_mutex_lock(&client->invalid_lock);
+	available = client->available;
+	g_mutex_unlock(&client->invalid_lock);
+
+	return available;
 }
 
-const char* const* portal_client_mechanisms(PortalClient* client)
+GStrv portal_client_dup_mechanisms(PortalClient* client)
 {
-	return client != NULL ? (const char* const*) client->mechanisms : NULL;
+	GStrv mechanisms;
+
+	if (!portal_client_available(client))
+		return NULL;
+
+	g_mutex_lock(&client->invalid_lock);
+	mechanisms = g_strdupv(client->mechanisms);
+	g_mutex_unlock(&client->invalid_lock);
+
+	return mechanisms;
 }
 
 /* Grants end through Session.Close(); releasing an absent grant succeeds. */
-static void close_session(PortalClient* client, const char* session)
+static void close_session(PortalClient* client, const char* owner, const char* session)
 {
 	if (session == NULL)
 		return;
 
-	send_close(client, session, "org.freedesktop.portal.Session");
+	send_close(client, owner, session, "org.freedesktop.portal.Session");
 }
 
-static char* create_session(PortalClient* client, GError** error)
+static char* create_session(PortalClient* client, guint64 generation, GError** error)
 {
 	g_autofree char* handle_token = request_token(client, "pkcs11c");
 	g_autofree char* session_token = request_token(client, "pkcs11s");
@@ -807,7 +958,7 @@ static char* create_session(PortalClient* client, GError** error)
 	                      g_variant_new_string(session_token));
 
 	results = portal_request(client, "CreateSession", g_variant_new("(a{sv})", &options), path,
-	                         error);
+	                         generation, error);
 	if (results == NULL)
 		return NULL;
 
@@ -828,6 +979,8 @@ PortalGrant* portal_client_acquire(PortalClient* client, GError** error)
 	g_autofree char* handle_token = NULL;
 	g_autofree char* path = NULL;
 	g_autofree char* reason = NULL;
+	g_autofree char* owner = NULL;
+	guint64 generation;
 	g_autoptr(GVariant) results = NULL;
 	g_autoptr(GVariant) certificate = NULL;
 	g_autoptr(PortalGrant) grant = NULL;
@@ -843,7 +996,12 @@ PortalGrant* portal_client_acquire(PortalClient* client, GError** error)
 		return NULL;
 	}
 
-	session = create_session(client, error);
+	g_mutex_lock(&client->invalid_lock);
+	owner = g_strdup(client->owner);
+	generation = client->owner_generation;
+	g_mutex_unlock(&client->invalid_lock);
+
+	session = create_session(client, generation, error);
 	if (session == NULL)
 		return NULL;
 
@@ -870,15 +1028,25 @@ PortalGrant* portal_client_acquire(PortalClient* client, GError** error)
 	add_certificate_filter(&options);
 
 	results = portal_request(client, "AcquireCredential",
-	                         g_variant_new("(osa{sv})", session, "", &options), path, error);
+	                         g_variant_new("(osa{sv})", session, "", &options), path,
+	                         generation, error);
 	if (results == NULL)
 	{
-		close_session(client, session);
+		close_session(client, owner, session);
 		return NULL;
 	}
 
 	grant = g_new0(PortalGrant, 1);
 	grant->session_handle = g_steal_pointer(&session);
+	grant->owner = g_steal_pointer(&owner);
+	grant->owner_generation = generation;
+	if (portal_client_grant_gone(client, grant))
+	{
+		g_set_error_literal(error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_INVALIDATED,
+		                    "Frontend owner changed");
+		portal_client_release(client, grant);
+		return NULL;
+	}
 
 	certificate = g_variant_lookup_value(results, "certificate_der", G_VARIANT_TYPE("ay"));
 	if (certificate == NULL)
@@ -920,7 +1088,7 @@ void portal_client_release(PortalClient* client, const PortalGrant* grant)
 	    grant->session_handle == NULL)
 		return;
 
-	close_session(client, grant->session_handle);
+	close_session(client, grant->owner, grant->session_handle);
 }
 
 static gboolean operation(PortalClient* client, const PortalGrant* grant, const char* method,
@@ -951,9 +1119,15 @@ static gboolean operation(PortalClient* client, const PortalGrant* grant, const 
 
 	results = portal_request(client, method,
 	                         g_variant_new("(osa{sv})", grant->session_handle, "", &options),
-	                         path, error);
+	                         path, grant->owner_generation, error);
 	if (results == NULL)
 		return FALSE;
+	if (portal_client_grant_gone(client, grant))
+	{
+		g_set_error_literal(error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_INVALIDATED,
+		                    "Frontend owner changed");
+		return FALSE;
+	}
 
 	value = g_variant_lookup_value(results, result_key, G_VARIANT_TYPE("ay"));
 	if (value == NULL)

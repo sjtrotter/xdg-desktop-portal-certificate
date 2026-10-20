@@ -296,6 +296,8 @@ def consumers(args, directory, library, env):
     cflags = shlex.split(output(['pkg-config', '--cflags', 'xdp-certificate-core-0'], env=env))
     libs = shlex.split(output(['pkg-config', '--libs', 'xdp-certificate-core-0'], env=env))
     options = json.loads(output(['meson', 'introspect', '--buildoptions', str(args.build)]))
+    # The project configures C only; both consumers use its recorded linker flags.
+    link_args = next(option['value'] for option in options if option['name'] == 'c_link_args')
     sanitizers = next(option['value'] for option in options if option['name'] == 'b_sanitize')
     if isinstance(sanitizers, str):
         sanitizers = sanitizers.split(',')
@@ -305,7 +307,7 @@ def consumers(args, directory, library, env):
         binary = directory / ('consumer-' + standard)
         run(compiler + ['-x', language, '-std=' + standard, '-Wall', '-Wextra', '-Werror'] +
             cflags + instrumentation + [str(args.source / 'tests/sdk-consumer.c'), '-o', str(binary)] +
-            libs + ['-pthread'])
+            link_args + libs + ['-pthread'])
         runtime = dict(env, LD_LIBRARY_PATH=str(library.parent) + (
             os.pathsep + env['LD_LIBRARY_PATH'] if env.get('LD_LIBRARY_PATH') else ''))
         run([str(binary)], env=runtime, timeout=60)

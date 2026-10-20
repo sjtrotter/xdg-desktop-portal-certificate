@@ -11,6 +11,8 @@
 typedef struct
 {
 	char* session_handle;
+	char* owner;
+	guint64 owner_generation;
 	GBytes* certificate_der;
 	char* key_type;               /**< RSA or EC. */
 	guint key_size;               /**< RSA modulus bits or EC curve size. */

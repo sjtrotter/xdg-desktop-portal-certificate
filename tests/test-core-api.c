@@ -23,6 +23,7 @@ typedef struct
 	XccUiId chooser_id, pin_id;
 	uint64_t revision, choice;
 	gboolean choose, submit, shutdown, always_auth, empty, confirm, pause_context;
+	gboolean generic_purpose;
 	uint64_t warning_id;
 	guint warnings, ordered_completions;
 	guint user_logins, context_logins, signatures, logouts;
@@ -359,6 +360,7 @@ static void choose(void* data, XccUiId id, const XccChooserView* view)
 	f->chooser_shows++;
 	f->chooser_id = id;
 	f->revision = view->revision;
+	g_assert_cmpint(view->generic_purpose, ==, f->generic_purpose);
 	g_assert_cmpuint(view->n_candidates, ==, f->empty ? 0 : 1);
 	if (!f->empty)
 	{
@@ -397,7 +399,9 @@ static void pin_show(void* data, XccUiId id, const XccPinView* view)
 	f->pin_shows++;
 	f->pin_id = id;
 	g_assert_cmpuint(view->status_code, ==, XCC_PIN_STATUS_NONE);
-	g_assert_false(view->generic_purpose);
+	g_assert_cmpint(view->generic_purpose, ==, f->generic_purpose);
+	g_assert_cmpstr(view->purpose_display, ==, f->generic_purpose
+	    ? "use a certificate" : "prove who you are to a server");
 	xcc_pin_ready(f->context, id);
 	g_string_append_c(f->deliveries, 'P');
 	if (view->context_specific)
@@ -591,6 +595,31 @@ static void test_acquire(Fixture* f, gconstpointer data)
 	WAIT(d.calls == 1);
 	g_assert_cmpuint(f->completions, ==, 2);
 	xcc_request_unref(r);
+}
+
+static void test_generic_purpose_reaches_pin(Fixture* f, gconstpointer data)
+{
+	Done acquired = {.f = f};
+	XccAcquireSpec spec = acquire_spec();
+	f->generic_purpose = TRUE;
+	f->always_auth = TRUE;
+	f->submit = TRUE;
+	spec.generic_purpose_present = TRUE;
+	spec.generic_purpose = TRUE;
+	XccRequest* request = xcc_acquire_async(f->session, &spec, done, &acquired);
+	WAIT(acquired.calls == 1);
+	g_assert_cmpint(acquired.error, ==, XCC_OK);
+	xcc_request_unref(request);
+
+	Done signed_result = {.f = f};
+	request = sign_request(f, &signed_result);
+	WAIT(signed_result.calls == 1);
+	g_assert_cmpint(signed_result.error, ==, XCC_OK);
+	g_assert_cmpuint(f->pin_shows, ==, 2);
+	g_assert_cmpuint(f->context_pin_shows, ==, 1);
+	g_assert_cmpuint(f->user_logins, ==, 1);
+	g_assert_cmpuint(f->context_logins, ==, 1);
+	xcc_request_unref(request);
 }
 typedef struct
 {
@@ -1934,6 +1963,7 @@ int main(int argc, char** argv)
 	g_test_init(&argc, &argv, NULL);
 #define TEST(name, function) g_test_add("/core-api/" name, Fixture, NULL, setup, function, teardown)
 	TEST("acquire-dispatch-stale-replies", test_acquire);
+	TEST("generic-purpose-pin", test_generic_purpose_reaches_pin);
 	g_test_add("/core-api/removal-before-consent-without-refresh", Fixture, GINT_TO_POINTER(1),
 			   setup, test_removal_before_consent, teardown);
 	TEST("cancel-before-chooser", test_cancel_before);

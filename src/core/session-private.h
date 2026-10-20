@@ -35,6 +35,7 @@ struct _XccSession
 	gint grant_pending;
 	CertificateCandidate* candidate;
 	CertificatePurpose purpose;
+	gboolean generic_purpose;
 	gboolean may_sign;
 	gboolean may_decrypt;
 

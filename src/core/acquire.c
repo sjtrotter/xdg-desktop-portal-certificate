@@ -31,6 +31,7 @@ static void finish_acquire(XccRequest* transaction, CertificateCandidate* candid
 	g_atomic_int_set(&session->grant_pending, TRUE);
 	xcc_session_grant(session, candidate, transaction->purpose,
 					  transaction->may_sign && candidate->can_sign, FALSE, transaction->lifetime);
+	session->generic_purpose = transaction->generic_purpose;
 
 	certificate_log_decision(CERTIFICATE_REASON_GRANT_CREATED, transaction->caller.app_id,
 							 certificate_identity_level_to_string(transaction->caller.level),
@@ -55,6 +56,7 @@ void xcc_acquire_rollback(XccRequest* transaction)
 	session->granted = FALSE;
 	g_clear_pointer(&session->candidate, certificate_candidate_unref);
 	session->purpose = 0;
+	session->generic_purpose = FALSE;
 	session->may_sign = session->may_decrypt = FALSE;
 	session->decrypt_count = session->lifetime = session->expires_at = 0;
 	g_atomic_int_set(&session->grant_pending, FALSE);

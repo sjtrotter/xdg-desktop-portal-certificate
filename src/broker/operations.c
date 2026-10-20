@@ -913,7 +913,8 @@ void certificate_broker_perform(CertificateTokens* tokens, XccSession* session,
 	operation->payload = g_steal_pointer(&payload);
 	operation->parent_window = g_strdup(parent_window);
 	operation->caller_display = g_strdup(caller_display);
-	operation->purpose_display = g_strdup(certificate_purpose_display(session->purpose));
+	operation->purpose_display = g_strdup(session->generic_purpose
+	    ? "use a certificate" : certificate_purpose_display(session->purpose));
 	operation->cancellable = cancellable != NULL ? g_object_ref(cancellable) : NULL;
 	operation->done = done;
 	operation->user_data = user_data;
