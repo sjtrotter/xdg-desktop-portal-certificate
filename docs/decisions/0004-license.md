@@ -3,6 +3,10 @@
 Date: 2026-09-04
 Status: accepted, supersedes the GPL-2.0-or-later decision below
 
+> Status, 2026-10-20: The D-Bus-only integration description below is historical. Desktop
+> backends link the core SDK, and applications load the client module. See
+> [SDK.md](../SDK.md) and [ADR 0011](0011-client-side-pkcs11-module.md).
+
 ## Decision
 
 License this repository **LGPL-2.1-or-later**. Ship the LGPL-2.1 text as `LICENSE`, add a
@@ -48,13 +52,11 @@ Status: superseded by the decision above, 2026-09-04
 
 ## Context
 
-The part of this project that is genuinely hard and genuinely proven — enumerating a card's
-certificates, choosing one, and prompting for a PIN without spending the retry counter — already
-exists, in Remmina's RDP plugin, under **GPL-2.0-or-later**.
+Remmina's RDP plugin implements certificate discovery, selection and PIN prompting under
+GPL-2.0-or-later.
 
-It is roughly 900 lines, and its value is not the lines. It is the enumerated list of things that go
-wrong with real hardware, found by running against real cards: p11-kit's trust tokens that hold no
-client certificates and must be skipped without spawning anything; empty tokens that report failure
+The roughly 900-line implementation records failures observed with real cards: p11-kit's trust
+tokens that hold no client certificates and must be skipped without spawning anything; empty tokens that report failure
 and must be treated as empty rather than fatal; token-listing failures that must stay fatal;
 certificate loading that takes seconds and must leave the main loop alive; a PIN answered once per
 challenge plus one engine-initiated retry and then expired; a toplevel window that may be destroyed

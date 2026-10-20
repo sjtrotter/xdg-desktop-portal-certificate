@@ -3,13 +3,18 @@
 Date: 2026-09-03
 Status: accepted (for the sketch)
 
-> **Note, after [0008](0008-build-to-the-upstream-shape.md):** "service-owned" now means
-> **backend-owned**. The PIN prompt is drawn by `xdg-desktop-portal-certificate`, in the process that holds
-> the PKCS#11 session, and the frontend cannot see a PIN because it has neither a window nor a
-> token session. Everything below is unchanged in substance: the point was always that the prompt
-> belongs to the system rather than to the application asking, and that a second desktop needs a
-> second implementation rather than a fork — which is now a second *backend package* selected by
-> `portals.conf`.
+> **Superseded in part, 2026-10-20.** After
+> [0008](0008-build-to-the-upstream-shape.md), "service-owned" means backend-owned login policy.
+> The local-only prompt, no-D-Bus PIN transport and rejection of delegated prompting below are
+> superseded: the GNOME fork uses Gcr to collect the PIN through GNOME Shell's system prompt,
+> with a native dialog fallback. Gcr sends the PIN encrypted over D-Bus to backend-owned
+> memory for `C_Login`. Neither Certificate interface carries a PIN, and the frontend and
+> application never receive it. KDE supplies its own PIN dialog. See
+> [PIN transport](../SECURITY.md#pin-entry-and-transport) and [SDK.md](../SDK.md).
+>
+> The grant-end `C_Logout` statement below is also superseded. The broker closes only that
+> grant's device session; token login ends when the last session closes. See
+> [login ownership](../SECURITY.md#login-retries-and-cancellation).
 
 ## Context
 

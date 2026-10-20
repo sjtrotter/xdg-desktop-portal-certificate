@@ -61,8 +61,17 @@ GObject types, including `XccSession`, retain registered metadata and function p
 even after all handles are released. Shutdown completion means resources are drained;
 it does not permit unloading the core DSO. The library links with `-Wl,-z,nodelete`
 so `dlclose()` cannot unmap it. Unresponsive middleware can prevent completion.
-Embedding also requires explicit process hardening before collecting PINs (`PR_SET_DUMPABLE(0)`, `RLIMIT_CORE=0`) and resolving
-crash-handler integration; see [SECURITY.md](SECURITY.md).
+The standalone service applies `PR_SET_DUMPABLE(0)` and `RLIMIT_CORE=0` before collecting
+PINs. The embedded [GNOME](https://github.com/sjtrotter/xdg-desktop-portal-gnome/blob/experimental/certificate/src/certificate.md)
+and [KDE](https://github.com/sjtrotter/xdg-desktop-portal-kde/blob/experimental/certificate/autotests/README.certificate.md)
+backends deliberately preserve process dumpability, core limits and crash reporting for the
+other portals they host. KDE also needs normal dumpability for file-chooser path translation.
+Both use scoped protection: `XccSecret` pages are wiped, locked where possible and excluded
+from dumps where supported. GNOME collects through Gcr's system prompt or GTK secure entry;
+KDE's PIN field writes directly to `XccSecret`. Input-stack and toolkit copies can remain in
+crash reports, and same-user debuggers can read live PINs. Accepting that exposure, applying
+process-wide hardening, or moving PIN collection and card operations to a separate hardened
+service remains an open desktop-review question; see [SECURITY.md](SECURITY.md#memory-and-process-hardening).
 
 Every public struct starts with `uint32_t struct_size, abi_version`; initialize inputs
 (including nested principals and byte spans) with their size and `XCC_ABI_VERSION`, the
@@ -137,7 +146,7 @@ and keep consent disabled. On completion, restore the list or the existing
 empty/no-match placeholder. This extension leaves the ABI version, SONAME,
 original minimum size and exported symbols unchanged.
 
-The remaining public UI views have been audited for SDK-owned English:
+Use these structured fields to translate the remaining UI text:
 
 | View / English fields | Structured source for desktop translations |
 | --- | --- |

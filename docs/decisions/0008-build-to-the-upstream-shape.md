@@ -4,6 +4,12 @@ Date: 2026-09-03
 Status: accepted (for the sketch), overriding the review advice recorded below; its
 *packaging* half is superseded by [0010](0010-backend-only-frontend-lives-upstream.md)
 
+> Status, 2026-10-20: The component sketch below is historical. Rate limits, permission-store
+> integration, a `Decrypt` method and the served facade remain unimplemented. Current interfaces
+> expose signing as the only key operation. Current responsibilities are in
+> [ARCHITECTURE.md](../ARCHITECTURE.md); see also [PUBLIC-INTERFACE.md](../PUBLIC-INTERFACE.md)
+> and [SECURITY.md](../SECURITY.md).
+
 > **Amendment (0010).** The split argued for here is preserved exactly; what changed is
 > that the frontend half is no longer in this repository. It is a branch of
 > xdg-desktop-portal (`experimental/integration`), which is how upstream
@@ -34,8 +40,7 @@ first thing to do is find out whether the facade can exist at all
 ([SPIKES.md](../SPIKES.md) S1 and S3). Doubling the process count before answering that is
 the classic way to spend a month on plumbing for a design that turns out to be impossible.
 
-The author has decided to do it anyway, and this ADR records that decision, its reasons,
-and the costs it accepts.
+Build separate frontend and backend processes.
 
 ## Decision
 

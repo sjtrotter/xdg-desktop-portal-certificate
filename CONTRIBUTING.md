@@ -4,7 +4,7 @@ The experimental backend and client-side PKCS#11 module implement the unmerged C
 interface. Status and hardware coverage are in [README.md](README.md#status).
 
 The interface belongs to the xdg-desktop-portal branch
-[experimental/integration](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration).
+[experimental/certificate](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate).
 The [impl XML](data/org.freedesktop.impl.portal.experimental.Certificate1.xml) is a tracking
 copy, apart from its provenance comment. Make interface changes in the frontend branch and
 copy the XML here. See [ADR 0010](docs/decisions/0010-backend-only-frontend-lives-upstream.md).
@@ -18,8 +18,10 @@ copy the XML here. See [ADR 0010](docs/decisions/0010-backend-only-frontend-live
   [docs/SPIKES.md](docs/SPIKES.md) lists unanswered feasibility questions.
 - Describe consumer integration requirements, including whether brokered `Sign` or a PKCS#11
   module fits the application. See [ADR 0007](docs/decisions/0007-brokered-operations-are-the-core.md).
-- Help with desktop integration, especially a KDE backend and PIN interaction. No KDE
-  equivalent of GNOME's gcr system prompter is integrated here.
+- Test desktop integration in the [GNOME](https://github.com/sjtrotter/xdg-desktop-portal-gnome/tree/experimental/certificate)
+  and [KDE](https://github.com/sjtrotter/xdg-desktop-portal-kde/tree/experimental/certificate)
+  forks. Both have SoftHSM container coverage. GNOME also has a live GNOME 50/PIV-card run;
+  KDE has no live-session or card run. KDE uses its own PIN dialog.
 - Review keyboard and screen-reader access to the chooser and PIN prompts. These controls
   must support informed consent.
 

@@ -9,8 +9,7 @@ Primary sources below support claims about specifications, libraries, protocols 
 discussion. Entries record evidence limits and check dates. Repository behavior is checked
 against the tree and [TESTING.md](TESTING.md).
 
-Pinned citation URLs retain revision hashes so cited line numbers remain meaningful. These
-hashes are exempt from the prose restriction on frontend revisions. Read dates and issue states
+Pinned citation URLs retain revision hashes so cited line numbers remain meaningful. Read dates and issue states
 describe the recorded evidence; they do not establish current remote status.
 
 Checked 2026-09-05 unless an entry says otherwise. The merged-convention entry records the
@@ -245,7 +244,7 @@ use an RSASSA-PSS algorithm, regardless of whether RSASSA-PKCS1-v1_5 algorithms 
 'signature_algorithms'." [§4.2.3](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.2.3) adds
 that the `rsa_pkcs1_*` code points "are not defined for use in signed TLS handshake messages".
 
-### S26. TLS 1.0 and 1.1 sign a concatenated MD5 ‖ SHA-1 with no DigestInfo.
+### S26. TLS 1.0 and 1.1 RSA signatures use concatenated MD5+SHA1 with no DigestInfo.
 
 [RFC 4346 §7.4.3 and §7.4.8](https://www.rfc-editor.org/rfc/rfc4346.html#section-7.4.8) give the
 structure (`opaque md5_hash[16]; opaque sha_hash[20];`);

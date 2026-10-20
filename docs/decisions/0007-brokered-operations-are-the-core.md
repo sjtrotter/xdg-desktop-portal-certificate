@@ -6,6 +6,14 @@ Status: accepted (for the sketch); the **compatibility half is superseded** by
 p11-kit module instead of a socket-served facade. The core half -- brokered operations are the
 contract -- is unchanged and is what the module calls.
 
+> **Superseded in part, 2026-10-20.** The interface sketch under "The split, concretely"
+> no longer describes the core API. The current methods are `CreateSession`,
+> `AcquireCredential`, `Sign` and `GetCapabilities`, with owner-only `GrantInvalidated`.
+> `Session.Close()` ends a grant. There is no `Decrypt`, `RenewGrant`, `ReleaseGrant` or
+> public token-presence signal. Per-operation signing consent and caller rate limits remain
+> unimplemented. See the [public contract](../PUBLIC-INTERFACE.md#contract) and
+> [impl methods](../IMPL-INTERFACE.md#methods).
+
 ## Context
 
 [0006](0006-failure-modes-of-naive-p11kit-forwarding.md) established that handing a consumer a

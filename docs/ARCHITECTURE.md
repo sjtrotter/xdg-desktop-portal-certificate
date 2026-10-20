@@ -2,7 +2,7 @@
 
 The experimental backend and client-side PKCS#11 module are implemented. The
 Certificate interface is defined on the xdg-desktop-portal fork's
-[experimental/integration](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration)
+[experimental/certificate](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate)
 branch and is not merged upstream. [SPIKES.md](SPIKES.md) records feasibility questions.
 [ADR 0010](decisions/0010-backend-only-frontend-lives-upstream.md) assigns the frontend to
 xdg-desktop-portal; [ADR 0008](decisions/0008-build-to-the-upstream-shape.md) records the split.
@@ -22,8 +22,8 @@ synthetic handles in the application's process and holds no card session.
 | Bus name | `org.freedesktop.portal.Desktop` | `org.freedesktop.impl.portal.desktop.certificate` |
 | Interface | `org.freedesktop.portal.experimental.Certificate1` | `org.freedesktop.impl.portal.experimental.Certificate1` |
 | Object path | `/org/freedesktop/portal/desktop`; Request and Session handles beneath `/request/` and `/session/` | `/org/freedesktop/portal/desktop` on its own bus name |
-| Options and policy | Validates purpose, interaction mode, mechanism, reason length (256 characters) and data size (1 MiB); drops unknown top-level keys | Revalidates fields and applies device limits; never widens permissions |
-| Grant lifetime | Default 300 s, ceiling 3600 s; forwards the decision as `lifetime` | Enforces the same monotonic deadline, with a delayed teardown backstop |
+| Options and policy | Validates purpose, interaction mode, mechanism, reason length (256 characters) and exact digest length for the named hash (20, 28, 32, 48 or 64 bytes); drops unknown top-level keys | Revalidates fields and applies device limits; never widens permissions |
+| Grant lifetime | Default 300 s, ceiling 3600 s; forwards the decision as `lifetime` and starts its monotonic timer on receipt of the acquisition result | Starts its own monotonic lifetime at grant creation; operations stop at that deadline and teardown adds `CERTIFICATE_EXPIRY_GRACE_SECONDS` |
 | Result limits | Intersects mechanisms and operations with its allowed sets before returning and recording the grant | Reports supported mechanisms and operations |
 | Permissions | No selection memory on the Certificate interface | Never accesses the permission store |
 | Ownership | Each grant belongs to one D-Bus peer; no process-tree delegation | Binds sessions to the supplied app id |
@@ -138,6 +138,11 @@ Cancellation and timer sources attach to the interaction's coordinator, includin
 context-specific authentication requested by a signing worker. Login waiter bookkeeping
 belongs to the coordinator, so cancelling the last waiter can hide an in-flight prompt
 without waiting for the worker's device lock.
+Workers return device and login snapshots to the coordinator; stale login snapshots are
+rechecked on workers before prompting. The coordinator never waits for `device_lock`.
+The core permits one successful acquisition per session and rejects concurrent acquisitions.
+If cancellation suppresses a committed grant before completion delivery, the core releases it;
+the open session can acquire again. [SDK.md](SDK.md) defines the delivery boundary.
 
 [`core/ui.h`](../src/core/ui.h) combines chooser and PIN presentation in the versioned
 `XccUiV1` table. Core sends copied views, IDs and typed warnings through `XccDispatch.post`.
@@ -176,6 +181,8 @@ Shared request/session dependencies are in [UPSTREAMING.md](UPSTREAMING.md#front
 [`tokens/discovery.h`](../src/tokens/discovery.h) loads p11-kit managed modules,
 enumerates asynchronously under a `GCancellable` and watches insertion and removal.
 Discovery uses the p11-kit API directly.
+Object enumeration continues through short batches until `C_FindObjects` returns zero.
+A finite object budget rejects invalid or nonterminating enumerations with `device_error`.
 Watcher emissions and test injection enter one mutex-protected FIFO at their source.
 Before accepting chooser consent, and before consuming an enumeration result, the
 coordinator detaches and dispatches the already queued prefix. A matching removal rejects
@@ -184,6 +191,8 @@ active. Enumeration completion uses normal priority; there is no priority-201 ba
 The finite prefix drain cannot be extended indefinitely by incoming events or priority-0
 traffic. Background presence delivery still uses an idle source; acceptance explicitly
 drains it instead of waiting for that source to be scheduled.
+The poller debounces presence per token: two consecutive matching observations establish a
+change, and a flapping reader cannot reset another token's pending change.
 
 This orders events once discovery has emitted them. Physical removals still awaiting the
 two-second polling loop or two-poll debounce are not yet queued, and can precede a grant
@@ -237,9 +246,13 @@ chooser requirements; [grant lifetime](SECURITY.md#grant-lifetime-and-delegation
 [`core/ui.h`](../src/core/ui.h) supplies borrowed `XccChooserView`
 snapshots and revisioned candidate IDs to the policy/provider bridge behind `XccUiV1`. GTK presentation lives in
 [`ui/chooser.c`](../src/ui/chooser.c), parented to a valid `parent_window` when available
-and unparented otherwise. Its contents follow the
+and unparented otherwise. The standalone chooser implements part of the
 [trusted-dialog requirements](SECURITY.md#trusted-dialog) and
 [accessibility criteria](PUBLIC-INTERFACE.md#accessibility-criteria).
+It lacks a fingerprint/details view, and full accessibility remains unverified.
+The versioned view's `tokens_reading` field marks refresh enumeration after insertion.
+When the list is empty, each backend shows a spinner and reading message with consent disabled.
+Refresh revisions preserve unchanged rows, selection and open details; see [SDK.md](SDK.md).
 
 Module acquisition handles contain a request token prefixed with `pkcs11a`. The chooser uses
 that prefix for neutral certificate-use wording because PKCS#11 searches do not establish
@@ -251,14 +264,18 @@ The prefix is caller-chosen and affects only display text; `reason` remains sepa
 [`core/pin.h`](../src/core/pin.h) supplies PIN interaction at first private-key use and for each
 operation on keys with `CKA_ALWAYS_AUTHENTICATE`. Context-specific login follows operation
 initialization; operations on the same session remain serialized during PIN entry.
-The core owns PIN policy and [`XccSecret`](../src/core/secret.h) storage; GTK and gcr
-providers remain in `src/ui/`. `XccPinView` carries sanitized display context, authentication
+The core owns PIN policy and [`XccSecret`](../src/core/secret.h) storage. The standalone
+GTK and gcr providers remain in `src/ui/`; desktop forks supply their own providers.
+`XccPinView` carries sanitized display context, authentication
 kind, busy state and token retry flags in show/update callbacks.
 Typed PIN warnings appear before input; Unlock submits directly. Only protected-path final tries
 use the warning reply for a single Continue before starting the reader; other protected-path
 entry starts automatically. The backend logs into its own session; protected-path tokens
 collect the secret on the token or reader. PIN memory, retries, serialization, cancellation and system-prompter transport
 are specified in [SECURITY.md](SECURITY.md#pin-handling).
+Workers refresh token-wide login with `C_GetSessionInfo`. Closing a grant closes its own
+device session without `C_Logout`, so other grants keep their login. Requests arriving during
+a cancelled login wait for cleanup before joining a new interaction.
 
 [`broker/operations.h`](../src/broker/operations.h) owns device operations. The
 [security checklist](SECURITY.md#missing-controls-and-evidence) records the consent gap.
@@ -268,8 +285,9 @@ A cached card login cannot authorize another application or purpose.
 
 Signing permits `RSA_PKCS1_V1_5`, `RSA_PSS` and `ECDSA`. The frontend intersects advertised
 mechanisms in its own order; the backend checks parameters against the key, including RSA-PSS
-hash, MGF and salt length. [Operation logs](SECURITY.md#logging) carry the session handle
-and the optional `operation_id` supplied with Sign.
+hash, MGF and salt length. [Operation logs](SECURITY.md#logging) carry the session handle.
+The frontend consumes public `operation_id` values and echoes them only to callers;
+backend logs show `operation=(none)`. Direct impl or SDK calls can supply an id to those logs.
 
 RSA-OAEP decryption code exists in the broker and client module but is unreachable through
 D-Bus. No interface exposes `Decrypt`.
@@ -282,6 +300,9 @@ backend code. NSS can also load the shared object directly.
 
 The module exposes one slot and a token labelled `Portal Certificate` while the portal answers
 `GetCapabilities`. With no portal or backend, it reports zero slots and `C_Initialize` succeeds.
+It watches the frontend's bus owner and retires grants when that owner disappears or changes.
+Capabilities are probed lazily, with backoff after failure, so the module can recover after a
+frontend restart without reinitialization.
 Credential-intent searches trigger `C_FindObjectsInit` acquisition; trust and unrelated-class
 searches do not. A cancelled chooser suppresses acquisitions across all search templates for ten seconds. `CKA_TOKEN == CK_TRUE` is ignored when
 classifying intent because all synthetic objects are persistent. Class-only enumeration needs
@@ -317,6 +338,8 @@ development has stopped.
 from digest length and returns raw `r || s`. OAEP is the only implemented decryption mapping,
 with no callable portal method. Unsupported mechanisms return `CKR_MECHANISM_INVALID`;
 unsupported functions, including token writes, return `CKR_FUNCTION_NOT_SUPPORTED`.
+PKCS#11 3.0 stubs use their declared signatures; interface descriptors are statically
+initialized for concurrent `C_GetInterfaceList` and `C_GetInterface` calls.
 
 Recursion is blocked by `certificate_module_is_portal_module()` in discovery, the module's
 refusal to run in either portal executable, and an `enable-in:` allowlist naming neither.
@@ -339,8 +362,8 @@ Removal behavior and polling limitations are in
 ### Logging
 
 [`redact.h`](../src/redact.h) defines the structured logging API.
-[SECURITY.md](SECURITY.md#logging) specifies permitted fields, redaction and session and
-operation ids for correlation.
+[SECURITY.md](SECURITY.md#logging) specifies permitted fields and redaction. Session handles
+can correlate public calls with backend logs; public operation ids do not reach the backend.
 
 ## Process model
 
@@ -350,9 +373,13 @@ The implementation has no idle-exit timer; [ROADMAP.md](ROADMAP.md) records life
 The frontend is the desktop's xdg-desktop-portal process. Applications use its public interface;
 [IMPL-INTERFACE.md](IMPL-INTERFACE.md) describes sender checks and same-UID limitations.
 
-GTK 4 supplies this backend's UI. A Qt/KDE implementation would be a separate backend
-package with its own `.portal` file, selected by `portals.conf`. KDE support and equivalent
-PIN integration remain unimplemented.
+GTK 4 supplies the standalone backend's UI. The [GNOME](https://github.com/sjtrotter/xdg-desktop-portal-gnome/tree/experimental/certificate)
+and [KDE](https://github.com/sjtrotter/xdg-desktop-portal-kde/tree/experimental/certificate)
+forks embed the SDK and supply native dialogs, selected through their `.portal` files and
+`portals.conf`. GNOME uses Shell's Gcr system prompt with a libadwaita fallback; KDE uses its
+own PIN dialog. Both have SoftHSM container coverage. GNOME also ran in a live GNOME 50 session
+with one PIV card; KDE has no live-session or card result. Their scoped PIN protection and
+the open process-hardening question are described in [SDK.md](SDK.md).
 
 ## Scope limits
 

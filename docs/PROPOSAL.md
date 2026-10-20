@@ -42,10 +42,10 @@ compositor are trusted. The user is present.
 The portal does not protect against a compromised application signing arbitrary data with a
 key it holds a grant for. A signature grant over a digest cannot attest what the digest is;
 the grant's lifetime is the limit (under the proposed changes below, the application
-instance's lifetime). The prototype now answers uniformly before consent for token presence
-and certificate-filter matches
-([#29](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/29)); this remains
-a requirement for the new interface.
+instance's lifetime). After successful enumeration, token presence and certificate-filter
+matches remain behind consent
+([#29](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/29)); the new interface
+must preserve that boundary. Enumeration timing and middleware failures remain observable.
 [SECURITY.md](SECURITY.md) has the full model,
 including PIN memory handling and the attacks a same-UID host process can still make.
 
@@ -53,10 +53,10 @@ including PIN memory handling and the attacks a same-UID host process can still 
 
 | Part | Location | Revision |
 |---|---|---|
-| Frontend (`org.freedesktop.portal.experimental.Certificate1`) | [sjtrotter/xdg-desktop-portal `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate) | `a2a13dd` |
+| Frontend (`org.freedesktop.portal.experimental.Certificate1`) | [sjtrotter/xdg-desktop-portal `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate) | `7a0ff38` |
 | Card library (`libxdp-certificate-core`), standalone GTK/libadwaita backend and PKCS#11 module | [sjtrotter/xdg-desktop-portal-certificate](https://github.com/sjtrotter/xdg-desktop-portal-certificate) | tag `proposal-2026-10` |
-| GNOME backend, `-Dcertificate=enabled` | [sjtrotter/xdg-desktop-portal-gnome `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-gnome/tree/experimental/certificate) on 50.0 | `121e2eb` |
-| KDE backend, `-DBUILD_CERTIFICATE_PORTAL=ON` | [sjtrotter/xdg-desktop-portal-kde `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-kde/tree/experimental/certificate) on v6.7.5 | `c7c5648` |
+| GNOME backend, `-Dcertificate=enabled` | [sjtrotter/xdg-desktop-portal-gnome `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-gnome/tree/experimental/certificate) on 50.0 | `28c933a` |
+| KDE backend, `-DBUILD_CERTIFICATE_PORTAL=ON` | [sjtrotter/xdg-desktop-portal-kde `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-kde/tree/experimental/certificate) on v6.7.5 | `1912e8b0` |
 
 The frontend follows the experimental convention merged in #2129 and is enabled with
 `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1`. The current interface:
@@ -202,7 +202,7 @@ leave the desktop backends with the dialogs that show what is being asked. It co
 own user unit, part of p11-kit, or part of gnome-keyring. It is not built yet
 ([#40](https://github.com/sjtrotter/xdg-desktop-portal-certificate/issues/40)).
 
-## Why not forward PKCS#11 to the sandbox
+## PKCS#11 forwarding
 
 Daiki Ueno's 2023 design (attached to #662) forwards p11-kit RPC to the sandbox after consent,
 with the token as the unit of access and a flag for destructive operations. It identified the
@@ -264,9 +264,8 @@ compromised application can still use every key and operation the token offers.
    renew without a prompt?
 6. Is there someone on the GNOME side and someone on the KDE side who could review the API?
 
-## Who does the work
+## Maintenance
 
 I will develop the frontend, the card library and the GNOME and KDE backends, and maintain them
 while the portal is experimental, as offered in
-[flatpak/flatpak#5756](https://github.com/flatpak/flatpak/issues/5756). I am asking for
-design review before further interface changes, not for someone to take it over.
+[flatpak/flatpak#5756](https://github.com/flatpak/flatpak/issues/5756).

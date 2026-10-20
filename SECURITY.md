@@ -13,6 +13,7 @@ See [the impl contract](docs/IMPL-INTERFACE.md) and
 [The threat model](docs/SECURITY.md#boundary-and-threat-model) describes sandbox containment
 and the limits of protection against hostile host processes.
 
-Report vulnerabilities privately to the repository owner. Design flaws are security issues;
+Email vulnerabilities privately to [Stephen J. Trotter](mailto:stephen.j.trotter@gmail.com).
+Design flaws are security issues;
 [ADR 0006](docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) records risks in
 PKCS#11 forwarding.

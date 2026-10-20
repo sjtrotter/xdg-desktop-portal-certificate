@@ -3,6 +3,10 @@
 Date: 2026-09-03
 Status: accepted (for the sketch) — this decision **corrects** [0001](0001-mediate-via-scoped-pkcs11-forwarding.md)
 
+> Status, 2026-10-20: The served facade and delegated-holder model below remain unimplemented.
+> Compatibility uses [ADR 0011](0011-client-side-pkcs11-module.md)'s client module; grants
+> belong to one D-Bus connection. See [PUBLIC-INTERFACE.md](../PUBLIC-INTERFACE.md).
+
 ## Context
 
 This project's founding claim was:
@@ -12,9 +16,8 @@ This project's founding claim was:
 > over a Unix socket, `p11-kit-client.so` loading it in the consumer). Consumers' existing TLS stacks
 > then work unchanged.
 
-**That claim is false**, and an independent review took it apart. This ADR records the ten failure
-modes, because they are the reason the architecture changed and because a future contributor will
-otherwise rediscover the original idea and think it obvious.
+Stock p11-kit forwarding does not enforce per-object grants. The following limitations led
+to brokered operations.
 
 ## The ten failure modes
 
@@ -95,9 +98,8 @@ limits, invalidation on removal and expiry, and filtering of the **PKCS#11 v3 in
 well as the v2 function list — which means all three of `C_GetFunctionList`, `C_GetInterfaceList`
 and `C_GetInterface` [[S16](../SOURCES.md)].
 
-**That facade is substantial, security-sensitive engineering — not plumbing.** It is a PKCS#11
-implementation facing a hostile peer over a wire protocol, it belongs in its own process, and it is
-the first thing that should be fuzzed. It is budgeted at 5–9 person-weeks on its own in
+The facade implements a security boundary and requires a separate process and RPC fuzzing.
+It is budgeted at 5–9 person-weeks on its own in
 [ROADMAP.md](../ROADMAP.md).
 
 ## Consequences
