@@ -10,7 +10,7 @@ path `/org/freedesktop/portal/desktop`. The frontend needs a configured backend 
 
 [`data/org.freedesktop.impl.portal.experimental.Certificate1.xml`](../data/org.freedesktop.impl.portal.experimental.Certificate1.xml)
 tracks that file on
-[experimental/integration](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration),
+[experimental/certificate](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate),
 apart from its provenance comment. Update the interface in the frontend branch and copy it here.
 The declared interface must match `data/certificate.portal`.
 
@@ -55,7 +55,9 @@ signal. A grant ends with `Session.Close()`. The client-side module serves PKCS#
 |---|---|
 | `app_id` | Derived by `xdp_invocation_get_app_info()`; empty when unidentified. |
 | `app_identity_level` | `sandboxed`, `host` or `unidentified`; the backend displays it. |
-| `lifetime` | Frontend-approved seconds, after the 3600 s ceiling; operations stop at its monotonic deadline. Backend teardown waits `CERTIFICATE_EXPIRY_GRACE_SECONDS` longer than the frontend timer. |
+| `lifetime` | Frontend-approved seconds, after the 3600 s ceiling; the backend starts its own monotonic lifetime at grant creation and stops operations at that deadline. Its teardown timer adds `CERTIFICATE_EXPIRY_GRACE_SECONDS` to that lifetime. |
+
+The frontend starts its own monotonic timer when it receives the acquisition result.
 
 There is no `app_display_name`: the backend may derive a human-readable name from `app_id`.
 There is no destination `context` option. The application-provided explanation is `reason`.
@@ -117,11 +119,11 @@ an unknown reason and sends `error`.
 
 | Reason | Backend behavior |
 |---|---|
-| `token_removed` | Detected removal, replacement, or a login failure indicating token loss. |
+| `token_removed` | Detected removal or replacement, or token loss reported while opening, logging in or signing. |
 | `policy` | Legal value; this backend does not emit it. |
 | `backend_gone` | Backend shutdown. |
 | `error` | Invalid internal reason value. |
-| `expired` | Backstop teardown after the frontend deadline plus `CERTIFICATE_EXPIRY_GRACE_SECONDS`. |
+| `expired` | Backstop teardown after the backend's monotonic lifetime plus `CERTIFICATE_EXPIRY_GRACE_SECONDS`. |
 
 Frontend loss or replacement closes old sessions without an invalidation signal; no remaining
 frontend owns those sessions. Backend bus-name loss is independently detected by the frontend.
@@ -169,12 +171,16 @@ frontend additions.
 close it. Paths include the caller's unique name and `session_handle_token`; a closed session
 can be replaced at the same path, while a live session prevents reuse.
 
-### Device rebinding
+### Acquisition and device lifetime
 
-The frontend permits one acquisition per session. The backend also handles reacquisition:
-`CertificateDevice` remembers its candidate and closes and logs out the old token session
-before opening a different one. Login state and key handles cannot carry over to a new
-certificate. Reacquisition resets the decryption budget and lifetime timer.
+The frontend and SDK permit one successful acquisition per session. The SDK also rejects an
+acquisition while another is pending. Failed or cancelled acquisitions can be retried on the
+same open session; cancellation before delivery releases any committed but undelivered grant.
+A new credential requires a new session. [SDK.md](SDK.md) defines these completion rules.
+
+Closing a grant closes only its device session, without token-wide `C_Logout`. Workers read
+`C_GetSessionInfo` to refresh login state and discard key handles after logout. Other grants
+on the same token keep their login until the last device session closes.
 
 `tools/certificate-e2e.py --regrant <key algorithm>` exercises a second frontend session and
 checks its signature against the second certificate. `tools/ui-smoke.sh` drives both prompts.
@@ -241,7 +247,8 @@ to the unique owner of `org.freedesktop.portal.Desktop`. Other senders receive
 Rejections use the cached owner without a bus round trip, so hostile messages cannot force a
 synchronous lookup per message. Acceptance resolves `GetNameOwner` directly: D-Bus does not
 order `NameOwnerChanged` against a former owner's queued messages. Unique names are never reused.
-A successor's first call can be refused before the owner watch updates; the frontend retries.
+A successor's first call can be refused before the owner watch updates. The frontend makes
+one backend call per request and returns failure if that call is refused.
 Owner change cancels old windows and invalidates old sessions before accepting the successor.
 No owner means every method is refused.
 
@@ -293,5 +300,7 @@ Chooser views and candidate rows, PIN views, warnings and candidate information 
 version and size; skip appended fields. Use `xcc_chooser_view_candidate()` for the producer's
 candidate-row stride. Core headers used by adapters and providers have C++ linkage guards.
 
-The internal headers remain uninstalled in this slice. Installation, dependency separation
-and the exported SDK belong to slice 6.
+The installed SDK exports `abi.h`, `core.h`, `ui.h`, `secret.h` and the optional GLib
+dispatcher bridge `dispatch-glib.h` through `xdp-certificate-core-0.pc`.
+Adapter, session and other private headers remain uninstalled. A `-Dservice=false` build
+skips GTK, libadwaita and gcr dependency lookups; [SDK.md](SDK.md) defines the public boundary.

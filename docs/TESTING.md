@@ -3,7 +3,11 @@
 Build checks, private-bus integration and software-token tests precede hardware tests.
 [Test coverage](../tests/README.md) lists registered tests and their prerequisites.
 Commands and dated evidence below are recorded from Fedora 44. Hardware tiers 3.1–3.4 have
-one PIV-card/reader result; remaining hardware checks are unrun.
+one PIV-card/reader result. The GNOME fork also ran in a live GNOME 50 session with OpenSC
+and an SCR 331 reader: test-client signing, Flathub Firefox sign-in, chooser hotplug, wrong
+PIN through the final-try warning, and Shell system prompting. KDE has SoftHSM container
+coverage only, with no live-session or card run. PIN-pad and Cancel-on-final-try checks remain
+unrun; §3 records the other hardware gaps.
 
 ## 0. Build and test
 
@@ -14,6 +18,7 @@ $ meson test -C build
 ```
 
 [tests/README.md](../tests/README.md) lists registered suites, coverage and skip conditions.
+The service build requires GLib 2.80+ and GTK 4.14+; the SDK-only build needs no GTK.
 
 ### Sanitizer build
 
@@ -231,7 +236,7 @@ $ tools/ui-smoke.sh                                        # RSA
 $ tools/ui-smoke.sh --key-algorithm EC                     # ECDSA, raw r||s
 $ tools/ui-smoke.sh --key-algorithm EC --der               # ECDSA, DER
 $ tools/ui-smoke.sh -- --key-algorithm RSA --regrant EC    # two sessions, two prompts
-$ tools/ui-smoke.sh --pin-prompt=system                    # the shell's prompt instead
+$ tools/ui-smoke.sh --pin-prompt=system                    # scripted Gcr test prompter
 ```
 
 `--pin-prompt=system` starts `build/tests/certificate-test-prompter` on the private bus,
@@ -273,8 +278,10 @@ reason for gcr and exercises KDE's native PIN dialog instead. `BACKEND_KIND=gtk`
 (the default) keeps the standalone backend. Logs stay in each printed `$LOGDIR`.
 
 For GNOME, install the public SDK and gcr-4 development files, then build the
-GNOME 50.0 fork with `meson setup build -Dcertificate=enabled` and
+GNOME 50.0 fork with `meson setup build -Dcertificate=enabled -Dtests=true` and
 `meson compile -C build -j1`. gcr-4 is required only with Certificate enabled.
+Tests default to disabled. `meson test -C build` with `-Dtests=true` covers dependency
+probing, dialog window groups, chooser content and settings-only startup.
 GNOME builds/tests can run on a host with its build dependencies; smoke runs use
 a Fedora 44 container with xdg-desktop-portal-devel and GNOME build dependencies.
 The SDK version must include
@@ -318,7 +325,7 @@ GNOME's `[Certificate] PinPrompt=auto|system|dialog` defaults to `auto` for real
 sessions. `auto` chooses Gcr only when `org.gnome.keyring.SystemPrompter` has an
 owner on the session bus, otherwise the backend's GTK dialog. `system` requires
 an owner. If absent, the backend reports `XCC_ERROR_NO_DISPLAY` to the SDK and
-`Sign` returns `no_display`.
+impl and public `Sign` return response `2` with `reason=no_display` while the grant is current.
 `dialog` always uses GTK.
 An open failure or prompter disappearance ends the request without switching UI.
 In a GNOME session the prompt belongs to gnome-shell, is session-modal, and is
@@ -344,13 +351,22 @@ the list (Cancel when empty); Down/Return selects and activates a row. Allow is
 the default widget. The PIN window focuses GtkPasswordEntry and makes Unlock the
 default widget; typing then Return submits once. Escape cancels either window.
 Protected-path devices have no PIN entry: login auto-starts after presentation,
-except FINAL_TRY requires explicit Continue; these hardware interactions, live
-hotplug/no-match states, and Wayland parenting need manual coverage beyond SoftHSM.
+except FINAL_TRY requires explicit Continue. PIN-pad interaction, no-match states and
+Wayland parenting still need manual coverage beyond SoftHSM; GNOME chooser hotplug has a
+live-session result. Both forks give identified callers an app-id label and format
+certificate details locally. GNOME gives each dialog its own window group.
+
+The standalone, GNOME and KDE choosers consume `tokens_reading` from the SDK. Insertion
+starts a refresh; an empty list shows a spinner and reading message with consent disabled.
+Reading transitions update the consent revision and retain unchanged rows, selection and
+open details. `chooser-policy`, `core-api`, SDK stride checks and the forks' UI tests cover
+this state; those checks do not establish hardware timing.
 
 GNOME preserves process dumpability/core limits. The dialog uses GTK secure entry;
 the system path receives the PIN typed in gnome-shell over Gcr's secret exchange
 and copies it directly into SDK XccSecret storage. See the fork's
-`src/certificate.md` for transient input-copy risk and the open process-hardening/helper question. The standalone GTK4 service
+[PIN protection documentation](https://github.com/sjtrotter/xdg-desktop-portal-gnome/blob/experimental/certificate/src/certificate.md)
+for transient input-copy risk and the open process-hardening/helper question. The standalone GTK4 service
 remains the fallback; xdg-desktop-portal-gtk (GTK3) needs its own UI adapter.
 
 ### Portal configuration
@@ -589,7 +605,7 @@ Expected output:
 ```
 === 0  the token is visible, and listing the database asks for nothing ===
 grants before=0 after=0
-nss-smoke: the token is there and neither listing acquired a credential
+nss-smoke: token present; listings acquired no credential
 
 === 1  certutil -K: the private key, and NO password callback ===
 < 0> rsa      6f5e40f180d8d48da9f587e6273bd8b87bb51327   Portal Certificate
@@ -980,7 +996,7 @@ to the application; see [PIN transport](SECURITY.md#pin-entry-and-transport).
 Press Return in an empty field: expect "Enter the PIN for this token.", no `pin-incorrect`
 and no consumed attempt. If cancellation lands after submission, expect `cancelled`; successful
 late login logs `login-ok detail=cancelled-after-login` and
-`login-ok detail=abandoning-cancelled-login`.
+`grant-invalidated detail=closing-session-after-cancelled-login`.
 
 A card can validate in tens of milliseconds, making post-submission cancellation impractical by
 hand. `/pin-system/shell-cancel-after-the-pin-was-submitted` tests it with a scripted prompter.
@@ -1139,9 +1155,12 @@ requested through `G_MESSAGES_DEBUG`, which works with or without `--verbose`. F
 `G_MESSAGES_DEBUG=Gdk` adds GDK output. Gcr debug output can contain secret-exchange payloads,
 including the encrypted PIN transfer.
 
-Sign operation logs include `session=<session_handle>`
-and `operation=<operation_id>` for correlation with the frontend journal. An absent
-`operation_id` appears as `(none)`. Both ids follow the [log field rules](SECURITY.md#logging).
+Sign operation logs include `session=<session_handle>`. Public calls show `operation=(none)`:
+the frontend consumes `operation_id`, strips it from impl options and echoes it only in the
+caller's response. Direct impl tests and SDK callers can supply an id for backend logs.
+Use the session handle for public-call correlation; both fields follow the
+[log field rules](SECURITY.md#logging). `grant-invalidated` includes the invalidation reason;
+an explicit close uses `closed-by-portal`.
 
 ## Troubleshooting
 
@@ -1149,10 +1168,10 @@ and `operation=<operation_id>` for correlation with the frontend journal. An abs
 |---|---|
 | Experimental Certificate interface absent | Frontend branch `experimental/certificate`, configured impl backend and startup `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1`; introspect the desktop path |
 | No frontend Certificate routing log | `.portal` interface, `XDG_DESKTOP_PORTAL_DIR` and `portals.conf` |
-| Backend disconnected without replying | Crash; hardening disables dumps. Use `--debug-allow-core` only for development debugging, using a disposable fixture |
+| Backend disconnected without replying | Inspect its log for a crash. Standalone hardening disables dumps; `--debug-allow-core` is for development with a disposable fixture. GNOME and KDE preserve crash reporting |
 | Wrong window theme | Compare `--verbose` `colour-scheme` with `gsettings get org.gnome.desktop.interface color-scheme`; inspect `follow_colour_scheme()` if they disagree |
 | `--pin-prompt=system` requires gcr-4 | Rebuild with `-Dgcr=enabled`, or use `--pin-prompt=gtk` or `auto` |
-| System prompt unavailable | Check the prompter on the backend's bus; failure is `no_display`, with `pin-prompt-failed detail=system-prompter-unreachable`. A private bus may activate a fallback, but has no shell |
+| System prompt unavailable | Check the prompter on the backend's bus. Impl and public `Sign` return `2` with `reason=no_display` while the grant is current. The standalone provider logs `pin-prompt-failed detail=system-prompter-unreachable`. Standalone `auto` can activate a fallback on a private bus; GNOME `auto` requires an existing owner |
 | Software token skipped | Pass `--allow-software-tokens` or explicit `--module` |
 | Missing fixture marker | Existing directory is refused; remove it manually only if disposable |
 | Marker mode 644 | Set a valid fixture marker to 0600 or recreate with its script |

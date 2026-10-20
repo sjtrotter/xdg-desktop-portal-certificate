@@ -4,6 +4,10 @@ Date: 2026-09-03
 Status: **superseded in part** by [0006](0006-failure-modes-of-naive-p11kit-forwarding.md) and
 [0007](0007-brokered-operations-are-the-core.md)
 
+> Status, 2026-10-20: The endpoint sketch below was never implemented. PKCS#11 consumers
+> use the client module; see [ADR 0011](0011-client-side-pkcs11-module.md) and
+> [PUBLIC-INTERFACE.md](../PUBLIC-INTERFACE.md).
+
 ## Context
 
 The founding idea of this project was an analogy. `org.freedesktop.portal.Camera` does not hand an
@@ -52,10 +56,6 @@ it into two statements:
 2. **Any PKCS#11 surface is a broker-controlled synthetic facade**, requested explicitly by a
    consumer that needs it, never the real token forwarded, and never described as scoped unless it
    actually enforces object and operation scoping at every entry point.
-
-"Scoped" is a claim about enforcement, not about a command line. A design that hides objects during
-enumeration and forwards everything else is not scoped; it is a filtered directory listing on a
-shared drive.
 
 ## Consequences
 

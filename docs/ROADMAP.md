@@ -1,7 +1,7 @@
 # Roadmap
 
 [README.md](../README.md#status) records experimental implementation status.
-The frontend is the xdg-desktop-portal fork's `experimental/integration` branch;
+The frontend is the xdg-desktop-portal fork's `experimental/certificate` branch;
 [ADR 0010](decisions/0010-backend-only-frontend-lives-upstream.md) assigns ownership and
 [UPSTREAMING.md](UPSTREAMING.md) lists proposal work.
 
@@ -50,7 +50,8 @@ Interface stability requires evidence for:
 2. A real WebKitGTK client-certificate handshake. The module must be configured in each process
    that uses GLib's PKCS#11 URI constructor, which has no module parameter. Recorded once
    (2026-09-05) through the now-stopped web-auth backend.
-3. Wrong PIN and final retry on hardware that can be unblocked.
+3. Wrong PIN and final retry on hardware that can be unblocked. The GNOME fork's dialog
+   passed through the final-try warning on 2026-10-19; Cancel on the final try remains unrun.
 4. Protected authentication path on a PIN-pad reader without an emulated entry.
 5. Card removal during signing.
 6. Simultaneous credentials in one consumer process.
@@ -90,10 +91,13 @@ Browser experiments in the test record do not establish packaging or general bro
 ## Phase 2: packaging and compatibility
 
 Package the backend and module, test GNOME and KDE on Wayland including parenting and activation,
-and confirm browser consumers without manual setup. A KDE chooser and PIN implementation
-would be a separate backend package with its own `.portal` file
-([ADR 0008](decisions/0008-build-to-the-upstream-shape.md)); no KDE system-prompter equivalent
-is integrated here.
+and confirm browser consumers without manual setup. The [GNOME](https://github.com/sjtrotter/xdg-desktop-portal-gnome/tree/experimental/certificate)
+and [KDE](https://github.com/sjtrotter/xdg-desktop-portal-kde/tree/experimental/certificate)
+forks implement native backends with their own `.portal` files. Both have SoftHSM container
+coverage. GNOME also ran in a live GNOME 50 session with one PIV card, including test-client
+signing, Flathub Firefox sign-in, chooser hotplug, wrong PIN through the final-try warning and
+Shell system prompting. KDE has no live-session or card run and uses its own PIN dialog.
+PIN-pad and Cancel-on-final-try hardware checks remain open.
 
 A served synthetic facade is optional future work. It needs an `OpenPkcs11Endpoint` proposal in
 the frontend, endpoint versioning and capabilities, synthetic handle mapping, administrative

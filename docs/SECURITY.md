@@ -7,7 +7,7 @@ The implementation checklist distinguishes controls from requirements and untest
 The [architecture](ARCHITECTURE.md#responsibilities) assigns identity and policy to
 xdg-desktop-portal and token interaction to this backend; [README.md](../README.md) summarizes
 status. The [impl contract](IMPL-INTERFACE.md) separates those processes. Frontend controls
-refer to the fork's `experimental/integration` branch.
+refer to the fork's `experimental/certificate` branch.
 
 [PUBLIC-INTERFACE.md](PUBLIC-INTERFACE.md#contract) defines the public bus contract and
 experimental export conditions.
@@ -29,7 +29,7 @@ experimental export conditions.
 | Externally sourced display text is sanitized and capped, including combining-mark runs | `certificate_display_text()` in `src/core/identity.c`; `test-redact.c`. Applies to app names and ids, subjects, issuers, token labels, readers and `reason` |
 | Expired certificates remain selectable and have textual warnings | `src/tokens/filter.c`, `src/core/chooser-format.c`, `src/ui/chooser.c`; `test-filter.c` |
 | One candidate still requires consent | `src/core/acquire.c` has no chooser-bypass path |
-| Reacquisition rebinds the device and discards old login and key handles | `certificate_device_open()` in `src/broker/device.c`; `test-broker-regrant.c` verifies against the new certificate and `test-broker-device.c` checks device state |
+| One successful acquisition per session; concurrent acquisitions fail | `src/core/acquire.c`; `test-core-api.c` checks overlapping requests, post-grant refusal and release of a committed grant when cancellation suppresses delivery |
 | Frontend departure cancels windows and answers pending calls `owner_gone` | `cancel_transactions()` in `src/certificate-impl.c`; `test-impl-dbus.c` |
 | PIN handling stays outside Certificate interfaces | `src/core/pin.c` takes a login callback. GTK collects locally; system prompting delivers an encrypted exchange from the shell. See PIN handling below |
 | Prompt selection is explicit and logged | `certificate_pin_set_prompt_kind()` in `src/ui/pin-backends.c`, `src/ui/pin-gtk.c`, `src/ui/pin-system.c`; `--pin-prompt=auto|gtk|system`, `pin-prompt-selected detail=...`; `test-pin-system.c` and `tools/ui-smoke.sh --pin-prompt=system` |
@@ -38,9 +38,9 @@ experimental export conditions.
 | Login timeout hides the prompt and abandons late success | `on_login_timeout()`, `CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT`; 60 s default, `--login-timeout 0` disables; `/pin-system/login-timeout`. The caller still waits for the module to return |
 | Owned PIN pages are aligned, locked where possible, non-dumpable and wiped | `XccSecret` in `src/core/secret.c`: `mlock()`, `MADV_DONTDUMP`, `explicit_bzero()`. Wipe precedes completion; lock failure warns once without refusing login |
 | Worker owns the submitted PIN page | `src/core/pin.c` transfers `XccSecret` without copying; `test-cancellation.c` checks the worker's PIN after window cancellation |
-| In-flight login cancellation hides UI and defers completion until worker return | `pin_prompt_finish()`; `test-cancellation.c` under ASan |
+| Shared user-login request cancellation completes that request while worker cleanup continues; cancelling the last waiter also hides the prompt | `waiter_cancelled_idle()` in `src/broker/operations.c`; PIN-dialog cancellation and login timeout still await worker return in `src/core/pin.c`; `test-core-api.c`, `test-cancellation.c`, with ASan in sanitizer builds |
 | Cancelled successful login closes its session before queued requests reopen | `on_pin_done()` and `finish_login()` in `src/broker/operations.c`; `test-core-api.c` checks a request joining during cancelled login |
-| Core dumps and ordinary same-UID attach are disabled | `harden()` in `src/main.c`: `PR_SET_DUMPABLE(0)`, `RLIMIT_CORE 0`; `--debug-allow-core` disables this for development and is absent from installed activation |
+| Standalone service disables core dumps and ordinary same-UID attach | `harden()` in `src/main.c`: `PR_SET_DUMPABLE(0)`, `RLIMIT_CORE 0`; `--debug-allow-core` disables this for development and is absent from installed activation. Embedded desktop forks use scoped protection; see Memory and process hardening |
 | Bus-name replacement requires opt-in | `--allow-replacement` and `--replace` are separate; installed service passes neither. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) and [TESTING.md](TESTING.md) §3.8 |
 | PINs are never persisted | No keyring entry, configuration key or retention option |
 | Protected authentication path uses a null PIN and no editable field | `src/ui/pin-gtk.c`, `src/ui/pin-system.c`; system tests check zero password rounds |
@@ -53,7 +53,7 @@ experimental export conditions.
 | One prompt permits at most three attempts | `PIN_MAX_ATTEMPTS`; `/pin-system/attempt-cap`. No per-caller rate limit |
 | Retries require user action | `src/core/pin.c`; `test-broker-device.c` preserves `PIN_INCORRECT` |
 | Prompts are serialized process-wide; operations on one session share a prompt | Queue in `src/core/pin.c`, waiter list in `src/broker/operations.c` |
-| Shared prompt lifetime follows live session waiters | `waiter_cancelled_idle()`, `login_cancellable` in `src/session-impl.h`; cancelling one operation leaves others waiting, cancelling the last closes UI; `test-cancellation.c` |
+| Shared prompt lifetime follows live session waiters | `waiter_cancelled_idle()`, `login_cancellable` in `src/core/session-private.h`; cancelling one operation leaves others waiting, cancelling the last closes UI; `test-cancellation.c` |
 | Login happens at first private-key use | `src/broker/operations.c`; UI smoke tests |
 | Mechanisms and parameters are checked against the key | `src/broker/mechanism.c`, `test-mechanism.c`; PSS `emLen >= hLen + sLen + 2` uses 64-bit arithmetic to avoid 32-bit overflow near `G_MAXUINT32`; `test-discovery-limits.c` covers bounds |
 | Signing requires the named hash's digest length | `src/broker/mechanism.c`, `test-mechanism.c` |
@@ -61,7 +61,7 @@ experimental export conditions.
 | Tokens are resolved by manufacturer, model, serial and label | `certificate_tokens_open_session()` in `src/tokens/discovery.c`; slot number alone is insufficient |
 | Tokens without serials are refused during acquisition | `finish_acquire()` in `src/core/acquire.c` |
 | Grant expiry uses a monotonic clock | `src/core/session.c`; closed, expired and cancelled state is checked before and under the device lock; `test-broker-regrant.c` checks clock behavior |
-| Detected token removal invalidates that token's grants | `token_event()` in `src/core/context.c` |
+| Detected token removal invalidates that token's grants | `token_event()` in `src/core/context.c`; token loss during signing also invalidates the session; `test-core-api.c` covers removal without a poll event |
 | Frontend disappearance or replacement closes its grants | `on_frontend_vanished()`, `set_frontend_owner()` |
 | Shutdown signals `backend_gone` and flushes; owner replacement closes silently | `src/main.c`, `src/certificate-impl.c`; `test-impl-dbus.c`. Successor knows no old sessions; pending calls get `owner_gone`, which is not a signal reason |
 | Invalidation validates five reasons | `src/core/session.c`: `expired`, `token_removed`, `policy`, `backend_gone`, `error`; unknown internal value logs a critical and sends `error` |
@@ -85,6 +85,8 @@ stale secrets are consumed and wiped. `ui/legacy-bridge.c` retains UI-local PIN 
 for GTK/gcr, rather than exposing a worker's `PinPrompt` across threads.
 Core waits for a provider readiness acknowledgement before protected-path login or a
 final-attempt warning. GTK acknowledges after presentation and gcr after asynchronous open.
+Device and login snapshots reach the coordinator from workers. Stale snapshots are refreshed
+on workers before prompting; cancellation and expiry never wait for `device_lock`.
 Acquisition drains already emitted presence events before accepting consent, including when
 no refresh is active. Polling/debounce can still delay physical-removal detection; token
 identity is independently resolved again before private-key session opening.
@@ -116,10 +118,11 @@ permit unloading the core DSO. The core links with `-Wl,-z,nodelete` to prevent
 | Per-operation signing consent | Consent is per grant for every purpose; a separate signing confirmation is unimplemented |
 | Chain construction | Empty chain and `leaf_only` |
 | Stronger host access policy | No shipped D-Bus policy separating the portal from other same-UID processes |
+| Desktop chooser sandbox label | The GNOME and KDE forks show app ids and host/unknown warnings, but omit an explicit sandbox-status label for sandboxed callers. The trusted-dialog requirement below remains open for those adapters |
 | Guaranteed wipe of every widget copy | GTK uses secure entry memory where supported but makes no guarantee for input-method or layout copies; the system path moves those copies to the shell |
-| Interrupting `C_Login` | PKCS#11 provides no cancellation; the attempt proceeds and completion waits |
+| Interrupting `C_Login` | PKCS#11 provides no cancellation; the attempt proceeds. Shared user-login request cancellation completes that request while worker cleanup continues; PIN-dialog cancellation and login timeout still await worker return |
 | `Decrypt` | No method exposes it. Internal RSA-OAEP code uses indistinguishable errors and a 32-attempt grant budget (`CERTIFICATE_MAX_DECRYPTS_PER_GRANT`); `test-broker-decrypt.c` covers it. PKCS#1 v1.5 decryption is refused [[S49](SOURCES.md), [S50](SOURCES.md)] |
-| Hardware breadth | Tiers 3.1–3.4 passed on one PIV card/reader on 2026-09-04. One-PIN-per-grant, wrong PIN and `FINAL_TRY`, removal during an operation, PIN-pad readers and additional cards remain unrun |
+| Hardware breadth | One PIV card, OpenSC and SCR 331 reader on GNOME 50. Tiers 3.1–3.4 passed on 2026-09-04; the GNOME fork's dialog passed wrong PIN through the final-try warning on 2026-10-19. One-PIN-per-grant, Cancel on the final try, removal during an operation, PIN-pad readers and additional cards remain unrun. KDE has container coverage only, with no live-session or card run |
 
 ## Boundary and threat model
 
@@ -213,8 +216,9 @@ The system path moves entry, input method and layout copies into the shell. It s
 PIN to this backend because `C_Login` requires it. gcr's copy belongs to `GcrPrompt`; closing
 and releasing it on hide, cancel or timeout releases that copy even while a worker is blocked.
 The worker owns a separate page and needs no live widget or prompt object. A requested system
-prompter that cannot be reached fails with `no_display` and a journal reason; there is no silent
-GTK fallback after selection.
+prompter that cannot be reached reports `XCC_ERROR_NO_DISPLAY` through the SDK. Impl and public
+`Sign` return response `2` with `reason=no_display` while the grant remains current.
+The selected provider never silently falls back to GTK.
 
 Common code in `src/core/pin.c` controls attempt limits, protected-path confirmation, flag
 refresh, queueing, deferred cancellation, timeouts and abandonment. Entry implementations collect characters and
@@ -252,6 +256,16 @@ before GTK initialization to avoid failed Settings calls. `gdb` attach also fail
 files. A tracer attached before hardening, `CAP_SYS_PTRACE`, or different kernel policy remains
 outside this mitigation.
 
+The embedded [GNOME](https://github.com/sjtrotter/xdg-desktop-portal-gnome/blob/experimental/certificate/src/certificate.md)
+and [KDE](https://github.com/sjtrotter/xdg-desktop-portal-kde/blob/experimental/certificate/autotests/README.certificate.md)
+backends preserve process dumpability and core limits for the other portals they host.
+They protect retained PINs in `XccSecret`; GNOME uses Gcr or GTK secure entry, and KDE's native
+field writes directly to the secret. Transient toolkit and input-stack copies can enter crash
+reports, and same-user debuggers can read live PINs. Process hardening would remove crash
+diagnostics for every portal and affect launched children; KDE also needs normal dumpability
+for file-chooser path translation. A separate hardened PIN/card service remains an open design
+question; [SDK.md](SDK.md) describes the embedding contract.
+
 Color-scheme behavior was measured on Fedora 44 with `prefer-dark`: portal fallbacks alone gave
 a light window under hardening and a dark one with `--debug-allow-core`. The backend retains
 hardening and reads `org.gnome.desktop.interface color-scheme` through GSettings/dconf, feeds
@@ -264,7 +278,8 @@ logs `colour-scheme detail=dark|light`.
 The broker logs into its own session at first private-key use. PKCS#11 shares login among an
 application's sessions, without transferring that state across a forwarding boundary. Workers
 read `C_GetSessionInfo` before login and private-key use; a grant's cached state cannot establish
-token login. Closing a grant closes only its PKCS#11 session. Closing the last application
+token login. Observed logout discards cached private-key handles. Closing a grant closes only
+its PKCS#11 session and never calls token-wide `C_Logout`. Closing the last application
 session ends token login. Tokens or middleware may cache authentication outside this service;
 the backend cannot guarantee that card, firmware or driver forgets authentication.
 
@@ -308,11 +323,12 @@ With no usable display or forbidden interaction, calls fail with `no_display` or
 `interaction_required`. No path reads a PIN from stdin. A headless trusted-agent protocol
 would need separate configuration and review.
 
-A submitted `C_Login` cannot be withdrawn. Cancellation hides the prompt but completion waits
-for its worker. `--login-timeout` (60 s, `0` disables) hides it, logs `pin-timeout` and records
-`CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT`; the caller still waits for module return. Late success
-is abandoned by closing that grant's device session on a worker. An attempt already submitted
-to the token is still spent.
+A submitted `C_Login` cannot be withdrawn. During shared user login, request cancellation
+completes that request while worker cleanup continues; cancelling the last waiter also hides
+the prompt. PIN-dialog cancellation and login timeout still await worker return.
+`--login-timeout` (60 s, `0` disables) hides the prompt, logs `pin-timeout` and records
+`CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT`. Late success is abandoned by closing that grant's
+device session on a worker. An attempt already submitted to the token is still spent.
 
 ## Grant scoping
 
@@ -372,7 +388,8 @@ possibly repeatedly without user action. Fork safety is unsupported
 ([0011](decisions/0011-client-side-pkcs11-module.md)); unload and reinitialization have tests.
 
 `tests/fuzz-der.c` exercises TLV, DigestInfo, arbitrary certificate objects and hostile attribute
-templates. It always builds as a Meson corpus replay; clang can also build a libFuzzer target.
+templates. The service build registers it as a Meson corpus replay; clang can also build a
+libFuzzer target.
 Replay uses ASan/UBSan only in a sanitizer build:
 
 ```console
@@ -401,17 +418,20 @@ resolution.
 
 ### Search intent
 
-Credential acquisition at `C_FindObjectsInit` requires the contract's `CKA_LABEL`, a
+By default, credential acquisition at `C_FindObjectsInit` requires the contract's `CKA_LABEL`, a
 `CKA_ID` issued during this module initialization, or `CKA_CLASS == CKO_PRIVATE_KEY`.
-`CKA_SIGN`, `CKA_DECRYPT` and persistent `CKA_TOKEN` modifiers do not change intent. Without a grant, issuer, subject, serial,
-trust-category, class-only and empty searches return no objects and never prompt. With a grant,
-normal template matching applies. Unknown or malformed IDs cannot trigger acquisition, even
-with the contract label. `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` or
-`x-init-reserved: enumerate=1` in the p11-kit module file permits class-only acquisition.
+`CKA_TOKEN == CK_TRUE` is ignored. `CKA_SIGN` and `CKA_DECRYPT` preserve private-key intent
+but prevent otherwise untargeted certificate/public-key searches from qualifying as enumeration.
+Issuer, subject, serial and trust-category attributes alone do not trigger acquisition. A matching
+label or issued ID can; a mismatched label or invalid/unknown ID prevents acquisition.
+Certificate/public-key class-only, token-only and empty searches acquire only when enumeration
+is enabled with `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` or `x-init-reserved: enumerate=1`
+in the p11-kit module file. With a grant, normal template matching applies.
 A cancelled chooser suppresses acquisition for ten seconds across all templates in the process.
 `portal_template_intent()` and `test-module.c` define this gate;
 `tools/module-smoke.sh` phase 0 checks token-only `p11tool --list-all-certs` and
-`pkcs11-tool --list-objects` produce no `grant-created` events.
+`pkcs11-tool --list-objects` return no objects and leave `chooser-shown` counts unchanged.
+Consumer failures also fail the check, except p11tool's explicit no-matching-objects result.
 
 The 2026-09-05 live run measured GnuTLS server-chain verification searches reaching this module
 before a client-certificate challenge [[S19](SOURCES.md)]. That is evidence from one system;
@@ -435,14 +455,19 @@ message; [0006](decisions/0006-failure-modes-of-naive-p11kit-forwarding.md) fail
 
 Detected removal cancels operations, closes every grant on the token and emits
 `SessionInvalidated(..., "token_removed")`; the frontend emits owner-only `GrantInvalidated`
-and closes the Session. Discovery polls every two seconds and requires two consecutive changed
-observations. Invalidation can lag by seconds; removal and reinsertion between polls can be missed.
+and closes the Session. Discovery polls every two seconds and requires two consecutive matching
+presence observations per token before publishing a change. A flapping reader cannot reset
+another token's pending change. Invalidation can lag by seconds; removal and reinsertion between
+polls can be missed. A token-removal error during signing invalidates the session immediately,
+without waiting for a poll event.
 
 The client module advertises `CKF_REMOVABLE_DEVICE`. On the next session lookup, slot-info
 query, nonblocking slot-event poll or session open after a grant ends, it retires all existing
 PKCS#11 sessions. `C_GetSessionInfo` and supported operations on those handles return
 `CKR_SESSION_HANDLE_INVALID` permanently. This applies to every `GrantInvalidated` reason,
 portal `Session.Closed` and local `expires_at` expiry; all can invalidate cached object handles.
+Frontend owner loss or replacement also retires the grant. The module reprobes capabilities
+lazily and retries failed probes with backoff, allowing recovery without `C_Finalize`.
 The next credential search in a new session requires fresh consent. Issued IDs and the
 cancelled-chooser throttle survive this transition.
 
@@ -488,9 +513,13 @@ across all purposes and filters. It must only preselect and cannot bypass consen
 
 The frontend records caller decisions and backend selection; the backend records card events.
 Sign operation logs in [`src/broker/operations.c`](../src/broker/operations.c) include the
-session handle and the caller's optional `operation_id` for correlation with the frontend
-journal. An absent operation id is logged as `(none)`.
+session handle. The frontend consumes public `operation_id` values and echoes them only to
+the caller; it strips them from impl calls. Public signing therefore logs `operation=(none)`
+in the backend. Direct impl tests or SDK callers can supply an id for backend logs; that
+does not establish correlation for public calls. Use the session handle to join those logs.
 PIN grant logs carry the same session handle.
+`grant-invalidated` records the invalidation reason, including `token_removed` or `expired`;
+explicit session close records `closed-by-portal`.
 [`src/redact.c`](../src/redact.c) escapes control characters and caps each id at 128 input
 bytes, followed by `...` when truncated.
 Allowed fields are counts, stable reason codes, purposes, supplied identity and level, ids,

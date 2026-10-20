@@ -6,8 +6,8 @@ in the local project record. Issue states below describe dated evidence.
 ## Frontend location and convention
 
 The frontend fork is
-[github.com/sjtrotter/xdg-desktop-portal](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration),
-branch `experimental/integration`. Git remotes are
+[github.com/sjtrotter/xdg-desktop-portal](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate),
+branch `experimental/certificate`. Git remotes are
 <https://github.com/sjtrotter/xdg-desktop-portal.git> for the fork and
 <https://github.com/flatpak/xdg-desktop-portal.git> for upstream `main`.
 [ADR 0010](decisions/0010-backend-only-frontend-lives-upstream.md) assigns frontend ownership.
@@ -27,11 +27,14 @@ and documents `version` and the `Certificate1` opt-in.
 The Certificate series includes shared request/session support: `xdp_session_dex_close()`,
 a fix to `xdp_session_dex_store_new_wrapped()` to read the session field instead of its address,
 a request-closed accessor to prevent committing state after cancellation, and impl-request
-closure. The frontend stores grant state on sessions.
-Consult `experimental/integration` for the current patch series.
+closure. The frontend stores grant state on sessions. It keeps a session path claimed until
+`session-closed` handlers finish, so a pending Close cannot remove a replacement session.
+If an acquisition request closes after the backend commits its grant, the frontend closes
+the session to revoke that undelivered grant.
+Consult `experimental/certificate` for the current patch series.
 
 Frontend validation uses its Meson integration/unit tests, `tests/test_certificate.py`,
-`tests/test_webauthentication.py`, gitlint and Black. This tree cannot establish their current
+gitlint and Black. This tree cannot establish their current
 results; backend commands are in [TESTING.md](TESTING.md).
 
 ## Backend layout
@@ -93,7 +96,10 @@ Follow frontend contribution checks and the coding-agent attribution format
 
 Recorded backend/frontend evidence in [TESTING.md](TESTING.md): one PIV card in one reader
 on 2026-09-04, tiers 3.2–3.4 (tier 3.1 requires no frontend); WebKitGTK on 2026-09-04/05,
-including a live Entra ID sign-in; Firefox on 2026-09-06.
+including a live Entra ID sign-in; Firefox on 2026-09-06; and a live GNOME 50 run of the
+GNOME fork with one PIV card, including Flathub Firefox sign-in, chooser hotplug, wrong PIN
+through the final-try warning and Shell system prompting. KDE has SoftHSM container coverage
+only, with no live-session or card run. PIN-pad and Cancel-on-final-try checks remain unrun.
 
 ## Prior art and related discussion
 

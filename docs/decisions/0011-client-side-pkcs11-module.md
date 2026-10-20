@@ -7,6 +7,28 @@ Status: accepted, implemented — this decision **supersedes the compatibility h
 
 Superseded in part by [ADR 0012](0012-merged-experimental-portal-convention.md).
 
+> **Status, 2026-10-20.** The implementation claims below are superseded where noted:
+>
+> - Consumers need module registration. Configured p11-kit consumers can load it; NSS needs
+>   explicit profile registration or distribution integration. See
+>   [NSS loading](../SOURCES.md#s54-firefox-and-thunderbird-load-pkcs11-modules-themselves-libreoffice-and-evolution-do-not-they-use-nss-and-reach-a-card-only-where-the-distribution-has-made-nss-load-p11-kit-proxyso).
+> - Current grants permit signing only. The `C_Decrypt` mapping is dormant; neither
+>   Certificate interface exposes `Decrypt`. The current names are in
+>   [PUBLIC-INTERFACE.md](../PUBLIC-INTERFACE.md).
+> - The facade identity comparison, in the table and paragraph below, is incorrect. Both
+>   designs identify the application through its public acquisition request. The client
+>   module avoids the facade's fd relay and separate RPC endpoint. See
+>   [the deferred endpoint](../ARCHITECTURE.md#deferred-endpoint).
+> - Corpus replay requires the service build; ASan/UBSan runs only when configured.
+>   See [the sanitizer procedure](../TESTING.md#sanitizer-build).
+> - Frontend and broker authorization checks protect portal assets. Module parser and
+>   lifecycle hardening also remain necessary to protect the consumer's process, contrary
+>   to the advice to harden the frontend and broker "instead" below. See
+>   [the module threat model](../SECURITY.md#client-side-pkcs11-module).
+> - WebKitGTK still shows two choosers, one for each process's acquisition. Only the
+>   unrelated third chooser from server-chain enumeration was removed. See
+>   [WebKitGTK evidence](../TESTING.md#255-webkitgtk-evidence).
+
 ## Context
 
 [0006](0006-failure-modes-of-naive-p11kit-forwarding.md) killed token-scoped forwarding.
@@ -37,9 +59,7 @@ module directory. It presents one slot, one token (`Portal Certificate`), and �
 chosen one — one certificate, its public key and its private key. `C_Sign` becomes
 `org.freedesktop.portal.Certificate.X1.Sign`. `C_Decrypt` becomes `Decrypt`.
 
-### Why this is not the facade under a different name
-
-The facade was a server. This is a client.
+### Comparison with the facade
 
 | | Facade (0007, deferred) | This module |
 |---|---|---|
@@ -67,7 +87,7 @@ authority. The threat model is smaller than the facade's. It is not absent.
 
 What it has to answer:
 
-1. **The portal's reply is the hostile input, and it is only trusted-ish.** `certificate_der`,
+1. Treat portal replies as untrusted parser input. `certificate_der`,
    `chain_der`, `key_type`, `key_curve` and `supported_mechanisms` arrive over D-Bus from
    `org.freedesktop.portal.Desktop` and are parsed in the consumer's process by `objects.c` and
    `der.c`. The frontend is a trusted service and the bus authenticates it, but "trusted" is a
@@ -112,7 +132,7 @@ Here the frontend derives the identity of the process the module is loaded into,
 application, by the ordinary `xdp_invocation_get_app_info()` route. The chooser names the right
 application because it is the one that called.
 
-### What this does NOT solve
+### Limits
 
 - **The application process holds a PKCS#11 handle to a synthetic token.** It holds no key, no PIN
   and no card. `CKA_VALUE` on the private key answers `CKR_ATTRIBUTE_SENSITIVE`; there is nothing
@@ -293,31 +313,31 @@ module. The live Entra run on 2026-09-05 measured the consequence: a chooser two
 the sign-in window opened, before any client-certificate
 challenge, for a certificate nothing had asked for.
 
-**A search now acquires a credential only when it can mean nothing else.** The table is in
-`portal_template_intent()` in `src/module/objects.c`:
+The following search templates may trigger credential acquisition.
+`portal_template_intent()` in `src/module/objects.c` implements the gate:
 
 | Template | Meaning | Acquires? |
 |---|---|---|
 | `CKA_LABEL == "Portal Certificate"` | the object label of the shared contract; what a PKCS#11 URI naming an object imports by | yes |
 | a `CKA_ID` issued during this module initialization | a previously exposed credential | yes |
 | `CKA_CLASS == CKO_PRIVATE_KEY`, alone or with `CKA_SIGN`/`CKA_DECRYPT` | nothing on a server's chain is a private key | yes |
-| `CKA_CLASS` alone (`CKO_CERTIFICATE`, `CKO_PUBLIC_KEY`), or an empty template | "list what is on this token" | only with the opt-in below |
-| `CKA_ISSUER`, `CKA_SUBJECT`, `CKA_SERIAL_NUMBER`, `CKA_TRUSTED`, `CKA_CERTIFICATE_CATEGORY`, `CKA_TOKEN == CK_FALSE`, a `CKA_LABEL` that is not ours, `CKO_DATA`, a malformed `CKA_CLASS` | somebody else's certificate, or nothing this token has | **never** |
+| `CKA_CLASS` alone (`CKO_CERTIFICATE`, `CKO_PUBLIC_KEY`), a token-only search (`CKA_TOKEN == CK_TRUE`), or an empty template | "list what is on this token" | only with the opt-in below |
+| `CKA_ISSUER`, `CKA_SUBJECT`, `CKA_SERIAL_NUMBER`, `CKA_TRUSTED`, `CKA_CERTIFICATE_CATEGORY`, `CKA_TOKEN == CK_FALSE`, `CKO_DATA`, a malformed `CKA_CLASS` | attributes that do not name a credential | only with a matching label or issued ID |
+| a mismatched `CKA_LABEL` or invalid/unknown `CKA_ID` | excludes credential acquisition | never |
 
-`CKA_TOKEN == CK_TRUE` is not in the table at all: it is **passed over**, exactly as `CKA_SIGN` and
-`CKA_DECRYPT` are, and the rows are decided on what is left. It says the object is persistent, which
-all three of this token's objects are, and it names nothing. Counting it was the whole of the
-2026-09-06 NSS defect: NSS attaches it to every search it makes — `[CKA_TOKEN, CKA_CLASS]` for
+`CKA_TOKEN == CK_TRUE` is ignored when classifying intent because all three synthetic objects
+are persistent. `CKA_SIGN` and `CKA_DECRYPT` preserve private-key intent but prevent otherwise
+untargeted certificate/public-key searches from qualifying as enumeration. Counting
+`CKA_TOKEN == CK_TRUE` was the whole of the 2026-09-06 NSS defect: NSS attaches it to every
+search it makes — `[CKA_TOKEN, CKA_CLASS]` for
 `PK11_ListCertsInSlot()`, `[CKA_CLASS, CKA_TOKEN]` for `PK11_ListPrivKeysInSlot()` — so **both** of
-those landed on the last row. The private-key search never reached the third row, and the
+those searches were refused. The private-key search never reached the third row, and the
 certificate search was never classified as enumeration, which left the opt-in below with nothing to
 switch: Firefox saw an empty token *with* `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` set.
-`CKA_TOKEN == CK_FALSE` asks for session objects, which this token never has, and stays on the
-refusing side.
-
-A search on the last row answers zero objects while there is no grant, and never asks for one. Once
-a grant exists, ordinary attribute matching applies and every one of these sees the three objects
-like any other search: the gate decides when a **window** may open, not what a token holds.
+`CKA_TOKEN == CK_FALSE` asks for session objects, which this token never has. That attribute
+and the others in its table row do not trigger acquisition alone. A matching label or issued
+ID can; a mismatched label or invalid/unknown ID prevents acquisition. Once a grant exists,
+ordinary attribute matching applies: the gate decides when a window may open, not what a token holds.
 
 `PKCS11_PORTAL_CERTIFICATE_ENUMERATE=1` or `x-init-reserved: enumerate=1` in the module file
 moves the fourth row onto the acquiring side, and only that row. NSS's `PK11_ListCertsInSlot()`
@@ -406,8 +426,6 @@ unaffected by what is shipped; `portal-stack.sh --live` writes the real per-user
   opens the chooser again. Logout releases the grant even when it returns
   `CKR_USER_NOT_LOGGED_IN`. The grant also ends at `C_Finalize`, at expiry, on
   `GrantInvalidated`, or when its portal session emits `Closed`.
-- **TLS 1.0 and 1.1 cannot work through this module and will not be made to.** They sign an
-  MD5 ‖ SHA-1 concatenation with `CKM_RSA_PKCS` [[S26](../SOURCES.md)], which has no hash name the
-  portal's `Sign` will accept and no DigestInfo to parse. It is refused with
-  `CKR_MECHANISM_INVALID`. Both protocols
-  are long dead.
+- **TLS 1.0/1.1 RSA authentication is unsupported.** Its raw MD5+SHA1 input to `CKM_RSA_PKCS`
+  [[S26](../SOURCES.md)] has no accepted DigestInfo or hash name and returns
+  `CKR_MECHANISM_INVALID`.

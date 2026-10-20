@@ -1,7 +1,7 @@
 # Public interface
 
 `org.freedesktop.portal.experimental.Certificate1` is defined by the xdg-desktop-portal fork's
-[experimental/integration](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration)
+[experimental/certificate](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate)
 branch. Its XML is authoritative.
 
 ## Frontend files
@@ -54,8 +54,8 @@ with `Request.Close()`. The acquisition result's `may_prompt_later` describes la
 
 ### Options
 
-Standard Request options include `handle_token` and `activation_token`.
-`AcquireCredential` also accepts:
+Request methods accept `handle_token`. `AcquireCredential` also accepts `activation_token`
+and these options:
 
 - `purpose`, required: `client_auth`, `signing`, `email` or `ssh`.
 - `interaction_mode`: `required`, `allowed` (default) or `forbidden`.
@@ -72,6 +72,9 @@ is a digest with the exact length named by `parameters.hash`. The backend constr
 mechanism's encoding, including DigestInfo for RSA PKCS#1 v1.5. The caller can submit any bytes
 of the required length; this validates shape and cannot prove how the input was computed or used.
 See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) for parameter rules.
+
+Optional `operation_id` is consumed by the frontend and echoed in the caller's response.
+It is stripped from impl options and cannot correlate backend operation logs for public calls.
 
 ### Results
 
@@ -97,13 +100,14 @@ requires a fresh session and consent. `expires_at` is a frontend-generated wall-
 for display. Enforcement uses a monotonic clock, so wall-clock adjustments cannot extend the
 grant and can make the displayed value disagree with the remaining time.
 
-The frontend's monotonic timer emits `GrantInvalidated(expired)` and closes the Session.
-The backend stops operations at the same deadline; its teardown timer runs
-`CERTIFICATE_EXPIRY_GRACE_SECONDS` later as a backstop. Backend activity cannot extend a grant.
+The frontend starts its monotonic timer when it receives the acquisition result; expiry emits
+`GrantInvalidated(expired)` and closes the Session. The backend starts its own monotonic
+lifetime at grant creation and stops operations at that deadline. Its teardown timer adds
+`CERTIFICATE_EXPIRY_GRACE_SECONDS` to that lifetime. Backend activity cannot extend a grant.
 
 `GrantInvalidated` reasons are `expired`, `token_removed`, `policy`, `backend_gone` and `error`.
-Consumers must tolerate unknown values. The signal is sent only to the owner because a session
-path contains its unique bus name. Sessions with no acquired credential close without that signal.
+Consumers must tolerate unknown values. The frontend addresses the signal to the owner's unique
+D-Bus name. Sessions with no acquired credential close without that signal.
 
 ## Accessibility criteria
 
@@ -126,6 +130,9 @@ There is no `context` destination hint; `reason` carries application-provided ex
 
 ## Manual calls
 
-[`trigger-certificate.sh`](../tools/trigger-certificate.sh) calls methods with `gdbus`.
+[`trigger-certificate.sh`](../tools/trigger-certificate.sh) supports synchronous `version`,
+`introspect`, `capabilities` and `all` inspection. Use
+[`certificate-e2e.py`](../tools/certificate-e2e.py) for session creation, acquisition,
+signing and release on one connection. Separate `gdbus call` processes cannot share sessions.
 [`dev-stack.sh`](../tools/dev-stack.sh) starts a configured frontend and backend; see
 [TESTING.md](TESTING.md).

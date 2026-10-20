@@ -3,6 +3,10 @@
 Date: 2026-10-15
 Status: accepted; supersedes in part 0003, 0005, 0009, 0010 and 0011
 
+> Status, 2026-10-20: The active frontend is `experimental/certificate`. WebAuthentication
+> development stopped on 2026-10-16. WebAuthentication and `experimental/integration`
+> references and the two-interface examples below are historical.
+
 ## Context
 
 Upstream merged experimental-portal support in PR #2129 and fixed the opt-in check in

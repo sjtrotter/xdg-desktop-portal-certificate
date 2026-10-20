@@ -3,7 +3,7 @@
 S1, S2 and S3 have evidence for the experimental client-side PKCS#11 module defined by
 [ADR 0011](decisions/0011-client-side-pkcs11-module.md). A served facade remains unimplemented;
 neither interface exposes `OpenPkcs11Endpoint`. The frontend belongs to the xdg-desktop-portal
-fork's `experimental/integration` branch
+fork's `experimental/certificate` branch
 ([ADR 0010](decisions/0010-backend-only-frontend-lives-upstream.md)).
 
 [ROADMAP.md](ROADMAP.md) budgets 2–4 weeks for focused feasibility experiments.
@@ -11,7 +11,7 @@ fork's `experimental/integration` branch
 | Check | Criterion | Evidence and remaining work |
 |---|---|---|
 | S1 | TLS stacks consume the synthetic PKCS#11 module | GnuTLS, NSS and Firefox have evidence; OpenSSL 3 provider and concurrent grants remain unrun |
-| S2 | Backend-owned PIN prompting and login | Backend lazy login and module protected-authentication flag work; real retry counters and PIN-pad readers need checks |
+| S2 | Backend-owned PIN prompting and login | GNOME dialog wrong-PIN retries through the final-try warning passed on one PIV card, 2026-10-19; PIN-pad and Cancel-on-final-try checks remain unrun |
 | S3 | WebKitGTK completes a client-certificate handshake | GLib constructor and WebKitGTK have evidence; removal, concurrency and distribution matrix remain open |
 | S4 | Grant behavior under removal, reinsertion and multiple readers | Identity and polling implemented; hardware removal tests unrun |
 | S5 | Frontend/backend lifecycle preserves scope and cancellation | Mock frontend tests and private-bus runs cover part of it; hardware failures and latency need measurement; fd tests require an endpoint API |
@@ -37,6 +37,13 @@ including a live Entra ID sign-in on 2026-09-05 ([TESTING.md](TESTING.md) §2.55
 Hardware tiers 3.1–3.4 have evidence from one PIV card/reader on 2026-09-04: discovery,
 private-bus signing, cancellation and a live session-bus run. The card remained inserted
 throughout; removal during signing has no hardware result.
+
+The GNOME fork also ran in a live GNOME 50 session with that PIV card, OpenSC and an SCR 331
+reader: test-client signing, Flathub Firefox sign-in, chooser hotplug and Shell system prompting.
+Its native PIN dialog passed wrong-PIN retries through the final-try warning on 2026-10-19
+([TESTING.md](TESTING.md#36-wrong-pin-and-final-attempt)). KDE has SoftHSM container coverage
+only, with no live-session or card run. PIN-pad and Cancel-on-final-try hardware checks remain
+unrun.
 
 The private-bus stack completes `CreateSession`, `AcquireCredential`, `Sign` and `Close`
 with a real frontend/backend. A backend crash surfaces as "Backend call failed"; the test
@@ -88,8 +95,10 @@ and `CKR_PIN_INCORRECT`, token flags and delayed prompts. Check a 30-second user
 stack timeout, handshake retries and duplicate prompts. Real hardware must establish protected
 path behavior without an editable field, wrong-PIN/blocked/device distinctions, final-attempt
 confirmation and the absence of automatic retries. Use a test card you can unblock for those checks.
-Measure whether a signature remains possible after grant-end `C_Logout`, since middleware and
-cards can cache authentication. [SECURITY.md](SECURITY.md) records the limit of that guarantee.
+The broker closes each grant's device session without `C_Logout`, which would also log out
+other grants on the token. Measure whether signatures remain possible after the last session
+closes, since middleware and cards can cache authentication.
+[SECURITY.md](SECURITY.md) records the limit of that guarantee.
 A design requiring the consumer to collect the real PIN fails this gate.
 
 ## S3: WebKitGTK client-certificate handshake
