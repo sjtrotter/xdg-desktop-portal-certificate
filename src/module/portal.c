@@ -314,8 +314,12 @@ static void on_method_returned(GObject* source, GAsyncResult* result, gpointer u
 	}
 	else if (reply == NULL)
 	{
-		/* Remote refusal creates no request; local cancellation may still leave one at the predicted path. */
-		request->method_failed = !g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+		/* Transport failures may leave a request at the predicted path. */
+		request->method_failed = g_dbus_error_is_remote_error(error) &&
+		                         !g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_NO_REPLY) &&
+		                         !g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_TIMEOUT) &&
+		                         !g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_TIMED_OUT) &&
+		                         !g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_DISCONNECTED);
 		request->error = g_steal_pointer(&error);
 		request_complete(request);
 	}
@@ -421,6 +425,41 @@ static char* request_path_for(PortalClient* client, const char* token)
 	return g_strdup_printf("%s/request/%s/%s", PKCS11_PORTAL_OBJECT_PATH, sender, token);
 }
 
+static PortalModuleErrorCode response_error(GVariant* results)
+{
+	static const struct
+	{
+		const char* reason;
+		PortalModuleErrorCode code;
+	} reasons[] = {
+		{ "cancelled", PKCS11_PORTAL_ERROR_CANCELLED },
+		{ "pin_locked", PKCS11_PORTAL_ERROR_PIN_LOCKED },
+		{ "token_removed", PKCS11_PORTAL_ERROR_INVALIDATED },
+		{ "grant_gone", PKCS11_PORTAL_ERROR_INVALIDATED },
+		{ "session_closed", PKCS11_PORTAL_ERROR_INVALIDATED },
+		{ "no_such_session", PKCS11_PORTAL_ERROR_INVALIDATED },
+		{ "owner_gone", PKCS11_PORTAL_ERROR_INVALIDATED },
+		{ "backend_gone", PKCS11_PORTAL_ERROR_INVALIDATED },
+		{ "device_error", PKCS11_PORTAL_ERROR_DEVICE },
+		{ "interaction_required", PKCS11_PORTAL_ERROR_LOGIN_REQUIRED },
+		{ "invalid_request", PKCS11_PORTAL_ERROR_INVALID_REQUEST },
+		{ "invalid_purpose", PKCS11_PORTAL_ERROR_INVALID_REQUEST },
+		{ "invalid_filter", PKCS11_PORTAL_ERROR_INVALID_REQUEST },
+	};
+	const char* reason = NULL;
+
+	if (results != NULL && g_variant_lookup(results, "reason", "&s", &reason))
+	{
+		for (guint i = 0; i < G_N_ELEMENTS(reasons); i++)
+		{
+			if (strcmp(reason, reasons[i].reason) == 0)
+				return reasons[i].code;
+		}
+	}
+
+	return PKCS11_PORTAL_ERROR_FAILED;
+}
+
 /** Consumes @parameters and blocks for the request's Response. */
 static GVariant* portal_request(PortalClient* client, const char* method, GVariant* parameters,
                                 const char* request_path, GError** error)
@@ -457,7 +496,7 @@ static GVariant* portal_request(PortalClient* client, const char* method, GVaria
 	}
 	else if (request->response != 0)
 	{
-		g_set_error(error, PKCS11_PORTAL_ERROR, PKCS11_PORTAL_ERROR_FAILED, "%s answered %u",
+		g_set_error(error, PKCS11_PORTAL_ERROR, response_error(request->results), "%s answered %u",
 		            method, request->response);
 	}
 	else

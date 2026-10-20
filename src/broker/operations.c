@@ -543,7 +543,7 @@ static void apply_login_outcome(Operation* operation, CertificatePinOutcome outc
 
 		case CERTIFICATE_PIN_NO_DISPLAY:
 			operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
-			                                   CERTIFICATE_PKCS11_ERROR_FAILED,
+			                                   CERTIFICATE_PKCS11_ERROR_NO_DISPLAY,
 			                                   "PIN entry requires a display"));
 			return;
 

@@ -72,6 +72,10 @@ typedef enum
 	ACQUIRE_STALL,
 	ACQUIRE_HOLD_REPLY, /* Hold the reply, then return an unpredicted request path. */
 	ACQUIRE_FAIL,
+	ACQUIRE_NO_REPLY,
+	ACQUIRE_TIMEOUT,
+	ACQUIRE_TIMED_OUT,
+	ACQUIRE_DISCONNECTED,
 } AcquireMode;
 
 typedef struct
@@ -93,6 +97,8 @@ typedef struct
 	guint acquire_count;
 	guint sign_count;
 	guint decrypt_count;
+	guint32 operation_response;
+	GVariant* operation_results;
 	guint64 expires_at;
 	char* acquire_path;
 	char* acquire_sender;
@@ -354,6 +360,15 @@ static void on_certificate_call(GDBusConnection* connection, const char* sender,
 			fake.decrypt_count++;
 		g_mutex_unlock(&fake.lock);
 		g_dbus_method_invocation_return_value(invocation, g_variant_new("(o)", request_path));
+		g_mutex_lock(&fake.lock);
+		if (fake.operation_response != 0)
+		{
+			emit_response(sender, request_path, fake.operation_response,
+			              g_variant_ref(fake.operation_results));
+			g_mutex_unlock(&fake.lock);
+			return;
+		}
+		g_mutex_unlock(&fake.lock);
 		g_variant_builder_init(&results, G_VARIANT_TYPE_VARDICT);
 		g_variant_builder_add(&results, "{sv}", signing ? "signature" : "plaintext",
 		                      g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, output,
@@ -364,9 +379,30 @@ static void on_certificate_call(GDBusConnection* connection, const char* sender,
 
 	acquire_seen(request_path, sender, &mode);
 
-	if (mode == ACQUIRE_FAIL)
+	if (mode == ACQUIRE_FAIL || mode == ACQUIRE_NO_REPLY || mode == ACQUIRE_TIMEOUT ||
+	    mode == ACQUIRE_TIMED_OUT || mode == ACQUIRE_DISCONNECTED)
 	{
-		g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR, G_DBUS_ERROR_FAILED,
+		GDBusError code = G_DBUS_ERROR_FAILED;
+
+		switch (mode)
+		{
+			case ACQUIRE_NO_REPLY:
+				code = G_DBUS_ERROR_NO_REPLY;
+				break;
+			case ACQUIRE_TIMEOUT:
+				code = G_DBUS_ERROR_TIMEOUT;
+				break;
+			case ACQUIRE_TIMED_OUT:
+				code = G_DBUS_ERROR_TIMED_OUT;
+				break;
+			case ACQUIRE_DISCONNECTED:
+				code = G_DBUS_ERROR_DISCONNECTED;
+				break;
+			default:
+				break;
+		}
+		g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR,
+		                                      code,
 		                                      "no credential for you");
 		return;
 	}
@@ -488,6 +524,7 @@ static void fake_stop(void)
 	g_clear_pointer(&fake.exported, g_array_unref);
 	g_clear_pointer(&fake.acquire_path, g_free);
 	g_clear_pointer(&fake.acquire_sender, g_free);
+	g_clear_pointer(&fake.operation_results, g_variant_unref);
 	g_cond_clear(&fake.cond);
 	g_mutex_clear(&fake.lock);
 }
@@ -502,6 +539,8 @@ static void fake_reset(AcquireMode mode)
 	fake.acquire_count = 0;
 	fake.sign_count = 0;
 	fake.decrypt_count = 0;
+	fake.operation_response = 0;
+	g_clear_pointer(&fake.operation_results, g_variant_unref);
 	fake.expires_at = 0;
 	g_clear_pointer(&fake.certificate, g_bytes_unref);
 	fake.certificate = fixture_der("client-auth-rsa.pem");
@@ -615,6 +654,7 @@ static gboolean release_reply(gpointer data)
 	invocation = fake.held;
 	fake.held = NULL;
 	path = g_steal_pointer(&fake.held_path);
+	g_cond_broadcast(&fake.cond);
 	g_mutex_unlock(&fake.lock);
 
 	if (invocation != NULL)
@@ -1047,6 +1087,49 @@ static void test_a_timed_out_request_is_closed(void)
 	g_assert_true(fake_wait_for_close(acquired, WAIT_MS));
 
 	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+	g_unsetenv(PKCS11_PORTAL_ENV_TIMEOUT);
+}
+
+static void test_a_method_timeout_closes_the_request(gconstpointer data)
+{
+	AcquireMode mode = GPOINTER_TO_UINT(data);
+	Search find;
+	GThread* finder;
+	g_autofree char* predicted = NULL;
+
+	if (mode == ACQUIRE_HOLD_REPLY && !g_test_slow())
+	{
+		g_test_skip("30-second method timeout requires -m slow");
+		return;
+	}
+
+	fake_reset(mode);
+	/* The method's 30 s deadline must expire before the Response deadline. */
+	g_setenv(PKCS11_PORTAL_ENV_TIMEOUT, "60000", TRUE);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	search_init(&find, open_session());
+	finder = g_thread_new("find", find_thread, &find);
+	predicted = fake_wait_for_acquire(WAIT_MS);
+	g_assert_nonnull(predicted);
+	g_assert_true(search_wait(&find, mode == ACQUIRE_HOLD_REPLY ? 35000 : WAIT_MS));
+	g_thread_join(finder);
+	g_assert_cmpuint(find.rv, ==, CKR_OK);
+	g_assert_true(fake_wait_for_close(predicted, WAIT_MS));
+	if (mode == ACQUIRE_HOLD_REPLY)
+	{
+		fake_release_held_reply();
+		gint64 deadline = g_get_monotonic_time() + WAIT_MS * G_TIME_SPAN_MILLISECOND;
+		g_mutex_lock(&fake.lock);
+		while (fake.held != NULL)
+		{
+			if (!g_cond_wait_until(&fake.cond, &fake.lock, deadline))
+				break;
+		}
+		g_assert_null(fake.held);
+		g_mutex_unlock(&fake.lock);
+	}
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+	search_clear(&find);
 	g_unsetenv(PKCS11_PORTAL_ENV_TIMEOUT);
 }
 
@@ -1511,6 +1594,55 @@ static void test_pending_operations_do_not_survive_grant_release(gconstpointer d
 	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
 }
 
+typedef struct
+{
+	const char* name;
+	guint32 response;
+	const char* key;
+	const char* reason;
+	CK_RV expected;
+} FailureCase;
+
+static void test_failure_reason_reaches_pkcs11(gconstpointer data)
+{
+	const FailureCase* test = data;
+	GVariantBuilder results;
+	CK_SESSION_HANDLE session;
+	CK_OBJECT_HANDLE key;
+	guint8 input[32] = { 0 };
+	guint8 output[256];
+	CK_ULONG size = sizeof(output);
+
+	fake_reset(ACQUIRE_ANSWER);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	key = find_the_private_key(session);
+	init_pending_operations(session, key);
+	g_variant_builder_init(&results, G_VARIANT_TYPE_VARDICT);
+	if (test->key != NULL)
+		g_variant_builder_add(&results, "{sv}", test->key,
+		                      test->reason != NULL ? g_variant_new_string(test->reason)
+		                                           : g_variant_new_uint32(7));
+	g_mutex_lock(&fake.lock);
+	fake.operation_response = test->response;
+	fake.operation_results = g_variant_ref_sink(g_variant_builder_end(&results));
+	g_mutex_unlock(&fake.lock);
+
+	g_assert_cmpuint(functions->C_Sign(session, input, sizeof(input), output, &size),
+	                 ==, test->expected);
+	size = sizeof(output);
+	g_assert_cmpuint(functions->C_Decrypt(session, input, sizeof(input), output, &size),
+	                 ==, test->expected);
+	g_assert_cmpuint(functions->C_Decrypt(session, input, sizeof(input), output, &size),
+	                 ==, CKR_OPERATION_NOT_INITIALIZED);
+	g_mutex_lock(&fake.lock);
+	g_assert_cmpuint(fake.sign_count, ==, 1);
+	g_assert_cmpuint(fake.decrypt_count, ==, 1);
+	g_mutex_unlock(&fake.lock);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+	g_assert_cmpuint(fake_close_count(), ==, 0);
+}
+
 static void test_invalidation_retires_sessions(gconstpointer data)
 {
 	const char* reason = data;
@@ -1658,6 +1790,31 @@ static void test_caller_lengths_are_bounded_before_they_are_narrowed(void)
 
 int main(int argc, char** argv)
 {
+	static const FailureCase failures[] = {
+		{ "cancelled", 2, "reason", "cancelled", CKR_FUNCTION_CANCELED },
+		{ "pin-locked", 2, "reason", "pin_locked", CKR_PIN_LOCKED },
+		{ "token-removed", 2, "reason", "token_removed", CKR_DEVICE_REMOVED },
+		{ "grant-gone", 2, "reason", "grant_gone", CKR_DEVICE_REMOVED },
+		{ "session-closed", 2, "reason", "session_closed", CKR_DEVICE_REMOVED },
+		{ "no-such-session", 2, "reason", "no_such_session", CKR_DEVICE_REMOVED },
+		{ "owner-gone", 2, "reason", "owner_gone", CKR_DEVICE_REMOVED },
+		{ "backend-gone", 2, "reason", "backend_gone", CKR_DEVICE_REMOVED },
+		{ "device-error", 2, "reason", "device_error", CKR_DEVICE_ERROR },
+		{ "interaction-required", 2, "reason", "interaction_required", CKR_USER_NOT_LOGGED_IN },
+		{ "invalid-request", 2, "reason", "invalid_request", CKR_ARGUMENTS_BAD },
+		{ "invalid-purpose", 2, "reason", "invalid_purpose", CKR_ARGUMENTS_BAD },
+		{ "invalid-filter", 2, "reason", "invalid_filter", CKR_ARGUMENTS_BAD },
+		{ "no-display", 2, "reason", "no_display", CKR_FUNCTION_FAILED },
+		{ "grant-already-held", 2, "reason", "grant_already_held", CKR_FUNCTION_FAILED },
+		{ "backend-protocol-error", 2, "reason", "backend_protocol_error", CKR_FUNCTION_FAILED },
+		{ "unknown", 2, "reason", "future_reason", CKR_FUNCTION_FAILED },
+		{ "empty", 2, "reason", "", CKR_FUNCTION_FAILED },
+		{ "missing", 2, NULL, NULL, CKR_FUNCTION_FAILED },
+		{ "wrong-type", 2, "reason", NULL, CKR_FUNCTION_FAILED },
+		{ "legacy-key", 2, "error", "pin_locked", CKR_FUNCTION_FAILED },
+		{ "response-one", 1, NULL, NULL, CKR_FUNCTION_CANCELED },
+		{ "response-one-overrides-reason", 1, "reason", "pin_locked", CKR_FUNCTION_CANCELED },
+	};
 	static const char* reasons[] = {
 		"token_removed", "expired", "policy", "backend_gone", "error", "local-expiry"
 	};
@@ -1689,6 +1846,26 @@ int main(int argc, char** argv)
 	                test_a_search_does_not_survive_reinitialization);
 	g_test_add_func("/module/portal/timeout-closes-the-request",
 	                test_a_timed_out_request_is_closed);
+	g_test_add_data_func("/module/portal/method-timeout-closes-the-request",
+	                     GUINT_TO_POINTER(ACQUIRE_HOLD_REPLY),
+	                     test_a_method_timeout_closes_the_request);
+	g_test_add_data_func("/module/portal/no-reply-closes-the-request",
+	                     GUINT_TO_POINTER(ACQUIRE_NO_REPLY),
+	                     test_a_method_timeout_closes_the_request);
+	g_test_add_data_func("/module/portal/remote-timeout-closes-the-request",
+	                     GUINT_TO_POINTER(ACQUIRE_TIMEOUT),
+	                     test_a_method_timeout_closes_the_request);
+	g_test_add_data_func("/module/portal/remote-timed-out-closes-the-request",
+	                     GUINT_TO_POINTER(ACQUIRE_TIMED_OUT),
+	                     test_a_method_timeout_closes_the_request);
+	g_test_add_data_func("/module/portal/disconnected-closes-the-request",
+	                     GUINT_TO_POINTER(ACQUIRE_DISCONNECTED),
+	                     test_a_method_timeout_closes_the_request);
+	for (guint i = 0; i < G_N_ELEMENTS(failures); i++)
+	{
+		g_autofree char* name = g_strdup_printf("/module/portal/failure-reason/%s", failures[i].name);
+		g_test_add_data_func(name, &failures[i], test_failure_reason_reaches_pkcs11);
+	}
 	g_test_add_func("/module/portal/caller-lengths",
 	                test_caller_lengths_are_bounded_before_they_are_narrowed);
 	g_test_add_data_func("/module/portal/pending-operations/logout", "logout",

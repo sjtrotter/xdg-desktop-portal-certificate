@@ -145,7 +145,11 @@ must return no objects without opening another chooser. Insert/remove a card whi
 is open; the purpose/filter is reapplied, and a disappearing selection disables Use.
 `test-impl-dbus.c` compares forbidden/no-display outcomes and capabilities with SoftHSM and an
 empty module list; `test-chooser.c` covers empty states and list replacement. Missing fixtures
-or display skip the corresponding cases.
+or display skip the corresponding cases. The D-Bus test disables GTK and libadwaita portals
+before toolkit initialization. A separate startup bus owns the document-portal name and
+enables portal use before the isolation override. The test checks that the session-bus
+singleton belongs to the fixture bus and is released at teardown. Removing the
+`GDK_DEBUG=no-portals` override must fail this check without a host portal.
 
 For manual calls, keep the stack running:
 
@@ -288,8 +292,8 @@ answers password requests.
 GNOME's `[Certificate] PinPrompt=auto|system|dialog` defaults to `auto` for real
 sessions. `auto` chooses Gcr only when `org.gnome.keyring.SystemPrompter` has an
 owner on the session bus, otherwise the backend's GTK dialog. `system` requires
-an owner. If absent, the backend reports `XCC_ERROR_NO_DISPLAY` to the SDK, but
-the SDK's PIN failure path discards that error and `Sign` returns `device_error`.
+an owner. If absent, the backend reports `XCC_ERROR_NO_DISPLAY` to the SDK and
+`Sign` returns `no_display`.
 `dialog` always uses GTK.
 An open failure or prompter disappearance ends the request without switching UI.
 In a GNOME session the prompt belongs to gnome-shell, is session-modal, and is
@@ -605,6 +609,25 @@ Invalidation tests cover `token_removed`, `expired`, `policy`, `backend_gone`, `
 local expiry: old sessions fail, the slot stays present and removable, one nonblocking event
 is reported, issued-ID acquisition still works and old-generation handles remain refused.
 Pending search, signing and decryption state cannot survive the transition.
+
+Failure-response tests check the module's signing and decryption return codes:
+
+| Reason | PKCS#11 result |
+|---|---|
+| `cancelled`, or response `1` | `CKR_FUNCTION_CANCELED` |
+| `pin_locked` | `CKR_PIN_LOCKED` |
+| `token_removed`, `grant_gone`, `session_closed`, `no_such_session`, `owner_gone`, `backend_gone` | `CKR_DEVICE_REMOVED` |
+| `device_error` | `CKR_DEVICE_ERROR` |
+| `interaction_required` | `CKR_USER_NOT_LOGGED_IN` |
+| `invalid_request`, `invalid_purpose`, `invalid_filter` | `CKR_ARGUMENTS_BAD` |
+| `no_display`, `grant_already_held`, `backend_protocol_error`, unknown, missing or mistyped reason | `CKR_FUNCTION_FAILED` |
+
+Response `1` takes precedence over a reason. A legacy `error` key is ignored.
+The local method-timeout test requires GLib slow mode (`-m slow`). It waits for the
+production 30-second method deadline with a 60-second Response deadline. The existing
+`PKCS11_PORTAL_CERTIFICATE_TIMEOUT_MS` override controls only the Response deadline.
+Local timeouts and remote transport errors must close the predicted request; a definitive
+method refusal must not.
 
 ### 2.6 Firefox
 
@@ -1115,5 +1138,5 @@ and `operation=<operation_id>` for correlation with the frontend journal. An abs
 | Existing session gives `no_such_session` | Different `app_id` or increased identity level |
 | Reused session path rejected | A live session occupies it; close first. Closed entries are replaceable |
 
-The backend's `error` diagnostic is not forwarded by the frontend; the public response may carry
-a different recognized `reason`.
+The frontend forwards the backend's string `reason` on acquisition and signing failures.
+A lost or expired grant can replace a signing failure with `grant_gone`.

@@ -25,7 +25,8 @@ typedef enum
 	/* The token remains present, but its private key is unavailable after login. */
 	CERTIFICATE_PKCS11_ERROR_NO_PRIVATE_KEY,
 	/* A login timeout stops waiting; the submitted attempt may still consume a retry or succeed. */
-	CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT
+	CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT,
+	CERTIFICATE_PKCS11_ERROR_NO_DISPLAY
 } CertificatePkcs11ErrorCode;
 
 void certificate_pkcs11_set_error(GError** error, CK_RV rv, const char* what);

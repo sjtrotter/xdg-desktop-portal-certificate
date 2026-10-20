@@ -21,6 +21,8 @@ typedef struct
 	uint64_t warning_id;
 	guint warnings, ordered_completions;
 	guint user_logins, context_logins, signatures, logouts;
+	CK_RV login_result;
+	gboolean fail_context_login;
 	gint clock_offset;
 	GMutex lock;
 	GCond cond;
@@ -143,9 +145,9 @@ static CK_RV login(CK_SESSION_HANDLE h, CK_USER_TYPE user, CK_UTF8CHAR_PTR pin, 
 		g_assert_cmpuint(user, ==, CKU_CONTEXT_SPECIFIC);
 		g_assert_true(f->initialized);
 		f->context_logins++;
-		f->context_authenticated = TRUE;
+		f->context_authenticated = f->login_result == CKR_OK;
 	}
-	return CKR_OK;
+	return user == CKU_USER && f->fail_context_login ? CKR_OK : f->login_result;
 }
 static CK_RV sign_init(CK_SESSION_HANDLE h, CK_MECHANISM_PTR mechanism, CK_OBJECT_HANDLE key)
 {
@@ -683,6 +685,66 @@ static void test_ui_failure(Fixture* f, gconstpointer data)
 	g_assert_cmpint(d.error, ==, XCC_ERROR_NO_DISPLAY);
 	xcc_request_unref(r);
 }
+static void setup_scripted(Fixture* f, gconstpointer data)
+{
+	setup(f, NULL);
+}
+typedef struct
+{
+	const char* name;
+	CK_RV rv;
+	XccErrorCode error;
+	const char* reason;
+	guint32 response;
+	gboolean context_specific;
+} LoginFailure;
+static const LoginFailure login_failures[] = {
+	{ "cancel", CKR_CANCEL, XCC_ERROR_CANCELLED, "cancelled", 1, FALSE },
+	{ "function-canceled", CKR_FUNCTION_CANCELED, XCC_ERROR_CANCELLED, "cancelled", 1, FALSE },
+	{ "locked", CKR_PIN_LOCKED, XCC_ERROR_PIN_LOCKED, "pin_locked", 2, FALSE },
+	{ "removed", CKR_TOKEN_NOT_PRESENT, XCC_ERROR_TOKEN_REMOVED, "token_removed", 2, FALSE },
+	{ "device", CKR_DEVICE_ERROR, XCC_ERROR_DEVICE, "device_error", 2, FALSE },
+	{ "context-cancel", CKR_CANCEL, XCC_ERROR_CANCELLED, "cancelled", 1, TRUE },
+	{ "context-function-canceled", CKR_FUNCTION_CANCELED, XCC_ERROR_CANCELLED, "cancelled", 1, TRUE },
+};
+static void test_pin_provider_failure(Fixture* f, gconstpointer data)
+{
+	XccErrorCode supplied = GPOINTER_TO_INT(data);
+	XccErrorCode expected = supplied == XCC_ERROR_NO_DISPLAY ? XCC_ERROR_NO_DISPLAY
+	                                                       : XCC_ERROR_DEVICE;
+	grant(f);
+	Done d = {.f = f};
+	XccRequest* r = sign_request(f, &d);
+	WAIT(f->pin_shows == 1);
+	xcc_ui_failed(f->context, f->pin_id, supplied);
+	WAIT(d.calls == 1);
+	g_assert_cmpint(d.error, ==, expected);
+	g_assert_cmpuint(xcc_error_wire_response(d.error), ==, 2);
+	g_assert_cmpstr(xcc_error_wire_name(d.error), ==,
+	                expected == XCC_ERROR_NO_DISPLAY ? "no_display" : "device_error");
+	g_assert_cmpuint(f->user_logins, ==, 0);
+	g_assert_cmpuint(f->signatures, ==, 0);
+	xcc_request_unref(r);
+}
+static void test_reader_login_failure(Fixture* f, gconstpointer data)
+{
+	const LoginFailure* test = data;
+	f->candidate->token->protected_authentication_path = TRUE;
+	f->login_result = test->rv;
+	f->always_auth = f->fail_context_login = test->context_specific;
+	grant(f);
+	Done d = {.f = f};
+	XccRequest* r = sign_request(f, &d);
+	WAIT(d.calls == 1);
+	g_assert_cmpint(d.error, ==, test->error);
+	g_assert_cmpuint(xcc_error_wire_response(d.error), ==, test->response);
+	g_assert_cmpstr(xcc_error_wire_name(d.error), ==, test->reason);
+	g_assert_cmpuint(f->pin_shows, ==, test->context_specific ? 2 : 1);
+	g_assert_cmpuint(f->user_logins, ==, 1);
+	g_assert_cmpuint(f->context_logins, ==, test->context_specific ? 1 : 0);
+	g_assert_cmpuint(f->signatures, ==, 0);
+	xcc_request_unref(r);
+}
 static void test_owner_replacement(Fixture* f, gconstpointer data)
 {
 	f->choose = FALSE;
@@ -813,6 +875,19 @@ int main(int argc, char** argv)
 	TEST("always-authenticate-order", test_always_auth);
 	TEST("expiry-during-request", test_expiry);
 	TEST("ui-failure", test_ui_failure);
+	g_test_add("/core-api/pin-provider/no-display", Fixture, GINT_TO_POINTER(XCC_ERROR_NO_DISPLAY),
+	           setup_scripted, test_pin_provider_failure, teardown);
+	g_test_add("/core-api/pin-provider/device", Fixture, GINT_TO_POINTER(XCC_ERROR_DEVICE),
+	           setup_scripted, test_pin_provider_failure, teardown);
+	g_test_add("/core-api/pin-provider/unspecified", Fixture, GINT_TO_POINTER(XCC_OK),
+	           setup_scripted, test_pin_provider_failure, teardown);
+	for (guint i = 0; i < G_N_ELEMENTS(login_failures); i++)
+	{
+		g_autofree char* name = g_strdup_printf("/core-api/reader-login-failure/%s",
+		                                     login_failures[i].name);
+		g_test_add(name, Fixture, &login_failures[i], setup_scripted,
+		           test_reader_login_failure, teardown);
+	}
 	TEST("owner-replacement", test_owner_replacement);
 	TEST("completion-dispatch-order", test_dispatch_order);
 	TEST("protected-final-try-stale-warning", test_protected_final_try);

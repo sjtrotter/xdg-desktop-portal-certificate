@@ -80,6 +80,18 @@ exe = executable(
 
 test('pin-policy', exe, protocol: 'tap', env: test_env, timeout: 120)
 
+# Exercise both copies of the legacy PIN reply bridge.
+pin_bridge_link_args = ['-Wl,--wrap=xcc_ui_failed', '-Wl,--wrap=xcc_ui_cancel']
+exe = executable(
+  'test-pin-bridge-core',
+  'test-pin-bridge.c',
+  dependencies: [certificate_core_dep],
+  link_args: pin_bridge_link_args,
+  c_args: certificate_log_args,
+  install: false,
+)
+test('pin-bridge-core', exe, protocol: 'tap', env: test_env)
+
 # Link seams inspect storage before free and force mlock failure without production hooks.
 exe = executable(
   'test-secret',
@@ -95,6 +107,18 @@ exe = executable(
 test('secret', exe, protocol: 'tap', env: test_env)
 
 if service_enabled
+  exe = executable(
+    'test-pin-bridge-service',
+    'test-pin-bridge.c',
+    link_with: [certificate_helpers, certificate_sdk],
+    dependencies: certificate_deps,
+    include_directories: [config_inc, include_directories('..' / 'src')],
+    link_args: pin_bridge_link_args,
+    c_args: certificate_log_args,
+    install: false,
+  )
+  test('pin-bridge-service', exe, protocol: 'tap', env: test_env)
+
   # Headless reference wire adapter for cross-desktop SoftHSM parity tests.
   # It exports the real GDBus adapter on a caller-supplied private bus.
   executable('certificate-reference-adapter', 'certificate-reference-adapter.c',
@@ -115,6 +139,7 @@ if service_enabled
       'test-' + name,
       [source] + fixture_util + (name == 'impl-dbus' ? files('fake-chooser-provider.c') : []),
       dependencies: [certificate_service_dep],
+      link_args: name == 'impl-dbus' ? ['-Wl,--wrap=xcc_sign_async_parsed'] : [],
       include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
       c_args: test_args + certificate_log_args,
       install: false,

@@ -24,6 +24,9 @@ static void on_operation_done(GBytes* value, const GError* error, gpointer data)
 								 CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT))
 			code = XCC_ERROR_PIN_INCORRECT;
 		else if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR,
+								 CERTIFICATE_PKCS11_ERROR_NO_DISPLAY))
+			code = XCC_ERROR_NO_DISPLAY;
+		else if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR,
 								 CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED) ||
 				 g_error_matches(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED))
 			code = XCC_ERROR_NOT_SUPPORTED;

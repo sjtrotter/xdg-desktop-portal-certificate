@@ -440,9 +440,8 @@ static GVariant* error_results(const char* code)
 {
 	GVariantBuilder builder;
 
-	/* The frontend drops unknown result keys, so this diagnostic reaches only direct impl callers and the journal. */
 	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-	g_variant_builder_add(&builder, "{sv}", "error", g_variant_new_string(code));
+	g_variant_builder_add(&builder, "{sv}", "reason", g_variant_new_string(code));
 	return g_variant_builder_end(&builder);
 }
 

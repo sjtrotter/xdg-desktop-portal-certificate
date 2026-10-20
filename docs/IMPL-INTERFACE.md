@@ -201,12 +201,12 @@ the request filter. Cancelling an empty or populated chooser returns `1`.
 
 ### Failure results
 
-Response `2` includes an internal `error` key: `no_such_session`, `invalid_purpose`,
+Failure responses include a string `reason`: `no_such_session`, `invalid_purpose`,
 `invalid_filter`, `interaction_required`, `no_display`,
 `device_error`, `token_removed`, `pin_locked`, `invalid_request`, `cancelled`, `owner_gone`,
-`backend_gone`. The frontend only forwards recognized results and drops `error`. This diagnostic
-is available to direct impl tests and the journal; application-visible reasons belong to the
-frontend contract.
+`backend_gone`. The frontend forwards backend reasons unchanged for acquisition and signing
+failures while the grant remains current. It can replace a signing failure with `grant_gone`
+if the session closes or the grant expires. CreateSession does not forward backend reasons.
 
 ### Discovery before login
 
@@ -271,8 +271,10 @@ Transactions live in `src/core/acquire.c` and `src/core/sign.c`. Their specifica
 copied strings, byte spans and explicit presence flags. Core errors map to the existing
 response codes and diagnostic strings: user cancellation is `1`; owner loss and other
 failures are `2`. Acquisition cancellation has empty results; signing cancellation retains
-`error=cancelled`. `PIN_INCORRECT` and `LOGIN_TIMEOUT` remain `device_error` on the wire;
-`NOT_SUPPORTED` remains `invalid_request`. Capabilities retain their dictionary-only reply.
+`reason=cancelled`, including cancellation on a PIN-pad reader. A PIN provider's
+`NO_DISPLAY` remains `no_display` through signing. `PIN_INCORRECT` and `LOGIN_TIMEOUT`
+remain `device_error` on the wire; `NOT_SUPPORTED` remains `invalid_request`.
+Capabilities retain their dictionary-only reply.
 
 The private coordinator owns transaction policy. UI views, close/hide calls, invalidations
 and completions are queued in order to the desktop dispatcher. No UI callback runs with a
