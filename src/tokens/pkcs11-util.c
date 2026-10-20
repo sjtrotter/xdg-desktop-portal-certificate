@@ -12,6 +12,8 @@
 
 /* Bound allocations because attribute lengths are supplied by the module. */
 #define CERTIFICATE_PKCS11_ATTRIBUTE_MAX (64 * 1024)
+/* Allow thousands of objects while bounding memory and non-empty search calls. */
+#define CERTIFICATE_PKCS11_OBJECT_MAX 16384
 
 G_DEFINE_QUARK(certificate-pkcs11-error, certificate_pkcs11_error)
 
@@ -167,10 +169,17 @@ GArray* certificate_pkcs11_find_objects(CK_FUNCTION_LIST* module, CK_SESSION_HAN
 		if (found == 0)
 			break;
 
-		g_array_append_vals(handles, batch, found);
+		if (found > G_N_ELEMENTS(batch) || found > CERTIFICATE_PKCS11_OBJECT_MAX - handles->len)
+		{
+			g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR,
+			                    CERTIFICATE_PKCS11_ERROR_ENUMERATION_LIMIT,
+			                    "C_FindObjects exceeded the enumeration limit");
+			g_array_unref(handles);
+			module->C_FindObjectsFinal(session);
+			return NULL;
+		}
 
-		if (found < G_N_ELEMENTS(batch))
-			break;
+		g_array_append_vals(handles, batch, found);
 	}
 
 	module->C_FindObjectsFinal(session);

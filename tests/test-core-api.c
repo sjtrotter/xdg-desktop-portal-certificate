@@ -9,7 +9,7 @@
 
 typedef struct
 {
-	gboolean open, find_pending, initialized, context_authenticated;
+	gboolean open, find_pending, initialized, context_authenticated, stale;
 } TokenSession;
 
 /* Script the token boundary, retaining the real transactions, broker and PIN policy. */
@@ -31,6 +31,8 @@ typedef struct
 	gboolean token_logged_in, hide_private_key, public_session;
 	TokenSession handles[32];
 	CK_RV login_result;
+	CK_RV sign_result;
+	guint sign_failure_stage, removals;
 	gboolean fail_context_login;
 	gint clock_offset;
 	GMutex lock;
@@ -205,9 +207,33 @@ static CK_RV login(CK_SESSION_HANDLE h, CK_USER_TYPE user, CK_UTF8CHAR_PTR pin, 
 	g_mutex_unlock(&f->lock);
 	return rv;
 }
+/* Removal invalidates every handle; reinsertion precedes the next discovery poll. */
+static CK_RV remove_during_sign(guint stage)
+{
+	Fixture* f = active;
+	if (f->sign_result == CKR_OK || f->sign_failure_stage != stage)
+		return CKR_OK;
+
+	CK_RV rv = f->sign_result;
+	f->sign_result = CKR_OK;
+	f->token_logged_in = FALSE;
+	f->key_generation++;
+	for (guint i = 0; i < G_N_ELEMENTS(f->handles); i++)
+	{
+		if (f->handles[i].open)
+			f->handles[i].stale = TRUE;
+	}
+	return rv;
+}
 static CK_RV sign_init(CK_SESSION_HANDLE h, CK_MECHANISM_PTR mechanism, CK_OBJECT_HANDLE key)
 {
 	g_mutex_lock(&active->lock);
+	CK_RV rv = remove_during_sign(0);
+	if (rv != CKR_OK)
+	{
+		g_mutex_unlock(&active->lock);
+		return rv;
+	}
 	if (!active->token_logged_in)
 	{
 		g_mutex_unlock(&active->lock);
@@ -229,6 +255,12 @@ static CK_RV sign(CK_SESSION_HANDLE h, CK_BYTE_PTR data, CK_ULONG length, CK_BYT
 	g_cond_broadcast(&f->cond);
 	while (f->hold_sign)
 		g_cond_wait(&f->cond, &f->lock);
+	CK_RV rv = remove_during_sign(out == NULL ? 1 : 2);
+	if (rv != CKR_OK)
+	{
+		g_mutex_unlock(&f->lock);
+		return rv;
+	}
 	g_assert_true(f->token_logged_in);
 	g_assert_true(f->handles[h].initialized);
 	if (f->always_auth)
@@ -256,6 +288,7 @@ static CK_RV close_device(CK_SESSION_HANDLE h)
 {
 	g_mutex_lock(&active->lock);
 	g_assert_true(active->handles[h].open);
+	gboolean stale = active->handles[h].stale;
 	active->handles[h] = (TokenSession){0};
 	active->sessions_closed++;
 	if (--active->open_sessions == 0)
@@ -264,7 +297,7 @@ static CK_RV close_device(CK_SESSION_HANDLE h)
 		active->key_generation++;
 	}
 	g_mutex_unlock(&active->lock);
-	return CKR_OK;
+	return stale ? CKR_SESSION_HANDLE_INVALID : CKR_OK;
 }
 static CK_RV session_info(CK_SESSION_HANDLE h, CK_SESSION_INFO_PTR info)
 {
@@ -276,6 +309,11 @@ static CK_RV session_info(CK_SESSION_HANDLE h, CK_SESSION_INFO_PTR info)
 	while (active->hold_session_info)
 		g_assert_true(g_cond_wait_until(&active->cond, &active->lock, deadline));
 	g_assert_true(active->handles[h].open);
+	if (active->handles[h].stale)
+	{
+		g_mutex_unlock(&active->lock);
+		return CKR_SESSION_HANDLE_INVALID;
+	}
 	*info = (CK_SESSION_INFO){ .slotID = 1, .flags = CKF_SERIAL_SESSION,
 	                          .state = active->token_logged_in && !active->public_session
 	                                       ? CKS_RO_USER_FUNCTIONS : CKS_RO_PUBLIC_SESSION };
@@ -840,6 +878,76 @@ static void test_token_logout(Fixture* f, gconstpointer data)
 	g_assert_cmpuint(f->pin_shows, ==, 2);
 	g_assert_cmpuint(f->user_logins, ==, 2);
 	g_assert_cmpuint(f->signatures, ==, 3);
+}
+
+typedef struct
+{
+	const char* name;
+	guint stage;
+	CK_RV rv;
+} SignRemoval;
+static const SignRemoval sign_removals[] = {
+	{ "init", 0, CKR_TOKEN_NOT_PRESENT },
+	{ "size", 1, CKR_DEVICE_REMOVED },
+	{ "value", 2, CKR_SESSION_HANDLE_INVALID },
+};
+static void removed_during_sign(XccSession* session, const char* reason, gpointer data)
+{
+	Fixture* f = data;
+	assert_desktop(f);
+	g_assert_cmpstr(reason, ==, "token_removed");
+	f->removals++;
+}
+static void test_removal_during_sign(Fixture* f, gconstpointer data)
+{
+	const SignRemoval* test = data;
+	grant(f);
+	g_autoptr(XccSession) other = second_grant(f);
+	xcc_session_set_invalidated_callback(f->session, removed_during_sign, f);
+	xcc_session_set_invalidated_callback(other, removed_during_sign, f);
+	f->hide_private_key = f->submit = TRUE;
+	sign_successfully(f, f->session);
+	sign_successfully(f, other);
+
+	g_mutex_lock(&f->lock);
+	f->sign_result = test->rv;
+	f->sign_failure_stage = test->stage;
+	g_mutex_unlock(&f->lock);
+	Done failed = {.f = f};
+	XccRequest* request = sign_request(f, &failed);
+	WAIT(failed.calls == 1);
+	g_assert_cmpint(failed.error, ==, XCC_ERROR_TOKEN_REMOVED);
+	g_assert_cmpstr(xcc_error_wire_name(failed.error), ==, "token_removed");
+	g_assert_cmpuint(f->removals, ==, 1);
+	g_assert_true(xcc_session_is_closed(f->session));
+	WAIT(sessions_closed(f) == 1);
+	xcc_request_unref(request);
+
+	Done retry = {.f = f};
+	request = sign_request(f, &retry);
+	WAIT(retry.calls == 1);
+	g_assert_cmpint(retry.error, ==, XCC_ERROR_NO_SUCH_SESSION);
+	g_assert_cmpuint(f->sessions_opened, ==, 2);
+	xcc_request_unref(request);
+
+	/* A fresh grant logs in on the reinserted token while another stale grant remains. */
+	g_autoptr(XccSession) fresh = second_grant(f);
+	sign_successfully(f, fresh);
+	Done stale = {.f = f};
+	request = sign_on_session(other, &stale);
+	WAIT(stale.calls == 1);
+	g_assert_cmpint(stale.error, ==, XCC_ERROR_TOKEN_REMOVED);
+	g_assert_cmpuint(f->removals, ==, 2);
+	g_assert_true(xcc_session_is_closed(other));
+	WAIT(sessions_closed(f) == 2);
+	xcc_request_unref(request);
+
+	sign_successfully(f, fresh);
+	g_assert_cmpuint(f->pin_shows, ==, 2);
+	g_assert_cmpuint(f->user_logins, ==, 2);
+	g_assert_cmpuint(f->logouts, ==, 0);
+	g_assert_cmpuint(f->signatures, ==, 4);
+	g_assert_cmpuint(f->sessions_opened, ==, 3);
 }
 
 typedef struct
@@ -1837,6 +1945,13 @@ int main(int argc, char** argv)
 	TEST("shared-login-waiters", test_shared_waiters);
 	TEST("two-grants-one-token", test_two_grants);
 	TEST("token-logout-reprompts", test_token_logout);
+	for (guint i = 0; i < G_N_ELEMENTS(sign_removals); i++)
+	{
+		g_autofree char* name = g_strdup_printf("/core-api/removal-during-sign/%s",
+		                                     sign_removals[i].name);
+		g_test_add(name, Fixture, &sign_removals[i], setup_scripted,
+		           test_removal_during_sign, teardown);
+	}
 	for (guint i = 0; i < G_N_ELEMENTS(login_states); i++)
 	{
 		g_autofree char* name = g_strdup_printf("/core-api/login-state/%s",

@@ -462,6 +462,10 @@ static void on_signed(GObject* source, GAsyncResult* result, gpointer user_data)
 
 	if (signature == NULL)
 	{
+		if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR,
+		                    CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED))
+			xcc_session_invalidate(operation->session, "token_removed");
+
 		operation_fail(operation, g_steal_pointer(&error));
 		return;
 	}

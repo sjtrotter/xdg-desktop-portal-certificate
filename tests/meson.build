@@ -37,6 +37,40 @@ foreach name, source : core_test_cases
     suite: name == 'sdk-token-metadata' ? ['sdk'] : [])
 endforeach
 
+# Drive the discovery poller through scripted snapshots without real delays.
+exe = executable(
+  'test-token-watch',
+  'test-token-watch.c',
+  dependencies: [certificate_core_dep],
+  link_args: [
+    '-Wl,--wrap=g_usleep',
+    '-Wl,--wrap=p11_kit_modules_load_and_initialize',
+    '-Wl,--wrap=p11_kit_modules_finalize_and_release',
+    '-Wl,--wrap=p11_kit_module_get_name',
+    '-Wl,--wrap=p11_kit_module_get_filename',
+  ],
+  c_args: certificate_log_args,
+  install: false,
+)
+test('token-watch', exe, protocol: 'tap', env: test_env)
+
+exe = executable(
+  'test-discovery-errors',
+  'test-discovery-errors.c',
+  dependencies: [certificate_core_dep],
+  link_args: [
+    '-Wl,--wrap=p11_kit_modules_load_and_initialize',
+    '-Wl,--wrap=p11_kit_modules_finalize_and_release',
+    '-Wl,--wrap=p11_kit_module_get_name',
+    '-Wl,--wrap=p11_kit_module_get_filename',
+    '-Wl,--wrap=certificate_tokens_watch',
+    '-Wl,--wrap=certificate_tokens_stop_watch',
+  ],
+  c_args: certificate_log_args,
+  install: false,
+)
+test('discovery-errors', exe, protocol: 'tap', env: test_env)
+
 # Clock and timer seams keep lifecycle coverage independent of D-Bus and token fixtures.
 exe = executable(
   'test-session',

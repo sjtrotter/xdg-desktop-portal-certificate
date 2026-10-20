@@ -17,7 +17,7 @@
 
 /* Poll because C_WaitForSlotEvent is optional and its blocking implementation may stall. */
 #define CERTIFICATE_WATCH_INTERVAL_MS 2000
-/* Require consecutive matching polls to debounce reader changes. */
+/* Require consecutive matching observations per token. */
 #define CERTIFICATE_WATCH_DEBOUNCE 2
 
 struct CertificateTokens
@@ -33,7 +33,6 @@ struct CertificateTokens
 	CertificateTokenEvent watch_event;
 	gpointer watch_data;
 	gboolean watch_stop;
-	GPtrArray* watch_known; /* CertificateToken* elements. */
 	GMutex event_lock;
 	GQueue events;
 	GSource* event_source;
@@ -574,7 +573,6 @@ void certificate_tokens_free(CertificateTokens* tokens)
 	g_ptr_array_free(tokens->explicit_modules, TRUE);
 	g_clear_pointer(&tokens->module_names, g_hash_table_unref);
 
-	g_clear_pointer(&tokens->watch_known, g_ptr_array_unref);
 	g_clear_pointer(&tokens->watch_context, g_main_context_unref);
 	g_mutex_clear(&tokens->lock);
 	g_mutex_clear(&tokens->event_lock);
@@ -730,8 +728,8 @@ static char** mechanisms_for(CK_FUNCTION_LIST* module, CK_SLOT_ID slot, const ch
 	return g_strv_builder_end(builder);
 }
 
-static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, GPtrArray* out,
-                            GCancellable* cancellable)
+static gboolean enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, GPtrArray* out,
+                                GCancellable* cancellable, GError** error)
 {
 	CK_SESSION_HANDLE session = CK_INVALID_HANDLE;
 	CK_OBJECT_CLASS certificate_class = CKO_CERTIFICATE;
@@ -748,17 +746,20 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 	if (rv != CKR_OK)
 	{
 		certificate_log_debug(CERTIFICATE_REASON_DISCOVERY_RESULT, "slot-open-failed");
-		return;
+		return TRUE;
 	}
 
 	handles = certificate_pkcs11_find_objects(module, session, template_, G_N_ELEMENTS(template_),
 	                                          &local_error);
 	if (handles == NULL)
 	{
+		if (g_error_matches(local_error, CERTIFICATE_PKCS11_ERROR,
+		                    CERTIFICATE_PKCS11_ERROR_ENUMERATION_LIMIT))
+			goto failed;
 		/* No matching object may be reported as failure without output and must not abort discovery. */
 		certificate_log_debug(CERTIFICATE_REASON_DISCOVERY_RESULT, "find-objects-failed");
 		module->C_CloseSession(session);
-		return;
+		return TRUE;
 	}
 
 	for (guint i = 0; i < handles->len; i++)
@@ -800,7 +801,11 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 		key_template[key_count].ulValueLen = cka_id->len;
 		key_count++;
 
-		keys = certificate_pkcs11_find_objects(module, session, key_template, key_count, NULL);
+		keys = certificate_pkcs11_find_objects(module, session, key_template, key_count, &local_error);
+		if (g_error_matches(local_error, CERTIFICATE_PKCS11_ERROR,
+		                    CERTIFICATE_PKCS11_ERROR_ENUMERATION_LIMIT))
+			goto failed;
+		g_clear_error(&local_error);
 		if (keys == NULL || keys->len == 0)
 		{
 			g_clear_pointer(&keys, g_array_unref);
@@ -808,7 +813,11 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 			key_template[0].pValue = &public_class;
 			key_template[0].ulValueLen = sizeof(public_class);
 			public_keys =
-			    certificate_pkcs11_find_objects(module, session, key_template, key_count, NULL);
+			    certificate_pkcs11_find_objects(module, session, key_template, key_count, &local_error);
+			if (g_error_matches(local_error, CERTIFICATE_PKCS11_ERROR,
+			                    CERTIFICATE_PKCS11_ERROR_ENUMERATION_LIMIT))
+				goto failed;
+			g_clear_error(&local_error);
 
 			if ((public_keys == NULL || public_keys->len == 0) && !token->login_required)
 				continue;
@@ -868,6 +877,12 @@ static void enumerate_token(CK_FUNCTION_LIST* module, CertificateToken* token, G
 	}
 
 	module->C_CloseSession(session);
+	return TRUE;
+
+failed:
+	module->C_CloseSession(session);
+	g_propagate_error(error, g_steal_pointer(&local_error));
+	return FALSE;
 }
 
 static GPtrArray* enumerate(CertificateTokens* tokens, GCancellable* cancellable,
@@ -906,7 +921,12 @@ static GPtrArray* enumerate(CertificateTokens* tokens, GCancellable* cancellable
 				continue;
 
 			token_count++;
-			enumerate_token(module, token, candidates, cancellable);
+			if (!enumerate_token(module, token, candidates, cancellable, error))
+			{
+				g_mutex_unlock(&tokens->lock);
+				g_ptr_array_unref(candidates);
+				return NULL;
+			}
 		}
 	}
 	g_mutex_unlock(&tokens->lock);
@@ -1219,18 +1239,56 @@ static gboolean list_contains_token(GPtrArray* list, const CertificateToken* tok
 	return FALSE;
 }
 
+typedef struct
+{
+	CertificateToken* token;
+	guint stable;
+	gboolean present;
+} WatchToken;
+
+static void watch_token_free(gpointer user_data)
+{
+	WatchToken* watched = user_data;
+
+	certificate_token_unref(watched->token);
+	g_free(watched);
+}
+
+static void watch_token_add(GPtrArray* watched, CertificateToken* token, gboolean present)
+{
+	WatchToken* entry = g_new0(WatchToken, 1);
+
+	entry->token = certificate_token_ref(token);
+	entry->present = present;
+	g_ptr_array_add(watched, entry);
+}
+
+static gboolean watch_contains_token(GPtrArray* watched, const CertificateToken* token)
+{
+	for (guint i = 0; i < watched->len; i++)
+	{
+		WatchToken* entry = g_ptr_array_index(watched, i);
+
+		if (certificate_token_same_presence(entry->token, token))
+			return TRUE;
+	}
+
+	return FALSE;
+}
+
 static gpointer watch_thread(gpointer user_data)
 {
 	CertificateTokens* tokens = user_data;
-	guint stable = 0;
+	g_autoptr(GPtrArray) watched = g_ptr_array_new_with_free_func(watch_token_free);
+	g_autoptr(GPtrArray) initial = certificate_tokens_list(tokens, NULL);
 
-	g_clear_pointer(&tokens->watch_known, g_ptr_array_unref);
-	tokens->watch_known = certificate_tokens_list(tokens, NULL);
+	for (guint i = 0; i < initial->len; i++)
+		watch_token_add(watched, g_ptr_array_index(initial, i), TRUE);
+	g_clear_pointer(&initial, g_ptr_array_unref);
 
 	while (!g_atomic_int_get(&tokens->watch_stop))
 	{
 		g_autoptr(GPtrArray) now = NULL;
-		gboolean changed = FALSE;
 
 		g_usleep(CERTIFICATE_WATCH_INTERVAL_MS * 1000);
 		if (g_atomic_int_get(&tokens->watch_stop))
@@ -1238,47 +1296,53 @@ static gpointer watch_thread(gpointer user_data)
 
 		now = certificate_tokens_list(tokens, NULL);
 
-		if (now->len != tokens->watch_known->len)
-			changed = TRUE;
-		else
-		{
-			for (guint i = 0; i < now->len && !changed; i++)
-			{
-				if (!list_contains_token(tokens->watch_known, g_ptr_array_index(now, i)))
-					changed = TRUE;
-			}
-		}
-
-		if (!changed)
-		{
-			stable = 0;
-			continue;
-		}
-
-		/* Require consecutive matching polls before emitting a presence change. */
-		stable++;
-		if (stable < CERTIFICATE_WATCH_DEBOUNCE)
-			continue;
-		stable = 0;
-
-		for (guint i = 0; i < tokens->watch_known->len; i++)
-		{
-			CertificateToken* old = g_ptr_array_index(tokens->watch_known, i);
-
-			if (!list_contains_token(now, old))
-				watch_emit(tokens, old, FALSE);
-		}
-
 		for (guint i = 0; i < now->len; i++)
 		{
 			CertificateToken* fresh = g_ptr_array_index(now, i);
 
-			if (!list_contains_token(tokens->watch_known, fresh))
-				watch_emit(tokens, fresh, TRUE);
+			if (!watch_contains_token(watched, fresh))
+				watch_token_add(watched, fresh, FALSE);
 		}
 
-		g_clear_pointer(&tokens->watch_known, g_ptr_array_unref);
-		tokens->watch_known = g_ptr_array_ref(now);
+		/* Other readers cannot reset this token's consecutive observation count. */
+		for (guint i = 0; i < watched->len; i++)
+		{
+			WatchToken* entry = g_ptr_array_index(watched, i);
+
+			if (list_contains_token(now, entry->token) == entry->present)
+				entry->stable = 0;
+			else
+				entry->stable++;
+		}
+
+		/* Deliver removals before additions, including replacement cards. */
+		for (guint i = 0; i < watched->len; i++)
+		{
+			WatchToken* entry = g_ptr_array_index(watched, i);
+
+			if (entry->present && entry->stable >= CERTIFICATE_WATCH_DEBOUNCE)
+			{
+				watch_emit(tokens, entry->token, FALSE);
+				entry->present = FALSE;
+				entry->stable = 0;
+			}
+		}
+
+		for (guint i = 0; i < watched->len;)
+		{
+			WatchToken* entry = g_ptr_array_index(watched, i);
+
+			if (!entry->present && entry->stable >= CERTIFICATE_WATCH_DEBOUNCE)
+			{
+				watch_emit(tokens, entry->token, TRUE);
+				entry->present = TRUE;
+				entry->stable = 0;
+			}
+			if (!entry->present && !list_contains_token(now, entry->token))
+				g_ptr_array_remove_index(watched, i);
+			else
+				i++;
+		}
 	}
 
 	return NULL;
