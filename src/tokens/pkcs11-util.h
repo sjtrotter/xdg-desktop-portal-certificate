@@ -26,7 +26,9 @@ typedef enum
 	CERTIFICATE_PKCS11_ERROR_NO_PRIVATE_KEY,
 	/* A login timeout stops waiting; the submitted attempt may still consume a retry or succeed. */
 	CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT,
-	CERTIFICATE_PKCS11_ERROR_NO_DISPLAY
+	CERTIFICATE_PKCS11_ERROR_NO_DISPLAY,
+	/* Invalid object counts or an exhausted enumeration budget. */
+	CERTIFICATE_PKCS11_ERROR_ENUMERATION_LIMIT
 } CertificatePkcs11ErrorCode;
 
 void certificate_pkcs11_set_error(GError** error, CK_RV rv, const char* what);
