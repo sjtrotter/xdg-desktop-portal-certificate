@@ -55,8 +55,8 @@ including PIN memory handling and the attacks a same-UID host process can still 
 |---|---|---|
 | Frontend (`org.freedesktop.portal.experimental.Certificate1`) | [sjtrotter/xdg-desktop-portal `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate) | `7a0ff38` |
 | Card library (`libxdp-certificate-core`), standalone GTK/libadwaita backend and PKCS#11 module | [sjtrotter/xdg-desktop-portal-certificate](https://github.com/sjtrotter/xdg-desktop-portal-certificate) | tag `proposal-2026-10` |
-| GNOME backend, `-Dcertificate=enabled` | [sjtrotter/xdg-desktop-portal-gnome `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-gnome/tree/experimental/certificate) on 50.0 | `28c933a` |
-| KDE backend, `-DBUILD_CERTIFICATE_PORTAL=ON` | [sjtrotter/xdg-desktop-portal-kde `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-kde/tree/experimental/certificate) on v6.7.5 | `1912e8b0` |
+| GNOME backend, `-Dcertificate=enabled` | [sjtrotter/xdg-desktop-portal-gnome `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-gnome/tree/experimental/certificate) on 50.0 | `28d5dcb` |
+| KDE backend, `-DBUILD_CERTIFICATE_PORTAL=ON` | [sjtrotter/xdg-desktop-portal-kde `experimental/certificate`](https://github.com/sjtrotter/xdg-desktop-portal-kde/tree/experimental/certificate) on v6.7.5 | `9eb6715c` |
 
 The frontend follows the experimental convention merged in #2129 and is enabled with
 `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1`. The current interface:
