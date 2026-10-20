@@ -207,6 +207,16 @@ if service_enabled
   test('module-portal', exe, protocol: 'tap', env: test_env, timeout: 120)
 
   exe = executable(
+    'test-module-lifecycle',
+    ['test-module-lifecycle.c', '..' / 'src' / 'module' / 'module.c'],
+    dependencies: [module_core_dep],
+    include_directories: [config_inc, include_directories('..' / 'src')],
+    link_args: ['-Wl,--wrap=g_main_loop_new', '-Wl,--wrap=g_bus_unwatch_name'],
+    install: false,
+  )
+  test('module-lifecycle', exe, protocol: 'tap', env: test_env)
+
+  exe = executable(
     'fuzz-der',
     ['fuzz-der.c'],
     dependencies: [module_core_dep],
@@ -338,6 +348,10 @@ foreach mode : ['install', 'headers', 'symbols', 'core-only']
     env: test_env,
   )
 endforeach
+test('sdk-link-args', python,
+  args: files('test-sdk-link-args.py'),
+  suite: 'sdk',
+)
 exe = executable('test-sdk-stride', 'test-sdk-stride.c',
   include_directories: include_directories('..' / 'src'), install: false)
 test('sdk-stride', exe, suite: 'sdk')

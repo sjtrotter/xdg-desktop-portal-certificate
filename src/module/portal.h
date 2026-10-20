@@ -15,7 +15,7 @@
 
 typedef struct _PortalClient PortalClient;
 
-/** Probe without D-Bus activation; an unavailable portal presents as an absent token. */
+/** Watch the frontend without activation; capabilities are probed on the next use. */
 PortalClient* portal_client_new(void);
 
 void portal_client_free(PortalClient* client);
@@ -25,7 +25,8 @@ void portal_client_cancel(PortalClient* client);
 
 gboolean portal_client_available(PortalClient* client);
 
-const char* const* portal_client_mechanisms(PortalClient* client);
+/** Caller owns the capability snapshot. */
+GStrv portal_client_dup_mechanisms(PortalClient* client);
 
 /** Blocks for the chooser; user refusal returns PKCS11_PORTAL_ERROR_CANCELLED. */
 PortalGrant* portal_client_acquire(PortalClient* client, GError** error);

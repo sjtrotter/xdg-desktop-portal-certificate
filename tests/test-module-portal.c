@@ -7,6 +7,7 @@
 /* The fake portal runs on its own context thread so tests can make blocking PKCS#11 calls. */
 
 #include <string.h>
+#include <unistd.h>
 
 #include <gio/gio.h>
 #include <glib.h>
@@ -95,8 +96,12 @@ typedef struct
 
 	AcquireMode acquire_mode;
 	guint acquire_count;
+	guint capabilities_count;
+	guint capabilities_failures;
+	gboolean ecdsa_only;
 	guint sign_count;
 	guint decrypt_count;
+	gboolean hold_operations;
 	guint32 operation_response;
 	GVariant* operation_results;
 	guint64 expires_at;
@@ -113,6 +118,7 @@ typedef struct
 } FakePortal;
 
 static FakePortal fake;
+static GTestDBus* bus;
 
 static GBytes* fixture_der(const char* name)
 {
@@ -296,10 +302,23 @@ static void on_certificate_call(GDBusConnection* connection, const char* sender,
 			"RSA_PKCS1_V1_5", "RSA_PSS", "ECDSA", "RSA_OAEP", NULL
 		};
 		GVariantBuilder capabilities;
+		static const char* const ecdsa[] = { "ECDSA", NULL };
 
+		g_mutex_lock(&fake.lock);
+		fake.capabilities_count++;
+		if (fake.capabilities_failures > 0)
+		{
+			fake.capabilities_failures--;
+			g_mutex_unlock(&fake.lock);
+			g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR,
+			                                      G_DBUS_ERROR_TIMED_OUT,
+			                                      "Capability probe timed out");
+			return;
+		}
 		g_variant_builder_init(&capabilities, G_VARIANT_TYPE_VARDICT);
 		g_variant_builder_add(&capabilities, "{sv}", "mechanisms",
-		                      g_variant_new_strv(mechanisms, -1));
+		                      g_variant_new_strv(fake.ecdsa_only ? ecdsa : mechanisms, -1));
+		g_mutex_unlock(&fake.lock);
 		g_dbus_method_invocation_return_value(invocation,
 		                                      g_variant_new("(a{sv})", &capabilities));
 		return;
@@ -358,13 +377,20 @@ static void on_certificate_call(GDBusConnection* connection, const char* sender,
 			fake.sign_count++;
 		else
 			fake.decrypt_count++;
+		g_cond_broadcast(&fake.cond);
 		g_mutex_unlock(&fake.lock);
 		g_dbus_method_invocation_return_value(invocation, g_variant_new("(o)", request_path));
 		g_mutex_lock(&fake.lock);
+		if (fake.hold_operations)
+		{
+			g_mutex_unlock(&fake.lock);
+			return;
+		}
 		if (fake.operation_response != 0)
 		{
+			/* The Response tuple takes a reference to the retained results. */
 			emit_response(sender, request_path, fake.operation_response,
-			              g_variant_ref(fake.operation_results));
+			              fake.operation_results);
 			g_mutex_unlock(&fake.lock);
 			return;
 		}
@@ -444,13 +470,13 @@ static void on_name_acquired(GDBusConnection* connection, const char* name, gpoi
 static gpointer fake_thread(gpointer data)
 {
 	g_autoptr(GError) error = NULL;
-	GTestDBus* bus = data;
+	GTestDBus* test_bus = data;
 
 	g_main_context_push_thread_default(fake.context);
 
 	/* Use a separate connection so shared dispatch cannot hide a module bug. */
 	fake.connection = g_dbus_connection_new_for_address_sync(
-	    g_test_dbus_get_bus_address(bus),
+	    g_test_dbus_get_bus_address(test_bus),
 	    G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
 	        G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION,
 	    NULL, NULL, &error);
@@ -460,8 +486,8 @@ static gpointer fake_thread(gpointer data)
 	                                    PKCS11_PORTAL_INTERFACE, &certificate_vtable);
 
 	fake.owner_id = g_bus_own_name_on_connection(fake.connection, PKCS11_PORTAL_BUS_NAME,
-	                                             G_BUS_NAME_OWNER_FLAGS_NONE, on_name_acquired,
-	                                             NULL, NULL, NULL);
+	                                             G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT,
+	                                             on_name_acquired, NULL, NULL, NULL);
 
 	g_main_loop_run(fake.loop);
 	g_main_context_pop_thread_default(fake.context);
@@ -476,10 +502,11 @@ static gboolean quit_fake(gpointer data)
 	return G_SOURCE_REMOVE;
 }
 
-static void fake_start(GTestDBus* bus)
+static void fake_start(GTestDBus* test_bus)
 {
 	g_autoptr(GError) error = NULL;
 
+	memset(&fake, 0, sizeof(fake));
 	g_mutex_init(&fake.lock);
 	g_cond_init(&fake.cond);
 	fake.closed = g_ptr_array_new_with_free_func(g_free);
@@ -491,7 +518,7 @@ static void fake_start(GTestDBus* bus)
 
 	fake.context = g_main_context_new();
 	fake.loop = g_main_loop_new(fake.context, FALSE);
-	fake.thread = g_thread_new("fake-portal", fake_thread, bus);
+	fake.thread = g_thread_new("fake-portal", fake_thread, test_bus);
 
 	g_mutex_lock(&fake.lock);
 	while (!fake.ready)
@@ -537,8 +564,12 @@ static void fake_reset(AcquireMode mode)
 	g_assert_null(fake.held);
 	fake.acquire_mode = mode;
 	fake.acquire_count = 0;
+	fake.capabilities_count = 0;
+	fake.capabilities_failures = 0;
+	fake.ecdsa_only = FALSE;
 	fake.sign_count = 0;
 	fake.decrypt_count = 0;
+	fake.hold_operations = FALSE;
 	fake.operation_response = 0;
 	g_clear_pointer(&fake.operation_results, g_variant_unref);
 	fake.expires_at = 0;
@@ -695,6 +726,92 @@ static void fake_answer_acquire(guint32 response)
 }
 
 static CK_FUNCTION_LIST* functions;
+
+static void test_pkcs11_3_stubs(void)
+{
+	/* ABI guard; Clang -fsanitize=function detects incompatible stubs. */
+	CK_INTERFACE* interface = NULL;
+	CK_FUNCTION_LIST_3_0* api;
+	CK_ULONG size = 19;
+
+	g_assert_cmpuint(C_GetInterface(NULL, NULL, &interface, 0), ==, CKR_OK);
+	api = interface->pFunctionList;
+#define UNSUPPORTED(call) g_assert_cmpuint(api->call, ==, CKR_FUNCTION_NOT_SUPPORTED)
+	UNSUPPORTED(C_LoginUser(1, CKU_USER, NULL, 0, NULL, 0));
+	UNSUPPORTED(C_SessionCancel(1, 0));
+	UNSUPPORTED(C_MessageEncryptInit(1, NULL, 0));
+	UNSUPPORTED(C_EncryptMessage(1, NULL, 0, NULL, 0, NULL, 0, NULL, &size));
+	UNSUPPORTED(C_EncryptMessageBegin(1, NULL, 0, NULL, 0));
+	UNSUPPORTED(C_EncryptMessageNext(1, NULL, 0, NULL, 0, NULL, &size, 0));
+	UNSUPPORTED(C_MessageEncryptFinal(1));
+	UNSUPPORTED(C_MessageDecryptInit(1, NULL, 0));
+	UNSUPPORTED(C_DecryptMessage(1, NULL, 0, NULL, 0, NULL, 0, NULL, &size));
+	UNSUPPORTED(C_DecryptMessageBegin(1, NULL, 0, NULL, 0));
+	UNSUPPORTED(C_DecryptMessageNext(1, NULL, 0, NULL, 0, NULL, &size, 0));
+	UNSUPPORTED(C_MessageDecryptFinal(1));
+	UNSUPPORTED(C_MessageSignInit(1, NULL, 0));
+	UNSUPPORTED(C_SignMessage(1, NULL, 0, NULL, 0, NULL, &size));
+	UNSUPPORTED(C_SignMessageBegin(1, NULL, 0));
+	UNSUPPORTED(C_SignMessageNext(1, NULL, 0, NULL, 0, NULL, &size));
+	UNSUPPORTED(C_MessageSignFinal(1));
+	UNSUPPORTED(C_MessageVerifyInit(1, NULL, 0));
+	UNSUPPORTED(C_VerifyMessage(1, NULL, 0, NULL, 0, NULL, 0));
+	UNSUPPORTED(C_VerifyMessageBegin(1, NULL, 0));
+	UNSUPPORTED(C_VerifyMessageNext(1, NULL, 0, NULL, 0, NULL, 0));
+	UNSUPPORTED(C_MessageVerifyFinal(1));
+#undef UNSUPPORTED
+	g_assert_cmpuint(size, ==, 19);
+}
+
+static gpointer discover_interfaces(gpointer data)
+{
+	CK_INTERFACE** expected = data;
+
+	for (guint i = 0; i < 2000; i++)
+	{
+		CK_INTERFACE listed[2];
+		CK_ULONG count = 0;
+		CK_INTERFACE* found;
+
+		g_assert_cmpuint(C_GetInterfaceList(NULL, &count), ==, CKR_OK);
+		g_assert_cmpuint(count, ==, 2);
+		count = 1;
+		g_assert_cmpuint(C_GetInterfaceList(listed, &count), ==, CKR_BUFFER_TOO_SMALL);
+		g_assert_cmpuint(count, ==, 2);
+		g_assert_cmpuint(C_GetInterfaceList(listed, &count), ==, CKR_OK);
+		for (guint j = 0; j < count; j++)
+		{
+			CK_VERSION version = j == 0 ? (CK_VERSION){ 3, 0 } : (CK_VERSION){ 2, 40 };
+			CK_VERSION* advertised = listed[j].pFunctionList;
+
+			g_assert_cmpuint(C_GetInterface((unsigned char*) "PKCS 11", &version,
+			                               &found, 0), ==, CKR_OK);
+			g_assert_true(found == expected[j]);
+			g_assert_cmpstr(found->pInterfaceName, ==, "PKCS 11");
+			g_assert_cmpuint(found->flags, ==, 0);
+			g_assert_true(found->pFunctionList == listed[j].pFunctionList);
+			g_assert_cmpuint(advertised->major, ==, version.major);
+			g_assert_cmpuint(advertised->minor, ==, version.minor);
+		}
+	}
+
+	return NULL;
+}
+
+static void test_concurrent_interface_discovery(void)
+{
+	/* Identical concurrent writes can pass stress and ASan/UBSan; this is an API guard. */
+	CK_INTERFACE* expected[2];
+	CK_VERSION version = { 2, 40 };
+	GThread* threads[4];
+
+	g_assert_cmpuint(C_GetInterface(NULL, NULL, &expected[0], 0), ==, CKR_OK);
+	g_assert_cmpuint(C_GetInterface(NULL, &version, &expected[1], 0), ==, CKR_OK);
+	for (guint i = 0; i < G_N_ELEMENTS(threads); i++)
+		threads[i] = g_thread_new("interfaces", discover_interfaces, expected);
+	for (guint i = 0; i < G_N_ELEMENTS(threads); i++)
+		g_thread_join(threads[i]);
+}
 
 static CK_SESSION_HANDLE open_session(void)
 {
@@ -1218,7 +1335,10 @@ static void test_p11kit_forwards_configuration(void)
 		g_assert_cmpuint(fake_acquire_count(), ==, 1);
 		g_assert_cmpuint(p11_kit_module_finalize(module), ==, CKR_OK);
 		p11_kit_modules_release(modules);
-		return;
+		/* The child retains the test bus fixture and its shared connection. */
+		fake_stop();
+		g_test_dbus_stop(bus);
+		_exit(0);
 	}
 
 	g_autofree char* directory = g_dir_make_tmp("certificate-module-XXXXXX", NULL);
@@ -1496,6 +1616,263 @@ static void init_pending_operations(CK_SESSION_HANDLE session, CK_OBJECT_HANDLE 
 
 	g_assert_cmpuint(sign_init(session, key, 32), ==, CKR_OK);
 	g_assert_cmpuint(functions->C_DecryptInit(session, &mechanism, key), ==, CKR_OK);
+}
+
+static void wait_token_present(gboolean present)
+{
+	gint64 deadline = g_get_monotonic_time() + WAIT_MS * G_TIME_SPAN_MILLISECOND;
+	CK_ULONG count;
+
+	do
+	{
+		count = 0;
+		g_assert_cmpuint(functions->C_GetSlotList(CK_TRUE, NULL, &count), ==, CKR_OK);
+		if (count == (present ? 1 : 0))
+			return;
+		g_usleep(1000);
+	} while (g_get_monotonic_time() < deadline);
+
+	g_assert_cmpuint(count, ==, present ? 1 : 0);
+}
+
+static void test_frontend_restart(gconstpointer data)
+{
+	const char* operation = data;
+	CK_SESSION_HANDLE session;
+	CK_OBJECT_HANDLE key;
+	CK_OBJECT_HANDLE replacement;
+	CK_SESSION_INFO info;
+	guint8 input[32] = { 0 };
+	guint8 output[256];
+	CK_ULONG size = sizeof(output);
+	CK_RV rv;
+
+	fake_reset(ACQUIRE_ANSWER);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	key = find_the_private_key(session);
+	init_pending_operations(session, key);
+
+	fake_stop();
+	wait_token_present(FALSE);
+	if (strcmp(operation, "sign-final") == 0)
+		rv = functions->C_SignFinal(session, output, &size);
+	else if (strcmp(operation, "sign-update") == 0)
+		rv = functions->C_SignUpdate(session, input, sizeof(input));
+	else if (strcmp(operation, "decrypt") == 0)
+		rv = functions->C_Decrypt(session, input, sizeof(input), output, &size);
+	else
+		rv = functions->C_Sign(session, input, sizeof(input), output, &size);
+	g_assert_cmpuint(rv, ==, CKR_DEVICE_REMOVED);
+	g_assert_cmpuint(functions->C_GetSessionInfo(session, &info), ==, CKR_SESSION_HANDLE_INVALID);
+
+	fake_start(bus);
+	wait_token_present(TRUE);
+	session = open_session();
+	replacement = find_the_private_key(session);
+	g_assert_cmpuint(replacement, !=, key);
+	init_pending_operations(session, replacement);
+	size = sizeof(output);
+	g_assert_cmpuint(functions->C_Sign(session, input, sizeof(input), output, &size), ==, CKR_OK);
+	g_mutex_lock(&fake.lock);
+	g_assert_cmpuint(fake.acquire_count, ==, 1);
+	g_assert_cmpuint(fake.sign_count, ==, 1);
+	g_assert_cmpuint(fake.decrypt_count, ==, 0);
+	g_mutex_unlock(&fake.lock);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static void test_frontend_capabilities_are_refreshed(void)
+{
+	CK_MECHANISM_TYPE mechanisms[32];
+	CK_MECHANISM_INFO info;
+	CK_ULONG count = G_N_ELEMENTS(mechanisms);
+
+	fake_reset(ACQUIRE_ANSWER);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	g_mutex_lock(&fake.lock);
+	g_assert_cmpuint(fake.capabilities_count, ==, 0);
+	g_mutex_unlock(&fake.lock);
+	g_assert_cmpuint(functions->C_GetMechanismList(1, mechanisms, &count), ==, CKR_OK);
+	g_assert_cmpuint(count, ==, 19);
+
+	fake_stop();
+	wait_token_present(FALSE);
+	fake_start(bus);
+	g_mutex_lock(&fake.lock);
+	fake.ecdsa_only = TRUE;
+	g_assert_cmpuint(fake.capabilities_count, ==, 0);
+	g_mutex_unlock(&fake.lock);
+	wait_token_present(TRUE);
+	count = G_N_ELEMENTS(mechanisms);
+	g_assert_cmpuint(functions->C_GetMechanismList(1, mechanisms, &count), ==, CKR_OK);
+	g_assert_cmpuint(count, ==, 6);
+	g_assert_cmpuint(functions->C_GetMechanismInfo(1, CKM_RSA_PKCS, &info), ==, CKR_MECHANISM_INVALID);
+	g_assert_cmpuint(functions->C_GetMechanismInfo(1, CKM_ECDSA, &info), ==, CKR_OK);
+	g_mutex_lock(&fake.lock);
+	g_assert_cmpuint(fake.capabilities_count, ==, 1);
+	g_mutex_unlock(&fake.lock);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static void test_failed_capabilities_are_retried(void)
+{
+	CK_MECHANISM_TYPE mechanisms[32];
+	CK_ULONG count = 0;
+
+	fake_reset(ACQUIRE_ANSWER);
+	g_mutex_lock(&fake.lock);
+	fake.capabilities_failures = 1;
+	g_mutex_unlock(&fake.lock);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	g_assert_cmpuint(functions->C_GetSlotList(CK_TRUE, NULL, &count), ==, CKR_OK);
+	g_assert_cmpuint(count, ==, 0);
+
+	/* Repeated discovery calls share the failed probe's backoff. */
+	for (guint i = 0; i < 16; i++)
+	{
+		count = 0;
+		g_assert_cmpuint(functions->C_GetSlotList(CK_TRUE, NULL, &count), ==, CKR_OK);
+		g_assert_cmpuint(count, ==, 0);
+	}
+	g_mutex_lock(&fake.lock);
+	g_assert_cmpuint(fake.capabilities_count, ==, 1);
+	g_mutex_unlock(&fake.lock);
+
+	wait_token_present(TRUE);
+	count = G_N_ELEMENTS(mechanisms);
+	g_assert_cmpuint(functions->C_GetMechanismList(1, mechanisms, &count), ==, CKR_OK);
+	g_assert_cmpuint(count, ==, 19);
+	wait_token_present(TRUE);
+	g_mutex_lock(&fake.lock);
+	g_assert_cmpuint(fake.capabilities_count, ==, 2);
+	g_mutex_unlock(&fake.lock);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static void test_frontend_appears_after_initialization(void)
+{
+	fake_stop();
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	wait_token_present(FALSE);
+	fake_start(bus);
+	wait_token_present(TRUE);
+	g_assert_cmpuint(find_the_private_key(open_session()), !=, CK_INVALID_HANDLE);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static void test_frontend_owner_is_replaced(void)
+{
+	g_autoptr(GDBusConnection) replacement = NULL;
+	g_autoptr(GVariant) reply = NULL;
+	g_autoptr(GError) error = NULL;
+	CK_SESSION_HANDLE session;
+	CK_OBJECT_HANDLE key;
+	guint8 input[32] = { 0 };
+	guint8 output[256];
+	CK_ULONG size = sizeof(output);
+	guint32 result;
+
+	fake_reset(ACQUIRE_ANSWER);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	key = find_the_private_key(session);
+	init_pending_operations(session, key);
+	replacement = g_dbus_connection_new_for_address_sync(
+	    g_test_dbus_get_bus_address(bus),
+	    G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
+	        G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION, NULL, NULL, &error);
+	g_assert_no_error(error);
+	reply = g_dbus_connection_call_sync(
+	    replacement, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+	    "RequestName", g_variant_new("(su)", PKCS11_PORTAL_BUS_NAME,
+	                                G_BUS_NAME_OWNER_FLAGS_REPLACE | G_BUS_NAME_OWNER_FLAGS_DO_NOT_QUEUE),
+	    G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, WAIT_MS, NULL, &error);
+	g_assert_no_error(error);
+	g_variant_get(reply, "(u)", &result);
+	g_assert_cmpuint(result, ==, 1);
+	wait_token_present(FALSE);
+	g_assert_cmpuint(functions->C_Sign(session, input, sizeof(input), output, &size),
+	                 ==, CKR_DEVICE_REMOVED);
+	g_mutex_lock(&fake.lock);
+	g_assert_cmpuint(fake.sign_count, ==, 0);
+	g_mutex_unlock(&fake.lock);
+	g_assert_true(g_dbus_connection_close_sync(replacement, NULL, &error));
+	g_assert_no_error(error);
+	wait_token_present(TRUE);
+	g_assert_cmpuint(find_the_private_key(open_session()), !=, key);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static void test_frontend_disappears_during_acquisition(void)
+{
+	Search find;
+	GThread* finder;
+	g_autofree char* path = NULL;
+
+	fake_reset(ACQUIRE_STALL);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	search_init(&find, open_session());
+	finder = g_thread_new("find", find_thread, &find);
+	path = fake_wait_for_acquire(WAIT_MS);
+	g_assert_nonnull(path);
+	fake_stop();
+	g_assert_true(search_wait(&find, WAIT_MS));
+	g_thread_join(finder);
+	g_assert_cmpuint(find.rv, ==, CKR_OK);
+	g_assert_cmpuint(functions->C_FindObjectsFinal(find.session), ==, CKR_OK);
+	search_clear(&find);
+	fake_start(bus);
+	wait_token_present(TRUE);
+	g_assert_cmpuint(find_the_private_key(open_session()), !=, CK_INVALID_HANDLE);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
+}
+
+static gpointer sign_thread(gpointer data)
+{
+	Search* sign = data;
+	guint8 input[32] = { 0 };
+	guint8 output[256];
+	CK_ULONG size = sizeof(output);
+
+	sign->rv = functions->C_Sign(sign->session, input, sizeof(input), output, &size);
+	search_done(sign);
+
+	return NULL;
+}
+
+static void test_frontend_disappears_during_signing(void)
+{
+	Search sign;
+	GThread* signer;
+	CK_SESSION_HANDLE session;
+	CK_OBJECT_HANDLE key;
+	gint64 deadline = g_get_monotonic_time() + WAIT_MS * G_TIME_SPAN_MILLISECOND;
+
+	fake_reset(ACQUIRE_ANSWER);
+	g_assert_cmpuint(functions->C_Initialize(NULL), ==, CKR_OK);
+	session = open_session();
+	key = find_the_private_key(session);
+	init_pending_operations(session, key);
+	g_mutex_lock(&fake.lock);
+	fake.hold_operations = TRUE;
+	g_mutex_unlock(&fake.lock);
+	search_init(&sign, session);
+	signer = g_thread_new("sign", sign_thread, &sign);
+	g_mutex_lock(&fake.lock);
+	while (fake.sign_count == 0 && g_cond_wait_until(&fake.cond, &fake.lock, deadline))
+		;
+	g_assert_cmpuint(fake.sign_count, ==, 1);
+	g_mutex_unlock(&fake.lock);
+	fake_stop();
+	g_assert_true(search_wait(&sign, WAIT_MS));
+	g_thread_join(signer);
+	g_assert_cmpuint(sign.rv, ==, CKR_DEVICE_REMOVED);
+	search_clear(&sign);
+	fake_start(bus);
+	wait_token_present(TRUE);
+	g_assert_cmpuint(find_the_private_key(open_session()), !=, CK_INVALID_HANDLE);
+	g_assert_cmpuint(functions->C_Finalize(NULL), ==, CKR_OK);
 }
 
 static void test_pending_operations_do_not_survive_grant_release(gconstpointer data)
@@ -1818,7 +2195,6 @@ int main(int argc, char** argv)
 	static const char* reasons[] = {
 		"token_removed", "expired", "policy", "backend_gone", "error", "local-expiry"
 	};
-	GTestDBus* bus = NULL;
 	int result;
 
 	g_test_init(&argc, &argv, NULL);
@@ -1830,6 +2206,22 @@ int main(int argc, char** argv)
 
 	g_assert_cmpuint(C_GetFunctionList(&functions), ==, CKR_OK);
 
+	g_test_add_func("/module/interface/typed-stubs", test_pkcs11_3_stubs);
+	g_test_add_func("/module/interface/concurrent-discovery", test_concurrent_interface_discovery);
+	g_test_add_data_func("/module/portal/frontend-restart/sign", "sign", test_frontend_restart);
+	g_test_add_data_func("/module/portal/frontend-restart/sign-update", "sign-update",
+	                     test_frontend_restart);
+	g_test_add_data_func("/module/portal/frontend-restart/sign-final", "sign-final",
+	                     test_frontend_restart);
+	g_test_add_data_func("/module/portal/frontend-restart/decrypt", "decrypt", test_frontend_restart);
+	g_test_add_func("/module/portal/frontend-capabilities", test_frontend_capabilities_are_refreshed);
+	g_test_add_func("/module/portal/capabilities-retry", test_failed_capabilities_are_retried);
+	g_test_add_func("/module/portal/frontend-appears", test_frontend_appears_after_initialization);
+	g_test_add_func("/module/portal/frontend-replaced", test_frontend_owner_is_replaced);
+	g_test_add_func("/module/portal/frontend-disappears-during-acquisition",
+	                test_frontend_disappears_during_acquisition);
+	g_test_add_func("/module/portal/frontend-disappears-during-signing",
+	                test_frontend_disappears_during_signing);
 	g_test_add_func("/module/portal/chooser-does-not-hold-the-lock",
 	                test_the_chooser_does_not_hold_the_module_lock);
 	g_test_add_func("/module/portal/finalize-during-the-chooser",

@@ -21,7 +21,8 @@ Run cancellation and parser coverage under AddressSanitizer and UndefinedBehavio
 
 ```console
 $ meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
-$ meson test -C build-asan
+$ meson compile -C build-asan -j1
+$ meson test -C build-asan --no-rebuild --print-errorlogs
 ```
 
 If tests exit 127, inspect `ldd build-asan/tests/test-mechanism` for missing sanitizer runtimes,
@@ -31,13 +32,37 @@ system installation, keep download and extraction in the same scratch directory:
 ```console
 $ mkdir -p ~/scratch/asan-rt
 $ (cd ~/scratch/asan-rt && dnf download --arch=x86_64 libasan libubsan && for f in *.rpm; do rpm2cpio "$f" | cpio -idmu; done)
-$ LD_LIBRARY_PATH=~/scratch/asan-rt/usr/lib64 meson test -C build-asan
+$ LDFLAGS="-L$HOME/scratch/asan-rt/usr/lib64" meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
+$ LD_LIBRARY_PATH="$HOME/scratch/asan-rt/usr/lib64" meson compile -C build-asan -j1
+$ LD_LIBRARY_PATH="$HOME/scratch/asan-rt/usr/lib64" meson test -C build-asan --no-rebuild --print-errorlogs
 ```
+
+Use a fresh build directory for the `LDFLAGS` setup command. Meson records linker flags at setup.
+The installed SDK consumers reuse those recorded link arguments for C and C++.
 
 `LD_LIBRARY_PATH` overrides the binary's `RUNPATH`. `tests/lsan.supp` covers process-lifetime
 allocations in GTK, GnuTLS and p11-kit; it contains no broad GLib/GIO/GObject suppression that
 could hide allocations from this backend. LSan matches any allocation-stack frame. Leaks in
 `src/` require investigation.
+
+The `module-portal` test watches frontend owner loss and replacement on the module's private
+context. It checks pending operations, acquisition and signing on caller threads, recovery
+without reinitialization, capability changes after a restart, and failed capability probes
+retried with backoff on the same owner. The `module-lifecycle` test queues owner signals
+during `C_Finalize` and checks release of the private context and shared connection with
+weak references. Interface discovery runs
+concurrently, and every unsupported PKCS#11 3.0 entry is called through its declared type.
+Clang's `-fsanitize=function` detects incompatible stubs. Concurrent discovery is an API
+guard under ASan/UBSan; identical concurrent writes need a race detector.
+The `core-api` test checks generic-purpose wording in user and context-specific PIN prompts.
+The p11-kit configuration child checks enumeration, finalizes the module, stops its private
+bus and calls `_exit()` to avoid reporting the retained `GTestDBus` fixture as a leak.
+
+Run the module and grant regressions, including the slow local-timeout case:
+
+```console
+$ meson test -C build-asan --no-rebuild --print-errorlogs module module-portal module-lifecycle core-api --test-args='-m slow'
+```
 
 `/cancel/during-login` checks deferred completion and worker-owned PIN storage. Immediate
 completion with the prompt's buffer would violate its assertions. It briefly opens a real

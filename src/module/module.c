@@ -63,7 +63,6 @@ static guint module_session_serial;
 static PortalClient* module_client;
 static PortalGrant* module_grant;
 static PortalObjects* module_objects;
-static GArray* module_mechanisms;
 static guint module_generation;
 static GHashTable* module_sessions;
 static CK_SESSION_HANDLE module_next_session;
@@ -219,6 +218,19 @@ static gboolean grant_still_good(void)
 	module_logged_in = FALSE;
 	module_slot_events++;
 	return FALSE;
+}
+
+static CK_RV operation_session_lookup(CK_SESSION_HANDLE handle, PortalSession** session)
+{
+	if (module_grant != NULL && g_hash_table_contains(module_sessions, GUINT_TO_POINTER(handle)) &&
+	    portal_client_grant_gone(module_client, module_grant))
+	{
+		grant_still_good();
+		return CKR_DEVICE_REMOVED;
+	}
+
+	*session = session_lookup(handle);
+	return *session != NULL ? CKR_OK : CKR_SESSION_HANDLE_INVALID;
 }
 
 /** Called with module_lock held; releases it during acquisition, so all prior state requires revalidation. */
@@ -382,7 +394,6 @@ CK_RV C_Initialize(void* init_args)
 	else
 	{
 		module_client = portal_client_new();
-		module_mechanisms = portal_mechanism_list(portal_client_mechanisms(module_client));
 	}
 
 	g_atomic_int_set(&module_initialized, TRUE);
@@ -419,7 +430,6 @@ CK_RV C_Finalize(void* reserved)
 
 	g_clear_pointer(&module_sessions, g_hash_table_unref);
 	g_clear_pointer(&module_issued_ids, g_hash_table_unref);
-	g_clear_pointer(&module_mechanisms, g_array_unref);
 	g_clear_pointer(&module_client, portal_client_free);
 
 	module_logged_in = FALSE;
@@ -462,17 +472,13 @@ CK_RV C_GetFunctionList(CK_FUNCTION_LIST** list)
 
 CK_RV C_GetInterfaceList(CK_INTERFACE* interfaces, unsigned long* count)
 {
-	static CK_INTERFACE interface_list[2];
+	static const CK_INTERFACE interface_list[] = {
+		{ (char*) "PKCS 11", &function_list_3_0, 0 },
+		{ (char*) "PKCS 11", &function_list, 0 },
+	};
 
 	if (count == NULL)
 		return CKR_ARGUMENTS_BAD;
-
-	interface_list[0].pInterfaceName = (char*) "PKCS 11";
-	interface_list[0].pFunctionList = &function_list_3_0;
-	interface_list[0].flags = 0;
-	interface_list[1].pInterfaceName = (char*) "PKCS 11";
-	interface_list[1].pFunctionList = &function_list;
-	interface_list[1].flags = 0;
 
 	if (interfaces == NULL)
 	{
@@ -495,8 +501,8 @@ CK_RV C_GetInterfaceList(CK_INTERFACE* interfaces, unsigned long* count)
 CK_RV C_GetInterface(unsigned char* interface_name, CK_VERSION* version,
                      CK_INTERFACE** interface, CK_FLAGS flags)
 {
-	static CK_INTERFACE interface_3_0;
-	static CK_INTERFACE interface_2_40;
+	static CK_INTERFACE interface_3_0 = { (char*) "PKCS 11", &function_list_3_0, 0 };
+	static CK_INTERFACE interface_2_40 = { (char*) "PKCS 11", &function_list, 0 };
 
 	if (interface == NULL)
 		return CKR_ARGUMENTS_BAD;
@@ -507,13 +513,6 @@ CK_RV C_GetInterface(unsigned char* interface_name, CK_VERSION* version,
 	/* No fork-safety flags are advertised. */
 	if (flags != 0)
 		return CKR_ARGUMENTS_BAD;
-
-	interface_3_0.pInterfaceName = (char*) "PKCS 11";
-	interface_3_0.pFunctionList = &function_list_3_0;
-	interface_3_0.flags = 0;
-	interface_2_40.pInterfaceName = (char*) "PKCS 11";
-	interface_2_40.pFunctionList = &function_list;
-	interface_2_40.flags = 0;
 
 	if (version == NULL || (version->major == 3 && version->minor == 0))
 		*interface = &interface_3_0;
@@ -636,6 +635,8 @@ CK_RV C_GetTokenInfo(CK_SLOT_ID slot_id, CK_TOKEN_INFO* info)
 CK_RV C_GetMechanismList(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE* mechanism_list,
                          unsigned long* count)
 {
+	g_auto(GStrv) mechanisms = NULL;
+	g_autoptr(GArray) list = NULL;
 	unsigned long available;
 
 	MODULE_CHECK();
@@ -647,13 +648,15 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE* mechanism_list,
 
 	g_mutex_lock(&module_lock);
 
-	if (!portal_client_available(module_client))
+	mechanisms = portal_client_dup_mechanisms(module_client);
+	if (mechanisms == NULL)
 	{
 		g_mutex_unlock(&module_lock);
 		return CKR_TOKEN_NOT_PRESENT;
 	}
 
-	available = module_mechanisms != NULL ? module_mechanisms->len : 0;
+	list = portal_mechanism_list((const char* const*) mechanisms);
+	available = list->len;
 
 	if (mechanism_list == NULL)
 	{
@@ -670,7 +673,7 @@ CK_RV C_GetMechanismList(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE* mechanism_list,
 	}
 
 	for (unsigned long i = 0; i < available; i++)
-		mechanism_list[i] = g_array_index(module_mechanisms, CK_MECHANISM_TYPE, i);
+		mechanism_list[i] = g_array_index(list, CK_MECHANISM_TYPE, i);
 	*count = available;
 
 	g_mutex_unlock(&module_lock);
@@ -681,6 +684,7 @@ CK_RV C_GetMechanismInfo(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE type,
                          CK_MECHANISM_INFO* info)
 {
 	const PortalMechanism* mechanism;
+	g_auto(GStrv) mechanisms = NULL;
 	CK_RV rv = CKR_OK;
 
 	MODULE_CHECK();
@@ -694,10 +698,11 @@ CK_RV C_GetMechanismInfo(CK_SLOT_ID slot_id, CK_MECHANISM_TYPE type,
 
 	g_mutex_lock(&module_lock);
 
-	if (!portal_client_available(module_client))
+	mechanisms = portal_client_dup_mechanisms(module_client);
+	if (mechanisms == NULL)
 		rv = CKR_TOKEN_NOT_PRESENT;
 	else if (mechanism == NULL ||
-	         !portal_mechanism_available(mechanism, portal_client_mechanisms(module_client)))
+	         !portal_mechanism_available(mechanism, (const char* const*) mechanisms))
 		rv = CKR_MECHANISM_INVALID;
 
 	g_mutex_unlock(&module_lock);
@@ -1330,11 +1335,11 @@ CK_RV C_Sign(CK_SESSION_HANDLE session_handle, unsigned char* data, unsigned lon
 
 	g_mutex_lock(&module_lock);
 
-	session = session_lookup(session_handle);
-	if (session == NULL)
+	rv = operation_session_lookup(session_handle, &session);
+	if (rv != CKR_OK)
 	{
 		g_mutex_unlock(&module_lock);
-		return CKR_SESSION_HANDLE_INVALID;
+		return rv;
 	}
 
 	if (!session->sign_active)
@@ -1382,11 +1387,11 @@ CK_RV C_SignUpdate(CK_SESSION_HANDLE session_handle, unsigned char* part, unsign
 
 	g_mutex_lock(&module_lock);
 
-	session = session_lookup(session_handle);
-	if (session == NULL)
+	rv = operation_session_lookup(session_handle, &session);
+	if (rv != CKR_OK)
 	{
 		g_mutex_unlock(&module_lock);
-		return CKR_SESSION_HANDLE_INVALID;
+		return rv;
 	}
 
 	if (!session->sign_active)
@@ -1417,11 +1422,11 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE session_handle, unsigned char* signature,
 
 	g_mutex_lock(&module_lock);
 
-	session = session_lookup(session_handle);
-	if (session == NULL)
+	rv = operation_session_lookup(session_handle, &session);
+	if (rv != CKR_OK)
 	{
 		g_mutex_unlock(&module_lock);
-		return CKR_SESSION_HANDLE_INVALID;
+		return rv;
 	}
 
 	if (!session->sign_active)
@@ -1545,6 +1550,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session_handle, unsigned char* ciphertext,
 	g_autoptr(GError) error = NULL;
 	const guint8* data;
 	gsize size = 0;
+	CK_RV rv;
 
 	MODULE_CHECK();
 
@@ -1553,11 +1559,11 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session_handle, unsigned char* ciphertext,
 
 	g_mutex_lock(&module_lock);
 
-	session = session_lookup(session_handle);
-	if (session == NULL)
+	rv = operation_session_lookup(session_handle, &session);
+	if (rv != CKR_OK)
 	{
 		g_mutex_unlock(&module_lock);
-		return CKR_SESSION_HANDLE_INVALID;
+		return rv;
 	}
 
 	if (!session->decrypt_active)
@@ -1585,7 +1591,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session_handle, unsigned char* ciphertext,
 	                           session->decrypt_mgf1_hash, session->decrypt_label, ciphertext,
 	                           ciphertext_len, &result, &error))
 	{
-		CK_RV rv = portal_error_to_rv(error);
+		rv = portal_error_to_rv(error);
 
 		session_reset_decrypt(session);
 		g_mutex_unlock(&module_lock);
@@ -1706,6 +1712,69 @@ NOT_SUPPORTED(C_GenerateRandom, (CK_SESSION_HANDLE s, unsigned char* d, unsigned
 NOT_SUPPORTED(C_GetFunctionStatus, (CK_SESSION_HANDLE s))
 NOT_SUPPORTED(C_CancelFunction, (CK_SESSION_HANDLE s))
 
+NOT_SUPPORTED(C_LoginUser, (CK_SESSION_HANDLE session, CK_USER_TYPE user_type, unsigned char* pin,
+                            unsigned long pin_len, unsigned char* username,
+                            unsigned long username_len))
+NOT_SUPPORTED(C_SessionCancel, (CK_SESSION_HANDLE session, CK_FLAGS flags))
+NOT_SUPPORTED(C_MessageEncryptInit, (CK_SESSION_HANDLE session, CK_MECHANISM* mechanism,
+                                     CK_OBJECT_HANDLE key))
+NOT_SUPPORTED(C_EncryptMessage, (CK_SESSION_HANDLE session, void* parameter,
+                                 unsigned long parameter_len, unsigned char* associated_data,
+                                 unsigned long associated_data_len, unsigned char* plaintext,
+                                 unsigned long plaintext_len, unsigned char* ciphertext,
+                                 unsigned long* ciphertext_len))
+NOT_SUPPORTED(C_EncryptMessageBegin, (CK_SESSION_HANDLE session, void* parameter,
+                                      unsigned long parameter_len, unsigned char* associated_data,
+                                      unsigned long associated_data_len))
+NOT_SUPPORTED(C_EncryptMessageNext, (CK_SESSION_HANDLE session, void* parameter,
+                                     unsigned long parameter_len, unsigned char* plaintext_part,
+                                     unsigned long plaintext_part_len,
+                                     unsigned char* ciphertext_part,
+                                     unsigned long* ciphertext_part_len, CK_FLAGS flags))
+NOT_SUPPORTED(C_MessageEncryptFinal, (CK_SESSION_HANDLE session))
+NOT_SUPPORTED(C_MessageDecryptInit, (CK_SESSION_HANDLE session, CK_MECHANISM* mechanism,
+                                     CK_OBJECT_HANDLE key))
+NOT_SUPPORTED(C_DecryptMessage, (CK_SESSION_HANDLE session, void* parameter,
+                                 unsigned long parameter_len, unsigned char* associated_data,
+                                 unsigned long associated_data_len, unsigned char* ciphertext,
+                                 unsigned long ciphertext_len, unsigned char* plaintext,
+                                 unsigned long* plaintext_len))
+NOT_SUPPORTED(C_DecryptMessageBegin, (CK_SESSION_HANDLE session, void* parameter,
+                                      unsigned long parameter_len, unsigned char* associated_data,
+                                      unsigned long associated_data_len))
+NOT_SUPPORTED(C_DecryptMessageNext, (CK_SESSION_HANDLE session, void* parameter,
+                                     unsigned long parameter_len, unsigned char* ciphertext_part,
+                                     unsigned long ciphertext_part_len,
+                                     unsigned char* plaintext_part,
+                                     unsigned long* plaintext_part_len, CK_FLAGS flags))
+NOT_SUPPORTED(C_MessageDecryptFinal, (CK_SESSION_HANDLE session))
+NOT_SUPPORTED(C_MessageSignInit, (CK_SESSION_HANDLE session, CK_MECHANISM* mechanism,
+                                  CK_OBJECT_HANDLE key))
+NOT_SUPPORTED(C_SignMessage, (CK_SESSION_HANDLE session, void* parameter,
+                              unsigned long parameter_len, unsigned char* data,
+                              unsigned long data_len, unsigned char* signature,
+                              unsigned long* signature_len))
+NOT_SUPPORTED(C_SignMessageBegin, (CK_SESSION_HANDLE session, void* parameter,
+                                   unsigned long parameter_len))
+NOT_SUPPORTED(C_SignMessageNext, (CK_SESSION_HANDLE session, void* parameter,
+                                  unsigned long parameter_len, unsigned char* data,
+                                  unsigned long data_len, unsigned char* signature,
+                                  unsigned long* signature_len))
+NOT_SUPPORTED(C_MessageSignFinal, (CK_SESSION_HANDLE session))
+NOT_SUPPORTED(C_MessageVerifyInit, (CK_SESSION_HANDLE session, CK_MECHANISM* mechanism,
+                                    CK_OBJECT_HANDLE key))
+NOT_SUPPORTED(C_VerifyMessage, (CK_SESSION_HANDLE session, void* parameter,
+                                unsigned long parameter_len, unsigned char* data,
+                                unsigned long data_len, unsigned char* signature,
+                                unsigned long signature_len))
+NOT_SUPPORTED(C_VerifyMessageBegin, (CK_SESSION_HANDLE session, void* parameter,
+                                     unsigned long parameter_len))
+NOT_SUPPORTED(C_VerifyMessageNext, (CK_SESSION_HANDLE session, void* parameter,
+                                    unsigned long parameter_len, unsigned char* data,
+                                    unsigned long data_len, unsigned char* signature,
+                                    unsigned long signature_len))
+NOT_SUPPORTED(C_MessageVerifyFinal, (CK_SESSION_HANDLE session))
+
 #define FUNCTION_LIST_2_40_FIELDS                                                             \
 	.C_Initialize = C_Initialize, .C_Finalize = C_Finalize, .C_GetInfo = C_GetInfo,            \
 	.C_GetFunctionList = C_GetFunctionList, .C_GetSlotList = C_GetSlotList,                   \
@@ -1744,37 +1813,32 @@ static CK_FUNCTION_LIST function_list = {
 	FUNCTION_LIST_2_40_FIELDS,
 };
 
-static CK_RV not_supported_3_0(void)
-{
-	return CKR_FUNCTION_NOT_SUPPORTED;
-}
-
 /* PKCS#11 3.0 entry points use the same functions and reject unsupported additions. */
 static CK_FUNCTION_LIST_3_0 function_list_3_0 = {
 	.version = { 3, 0 },
 	FUNCTION_LIST_2_40_FIELDS,
 	.C_GetInterfaceList = C_GetInterfaceList,
 	.C_GetInterface = C_GetInterface,
-	.C_LoginUser = (CK_C_LoginUser)(void*) not_supported_3_0,
-	.C_SessionCancel = (CK_C_SessionCancel)(void*) not_supported_3_0,
-	.C_MessageEncryptInit = (CK_C_MessageEncryptInit)(void*) not_supported_3_0,
-	.C_EncryptMessage = (CK_C_EncryptMessage)(void*) not_supported_3_0,
-	.C_EncryptMessageBegin = (CK_C_EncryptMessageBegin)(void*) not_supported_3_0,
-	.C_EncryptMessageNext = (CK_C_EncryptMessageNext)(void*) not_supported_3_0,
-	.C_MessageEncryptFinal = (CK_C_MessageEncryptFinal)(void*) not_supported_3_0,
-	.C_MessageDecryptInit = (CK_C_MessageDecryptInit)(void*) not_supported_3_0,
-	.C_DecryptMessage = (CK_C_DecryptMessage)(void*) not_supported_3_0,
-	.C_DecryptMessageBegin = (CK_C_DecryptMessageBegin)(void*) not_supported_3_0,
-	.C_DecryptMessageNext = (CK_C_DecryptMessageNext)(void*) not_supported_3_0,
-	.C_MessageDecryptFinal = (CK_C_MessageDecryptFinal)(void*) not_supported_3_0,
-	.C_MessageSignInit = (CK_C_MessageSignInit)(void*) not_supported_3_0,
-	.C_SignMessage = (CK_C_SignMessage)(void*) not_supported_3_0,
-	.C_SignMessageBegin = (CK_C_SignMessageBegin)(void*) not_supported_3_0,
-	.C_SignMessageNext = (CK_C_SignMessageNext)(void*) not_supported_3_0,
-	.C_MessageSignFinal = (CK_C_MessageSignFinal)(void*) not_supported_3_0,
-	.C_MessageVerifyInit = (CK_C_MessageVerifyInit)(void*) not_supported_3_0,
-	.C_VerifyMessage = (CK_C_VerifyMessage)(void*) not_supported_3_0,
-	.C_VerifyMessageBegin = (CK_C_VerifyMessageBegin)(void*) not_supported_3_0,
-	.C_VerifyMessageNext = (CK_C_VerifyMessageNext)(void*) not_supported_3_0,
-	.C_MessageVerifyFinal = (CK_C_MessageVerifyFinal)(void*) not_supported_3_0,
+	.C_LoginUser = C_LoginUser,
+	.C_SessionCancel = C_SessionCancel,
+	.C_MessageEncryptInit = C_MessageEncryptInit,
+	.C_EncryptMessage = C_EncryptMessage,
+	.C_EncryptMessageBegin = C_EncryptMessageBegin,
+	.C_EncryptMessageNext = C_EncryptMessageNext,
+	.C_MessageEncryptFinal = C_MessageEncryptFinal,
+	.C_MessageDecryptInit = C_MessageDecryptInit,
+	.C_DecryptMessage = C_DecryptMessage,
+	.C_DecryptMessageBegin = C_DecryptMessageBegin,
+	.C_DecryptMessageNext = C_DecryptMessageNext,
+	.C_MessageDecryptFinal = C_MessageDecryptFinal,
+	.C_MessageSignInit = C_MessageSignInit,
+	.C_SignMessage = C_SignMessage,
+	.C_SignMessageBegin = C_SignMessageBegin,
+	.C_SignMessageNext = C_SignMessageNext,
+	.C_MessageSignFinal = C_MessageSignFinal,
+	.C_MessageVerifyInit = C_MessageVerifyInit,
+	.C_VerifyMessage = C_VerifyMessage,
+	.C_VerifyMessageBegin = C_VerifyMessageBegin,
+	.C_VerifyMessageNext = C_VerifyMessageNext,
+	.C_MessageVerifyFinal = C_MessageVerifyFinal,
 };
