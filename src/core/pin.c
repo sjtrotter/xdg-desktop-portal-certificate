@@ -283,7 +283,7 @@ static const char* pin_status_text(XccPinStatus status)
 	case XCC_PIN_STATUS_TOO_LONG:
 		return "PIN exceeds the supported length.";
 	case XCC_PIN_STATUS_MEMORY_UNAVAILABLE:
-		return "The PIN could not be held in locked memory.";
+		return "Could not allocate memory for the PIN.";
 	default:
 		return NULL;
 	}

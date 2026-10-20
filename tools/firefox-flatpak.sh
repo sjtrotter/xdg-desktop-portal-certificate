@@ -95,9 +95,9 @@ echo "${0##*/}: portal bus: Certificate interface visible from the sandbox"
 
 [ "$CHECK" = 1 ] && exit 0
 
-mkdir -p "$APPDIR/data"
-cp -f "$MODULE" "$APPDIR/data/"
 INSIDE="$APPDIR/data/libpkcs11-portal-certificate.so"
+mkdir -p "$APPDIR/data" || die "module directory could not be created: $APPDIR/data"
+cp -f "$MODULE" "$INSIDE" || die "module could not be copied to $INSIDE"
 if [ "$FRESH" = 1 ]; then
 	rm -rf "$PROFILE"
 fi

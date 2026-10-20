@@ -532,6 +532,48 @@ EOF
 	export XDG_CURRENT_DESKTOP=portal-certificate-smoke LC_ALL=C LANGUAGE=C
 }
 
+xdp_smoke_module_enumeration() {
+	local logdir="$1" module="$2" uri="$3" before after p11_status pkcs11_status
+	local backend_log="$logdir/backend.log"
+
+	[ -r "$backend_log" ] || { echo "module-smoke: backend log unavailable"; return 1; }
+	before="$(grep -c 'chooser-shown' "$backend_log" || true)"
+
+	LC_ALL=C timeout 180 p11tool --provider "$module" --list-all-certs "$uri" \
+		>"$logdir/quiet-p11tool.log" 2>&1
+	p11_status=$?
+	LC_ALL=C timeout 180 pkcs11-tool --module "$module" --list-objects \
+		>"$logdir/quiet-pkcs11-tool.log" 2>&1
+	pkcs11_status=$?
+
+	after="$(grep -c 'chooser-shown' "$backend_log" || true)"
+	echo "choosers before=$before after=$after"
+	if [ "$before" != "$after" ]; then
+		echo "module-smoke: an enumeration raised a chooser"
+		grep 'chooser-shown' "$backend_log" | tail -5
+		return 1
+	fi
+	# p11tool exits 2 for an empty search; other failures must fail the phase.
+	if [ "$p11_status" != 0 ] && ! { [ "$p11_status" = 2 ] &&
+		grep -qxF 'No matching objects found' "$logdir/quiet-p11tool.log"; }; then
+		echo "module-smoke: p11tool failed ($p11_status)"
+		cat "$logdir/quiet-p11tool.log"
+		return 1
+	fi
+	if [ "$pkcs11_status" != 0 ]; then
+		echo "module-smoke: pkcs11-tool failed ($pkcs11_status)"
+		cat "$logdir/quiet-pkcs11-tool.log"
+		return 1
+	fi
+	if grep -qE '^[[:space:]]*Object [0-9]+:' "$logdir/quiet-p11tool.log" ||
+		grep -qE 'Object;|^Data object ' "$logdir/quiet-pkcs11-tool.log"; then
+		echo "module-smoke: enumeration returned objects from an unacquired token"
+		cat "$logdir/quiet-p11tool.log" "$logdir/quiet-pkcs11-tool.log"
+		return 1
+	fi
+	echo "module-smoke: enumerations opened no chooser and returned no objects"
+}
+
 xdp_smoke_start_gnome_backend() {
 	# Only this backend sees the temporary configuration. Client p11-kit module
 	# registrations and the real session's configuration remain independent.

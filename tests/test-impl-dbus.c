@@ -358,8 +358,11 @@ static void test_session_close_is_authorised(Fixture* fixture, gconstpointer use
 	g_assert_error(error, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED);
 	g_clear_error(&error);
 
+	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
+	                      "grant-invalidated session=" SESSION_PATH " detail=closed-by-portal");
 	reply = call_sync(fixture->frontend, SESSION_PATH, "org.freedesktop.impl.portal.Session",
 	                  "Close", NULL, &error);
+	g_test_assert_expected_messages();
 	g_assert_no_error(error);
 	g_assert_nonnull(reply);
 }
@@ -567,6 +570,42 @@ static void on_session_invalidated_signal(GDBusConnection* connection, const cha
 	watch->count++;
 }
 
+static void collect_grant_log(const char* domain, GLogLevelFlags level, const char* message,
+                              gpointer user_data)
+{
+	GPtrArray* lines = user_data;
+
+	if (g_str_has_prefix(message, "grant-invalidated "))
+		g_ptr_array_add(lines, g_strdup(message));
+	else
+		g_log_default_handler(domain, level, message, NULL);
+}
+
+static void test_session_invalidation_log(Fixture* fixture, gconstpointer user_data)
+{
+	const char* reason = user_data;
+	g_autoptr(CertificateImplSession) session = certificate_impl_session_new(SESSION_PATH, APP_A);
+	g_autoptr(GPtrArray) lines = g_ptr_array_new_with_free_func(g_free);
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GVariant) reply = NULL;
+	g_autofree char* expected =
+	    g_strdup_printf("grant-invalidated session=%s detail=%s", SESSION_PATH, reason);
+	guint handler;
+
+	g_assert_true(certificate_impl_session_export(session, fixture->backend, &error));
+	g_assert_no_error(error);
+	handler = g_log_set_handler(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, collect_grant_log, lines);
+	xcc_session_invalidate(session->core, reason);
+	xcc_session_invalidate(session->core, "error");
+	reply = call_sync(fixture->frontend, SESSION_PATH, "org.freedesktop.impl.portal.Session",
+	                  "Close", NULL, &error);
+	g_log_remove_handler(G_LOG_DOMAIN, handler);
+	g_assert_no_error(error);
+	g_assert_nonnull(reply);
+	g_assert_cmpuint(lines->len, ==, 1);
+	g_assert_cmpstr(g_ptr_array_index(lines, 0), ==, expected);
+}
+
 static void test_shutdown_reason_is_in_the_vocabulary(Fixture* fixture, gconstpointer user_data)
 {
 	InvalidationWatch watch = { NULL, 0 };
@@ -579,10 +618,13 @@ static void test_shutdown_reason_is_in_the_vocabulary(Fixture* fixture, gconstpo
 	                                        G_DBUS_SIGNAL_FLAGS_NONE,
 	                                        on_session_invalidated_signal, &watch, NULL);
 
+	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
+	                      "grant-invalidated session=" SESSION_PATH " detail=backend_gone");
 	certificate_impl_shutdown(fixture->impl);
 
 	while (watch.count == 0)
 		g_main_context_iteration(NULL, TRUE);
+	g_test_assert_expected_messages();
 
 	g_dbus_connection_signal_unsubscribe(fixture->frontend, id);
 
@@ -1147,9 +1189,33 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	{
 		g_autoptr(GVariant) der = g_variant_lookup_value(results, "certificate_der",
 		                                               G_VARIANT_TYPE("ay"));
+		g_autoptr(GPtrArray) lines = g_ptr_array_new_with_free_func(g_free);
+		InvalidationWatch watch = { NULL, 0 };
+		guint subscription;
+		guint handler;
 
 		g_assert_cmpuint(response, ==, CERTIFICATE_RESPONSE_SUCCESS);
 		g_assert_nonnull(der);
+		subscription = g_dbus_connection_signal_subscribe(
+		    fixture->frontend, NULL, IMPL_INTERFACE, "SessionInvalidated", IMPL_PATH, NULL,
+		    G_DBUS_SIGNAL_FLAGS_NONE, on_session_invalidated_signal, &watch, NULL);
+		handler = g_log_set_handler(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, collect_grant_log, lines);
+		certificate_tokens_emit_event(fixture->tokens, token, FALSE);
+		deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
+		while (watch.count == 0 && g_get_monotonic_time() < deadline)
+			g_main_context_iteration(NULL, FALSE);
+		g_assert_cmpuint(watch.count, ==, 1);
+		g_assert_cmpstr(watch.reason, ==, "token_removed");
+		closed = call_sync(fixture->frontend, SESSION_PATH, "org.freedesktop.impl.portal.Session",
+		                   "Close", NULL, &error);
+		g_log_remove_handler(G_LOG_DOMAIN, handler);
+		g_dbus_connection_signal_unsubscribe(fixture->frontend, subscription);
+		g_assert_no_error(error);
+		g_assert_nonnull(closed);
+		g_assert_cmpuint(lines->len, ==, 1);
+		g_assert_cmpstr(g_ptr_array_index(lines, 0), ==,
+		                "grant-invalidated session=" SESSION_PATH " detail=token_removed");
+		g_free(watch.reason);
 	}
 	certificate_tokens_set_enumerate_gate(NULL, NULL);
 	g_mutex_clear(&gate.lock);
@@ -1219,6 +1285,15 @@ int main(int argc, char** argv)
 	ADD("/impl/toolkit-does-not-retain-session-bus", test_toolkit_does_not_retain_session_bus);
 	ADD("/impl/stranger-is-refused", test_stranger_is_refused);
 	ADD("/impl/session-close-is-authorised", test_session_close_is_authorised);
+	{
+		static const char* reasons[] = { "token_removed", "expired", "policy", "backend_gone", "error" };
+		for (guint i = 0; i < G_N_ELEMENTS(reasons); i++)
+		{
+			g_autofree char* name = g_strconcat("/impl/session-invalidation-log/", reasons[i], NULL);
+			g_test_add(name, Fixture, reasons[i], fixture_set_up,
+			           test_session_invalidation_log, fixture_tear_down);
+		}
+	}
 	ADD("/impl/request-close-is-authorised", test_request_close_is_authorised);
 	ADD("/impl/session-is-bound-to-app-id", test_session_is_bound_to_app_id);
 	ADD("/impl/identity-level-cannot-rise", test_identity_level_cannot_rise);

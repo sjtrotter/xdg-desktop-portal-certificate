@@ -37,7 +37,7 @@ import('pkgconfig').generate(
   description: 'Toolkit-neutral certificate discovery, consent and brokered operations',
   version: meson.project_version(),
   subdirs: 'xdp-certificate-core-0',
-  requires_private: ['glib-2.0 >= 2.66', 'gio-2.0 >= 2.66', 'p11-kit-1 >= 0.23', 'gnutls >= 3.6'],
+  requires_private: ['glib-2.0 >= 2.80', 'gio-2.0 >= 2.80', 'p11-kit-1 >= 0.23', 'gnutls >= 3.6'],
 )
 
 # Tests need private APIs and linker --wrap seams. Nothing in this archive is installed.

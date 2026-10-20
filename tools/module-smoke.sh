@@ -242,36 +242,10 @@ inner() {
 	"$LOGDIR/driver.sh" >"$LOGDIR/driver.log" 2>&1 &
 	DRIVER=$!
 
-	# Count grants because successful empty searches must not open a chooser.
-	grants_created() {
-		grep -c 'grant-created' "$LOGDIR/backend.log" 2>/dev/null || true
-	}
-
 	if phase_wanted 0; then
-		local before after
 		echo
 		echo "=== 0  unnamed searches do not acquire credentials ==="
-		before="$(grants_created)"
-
-		timeout 180 p11tool --provider "$MODULE_SO" --list-all-certs "$URI_TOKEN" \
-			>"$LOGDIR/quiet-p11tool.log" 2>&1
-		timeout 180 pkcs11-tool --module "$MODULE_SO" --list-objects \
-			>"$LOGDIR/quiet-pkcs11-tool.log" 2>&1
-
-		after="$(grants_created)"
-		echo "grants before=$before after=$after"
-
-		if [ "$before" != "$after" ]; then
-			echo "module-smoke: an enumeration raised a chooser"
-			grep -E 'grant-created|chooser-shown' "$LOGDIR/backend.log" | tail -5
-			rc=1
-		elif grep -qE '^\s*Object [0-9]+:' "$LOGDIR/quiet-p11tool.log"; then
-			echo "module-smoke: p11tool got objects out of an unacquired token"
-			cat "$LOGDIR/quiet-p11tool.log"
-			rc=1
-		else
-			echo "module-smoke: neither search acquired a credential"
-		fi
+		xdp_smoke_module_enumeration "$LOGDIR" "$MODULE_SO" "$URI_TOKEN" || rc=1
 	fi
 
 	if phase_wanted 1 && [ "$rc" = 0 ]; then

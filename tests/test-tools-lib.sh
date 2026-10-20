@@ -211,5 +211,84 @@ expect_eq "Removed fixture no longer exists" "gone" "$([ -e "$GOOD" ] && echo pr
 expect_refused "fixture_remove refuses a directory it did not make" \
 	fixture_remove "$UNMARKED" libtest
 
+# Fake consumers exercise phase 0 without loading a module or starting services.
+ENUM_LOG="$ROOT/enumeration"
+mkdir -p "$ENUM_LOG/stack/document-portal" "$ENUM_LOG/stack/desktop-portal"
+for executable in "$ENUM_LOG/stack/document-portal/xdg-permission-store" \
+	"$ENUM_LOG/stack/desktop-portal/xdg-desktop-portal" "$ENUM_LOG/driver.sh"; do
+	printf '#!/bin/sh\nexit 0\n' >"$executable"
+	chmod +x "$executable"
+done
+P11_STATUS=2
+P11_OUTPUT="No matching objects found"
+PKCS11_STATUS=0
+PKCS11_OUTPUT=""
+SHOW_CHOOSER=0
+
+timeout() {
+	shift
+	case "$1" in
+	p11tool)
+		if [ "$SHOW_CHOOSER" = 1 ]; then
+			echo 'chooser-shown app_id=test' >>"$ENUM_LOG/backend.log"
+		fi
+		printf '%s\n' "$P11_OUTPUT"
+		return "$P11_STATUS"
+		;;
+	pkcs11-tool)
+		printf '%s\n' "$PKCS11_OUTPUT"
+		return "$PKCS11_STATUS"
+		;;
+	*) return 99 ;;
+	esac
+}
+
+module_phase_zero() (
+	local LOGDIR="$ENUM_LOG" XDP_BUILD="$ENUM_LOG/stack" BACKEND_KIND=test
+	local MODULE_SO=/unused/module URI_TOKEN=pkcs11:test BE=unused
+	# Load the runner without its display and service setup.
+	. <(sed -n '/^inner() {/,/^}/p' "$REPO/tools/module-smoke.sh")
+	phase_wanted() { [ "$1" = 0 ]; }
+	gdbus() { echo '(true,)'; }
+	sleep() { :; }
+	kill() { :; }
+	inner
+)
+
+: >"$ENUM_LOG/backend.log"
+expect_accepted "module enumeration accepts p11tool's empty-result status" \
+	module_phase_zero
+P11_STATUS=0
+P11_OUTPUT=""
+expect_accepted "module enumeration accepts successful empty consumers" \
+	module_phase_zero
+for P11_STATUS in 1 2 124 137; do
+	expect_refused "module enumeration rejects p11tool failure $P11_STATUS" \
+		module_phase_zero
+done
+P11_STATUS=2
+P11_OUTPUT="No matching objects found"
+for PKCS11_STATUS in 1 124 137; do
+	expect_refused "module enumeration rejects pkcs11-tool failure $PKCS11_STATUS" \
+		module_phase_zero
+done
+PKCS11_STATUS=0
+SHOW_CHOOSER=1
+expect_refused "module enumeration rejects a chooser without a grant" \
+	module_phase_zero
+SHOW_CHOOSER=0
+P11_STATUS=0
+P11_OUTPUT="Object 0:"
+expect_refused "module enumeration rejects p11tool objects" \
+	module_phase_zero
+P11_OUTPUT=""
+PKCS11_OUTPUT="Certificate Object; type = X.509 cert"
+expect_refused "module enumeration rejects pkcs11-tool objects" \
+	module_phase_zero
+rm "$ENUM_LOG/backend.log"
+expect_refused "module enumeration requires a backend log" \
+	module_phase_zero
+unset -f timeout
+
 echo "1..$checks"
 [ "$failures" -eq 0 ] || exit 1

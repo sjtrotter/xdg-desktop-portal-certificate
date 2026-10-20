@@ -297,7 +297,7 @@ inner() {
 			grep -E 'grant-created' "$LOGDIR/backend.log" | tail -5
 			rc=1
 		else
-			echo "nss-smoke: the token is there and neither listing acquired a credential"
+			echo "nss-smoke: token present; listings acquired no credential"
 		fi
 	fi
 

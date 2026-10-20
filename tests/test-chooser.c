@@ -36,7 +36,7 @@ static void test_purpose_wording(void)
 	} cases[] = {
 		{ CERTIFICATE_PURPOSE_CLIENT_AUTH, "prove who you are to a server" },
 		{ CERTIFICATE_PURPOSE_SIGNING, "sign a document or a piece of data" },
-		{ CERTIFICATE_PURPOSE_EMAIL, "sign or read secure email" },
+		{ CERTIFICATE_PURPOSE_EMAIL, "sign email" },
 		{ CERTIFICATE_PURPOSE_SSH, "authenticate an SSH connection" },
 	};
 	static const struct
@@ -50,6 +50,10 @@ static void test_purpose_wording(void)
 		{ "/org/freedesktop/portal/desktop/request/1_42/pkcs11a123_2", TRUE },
 		{ "/org/freedesktop/portal/desktop/request/1_42/pkcs11a123_2/456", TRUE },
 	};
+
+	g_assert_cmpstr(certificate_purpose_detail(CERTIFICATE_PURPOSE_EMAIL), ==,
+	                "The application will be able to sign email until the grant "
+	                "expires. It cannot read the private key.");
 
 	for (gsize i = 0; i < G_N_ELEMENTS(cases); i++)
 	{
@@ -92,9 +96,15 @@ static void test_lifetime_wording(void)
 		guint32 seconds;
 		const char* expected;
 	} cases[] = {
-		{ 1, "1 seconds" },   { 119, "119 seconds" }, { 120, "2 minutes" },
-		{ 300, "5 minutes" }, { 301, "6 minutes" },   { 7199, "120 minutes" },
-		{ 7200, "2 hours" },  { 3600, "60 minutes" }, { 10800, "3 hours" },
+		{ 0, "0 seconds" }, { 1, "1 second" }, { 59, "59 seconds" },
+		{ 60, "1 minute" }, { 61, "1 minute and 1 second" },
+		{ 119, "1 minute and 59 seconds" }, { 120, "2 minutes" },
+		{ 121, "2 minutes and 1 second" }, { 122, "2 minutes and 2 seconds" },
+		{ 300, "5 minutes" }, { 301, "5 minutes and 1 second" },
+		{ 3599, "59 minutes and 59 seconds" }, { 3600, "1 hour" },
+		{ 3601, "60 minutes and 1 second" }, { 7199, "119 minutes and 59 seconds" },
+		{ 7200, "2 hours" }, { 10800, "3 hours" },
+		{ G_MAXUINT32, "71582788 minutes and 15 seconds" },
 	};
 
 	for (gsize i = 0; i < G_N_ELEMENTS(cases); i++)
@@ -399,6 +409,10 @@ static void test_empty_and_updates(gconstpointer data)
 	g_assert_nonnull(chooser);
 	g_assert_cmpuint(g_list_model_get_n_items(gtk_window_get_toplevels()), ==, 1);
 	window = g_list_model_get_item(gtk_window_get_toplevels(), 0);
+	g_assert_nonnull(find_text(GTK_WIDGET(window),
+	    "The application will be able to authenticate as you until the "
+	    "grant expires. It cannot read the private key.\n\n"
+	    "This grant lasts 5 minutes. It allows signing only."));
 	deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;
 	while (announcement.calls == 0 && g_get_monotonic_time() < deadline)
 		g_main_context_iteration(NULL, FALSE);

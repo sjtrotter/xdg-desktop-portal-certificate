@@ -42,7 +42,8 @@ static gboolean handle_close(XdpImplSession* object, GDBusMethodInvocation* invo
 	}
 
 	/* The frontend answers invalidation with Close(), so closing an already-closed session must succeed. */
-	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "closed-by-portal");
+	if (!session->invalidated)
+		certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, "closed-by-portal");
 
 	/* The local reference keeps the session alive after forget() drops the table's reference. */
 	certificate_impl_session_close(session);
@@ -91,6 +92,8 @@ static void on_core_invalidated(XccSession* core, const char* reason, gpointer u
 {
 	g_autoptr(CertificateImplSession) session = g_object_ref(user_data);
 
+	session->invalidated = TRUE;
+	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, reason);
 	g_signal_emit(session, signals[SIGNAL_INVALIDATED], 0, reason);
 	if (session->exported)
 		xdp_impl_session_emit_closed(XDP_IMPL_SESSION(session));

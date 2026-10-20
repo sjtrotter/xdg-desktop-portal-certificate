@@ -603,6 +603,17 @@ static void test_empty_answer(Fixture* fixture, gconstpointer user_data)
 	finish(fixture, CERTIFICATE_PIN_OK, 1);
 }
 
+static void test_memory_unavailable(Fixture* fixture, gconstpointer user_data)
+{
+	start(fixture);
+	g_assert_false(certificate_pin_prompt_hold(fixture->ui.prompt, NULL, 0));
+	g_assert_cmpuint(fixture->ui.retries, ==, 1);
+	g_assert_cmpstr(fixture->ui.status, ==, "Could not allocate memory for the PIN.");
+	g_assert_cmpuint(fixture->attempts, ==, 0);
+	fake_pin_provider_submit(&fixture->ui, GOOD_PIN);
+	finish(fixture, CERTIFICATE_PIN_OK, 1);
+}
+
 static void test_oversized_answer(Fixture* fixture, gconstpointer user_data)
 {
 	char pin[513];
@@ -687,6 +698,7 @@ int main(int argc, char** argv)
 	ADD("timeout-abandons-success", TRUE, test_in_flight);
 	ADD("cancel-abandons-success", FALSE, test_in_flight);
 	ADD("empty-answer", 0, test_empty_answer);
+	ADD("memory-unavailable", 0, test_memory_unavailable);
 	ADD("oversized-answer", 0, test_oversized_answer);
 	ADD("submit-without-input", 0, test_submit_without_input);
 	ADD("stale-secret", 0, test_stale_secret);

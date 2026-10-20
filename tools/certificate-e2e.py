@@ -46,6 +46,7 @@ class Portal:
         self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         self.timeout = timeout
         self.counter = 0
+        self.close_delivered = False
 
     def token(self, prefix):
         self.counter += 1
@@ -77,10 +78,13 @@ class Portal:
                 5000,
                 None,
             )
+            return True
         except GLib.Error as error:
             print(f"Request.Close failed: {error.message}", file=sys.stderr)
+            return False
 
     def request(self, method, build_parameters, prefix, cancel_after=0):
+        self.close_delivered = False
         handle_token = self.token(prefix)
         path = request_path(self.bus, handle_token)
 
@@ -135,7 +139,11 @@ class Portal:
                 def do_close():
                     live["cancel"] = 0
                     print(f"closing {returned} after {cancel_after} ms")
-                    self.close_request(returned)
+                    if not self.close_request(returned):
+                        answer["close_failed"] = True
+                        loop.quit()
+                        return GLib.SOURCE_REMOVE
+                    self.close_delivered = True
 
                     # Frontend Close() unexports before forwarding, so the grace period checks that no late grant arrives.
                     def give_up():
@@ -160,6 +168,9 @@ class Portal:
 
         if answer.get("timeout"):
             raise TimeoutError(f"{method} produced no Response within {self.timeout} ms")
+
+        if answer.get("close_failed"):
+            raise RuntimeError(f"{method}: Request.Close failed")
 
         if answer.get("closed"):
             return None, {}
@@ -196,7 +207,7 @@ def check_exported(portal):
         die(
             EXIT_UNAVAILABLE,
             f"{IFACE} is not exported on {OBJECT_PATH}.\n"
-            "Use frontend branch experimental/integration with a configured certificate backend "
+            "Use frontend branch experimental/certificate with a configured certificate backend "
             "and XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1 in its environment.\n"
             f"D-Bus error: {error.message}",
         )
@@ -399,8 +410,14 @@ def verify(cert_der, signature, message, mechanism, hash_name, der):
 
 
 
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+
 def parse_args(argv):
-    parser = argparse.ArgumentParser(
+    parser = ArgumentParser(
         description="Drive the experimental Certificate portal end to end.",
         epilog="Exit codes: 0 PASS, 1 FAIL, 2 cancelled, 40 unavailable, 64 usage, "
         "70 internal.",
@@ -430,15 +447,19 @@ def parse_args(argv):
                         help="acquire a grant, release it, and exit without signing")
     parser.add_argument("--cancel-after", type=int, default=0, metavar="MS",
                         help="close AcquireCredential after this many milliseconds and check for no grant")
-    parser.add_argument("--expect-cancelled", action="store_true",
-                        help="pass if acquisition is cancelled; use with --cancel-after")
-    parser.add_argument("--expect-user-cancelled", choices=["chooser", "pin"],
-                        help="require user cancellation (response 1) at this dialog")
+    expectations = parser.add_mutually_exclusive_group()
+    expectations.add_argument("--expect-cancelled", action="store_true",
+                              help="require successful Request.Close and no grant; use with --cancel-after")
+    expectations.add_argument("--expect-user-cancelled", choices=["chooser", "pin"],
+                              help="require user cancellation (response 1) at this dialog")
     parser.add_argument("--regrant", metavar="KEY_ALGORITHM",
                         help="acquire on a second session with this key algorithm and verify its signature")
-    parser.add_argument("--expect-no-certificate", action="store_true",
-                        help="pass if acquisition fails without a grant")
-    return parser.parse_args(argv)
+    expectations.add_argument("--expect-no-certificate", action="store_true",
+                              help="pass if acquisition fails without a grant")
+    args = parser.parse_args(argv)
+    if args.expect_cancelled and args.cancel_after <= 0:
+        parser.error("--expect-cancelled requires --cancel-after greater than zero")
+    return args
 
 
 def main(argv):
@@ -471,8 +492,12 @@ def main(argv):
 
     if args.expect_cancelled:
         # Frontend Close() unexports the Request before forwarding, so no Response follows.
+        if not portal.close_delivered:
+            die(EXIT_FAIL, f"acquisition ended before Request.Close succeeded (Response {response})")
         if response == 0:
             die(EXIT_FAIL, "expected a cancellation, but a grant was issued")
+        if response not in (None, 1):
+            die(EXIT_FAIL, f"expected cancellation (1) or no Response, got {response}")
         if response is None:
             print("PASS cancel: Close() delivered, no Response")
         else:
@@ -624,8 +649,8 @@ if __name__ == "__main__":
         sys.exit(main(sys.argv))
     except KeyboardInterrupt:
         sys.exit(EXIT_CANCELLED)
-    except TimeoutError as timeout:
-        print(f"FAIL: {timeout}", file=sys.stderr)
+    except (TimeoutError, RuntimeError) as error:
+        print(f"FAIL: {error}", file=sys.stderr)
         sys.exit(EXIT_FAIL)
     except GLib.Error as dbus_error:
         print(f"D-Bus error: {dbus_error.message}", file=sys.stderr)

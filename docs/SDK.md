@@ -131,7 +131,7 @@ The remaining public UI views have been audited for SDK-owned English:
 | `purpose_text`, `purpose_detail` | Existing `purpose` plus appended `bool generic_purpose`, which selects generic module disclosure without changing permissions. |
 | `operation_scope` | Existing `may_sign`, `may_decrypt`. |
 | `duration` | Existing `lifetime_seconds`. |
-| `later_prompt` | Invariant disclosure that the first key use may prompt for a PIN; desktops translate this fixed contract. |
+| `later_prompt` | Currently `NULL`; retained for ABI compatibility. |
 | `reason_label` | Invariant label introducing application-supplied, untrusted reason text; desktops translate the label. `untrusted_reason` itself is external text. |
 | `XccPinView.purpose_display` | Appended `uint32_t purpose` (`XccPurpose`) and `bool generic_purpose`; generic ignores `purpose`. The core resolves the private legacy purpose strings before publishing these fields. |
 | `XccPinView.status` | Appended `uint32_t status_code` (`XccPinStatus`): `NONE`, `INCORRECT`, `REQUIRED`, `TOO_LONG`, `MEMORY_UNAVAILABLE`. `NONE` preserves input on busy-only updates; other codes request fresh input. The English `status` and its NULL convention are retained. |

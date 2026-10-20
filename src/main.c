@@ -79,7 +79,7 @@ static const char* description =
     "Interface: " CERTIFICATE_IMPL_INTERFACE "\n"
     "Only the owner of org.freedesktop.portal.Desktop may call this backend.\n"
     "\n"
-    "The frontend requires branch experimental/integration, a configured backend\n"
+    "The frontend requires branch experimental/certificate, a configured backend\n"
     "and XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1 in its environment.\n"
     "It establishes caller identity; this backend draws consent and PIN dialogs\n"
     "and performs private-key operations on the token.\n"

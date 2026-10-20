@@ -28,6 +28,7 @@ struct _CertificateImplSession
 	XdpImplSessionSkeleton parent_instance;
 
 	gboolean exported;
+	gboolean invalidated;
 	char* id;     /**< Object path chosen by the frontend. */
 	char* app_id; /**< App ID established by the frontend. */
 	char* owner;  /**< Frontend connection owner at CreateSession. */
