@@ -1410,6 +1410,26 @@ static void test_bridge_protected_final_try(Fixture* fixture, gconstpointer user
 	script_clear(&b.script);
 	certificate_test_prompter_set_delay(40);
 }
+static void test_bridge_prompter_open_failure(StallFixture* fixture, gconstpointer user_data)
+{
+	const char* answers[] = {"ok"};
+	BridgeLogin b = {.script = {.token = make_token(), .answers = answers}};
+
+	bridge_start(&b);
+	BRIDGE_WAIT(g_atomic_int_get(&b.context->ui_handles) != 0);
+	g_assert_false(b.script.done_called);
+	certificate_test_stalling_prompter_vanish(fixture->prompter);
+	run_until_done(&b.script, 15000);
+	g_assert_cmpint(b.script.outcome, ==, CERTIFICATE_PIN_NO_DISPLAY);
+	g_assert_cmpuint(b.script.attempts, ==, 0);
+	g_assert_null(b.script.last_pin);
+
+	xcc_context_shutdown_async(b.context, bridge_shutdown_done, &b);
+	BRIDGE_WAIT(b.shutdown);
+	g_assert_cmpint(g_atomic_int_get(&b.context->ui_handles), ==, 0);
+	xcc_context_unref(b.context);
+	script_clear(&b.script);
+}
 static void bridge_settled_delivered(void* data)
 {
 	((BridgeLogin*)data)->settled = TRUE;
@@ -1501,6 +1521,8 @@ int main(int argc, char** argv)
 	          test_close_racing_a_transport_error);
 	ADD_STALL("/pin-system/prompter-vanishes-during-open", stall_set_up_no_ready,
 	          test_prompter_vanishes_during_open);
+	ADD_STALL("/pin-system/bridge-prompter-open-failure", stall_set_up_no_ready,
+	          test_bridge_prompter_open_failure);
 
 #undef ADD_STALL
 

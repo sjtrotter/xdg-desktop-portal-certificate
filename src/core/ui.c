@@ -301,6 +301,8 @@ static void reply(void* data)
 			if (i->pin)
 				certificate_pin_prompt_answer(i->prompt, r->kind == 3
 															 ? CERTIFICATE_PIN_CANCELLED
+															 : r->error == XCC_ERROR_NO_DISPLAY
+															 ? CERTIFICATE_PIN_NO_DISPLAY
 															 : CERTIFICATE_PIN_DEVICE_ERROR);
 			else if (r->kind == 4)
 				certificate_chooser_fail(i->chooser_id,

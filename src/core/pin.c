@@ -133,7 +133,9 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 			if (outcome == CERTIFICATE_PIN_CANCELLED)
 				xcc_ui_cancel(prompt->ui_context, prompt->ui_id);
 			else
-				xcc_ui_failed(prompt->ui_context, prompt->ui_id, XCC_ERROR_DEVICE);
+				xcc_ui_failed(prompt->ui_context, prompt->ui_id,
+				              outcome == CERTIFICATE_PIN_NO_DISPLAY ? XCC_ERROR_NO_DISPLAY
+				                                                    : XCC_ERROR_DEVICE);
 		}
 		return;
 	}
@@ -397,6 +399,12 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 	}
 
 	set_busy(prompt, FALSE);
+
+	if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_CANCELLED))
+	{
+		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_CANCELLED);
+		return;
+	}
 
 	if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT))
 	{

@@ -98,6 +98,14 @@ static CK_RV portal_error_to_rv(const GError* error)
 			return CKR_DEVICE_REMOVED;
 		case PKCS11_PORTAL_ERROR_UNAVAILABLE:
 			return CKR_TOKEN_NOT_PRESENT;
+		case PKCS11_PORTAL_ERROR_PIN_LOCKED:
+			return CKR_PIN_LOCKED;
+		case PKCS11_PORTAL_ERROR_DEVICE:
+			return CKR_DEVICE_ERROR;
+		case PKCS11_PORTAL_ERROR_LOGIN_REQUIRED:
+			return CKR_USER_NOT_LOGGED_IN;
+		case PKCS11_PORTAL_ERROR_INVALID_REQUEST:
+			return CKR_ARGUMENTS_BAD;
 		default:
 			return CKR_FUNCTION_FAILED;
 	}
@@ -1581,7 +1589,7 @@ CK_RV C_Decrypt(CK_SESSION_HANDLE session_handle, unsigned char* ciphertext,
 
 		session_reset_decrypt(session);
 		g_mutex_unlock(&module_lock);
-		return rv == CKR_FUNCTION_FAILED ? CKR_ENCRYPTED_DATA_INVALID : rv;
+		return rv;
 	}
 
 	data = g_bytes_get_data(result, &size);

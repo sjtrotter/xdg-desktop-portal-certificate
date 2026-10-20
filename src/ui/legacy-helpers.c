@@ -71,7 +71,9 @@ void certificate_pin_prompt_answer(PinPrompt* prompt, CertificatePinOutcome outc
 	if (outcome == CERTIFICATE_PIN_CANCELLED)
 		xcc_ui_cancel(prompt->ui_context, prompt->ui_id);
 	else
-		xcc_ui_failed(prompt->ui_context, prompt->ui_id, XCC_ERROR_DEVICE);
+		xcc_ui_failed(prompt->ui_context, prompt->ui_id,
+		              outcome == CERTIFICATE_PIN_NO_DISPLAY ? XCC_ERROR_NO_DISPLAY
+		                                                    : XCC_ERROR_DEVICE);
 }
 gboolean certificate_pin_prompt_hold(PinPrompt* prompt, XccSecret* secret, size_t length)
 {

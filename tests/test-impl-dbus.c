@@ -17,6 +17,7 @@
 #include "tokens/filter.h"
 #include "core/chooser.h"
 #include "core/pin.h"
+#include "core/context-private.h"
 #include "ui/pin-backends.h"
 #include "ui/chooser.h"
 
@@ -36,6 +37,7 @@ typedef struct
 	GDBusConnection* backend;
 	GDBusConnection* frontend;
 	GDBusConnection* stranger;
+	GDBusConnection* shared; /* Weak reference checked after bus teardown. */
 	guint owner_id;
 	gboolean acquired;
 	CertificateTokens* tokens;
@@ -46,6 +48,22 @@ typedef struct
 /* Address the backend by its unique connection name; no well-known backend name is owned. */
 static const char* backend_name = NULL;
 static gboolean has_display = FALSE;
+
+/* Script SDK failures while retaining the adapter's request and reply paths. */
+static XccErrorCode sign_failure = XCC_OK;
+XccRequest* __real_xcc_sign_async_parsed(XccSession*, const XccSignSpec*, bool, XccDone, void*);
+XccRequest* __wrap_xcc_sign_async_parsed(XccSession*, const XccSignSpec*, bool, XccDone, void*);
+XccRequest* __wrap_xcc_sign_async_parsed(XccSession* session, const XccSignSpec* spec,
+                                       bool valid, XccDone done, void* user)
+{
+	if (sign_failure == XCC_OK)
+		return __real_xcc_sign_async_parsed(session, spec, valid, done, user);
+
+	XccRequest* request = xcc_request_new(session->context, session, XCC_RESULT_SIGN, done, user);
+	request->validation_error = sign_failure;
+	xcc_request_schedule(request, xcc_sign_start);
+	return request;
+}
 
 /* Use a fresh connection because the session-bus singleton outlives individual GTestDBus fixtures. */
 static GDBusConnection* open_connection(GTestDBus* bus)
@@ -58,6 +76,25 @@ static GDBusConnection* open_connection(GTestDBus* bus)
 	    NULL, NULL, &error);
 
 	g_assert_no_error(error);
+	return connection;
+}
+
+static GDBusConnection* open_document_portal(GTestDBus* bus)
+{
+	g_autoptr(GError) error = NULL;
+	GDBusConnection* connection = open_connection(bus);
+	/* GTK's file-transfer proxy only needs a name owner during initialization. */
+	g_autoptr(GVariant) reply = g_dbus_connection_call_sync(
+	    connection, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+	    "RequestName", g_variant_new("(su)", "org.freedesktop.portal.Documents", 0u),
+	    G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+	guint32 result;
+
+	g_assert_no_error(error);
+	g_variant_get(reply, "(u)", &result);
+	g_assert_cmpuint(result, ==, 1);
+	/* Require the isolation override even when the host has no portals. */
+	g_setenv("GDK_DEBUG", "portals", TRUE);
 	return connection;
 }
 
@@ -142,6 +179,7 @@ static void fixture_tear_down(Fixture* fixture, gconstpointer user_data)
 	backend_name = NULL;
 
 	g_test_dbus_down(fixture->bus);
+	g_assert_null(fixture->shared);
 	g_clear_object(&fixture->bus);
 }
 
@@ -211,13 +249,22 @@ static guint32 create_session(Fixture* fixture, const char* path, const char* ap
 {
 	g_autoptr(GError) error = NULL;
 	g_autoptr(GVariant) reply = NULL;
+	g_autoptr(GVariant) results = NULL;
 	guint32 response = 99;
 
 	reply = impl_call(fixture->frontend, "CreateSession",
 	                  g_variant_new("(oos@a{sv})", REQUEST_PATH, path, app_id, empty_options()),
 	                  &error);
 	g_assert_no_error(error);
-	g_variant_get(reply, "(u@a{sv})", &response, NULL);
+	g_variant_get(reply, "(u@a{sv})", &response, &results);
+	g_autoptr(GVariant) legacy = g_variant_lookup_value(results, "error", NULL);
+	g_assert_null(legacy);
+	if (response != 0)
+	{
+		const char* reason = NULL;
+		g_assert_true(g_variant_lookup(results, "reason", "&s", &reason));
+		g_assert_cmpstr(reason, ==, "invalid_request");
+	}
 
 	return response;
 }
@@ -237,9 +284,25 @@ static void acquire(Fixture* fixture, const char* session_path, const char* app_
 	                  &error);
 	g_assert_no_error(error);
 	g_variant_get(reply, "(u@a{sv})", response, &results);
+	g_autoptr(GVariant) legacy = g_variant_lookup_value(results, "error", NULL);
+	g_assert_null(legacy);
 
 	*code = NULL;
-	g_variant_lookup(results, "error", "s", code);
+	g_variant_lookup(results, "reason", "s", code);
+}
+
+static void test_toolkit_does_not_retain_session_bus(Fixture* fixture, gconstpointer user_data)
+{
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GDBusConnection) connection = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
+
+	g_assert_no_error(error);
+	g_assert_nonnull(connection);
+	/* GTK must not retain the startup bus through its document-portal proxy. */
+	g_assert_cmpstr(g_dbus_connection_get_guid(connection), ==,
+	                g_dbus_connection_get_guid(fixture->backend));
+	fixture->shared = connection;
+	g_object_add_weak_pointer(G_OBJECT(connection), (gpointer*) &fixture->shared);
 }
 
 static void test_stranger_is_refused(Fixture* fixture, gconstpointer user_data)
@@ -550,6 +613,42 @@ static void test_sign_without_grant(Fixture* fixture, gconstpointer user_data)
 	g_assert_cmpuint(response, ==, 2);
 }
 
+typedef struct
+{
+	XccErrorCode error;
+	const char* reason;
+	guint32 response;
+} WireFailure;
+
+static void test_sign_failure_reason(Fixture* fixture, gconstpointer user_data)
+{
+	const WireFailure* test = user_data;
+	g_autoptr(GError) error = NULL;
+	g_autoptr(GVariant) reply = NULL;
+	g_autoptr(GVariant) results = NULL;
+	g_autoptr(GVariant) options = g_variant_parse(
+	    G_VARIANT_TYPE_VARDICT,
+	    "{'mechanism': <'RSA_PKCS1_V1_5'>, 'parameters': <{'hash': <'SHA256'>}>, 'data': "
+	    "<b'0123456789abcdef0123456789abcdef'>}", NULL, NULL, NULL);
+	guint32 response;
+	const char* reason = NULL;
+
+	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
+	sign_failure = test->error;
+	reply = impl_call(fixture->frontend, "Sign",
+	                  g_variant_new("(ooss@a{sv})", REQUEST_PATH, SESSION_PATH, APP_A, "", options),
+	                  &error);
+	sign_failure = XCC_OK;
+	g_assert_no_error(error);
+	g_variant_get(reply, "(u@a{sv})", &response, &results);
+	g_assert_cmpuint(response, ==, test->response);
+	g_assert_cmpuint(g_variant_n_children(results), ==, 1);
+	g_assert_true(g_variant_lookup(results, "reason", "&s", &reason));
+	g_assert_cmpstr(reason, ==, test->reason);
+	g_autoptr(GVariant) legacy = g_variant_lookup_value(results, "error", NULL);
+	g_assert_null(legacy);
+}
+
 static void test_capabilities(Fixture* fixture, gconstpointer user_data)
 {
 	g_autoptr(GError) error = NULL;
@@ -754,7 +853,7 @@ static void test_replaced_frontend_is_refused(Fixture* fixture, gconstpointer us
 
 		g_assert_no_error(call_error);
 		g_variant_get(answer, "(u@a{sv})", &acquire_response, &acquire_results);
-		g_variant_lookup(acquire_results, "error", "s", &code);
+		g_variant_lookup(acquire_results, "reason", "s", &code);
 		g_assert_cmpuint(acquire_response, ==, 2);
 		g_assert_cmpstr(code, ==, "no_such_session");
 	}
@@ -801,7 +900,7 @@ static void test_frontend_vanishing_answers_pending_calls(Fixture* fixture,
 
 	g_assert_no_error(call.error);
 	g_variant_get(call.reply, "(u@a{sv})", &response, &results);
-	g_variant_lookup(results, "error", "s", &code);
+	g_variant_lookup(results, "reason", "s", &code);
 
 	g_assert_cmpuint(response, ==, 2);
 	g_assert_cmpstr(code, ==, "owner_gone");
@@ -1033,7 +1132,7 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	g_assert_true(call.done);
 	g_assert_no_error(call.error);
 	g_variant_get(call.reply, "(u@a{sv})", &response, &results);
-	g_variant_lookup(results, "error", "s", &code);
+	g_variant_lookup(results, "reason", "s", &code);
 	if (outcome == DEFERRED_CLOSE || outcome == DEFERRED_CANCEL)
 	{
 		g_assert_cmpuint(response, ==, CERTIFICATE_RESPONSE_CANCELLED);
@@ -1067,11 +1166,41 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 
 int main(int argc, char** argv)
 {
+	static const WireFailure failures[] = {
+		{ XCC_ERROR_CANCELLED, "cancelled", 1 },
+		{ XCC_ERROR_OWNER_GONE, "owner_gone", 2 },
+		{ XCC_ERROR_BACKEND_GONE, "backend_gone", 2 },
+		{ XCC_ERROR_NO_SUCH_SESSION, "no_such_session", 2 },
+		{ XCC_ERROR_INVALID_REQUEST, "invalid_request", 2 },
+		{ XCC_ERROR_INVALID_PURPOSE, "invalid_purpose", 2 },
+		{ XCC_ERROR_INVALID_FILTER, "invalid_filter", 2 },
+		{ XCC_ERROR_DEVICE, "device_error", 2 },
+		{ XCC_ERROR_INTERACTION_REQUIRED, "interaction_required", 2 },
+		{ XCC_ERROR_NO_DISPLAY, "no_display", 2 },
+		{ XCC_ERROR_PIN_LOCKED, "pin_locked", 2 },
+		{ XCC_ERROR_TOKEN_REMOVED, "token_removed", 2 },
+		{ XCC_ERROR_PIN_INCORRECT, "device_error", 2 },
+		{ XCC_ERROR_LOGIN_TIMEOUT, "device_error", 2 },
+		{ XCC_ERROR_NOT_SUPPORTED, "invalid_request", 2 },
+	};
 	g_test_init(&argc, &argv, NULL);
+	g_autofree char* display = g_strdup(g_getenv("DISPLAY"));
+	g_autofree char* runtime_dir = g_strdup(g_getenv("XDG_RUNTIME_DIR"));
+	g_autoptr(GTestDBus) toolkit_bus = g_test_dbus_new(G_TEST_DBUS_NONE);
+	g_test_dbus_up(toolkit_bus);
+	/* GTestDBus clears these; GTK still needs the supplied display. */
+	if (display != NULL)
+		g_setenv("DISPLAY", display, TRUE);
+	if (runtime_dir != NULL)
+		g_setenv("XDG_RUNTIME_DIR", runtime_dir, TRUE);
+	g_autoptr(GDBusConnection) document_portal = open_document_portal(toolkit_bus);
+
 	certificate_pin_set_provider(certificate_pin_provider_gtk());
 	certificate_chooser_set_provider(certificate_chooser_provider_gtk());
 	/* Keep toolkit settings and accessibility off the private service bus. */
 	g_setenv("GTK_A11Y", "test", TRUE);
+	/* GTK's file-transfer portal proxy otherwise retains the startup bus. */
+	g_setenv("GDK_DEBUG", "no-portals", TRUE);
 	g_setenv("ADW_DISABLE_PORTAL", "1", TRUE);
 	g_setenv("GSETTINGS_BACKEND", "memory", TRUE);
 	/* gvfs would hold a connection to the private bus past g_test_dbus_down(). */
@@ -1079,7 +1208,7 @@ int main(int argc, char** argv)
 	/* GTestDBus forks a watcher; Mesa's exit handlers deadlock in a forked child. */
 	g_setenv("GDK_DISABLE", "gl,egl,vulkan", TRUE);
 	g_setenv("GSK_RENDERER", "cairo", TRUE);
-	/* Initialize GTK before GTestDBus changes the session bus environment. */
+	/* The startup bus stays live while each test uses a separate private bus. */
 	has_display = gtk_init_check();
 	if (has_display)
 		adw_init();
@@ -1087,6 +1216,7 @@ int main(int argc, char** argv)
 #define ADD(path, function) \
 	g_test_add(path, Fixture, NULL, fixture_set_up, function, fixture_tear_down)
 
+	ADD("/impl/toolkit-does-not-retain-session-bus", test_toolkit_does_not_retain_session_bus);
 	ADD("/impl/stranger-is-refused", test_stranger_is_refused);
 	ADD("/impl/session-close-is-authorised", test_session_close_is_authorised);
 	ADD("/impl/request-close-is-authorised", test_request_close_is_authorised);
@@ -1096,6 +1226,12 @@ int main(int argc, char** argv)
 	ADD("/impl/options-are-validated", test_options_are_validated);
 	ADD("/impl/results-types", test_results_types);
 	ADD("/impl/sign-without-grant", test_sign_without_grant);
+	for (guint i = 0; i < G_N_ELEMENTS(failures); i++)
+	{
+		g_autofree char* name = g_strdup_printf("/impl/sign-failure-reason/%u", failures[i].error);
+		g_test_add(name, Fixture, &failures[i], fixture_set_up,
+		           test_sign_failure_reason, fixture_tear_down);
+	}
 	ADD("/impl/capabilities", test_capabilities);
 	ADD("/impl/replaced-frontend-is-refused", test_replaced_frontend_is_refused);
 	ADD("/impl/close-mid-flight", test_close_mid_flight);
@@ -1130,5 +1266,9 @@ int main(int argc, char** argv)
 
 #undef ADD
 
-	return g_test_run();
+	int status = g_test_run();
+	g_dbus_connection_close_sync(document_portal, NULL, NULL);
+	g_clear_object(&document_portal);
+	g_test_dbus_down(toolkit_bus);
+	return status;
 }
