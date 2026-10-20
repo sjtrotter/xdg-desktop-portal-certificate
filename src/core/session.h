@@ -49,6 +49,9 @@ void xcc_session_close(XccSession* session);
 /** Blocking; main-context callers use the async form. */
 void xcc_session_release_device(XccSession* session);
 void xcc_session_release_device_async(XccSession* session);
+/** Always dispatch a worker release, then call done on the coordinator. */
+void xcc_session_release_device_async_full(XccSession* session, GDestroyNotify done,
+                                           gpointer user_data);
 
 /** Shutdown only: drain pending worker releases for at most timeout_ms. */
 void xcc_session_drain_releases(guint timeout_ms);

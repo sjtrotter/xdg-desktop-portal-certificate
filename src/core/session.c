@@ -122,22 +122,56 @@ void xcc_session_release_device(XccSession* session)
 /* Atomic count of pending worker releases, drained during shutdown. */
 static gint certificate_release_pending = 0;
 
+typedef struct
+{
+	XccSession* session;
+	GDestroyNotify done;
+	gpointer user_data;
+} DeviceRelease;
+
+static void device_release_free(gpointer data)
+{
+	DeviceRelease* release = data;
+
+	g_object_unref(release->session);
+	g_free(release);
+}
+
 static void release_thread(GTask* task, gpointer source, gpointer task_data,
                            GCancellable* cancellable)
 {
-	xcc_session_release_device(XCC_SESSION(task_data));
+	DeviceRelease* release = task_data;
+
+	xcc_session_release_device(release->session);
 	g_task_return_boolean(task, TRUE);
 }
 
 static void on_device_released(GObject* source, GAsyncResult* result, gpointer user_data)
 {
+	DeviceRelease* release = g_task_get_task_data(G_TASK(result));
+
+	if (release->done != NULL)
+		release->done(release->user_data);
 	g_atomic_int_add(&certificate_release_pending, -1);
+}
+
+void xcc_session_release_device_async_full(XccSession* session, GDestroyNotify done,
+                                           gpointer user_data)
+{
+	g_autoptr(GTask) task = NULL;
+	DeviceRelease* release = g_new0(DeviceRelease, 1);
+
+	release->session = g_object_ref(session);
+	release->done = done;
+	release->user_data = user_data;
+	g_atomic_int_add(&certificate_release_pending, 1);
+	task = g_task_new(NULL, NULL, on_device_released, NULL);
+	g_task_set_task_data(task, release, device_release_free);
+	g_task_run_in_thread(task, release_thread);
 }
 
 void xcc_session_release_device_async(XccSession* session)
 {
-	g_autoptr(GTask) task = NULL;
-
 	/* Avoid blocking the main thread when a worker holds device_lock. */
 	if (g_mutex_trylock(&session->device_lock))
 	{
@@ -149,11 +183,7 @@ void xcc_session_release_device_async(XccSession* session)
 			return;
 	}
 
-	g_atomic_int_add(&certificate_release_pending, 1);
-
-	task = g_task_new(NULL, NULL, on_device_released, NULL);
-	g_task_set_task_data(task, g_object_ref(session), g_object_unref);
-	g_task_run_in_thread(task, release_thread);
+	xcc_session_release_device_async_full(session, NULL, NULL);
 }
 
 void xcc_session_drain_releases(guint timeout_ms)

@@ -66,6 +66,13 @@ guint certificate_pin_login_timeout(void)
 static GQueue pin_queue = G_QUEUE_INIT;
 static PinPrompt* pin_active = NULL;
 
+gboolean certificate_pin_login_is_cancelling(GCancellable* cancellable)
+{
+	return g_cancellable_is_cancelled(cancellable) ||
+	       (pin_active != NULL && pin_active->cancellable == cancellable &&
+	        pin_active->cancel_deferred);
+}
+
 static void pin_prompt_start(PinPrompt* prompt);
 
 static void pin_prompt_free(PinPrompt* prompt)
