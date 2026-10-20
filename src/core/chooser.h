@@ -51,6 +51,9 @@ CertificateChooser* certificate_chooser_show(const char* parent_window,
 void certificate_chooser_update(CertificateChooser* chooser, GPtrArray* candidates,
                                 gboolean tokens_present);
 
+/* Reading changes advance the revision and preserve the current candidates. */
+void certificate_chooser_set_tokens_reading(CertificateChooser* chooser, gboolean reading);
+
 gboolean certificate_chooser_available(void);
 
 /* Display helpers sanitize and cap external fields. */

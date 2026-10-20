@@ -15,6 +15,21 @@
 
 int main(void)
 {
+	XccChooserView reading = {.struct_size = sizeof(reading),
+	                          .abi_version = XCC_ABI_VERSION, .tokens_reading = true};
+	CHECK(xcc_chooser_view_tokens_reading(&reading));
+	reading.tokens_reading = false;
+	CHECK(!xcc_chooser_view_tokens_reading(&reading));
+	reading.tokens_reading = true;
+	reading.struct_size = offsetof(XccChooserView, tokens_reading);
+	CHECK(!xcc_chooser_view_tokens_reading(&reading));
+	reading.struct_size = XCC_CHOOSER_VIEW_V1_SIZE;
+	CHECK(!xcc_chooser_view_tokens_reading(&reading));
+	reading.struct_size = sizeof(reading);
+	reading.abi_version++;
+	CHECK(!xcc_chooser_view_tokens_reading(&reading));
+	CHECK(!xcc_chooser_view_tokens_reading(NULL));
+
 	struct ExtendedRow
 	{
 		XccChooserCandidateView row;

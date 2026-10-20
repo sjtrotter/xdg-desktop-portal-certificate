@@ -242,10 +242,20 @@ static void on_chooser_done(const CertificateChooserResult* result, gpointer use
 	received->chosen = result->chosen;
 }
 
+typedef enum
+{
+	CHOOSER_CANCEL,
+	CHOOSER_CHOOSE,
+	CHOOSER_CHOOSE_READING,
+	CHOOSER_CHOOSE_READING_CLEARED,
+	CHOOSER_CHOOSE_READING_COMPLETED
+} ChooserCompletion;
+
 static void test_completion_log_fields(gconstpointer data)
 {
 	static int has_display = -1;
-	gboolean granted = GPOINTER_TO_INT(data);
+	ChooserCompletion completion = GPOINTER_TO_INT(data);
+	gboolean granted = completion != CHOOSER_CANCEL;
 	g_autoptr(GPtrArray) candidates =
 	    g_ptr_array_new_with_free_func((GDestroyNotify) certificate_candidate_unref);
 	CertificateCallerIdentity caller = { CERTIFICATE_IDENTITY_DERIVED_HOST,
@@ -255,6 +265,8 @@ static void test_completion_log_fields(gconstpointer data)
 	                                      .may_sign = TRUE,
 	                                      .lifetime_seconds = 300 };
 	CertificateChooserResult received = { NULL };
+	CertificateChooser* chooser;
+	CertificateCandidate* candidate;
 	g_autoptr(GtkWindow) window = NULL;
 	g_autofree char* expected = NULL;
 
@@ -270,12 +282,16 @@ static void test_completion_log_fields(gconstpointer data)
 
 	adw_init();
 	certificate_ui_set_has_display(TRUE);
-	g_ptr_array_add(candidates, certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE));
+	candidate = certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
+	candidate->cka_id = g_byte_array_new();
+	g_byte_array_append(candidate->cka_id, (const guint8*) "one", 3);
+	g_ptr_array_add(candidates, candidate);
 
 	g_test_expect_message("xdg-desktop-portal-certificate", G_LOG_LEVEL_MESSAGE,
 	                      "chooser-shown app_id=org.example.App identity=host "
 	                      "purpose=client_auth granted=no");
-	certificate_chooser_show(NULL, NULL, candidates, &request, NULL, on_chooser_done, &received);
+	chooser = certificate_chooser_show(NULL, NULL, candidates, &request, NULL,
+	                                   on_chooser_done, &received);
 	g_test_assert_expected_messages();
 	g_clear_pointer(&caller.app_id, g_free);
 
@@ -294,6 +310,17 @@ static void test_completion_log_fields(gconstpointer data)
 		g_assert_nonnull(list);
 		row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0);
 		gtk_list_box_select_row(GTK_LIST_BOX(list), row);
+		if (completion >= CHOOSER_CHOOSE_READING)
+		{
+			g_assert_true(gtk_widget_grab_focus(GTK_WIDGET(row)));
+			certificate_chooser_set_tokens_reading(chooser, TRUE);
+			if (completion == CHOOSER_CHOOSE_READING_CLEARED)
+				certificate_chooser_set_tokens_reading(chooser, FALSE);
+			else if (completion == CHOOSER_CHOOSE_READING_COMPLETED)
+				certificate_chooser_update(chooser, candidates, TRUE);
+			g_assert_true(gtk_list_box_get_selected_row(GTK_LIST_BOX(list)) == row);
+			g_assert_true(gtk_root_get_focus(GTK_ROOT(window)) == GTK_WIDGET(row));
+		}
 		g_signal_emit_by_name(list, "row-activated", row);
 	}
 	else
@@ -365,6 +392,20 @@ static void assert_focus_in_list(GtkWindow* window, GtkWidget* list)
 
 	g_assert_nonnull(focus);
 	g_assert_true(focus == list || gtk_widget_is_ancestor(focus, list));
+}
+
+static GtkWidget* find_spinner(GtkWidget* widget)
+{
+	if (GTK_IS_SPINNER(widget))
+		return widget;
+	for (GtkWidget* child = gtk_widget_get_first_child(widget); child != NULL;
+	     child = gtk_widget_get_next_sibling(child))
+	{
+		GtkWidget* found = find_spinner(child);
+		if (found != NULL)
+			return found;
+	}
+	return NULL;
 }
 
 static void test_empty_and_updates(gconstpointer data)
@@ -439,6 +480,31 @@ static void test_empty_and_updates(gconstpointer data)
 	g_assert_null(gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0));
 	g_assert_cmpuint(received.calls, ==, 0);
 
+	GtkWidget* spinner = find_spinner(GTK_WIDGET(window));
+	g_assert_nonnull(spinner);
+	g_assert_false(gtk_spinner_get_spinning(GTK_SPINNER(spinner)));
+	certificate_chooser_set_tokens_reading(chooser, TRUE);
+	g_assert_cmpstr(gtk_label_get_text(GTK_LABEL(neutral)), ==, "Reading security token…");
+	g_assert_cmpstr(gtk_label_get_text(GTK_LABEL(detail)), ==, "This can take a few seconds.");
+	g_assert_true(gtk_widget_get_visible(detail));
+	g_assert_true(gtk_widget_get_visible(spinner));
+	g_assert_true(gtk_spinner_get_spinning(GTK_SPINNER(spinner)));
+	g_assert_false(gtk_widget_get_sensitive(use));
+	g_assert_true(gtk_root_get_focus(GTK_ROOT(window)) == cancel);
+	g_assert_cmpuint(announcement.calls, ==, 2);
+	g_assert_cmpstr(announcement.text, ==, "Reading security token… This can take a few seconds.");
+	certificate_chooser_set_tokens_reading(chooser, TRUE);
+	g_assert_cmpuint(announcement.calls, ==, 2);
+	certificate_chooser_update(chooser, empty, tokens_present);
+	g_assert_cmpstr(gtk_label_get_text(GTK_LABEL(neutral)), ==, "Insert your security token");
+	g_assert_cmpint(gtk_widget_get_visible(detail), ==, tokens_present);
+	g_assert_false(gtk_spinner_get_spinning(GTK_SPINNER(spinner)));
+	g_assert_cmpuint(announcement.calls, ==, 3);
+	certificate_chooser_update(chooser, empty, tokens_present);
+	g_assert_cmpuint(announcement.calls, ==, 3);
+	certificate_chooser_set_tokens_reading(chooser, TRUE);
+	g_assert_cmpuint(announcement.calls, ==, 4);
+
 	candidate = certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
 	candidate->cka_id = g_byte_array_new();
 	g_byte_array_append(candidate->cka_id, (const guint8*) "one", 3);
@@ -446,6 +512,8 @@ static void test_empty_and_updates(gconstpointer data)
 	certificate_chooser_update(chooser, candidates, TRUE);
 	g_assert_false(gtk_widget_get_visible(neutral));
 	g_assert_false(gtk_widget_get_visible(detail));
+	g_assert_false(gtk_widget_get_visible(spinner));
+	g_assert_false(gtk_spinner_get_spinning(GTK_SPINNER(spinner)));
 	g_assert_nonnull(gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0));
 	g_assert_false(gtk_widget_get_sensitive(use));
 	gtk_list_box_select_row(GTK_LIST_BOX(list),
@@ -454,7 +522,31 @@ static void test_empty_and_updates(gconstpointer data)
 	    gtk_list_box_get_selected_row(GTK_LIST_BOX(list)))));
 	assert_focus_in_list(window, list);
 	g_assert_true(gtk_widget_get_sensitive(use));
+	GtkListBoxRow* original_row = gtk_list_box_get_selected_row(GTK_LIST_BOX(list));
+	certificate_chooser_set_tokens_reading(chooser, TRUE);
+	g_assert_true(gtk_list_box_get_selected_row(GTK_LIST_BOX(list)) == original_row);
+	g_assert_true(gtk_root_get_focus(GTK_ROOT(window)) == GTK_WIDGET(original_row));
+	g_assert_true(gtk_widget_get_sensitive(use));
+	g_assert_false(gtk_widget_get_visible(spinner));
+	g_assert_cmpuint(announcement.calls, ==, 4);
+	certificate_chooser_set_tokens_reading(chooser, FALSE);
+	g_assert_true(gtk_list_box_get_selected_row(GTK_LIST_BOX(list)) == original_row);
+	g_assert_true(gtk_root_get_focus(GTK_ROOT(window)) == GTK_WIDGET(original_row));
+	g_assert_true(gtk_widget_get_sensitive(use));
+	g_assert_false(gtk_widget_get_visible(spinner));
+	g_assert_cmpuint(announcement.calls, ==, 4);
+	certificate_chooser_set_tokens_reading(chooser, TRUE);
 	certificate_chooser_update(chooser, candidates, TRUE);
+	g_assert_nonnull(gtk_list_box_get_selected_row(GTK_LIST_BOX(list)));
+	g_assert_true(gtk_list_box_get_selected_row(GTK_LIST_BOX(list)) == original_row);
+	g_assert_true(gtk_widget_get_sensitive(use));
+	g_assert_true(gtk_root_get_focus(GTK_ROOT(window)) ==
+	              GTK_WIDGET(gtk_list_box_get_selected_row(GTK_LIST_BOX(list))));
+
+	g_free(candidate->issuer_display);
+	candidate->issuer_display = g_strdup("Updated issuer");
+	certificate_chooser_update(chooser, candidates, TRUE);
+	g_assert_nonnull(find_text(GTK_WIDGET(window), "Issued by Updated issuer"));
 	g_assert_nonnull(gtk_list_box_get_selected_row(GTK_LIST_BOX(list)));
 	g_assert_true(gtk_widget_get_sensitive(use));
 	g_assert_true(gtk_root_get_focus(GTK_ROOT(window)) ==
@@ -463,6 +555,7 @@ static void test_empty_and_updates(gconstpointer data)
 	gtk_list_box_unselect_all(GTK_LIST_BOX(list));
 	certificate_chooser_update(chooser, candidates, TRUE);
 	assert_focus_in_list(window, list);
+	g_assert_null(gtk_list_box_get_selected_row(GTK_LIST_BOX(list)));
 	g_assert_false(gtk_widget_get_sensitive(use));
 	gtk_list_box_select_row(GTK_LIST_BOX(list),
 	                        gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0));
@@ -486,7 +579,7 @@ static void test_empty_and_updates(gconstpointer data)
 	g_assert_true(gtk_widget_get_visible(neutral));
 	g_assert_false(gtk_widget_get_visible(detail));
 	g_assert_true(gtk_root_get_focus(GTK_ROOT(window)) == cancel);
-	g_assert_cmpuint(announcement.calls, ==, 2);
+	g_assert_cmpuint(announcement.calls, ==, 5);
 	g_assert_cmpstr(announcement.text, ==, "Insert your security token");
 	g_test_expect_message("xdg-desktop-portal-certificate", G_LOG_LEVEL_MESSAGE,
 	                      "chooser-cancelled app_id=org.example.App identity=host "
@@ -513,9 +606,17 @@ int main(int argc, char** argv)
 	g_test_add_func("/chooser/detail-line-sanitises-the-card",
 	                test_detail_line_sanitises_the_card);
 	g_test_add_func("/chooser/detail-line-has-a-fallback", test_detail_line_has_a_fallback);
-	g_test_add_data_func("/chooser/consent-log-fields", GINT_TO_POINTER(TRUE),
+	g_test_add_data_func("/chooser/consent-log-fields", GINT_TO_POINTER(CHOOSER_CHOOSE),
 	                     test_completion_log_fields);
-	g_test_add_data_func("/chooser/cancel-log-fields", GINT_TO_POINTER(FALSE),
+	g_test_add_data_func("/chooser/cancel-log-fields", GINT_TO_POINTER(CHOOSER_CANCEL),
+	                     test_completion_log_fields);
+	g_test_add_data_func("/chooser/reading-consent", GINT_TO_POINTER(CHOOSER_CHOOSE_READING),
+	                     test_completion_log_fields);
+	g_test_add_data_func("/chooser/reading-cleared-consent",
+	                     GINT_TO_POINTER(CHOOSER_CHOOSE_READING_CLEARED),
+	                     test_completion_log_fields);
+	g_test_add_data_func("/chooser/reading-completed-consent",
+	                     GINT_TO_POINTER(CHOOSER_CHOOSE_READING_COMPLETED),
 	                     test_completion_log_fields);
 
 	g_test_add_data_func("/chooser/empty-no-token", GINT_TO_POINTER(FALSE),

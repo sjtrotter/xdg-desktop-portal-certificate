@@ -1128,8 +1128,13 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	while (!g_atomic_int_get(&gate.entered) && g_get_monotonic_time() < deadline)
 		g_main_context_iteration(NULL, FALSE);
 	g_assert_true(g_atomic_int_get(&gate.entered));
+	while (g_main_context_iteration(NULL, FALSE))
+		;
 	if (fake_ui)
 	{
+		g_assert_cmpuint(fake.updates, ==, 1);
+		g_assert_true(xcc_chooser_view_tokens_reading(&fake.view));
+		g_assert_cmpuint(fake.view.n_candidates, >, 0);
 		if (outcome == DEFERRED_CANCEL)
 			fake_chooser_provider_cancel(&fake);
 		else
@@ -1141,6 +1146,8 @@ static void test_deferred_consent(Fixture* fixture, gconstpointer user_data)
 	}
 	else
 	{
+		row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0);
+		g_assert_nonnull(row);
 		gtk_list_box_select_row(GTK_LIST_BOX(list), row);
 		g_signal_emit_by_name(list, "row-activated", row);
 		deadline = g_get_monotonic_time() + 5 * G_TIME_SPAN_SECOND;

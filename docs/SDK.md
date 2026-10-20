@@ -122,6 +122,21 @@ chooser occupies 96 bytes; `generic_purpose` starts at 96, beyond its tail
 padding. On i386 the original chooser remains 92 bytes and the extension starts
 at 96. Original field offsets on both ABIs and x86_64 are preserved.
 
+`XccChooserView` appends `bool tokens_reading` after `display_flags`.
+Use `xcc_chooser_view_tokens_reading(view)` to check the ABI version and field
+size; older producers mean false. The core sets it on token insertion while
+refresh enumeration is pending and clears it when publishing the refreshed
+snapshot. Removal still clears rows immediately. Each reading-state transition
+and candidate refresh advances the consent revision monotonically. Reading-state
+transitions retain the candidate snapshot. Update the revision used for consent
+on every view; preserve rows, selection and open details when candidate contents
+are unchanged, including when reading clears or refresh completes.
+When reading with no candidates, show a spinner, "Reading security token…" and
+one dim line, "This can take a few seconds." Announce that state once per entry
+and keep consent disabled. On completion, restore the list or the existing
+empty/no-match placeholder. This extension leaves the ABI version, SONAME,
+original minimum size and exported symbols unchanged.
+
 The remaining public UI views have been audited for SDK-owned English:
 
 | View / English fields | Structured source for desktop translations |

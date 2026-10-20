@@ -20,6 +20,9 @@ typedef struct
 	CertificateCandidate* candidate;
 	GThread* desktop;
 	guint chooser_shows, pin_shows, context_pin_shows, closes, hides, completions, updates;
+	guint chooser_updates;
+	size_t chooser_candidates;
+	gboolean tokens_reading, tokens_absent;
 	XccUiId chooser_id, pin_id;
 	uint64_t revision, choice;
 	gboolean choose, submit, shutdown, always_auth, empty, confirm, pause_context;
@@ -133,7 +136,7 @@ void __wrap_certificate_tokens_enumerate_async(CertificateTokens* t, GCancellabl
 GPtrArray* __wrap_certificate_tokens_enumerate_finish(CertificateTokens* t, GAsyncResult* result,
 													  gboolean* present, GError** error)
 {
-	*present = TRUE;
+	*present = !active->tokens_absent;
 	return g_task_propagate_pointer(G_TASK(result), error);
 }
 static CK_RV find_init(CK_SESSION_HANDLE h, CK_ATTRIBUTE_PTR attrs, CK_ULONG count)
@@ -360,6 +363,9 @@ static void choose(void* data, XccUiId id, const XccChooserView* view)
 	f->chooser_shows++;
 	f->chooser_id = id;
 	f->revision = view->revision;
+	f->tokens_reading = xcc_chooser_view_tokens_reading(view);
+	f->chooser_candidates = view->n_candidates;
+	g_assert_false(f->tokens_reading);
 	g_assert_cmpint(view->generic_purpose, ==, f->generic_purpose);
 	g_assert_cmpuint(view->n_candidates, ==, f->empty ? 0 : 1);
 	if (!f->empty)
@@ -379,7 +385,13 @@ static void choose(void* data, XccUiId id, const XccChooserView* view)
 }
 static void chooser_update(void* data, XccUiId id, const XccChooserView* view)
 {
-	assert_desktop(data);
+	Fixture* f = data;
+	assert_desktop(f);
+	f->chooser_updates++;
+	f->tokens_reading = xcc_chooser_view_tokens_reading(view);
+	f->chooser_candidates = view->n_candidates;
+	f->revision = view->revision;
+	f->choice = view->n_candidates != 0 ? view->candidates[0].id : 0;
 }
 static void submit_pin(Fixture* f, XccUiId id)
 {
@@ -1907,6 +1919,101 @@ static void test_empty_chooser(Fixture* f, gconstpointer data)
 	g_assert_cmpint(d.error, ==, XCC_ERROR_CANCELLED);
 	xcc_request_unref(r);
 }
+
+static void insert_token(void* data)
+{
+	Fixture* f = data;
+	xcc_acquire_token_event(f->context, f->candidate->token, TRUE);
+}
+
+static void remove_token(void* data)
+{
+	Fixture* f = data;
+	xcc_acquire_token_event(f->context, f->candidate->token, FALSE);
+}
+
+static void test_reading_after_insertion(Fixture* f, gconstpointer data)
+{
+	f->empty = f->tokens_absent = TRUE;
+	f->choose = FALSE;
+	Done d = {.f = f};
+	XccRequest* r = acquire(f, &d);
+	WAIT(f->chooser_shows == 1);
+	g_assert_false(f->tokens_reading);
+	g_assert_cmpuint(f->chooser_candidates, ==, 0);
+	uint64_t revision = f->revision;
+
+	g_mutex_lock(&f->lock);
+	f->hold_enumeration = TRUE;
+	f->enumerating = FALSE;
+	f->tokens_absent = FALSE;
+	f->empty = GPOINTER_TO_INT(data);
+	g_mutex_unlock(&f->lock);
+	xcc_context_post(f->context, insert_token, f);
+	WAIT(enumerating(f) && f->chooser_updates == 1);
+	g_assert_true(f->tokens_reading);
+	g_assert_cmpuint(f->chooser_candidates, ==, 0);
+	g_assert_cmpuint(f->revision, >, revision);
+	revision = f->revision;
+	g_assert_cmpuint(d.calls, ==, 0);
+
+	g_mutex_lock(&f->lock);
+	f->hold_enumeration = FALSE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	WAIT(f->chooser_updates == 2);
+	g_assert_false(f->tokens_reading);
+	g_assert_cmpuint(f->chooser_candidates, ==, f->empty ? 0 : 1);
+	g_assert_cmpuint(f->revision, >, revision);
+	g_assert_cmpuint(f->chooser_shows, ==, 1);
+	g_assert_cmpuint(d.calls, ==, 0);
+	xcc_ui_cancel(f->context, f->chooser_id);
+	WAIT(d.calls == 1);
+	g_assert_cmpint(d.error, ==, XCC_ERROR_CANCELLED);
+	xcc_request_unref(r);
+}
+
+static void test_removal_while_reading(Fixture* f, gconstpointer data)
+{
+	f->choose = FALSE;
+	Done d = {.f = f};
+	XccRequest* r = acquire(f, &d);
+	WAIT(f->chooser_shows == 1);
+	uint64_t revision = f->revision;
+	uint64_t choice = f->choice;
+	g_mutex_lock(&f->lock);
+	f->hold_enumeration = TRUE;
+	f->enumerating = FALSE;
+	g_mutex_unlock(&f->lock);
+	xcc_context_post(f->context, insert_token, f);
+	WAIT(enumerating(f) && f->chooser_updates == 1);
+	g_assert_true(f->tokens_reading);
+	g_assert_cmpuint(f->chooser_candidates, ==, 1);
+	g_assert_cmpuint(f->choice, ==, choice);
+	g_assert_cmpuint(f->revision, >, revision);
+	revision = f->revision;
+
+	xcc_context_post(f->context, remove_token, f);
+	WAIT(f->chooser_updates == 2);
+	g_assert_false(f->tokens_reading);
+	g_assert_cmpuint(f->chooser_candidates, ==, 0);
+	g_assert_cmpuint(f->revision, >, revision);
+	revision = f->revision;
+	g_assert_cmpuint(d.calls, ==, 0);
+	g_mutex_lock(&f->lock);
+	f->empty = f->tokens_absent = TRUE;
+	f->hold_enumeration = FALSE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	WAIT(f->chooser_updates == 3);
+	g_assert_false(f->tokens_reading);
+	g_assert_cmpuint(f->chooser_candidates, ==, 0);
+	g_assert_cmpuint(f->revision, >, revision);
+	xcc_ui_cancel(f->context, f->chooser_id);
+	WAIT(d.calls == 1);
+	g_assert_cmpint(d.error, ==, XCC_ERROR_CANCELLED);
+	xcc_request_unref(r);
+}
 static void test_forbidden(Fixture* f, gconstpointer data)
 {
 	XccAcquireSpec spec = acquire_spec();
@@ -2037,6 +2144,10 @@ int main(int argc, char** argv)
 	TEST("completion-dispatch-order", test_dispatch_order);
 	TEST("protected-final-try-stale-warning", test_protected_final_try);
 	TEST("empty-chooser", test_empty_chooser);
+	TEST("reading-after-insertion", test_reading_after_insertion);
+	TEST("removal-while-reading", test_removal_while_reading);
+	g_test_add("/core-api/reading-after-insertion-no-match", Fixture, GINT_TO_POINTER(1),
+	           setup_scripted, test_reading_after_insertion, teardown);
 	TEST("interaction-forbidden", test_forbidden);
 	TEST("session-close", test_close_session);
 	TEST("shutdown-with-submitted-login", test_shutdown_with_login);
