@@ -39,7 +39,7 @@ experimental export conditions.
 | Owned PIN pages are aligned, locked where possible, non-dumpable and wiped | `XccSecret` in `src/core/secret.c`: `mlock()`, `MADV_DONTDUMP`, `explicit_bzero()`. Wipe precedes completion; lock failure warns once without refusing login |
 | Worker owns the submitted PIN page | `src/core/pin.c` transfers `XccSecret` without copying; `test-cancellation.c` checks the worker's PIN after window cancellation |
 | In-flight login cancellation hides UI and defers completion until worker return | `pin_prompt_finish()`; `test-cancellation.c` under ASan |
-| Cancelled successful login is logged out | Abandon callback and `do_abandon()` in `src/broker/operations.c`; `test-cancellation.c` checks both abandoned and normal login |
+| Cancelled successful login closes its session before queued requests reopen | `on_pin_done()` and `finish_login()` in `src/broker/operations.c`; `test-core-api.c` checks a request joining during cancelled login |
 | Core dumps and ordinary same-UID attach are disabled | `harden()` in `src/main.c`: `PR_SET_DUMPABLE(0)`, `RLIMIT_CORE 0`; `--debug-allow-core` disables this for development and is absent from installed activation |
 | Bus-name replacement requires opt-in | `--allow-replacement` and `--replace` are separate; installed service passes neither. See [IMPL-INTERFACE.md](IMPL-INTERFACE.md) and [TESTING.md](TESTING.md) §3.8 |
 | PINs are never persisted | No keyring entry, configuration key or retention option |
@@ -262,14 +262,21 @@ logs `colour-scheme detail=dark|light`.
 ### Login, retries and cancellation
 
 The broker logs into its own session at first private-key use. PKCS#11 shares login among an
-application's sessions, without transferring that state across a forwarding boundary. Tokens or
-middleware may cache authentication outside this service. `C_Logout` is issued at grant end;
+application's sessions, without transferring that state across a forwarding boundary. Workers
+read `C_GetSessionInfo` before login and private-key use; a grant's cached state cannot establish
+token login. Closing a grant closes only its PKCS#11 session. Closing the last application
+session ends token login. Tokens or middleware may cache authentication outside this service;
 the backend cannot guarantee that card, firmware or driver forgets authentication.
+
+`C_Login(CKU_USER)` returning `CKR_USER_ALREADY_LOGGED_IN` counts as success. If session
+state still reports public before private-key use, the operation retries authentication
+once, then returns `device_error` if the disagreement persists. This preserves logout
+detection and private-key handle refresh without repeated prompts until grant expiry.
 
 Keys with `CKA_ALWAYS_AUTHENTICATE` require a fresh PIN interaction and
 `C_Login(CKU_CONTEXT_SPECIFIC)` after operation initialization for each use. The PIN is not
 cached. PIN cancellation or failure closes the device session to discard the initialized
-operation.
+operation. Other grants on the token retain their ordinary login.
 
 A protected authentication path (`CKF_PROTECTED_AUTHENTICATION_PATH`) uses a null PIN and an
 instructional dialog without an editable field [[S12](SOURCES.md)]. The token or reader collects
@@ -293,7 +300,9 @@ cancellation, token removal and other device failures, including ambiguous trans
 end the interaction. A fresh application request can start a new prompt and spend another
 attempt. PIN prompts are serialized; concurrent operations on one session share the initial
 user login. Cancelling a waiter leaves other waiters active; cancelling the last hides the
-prompt. Keys with `CKA_ALWAYS_AUTHENTICATE` prompt separately for each operation.
+prompt. Requests arriving after cancellation wait for the interaction and device cleanup to
+settle before reopening. Ordinary login rechecks grant expiry, closure and cancellation before
+`C_Login`. Keys with `CKA_ALWAYS_AUTHENTICATE` prompt separately for each operation.
 
 With no usable display or forbidden interaction, calls fail with `no_display` or
 `interaction_required`. No path reads a PIN from stdin. A headless trusted-agent protocol
@@ -302,7 +311,8 @@ would need separate configuration and review.
 A submitted `C_Login` cannot be withdrawn. Cancellation hides the prompt but completion waits
 for its worker. `--login-timeout` (60 s, `0` disables) hides it, logs `pin-timeout` and records
 `CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT`; the caller still waits for module return. Late success
-is abandoned by worker-thread logout. A timed-out or cancelled attempt is still spent.
+is abandoned by closing that grant's device session on a worker. An attempt already submitted
+to the token is still spent.
 
 ## Grant scoping
 

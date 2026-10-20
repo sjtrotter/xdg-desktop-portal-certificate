@@ -39,6 +39,8 @@ typedef struct
 	guint login_cancel_idle;
 	CertificatePinOutcome context_outcome;
 	gboolean retry_open;
+	gboolean retried_open;
+	gboolean retry_login; /* Queued for a fresh interaction after cancellation settles. */
 } Operation;
 
 static void operation_free(Operation* operation)
@@ -155,8 +157,10 @@ typedef struct
 
 	CertificateTokens* tokens;
 	XccSession* session;
+	GCancellable* cancellable;
+	CertificatePinOutcome outcome;
 
-	/* Only the interaction that performed the login may undo it. */
+	/* Close the session only if this interaction submitted ordinary login. */
 	gboolean performed_login;
 } LoginInteraction;
 
@@ -177,6 +181,7 @@ static void login_interaction_unref(gpointer data)
 		return;
 
 	g_clear_object(&interaction->session);
+	g_clear_object(&interaction->cancellable);
 	g_free(interaction);
 }
 
@@ -185,9 +190,18 @@ static gboolean do_login(const char* pin, gpointer user_data, GError** error)
 {
 	LoginInteraction* interaction = user_data;
 	XccSession* session = interaction->session;
+	Operation authorisation = { .session = session, .cancellable = interaction->cancellable };
 	gboolean ok;
 
 	g_mutex_lock(&session->device_lock);
+
+	if (!operation_still_authorised(&authorisation, error) ||
+	    !certificate_device_refresh_login(&session->device, error) ||
+	    !operation_still_authorised(&authorisation, error))
+	{
+		g_mutex_unlock(&session->device_lock);
+		return FALSE;
+	}
 
 	/* Another request may have completed login while the prompt was open. */
 	if (session->device.logged_in)
@@ -208,27 +222,6 @@ static void do_refresh_flags(CertificateToken* token, gpointer user_data)
 	LoginInteraction* interaction = user_data;
 
 	certificate_tokens_refresh_flags(interaction->tokens, token);
-}
-
-/* A login completed after cancellation must be undone on a worker; see docs/SECURITY.md. */
-static void do_abandon(gpointer user_data)
-{
-	LoginInteraction* interaction = user_data;
-	XccSession* session = interaction->session;
-	gboolean still_wanted = FALSE;
-
-	if (!interaction->performed_login)
-		return;
-
-	/* Keep the login while any waiter still needs it. */
-	still_wanted = session->login_waiters != NULL && session->login_waiters->len > 0;
-
-	if (still_wanted)
-		return;
-
-	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id,
-	                      "logged-out-after-cancelled-login");
-	xcc_session_release_device_async(session);
 }
 
 typedef struct
@@ -386,6 +379,16 @@ static void sign_thread(GTask* task, gpointer source, gpointer task_data,
 	}
 
 	/* A preceding operation may have reset the device while this request waited. */
+	if ((session->device.module != NULL &&
+	     !certificate_device_refresh_login(&session->device, &error)) ||
+	    !operation_still_authorised(operation, &error))
+	{
+		g_mutex_unlock(&session->device_lock);
+		g_mutex_unlock(&session->operation_lock);
+		g_task_return_error(task, g_steal_pointer(&error));
+		return;
+	}
+
 	if (session->device.module == NULL ||
 	    (!session->device.logged_in &&
 	     (session->candidate->token->login_required ||
@@ -441,6 +444,15 @@ static void on_signed(GObject* source, GAsyncResult* result, gpointer user_data)
 	if (operation->retry_open && error == NULL)
 	{
 		operation->retry_open = FALSE;
+		/* Bound reauthentication when login and session state disagree. */
+		if (operation->retried_open)
+		{
+			operation_fail(operation, g_error_new_literal(CERTIFICATE_PKCS11_ERROR,
+			                                   CERTIFICATE_PKCS11_ERROR_FAILED,
+			                                   "Token login state did not settle"));
+			return;
+		}
+		operation->retried_open = TRUE;
 		open_operation(operation);
 		return;
 	}
@@ -571,7 +583,7 @@ static void detach_waiter_cancel(Operation* operation)
 	}
 }
 
-static void on_pin_done(CertificatePinOutcome outcome, gpointer user_data)
+static void finish_login(gpointer user_data)
 {
 	LoginInteraction* interaction = user_data;
 	XccSession* session = interaction->session;
@@ -592,11 +604,40 @@ static void on_pin_done(CertificatePinOutcome outcome, gpointer user_data)
 			Operation* waiter = g_ptr_array_index(waiters, i);
 
 			detach_waiter_cancel(waiter);
-			apply_login_outcome(waiter, outcome);
+			if (waiter->retry_login)
+			{
+				waiter->retry_login = FALSE;
+				open_operation(waiter);
+			}
+			else
+				apply_login_outcome(waiter, interaction->outcome);
 		}
 	}
 
 	login_interaction_unref(interaction);
+}
+
+static void on_pin_done(CertificatePinOutcome outcome, gpointer user_data)
+{
+	LoginInteraction* interaction = user_data;
+	XccSession* session = interaction->session;
+
+	/* The cancellation idle may still be queued when the login worker completes. */
+	if (outcome == CERTIFICATE_PIN_OK && g_cancellable_is_cancelled(interaction->cancellable))
+		outcome = CERTIFICATE_PIN_CANCELLED;
+
+	interaction->outcome = outcome;
+	if (outcome != CERTIFICATE_PIN_OK && interaction->performed_login)
+	{
+		/* New requests wait until the cancelled login's session has closed. */
+		g_cancellable_cancel(interaction->cancellable);
+		certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id,
+		                      "closing-session-after-cancelled-login");
+		xcc_session_release_device_async_full(session, finish_login, interaction);
+		return;
+	}
+
+	finish_login(interaction);
 }
 
 static gboolean waiter_cancelled_idle(gpointer user_data)
@@ -699,6 +740,8 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 	/* Waiter bookkeeping belongs to the coordinator; C_Login may hold device_lock. */
 	if (session->login_in_progress)
 	{
+		/* A cancelled interaction cannot authenticate new requests. */
+		operation->retry_login = certificate_pin_login_is_cancelling(session->login_cancellable);
 		g_ptr_array_add(session->login_waiters, operation_ref(operation));
 		goto attach_waiter;
 	}
@@ -737,6 +780,7 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 			interaction->refs = 1;
 			interaction->tokens = operation->tokens;
 			interaction->session = g_object_ref(session);
+			interaction->cancellable = g_object_ref(session->login_cancellable);
 			prompt_cancellable = g_object_ref(session->login_cancellable);
 		}
 	}
@@ -759,7 +803,7 @@ attach_waiter:
 	/* The prompt and on_pin_done() each own a reference until their callbacks finish. */
 	certificate_pin_login_full(session->candidate->token, session->id, operation->parent_window,
 	                           operation->caller_display, operation->purpose_display, do_login,
-	                           do_refresh_flags, do_abandon, interaction,
+	                           do_refresh_flags, NULL, interaction,
 	                           login_interaction_unref, prompt_cancellable, on_pin_done,
 	                           login_interaction_ref(interaction));
 }

@@ -43,7 +43,7 @@ gboolean certificate_device_open(CertificateDevice* device, CertificateTokens* t
 	if (device->module != NULL)
 	{
 		if (device_is_bound_to(device, candidate))
-			return TRUE;
+			return certificate_device_refresh_login(device, error);
 
 		/* A replacement credential requires a fresh session and login. */
 		certificate_device_close(device);
@@ -62,6 +62,38 @@ gboolean certificate_device_open(CertificateDevice* device, CertificateTokens* t
 	device->logged_in = FALSE;
 	device->candidate = certificate_candidate_ref((CertificateCandidate*) candidate);
 	find_private_key(device, candidate);
+
+	return certificate_device_refresh_login(device, error);
+}
+
+gboolean certificate_device_refresh_login(CertificateDevice* device, GError** error)
+{
+	CK_SESSION_INFO info;
+	CK_RV rv;
+	gboolean logged_in;
+
+	if (device->module == NULL || device->session == CK_INVALID_HANDLE)
+	{
+		g_set_error_literal(error, CERTIFICATE_PKCS11_ERROR,
+		                    CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED,
+		                    "The security token is no longer present");
+		return FALSE;
+	}
+
+	rv = device->module->C_GetSessionInfo(device->session, &info);
+	if (rv != CKR_OK)
+	{
+		certificate_pkcs11_set_error(error, rv, "C_GetSessionInfo");
+		return FALSE;
+	}
+
+	logged_in = info.state == CKS_RO_USER_FUNCTIONS || info.state == CKS_RW_USER_FUNCTIONS;
+	if (device->logged_in && !logged_in)
+		device->private_key = CK_INVALID_HANDLE;
+	device->logged_in = logged_in;
+
+	if (logged_in && device->private_key == CK_INVALID_HANDLE)
+		find_private_key(device, device->candidate);
 
 	return TRUE;
 }
@@ -229,10 +261,7 @@ void certificate_device_close(CertificateDevice* device)
 
 	if (device->session != CK_INVALID_HANDLE)
 	{
-		/* Token middleware may retain authentication after C_Logout. */
-		if (device->logged_in)
-			device->module->C_Logout(device->session);
-
+		/* C_Logout would also revoke other grants' sessions on this token. */
 		device->module->C_CloseSession(device->session);
 	}
 

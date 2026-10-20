@@ -34,7 +34,7 @@ typedef gboolean (*CertificatePinLoginFunc)(const char* pin, gpointer user_data,
 /** Worker-only refresh before presentation and after successful or refused login; NULL disables refresh. */
 typedef void (*CertificatePinRefreshFunc)(CertificateToken* token, gpointer user_data);
 
-/** After done(), the main-thread abandon callback must undo a successful discarded login; NULL leaves it authenticated. */
+/** After done(), the main-thread abandon callback undoes a successful discarded login; NULL disables it. */
 typedef void (*CertificatePinAbandonFunc)(gpointer user_data);
 
 typedef void (*CertificatePinDone)(CertificatePinOutcome outcome, gpointer user_data);
@@ -70,6 +70,9 @@ void certificate_pin_login_full_kind(CertificateToken* token, const char* sessio
  *  module call is not interrupted, so the caller is answered when it returns. */
 void certificate_pin_set_login_timeout(guint seconds);
 guint certificate_pin_login_timeout(void);
+
+/** Coordinator only: cancellation or timeout may still be waiting for a worker. */
+gboolean certificate_pin_login_is_cancelling(GCancellable* cancellable);
 
 void certificate_ui_set_has_display(gboolean has_display);
 gboolean certificate_ui_has_display(void);

@@ -18,7 +18,7 @@ typedef struct
 	CK_FUNCTION_LIST* module;
 	CK_SESSION_HANDLE session;
 	CK_OBJECT_HANDLE private_key;
-	gboolean logged_in;
+	gboolean logged_in; /* Snapshot of token-wide state; refresh before use. */
 
 	/* The device owns a candidate reference so re-granting cannot change its key binding. */
 	CertificateCandidate* candidate;
@@ -33,6 +33,9 @@ gboolean certificate_device_login(CertificateDevice* device,
                                   const CertificateCandidate* candidate, const char* pin,
                                   GError** error);
 
+/** Read token-wide login state and refresh private-key handles after a state change. */
+gboolean certificate_device_refresh_login(CertificateDevice* device, GError** error);
+
 gboolean certificate_device_login_context(CertificateDevice* device, const char* pin,
                                           GError** error);
 
@@ -44,7 +47,7 @@ GBytes* certificate_device_perform(CertificateDevice* device, gboolean decrypt,
                                    CertificateDeviceAuthenticate authenticate, gpointer auth_data,
                                    GError** error);
 
-/** Middleware may retain authentication after logout and session close. */
+/** Closing the last application session ends token login; middleware may retain authentication. */
 void certificate_device_close(CertificateDevice* device);
 
 #endif

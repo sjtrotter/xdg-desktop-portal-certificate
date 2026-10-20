@@ -916,6 +916,12 @@ static CK_RV context_close(CK_SESSION_HANDLE handle)
 	return CKR_OK;
 }
 
+static CK_RV context_session_info(CK_SESSION_HANDLE handle, CK_SESSION_INFO_PTR info)
+{
+	*info = (CK_SESSION_INFO){ .state = CKS_RO_USER_FUNCTIONS, .flags = CKF_SERIAL_SESSION };
+	return CKR_OK;
+}
+
 static void context_signed(GBytes* result, const GError* error, gpointer user_data)
 {
 	guint* completions = user_data;
@@ -936,6 +942,7 @@ static void test_broker_context_login(Fixture* fixture, gconstpointer user_data)
 	g_autoptr(GVariant) parameters =
 	    g_variant_parse(G_VARIANT_TYPE_VARDICT, "{'hash': <'SHA256'>}", NULL, NULL, NULL);
 	CK_FUNCTION_LIST module = {
+		.C_GetSessionInfo = context_session_info,
 		.C_GetAttributeValue = context_get_attribute,
 		.C_SignInit = context_sign_init,
 		.C_Login = context_token_login,
@@ -1034,8 +1041,21 @@ static void open_gate_release(OpenGate* gate)
 	g_mutex_unlock(&gate->lock);
 }
 
+static void open_context_setup(CertificateDevice* setup, CertificateTokens* tokens,
+                               CertificateCandidate* candidate)
+{
+	g_autoptr(GError) error = NULL;
+
+	g_assert_true(certificate_device_open(setup, tokens, candidate, &error));
+	g_assert_no_error(error);
+	g_assert_cmpuint(setup->module->C_CloseSession(setup->session), ==, CKR_OK);
+	g_assert_cmpuint(setup->module->C_OpenSession(candidate->token->slot,
+	                                            CKF_SERIAL_SESSION | CKF_RW_SESSION,
+	                                            NULL, NULL, &setup->session), ==, CKR_OK);
+}
+
 /* With hold_open, the queued request's open completes before the cancel and its callback runs after. */
-static void run_context_cancel_queued(gboolean hold_open)
+static void run_context_cancel_queued(gboolean hold_open, gboolean last_session)
 {
 	const char* directory = g_getenv("SOFTHSM_FIXTURE_DIR");
 	g_autofree char* fallback = g_build_filename(g_get_tmp_dir(), "xdp-certificate-softhsm", NULL);
@@ -1047,6 +1067,8 @@ static void run_context_cancel_queued(gboolean hold_open)
 	g_autoptr(XccSession) session = NULL;
 	CertificateCandidate* candidate = NULL;
 	CertificateDevice setup = { 0 };
+	CK_SESSION_INFO info;
+	guint prompts = last_session ? 3 : 2;
 	const char* modules[2] = { NULL, NULL };
 	g_autoptr(GBytes) digest = g_bytes_new_static("01234567890123456789012345678901", 32);
 	g_autoptr(GVariant) parameters =
@@ -1108,11 +1130,7 @@ static void run_context_cancel_queued(gboolean hold_open)
 		}
 	}
 	g_assert_nonnull(candidate);
-	g_assert_true(certificate_device_open(&setup, tokens, candidate, &error));
-	g_assert_cmpuint(setup.module->C_CloseSession(setup.session), ==, CKR_OK);
-	g_assert_cmpuint(setup.module->C_OpenSession(candidate->token->slot,
-	                                            CKF_SERIAL_SESSION | CKF_RW_SESSION,
-	                                            NULL, NULL, &setup.session), ==, CKR_OK);
+	open_context_setup(&setup, tokens, candidate);
 	g_assert_true(certificate_device_login(&setup, candidate, "123456", &error));
 	g_assert_no_error(error);
 	/* Remove keys left by an earlier aborted run so the broker finds only this pair. */
@@ -1145,10 +1163,15 @@ static void run_context_cancel_queued(gboolean hold_open)
 	g_assert_true(certificate_device_open(&session->device, tokens, candidate, &error));
 	g_assert_true(certificate_device_login(&session->device, candidate, "123456", &error));
 	g_assert_no_error(error);
+	if (last_session)
+		certificate_device_close(&setup);
 
 	certificate_test_prompter_set_delay(5000);
+	/* Cancel the first context PIN, then authenticate the queued operation. */
 	certificate_test_prompter_expect_password(NULL);
-	certificate_test_prompter_expect_password("123456");
+	/* Closing the last session also requires ordinary login before the next context PIN. */
+	if (last_session)
+		certificate_test_prompter_expect_password("123456");
 	certificate_test_prompter_expect_password("123456");
 	certificate_broker_perform(tokens, session, FALSE, "cancel-context", "RSA_PKCS1_V1_5",
 	                           parameters, digest, NULL, "Test application", NULL,
@@ -1185,6 +1208,12 @@ static void run_context_cancel_queued(gboolean hold_open)
 		g_mutex_lock(&session->device_lock);
 		g_assert_null(session->device.module);
 		g_mutex_unlock(&session->device_lock);
+		g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 1);
+		if (!last_session)
+		{
+			g_assert_cmpuint(setup.module->C_GetSessionInfo(setup.session, &info), ==, CKR_OK);
+			g_assert_cmpuint(info.state, ==, CKS_RW_USER_FUNCTIONS);
+		}
 		open_gate_release(&gate);
 	}
 
@@ -1197,8 +1226,9 @@ static void run_context_cancel_queued(gboolean hold_open)
 	g_assert_cmpuint(probes[1].calls, ==, 1);
 	g_assert_no_error(probes[1].error);
 	g_assert_nonnull(probes[1].signature);
-	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 3);
-	g_assert_cmpuint(certificate_test_prompter_prompts_created(), ==, 3);
+	/* A surviving setup session preserves ordinary login; each operation still needs a context PIN. */
+	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, prompts);
+	g_assert_cmpuint(certificate_test_prompter_prompts_created(), ==, prompts);
 	gnutls_datum_t digest_data = { (unsigned char*) g_bytes_get_data(digest, NULL), 32 };
 	gnutls_datum_t signature_data = {
 		(unsigned char*) g_bytes_get_data(probes[1].signature, NULL),
@@ -1218,6 +1248,10 @@ static void run_context_cancel_queued(gboolean hold_open)
 	gnutls_pubkey_deinit(verifier);
 	certificate_device_close(&session->device);
 	xcc_session_close(session);
+	if (last_session)
+		open_context_setup(&setup, tokens, candidate);
+	g_assert_cmpuint(setup.module->C_GetSessionInfo(setup.session, &info), ==, CKR_OK);
+	g_assert_cmpuint(info.state, ==, last_session ? CKS_RW_PUBLIC_SESSION : CKS_RW_USER_FUNCTIONS);
 	g_assert_true(certificate_device_login(&setup, candidate, "123456", &error));
 	g_assert_no_error(error);
 	/* Logout invalidates private object handles, so resolve both keys again for cleanup. */
@@ -1235,12 +1269,12 @@ static void run_context_cancel_queued(gboolean hold_open)
 
 static void test_broker_context_cancel_queued(Fixture* fixture, gconstpointer user_data)
 {
-	run_context_cancel_queued(FALSE);
+	run_context_cancel_queued(FALSE, GPOINTER_TO_INT(user_data));
 }
 
 static void test_broker_context_cancel_before_opened(Fixture* fixture, gconstpointer user_data)
 {
-	run_context_cancel_queued(TRUE);
+	run_context_cancel_queued(TRUE, GPOINTER_TO_INT(user_data));
 }
 
 /* Gate delivery of real gcr completions, without replacing gcr or the bridge.
@@ -1489,6 +1523,11 @@ int main(int argc, char** argv)
 	ADD("/pin-system/broker-context-cancel-queued", test_broker_context_cancel_queued);
 	ADD("/pin-system/broker-context-cancel-before-opened",
 	    test_broker_context_cancel_before_opened);
+	g_test_add("/pin-system/broker-context-cancel-queued-last-session", Fixture, GINT_TO_POINTER(1),
+	           fixture_set_up, test_broker_context_cancel_queued, fixture_tear_down);
+	g_test_add("/pin-system/broker-context-cancel-before-opened-last-session", Fixture,
+	           GINT_TO_POINTER(1), fixture_set_up, test_broker_context_cancel_before_opened,
+	           fixture_tear_down);
 	ADD("/pin-system/auto-picks-the-prompter", test_auto_picks_the_prompter);
 	ADD("/pin-system/bridge-protected-final-try-async-open", test_bridge_protected_final_try);
 	ADD("/pin-system/bridge-shutdown-pending-close", test_bridge_shutdown_pending_close);
