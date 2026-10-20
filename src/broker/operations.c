@@ -41,6 +41,7 @@ typedef struct
 	gboolean retry_open;
 	gboolean retried_open;
 	gboolean retry_login; /* Queued for a fresh interaction after cancellation settles. */
+	guint64 open_login_generation;
 } Operation;
 
 static void operation_free(Operation* operation)
@@ -99,16 +100,10 @@ static void operation_succeed(Operation* operation, GBytes* result)
 	operation->done(owned, NULL, operation->user_data);
 }
 
-/* The authoritative budget check and charge run under device_lock. */
+/* Grant budgets belong to the coordinator. */
 static gboolean certificate_broker_decrypts_spent(XccSession* session)
 {
-	gboolean spent;
-
-	g_mutex_lock(&session->device_lock);
-	spent = session->decrypt_count >= CERTIFICATE_MAX_DECRYPTS_PER_GRANT;
-	g_mutex_unlock(&session->device_lock);
-
-	return spent;
+	return session->decrypt_count >= CERTIFICATE_MAX_DECRYPTS_PER_GRANT;
 }
 
 /* PKCS#11 cannot revoke submitted work; recheck expiry under the device lock before submission. */
@@ -190,13 +185,15 @@ static gboolean do_login(const char* pin, gpointer user_data, GError** error)
 {
 	LoginInteraction* interaction = user_data;
 	XccSession* session = interaction->session;
-	Operation authorisation = { .session = session, .cancellable = interaction->cancellable };
+	Operation authorisation = { .session = session, .tokens = interaction->tokens,
+	                            .cancellable = interaction->cancellable };
 	gboolean ok;
 
 	g_mutex_lock(&session->device_lock);
 
+	/* A cancelled login may have closed the device since the open snapshot. */
 	if (!operation_still_authorised(&authorisation, error) ||
-	    !certificate_device_refresh_login(&session->device, error) ||
+	    !ensure_session_locked(&authorisation, error) ||
 	    !operation_still_authorised(&authorisation, error))
 	{
 		g_mutex_unlock(&session->device_lock);
@@ -591,11 +588,10 @@ static void finish_login(gpointer user_data)
 	g_autoptr(GPtrArray) waiters = NULL;
 	g_autoptr(GCancellable) cancellable = NULL;
 
-	g_mutex_lock(&session->device_lock);
 	session->login_in_progress = FALSE;
+	session->login_generation++;
 	waiters = g_steal_pointer(&session->login_waiters);
 	cancellable = g_steal_pointer(&session->login_cancellable);
-	g_mutex_unlock(&session->device_lock);
 
 	if (waiters != NULL)
 	{
@@ -685,12 +681,18 @@ static void on_waiter_cancelled(GCancellable* cancellable, gpointer user_data)
 												operation_ref(operation), operation_unref);
 }
 
+typedef struct
+{
+	gboolean needs_login;
+} OpenResult;
+
 static void open_thread(GTask* task, gpointer source, gpointer task_data,
                         GCancellable* cancellable)
 {
 	Operation* operation = task_data;
 	XccSession* session = operation->session;
 	g_autoptr(GError) error = NULL;
+	g_autofree OpenResult* opened = g_new0(OpenResult, 1);
 	gboolean ok;
 
 	if (!operation_still_authorised(operation, &error))
@@ -700,7 +702,12 @@ static void open_thread(GTask* task, gpointer source, gpointer task_data,
 	}
 
 	g_mutex_lock(&session->device_lock);
-	ok = ensure_session_locked(operation, &error);
+	ok = operation_still_authorised(operation, &error) &&
+	     ensure_session_locked(operation, &error);
+	if (ok)
+		opened->needs_login = !session->device.logged_in &&
+		                      (session->candidate->token->login_required ||
+		                       session->device.private_key == CK_INVALID_HANDLE);
 	g_mutex_unlock(&session->device_lock);
 
 	if (ok && certificate_broker_open_gate != NULL)
@@ -714,7 +721,7 @@ static void open_thread(GTask* task, gpointer source, gpointer task_data,
 	if (!ok)
 		g_task_return_error(task, g_steal_pointer(&error));
 	else
-		g_task_return_boolean(task, TRUE);
+		g_task_return_pointer(task, g_steal_pointer(&opened), g_free);
 }
 
 static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
@@ -722,17 +729,22 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 	Operation* operation = user_data;
 	XccSession* session = operation->session;
 	g_autoptr(GError) error = NULL;
-	gboolean needs_login;
-	gboolean wait_for_login = FALSE;
+	g_autofree OpenResult* opened = g_task_propagate_pointer(G_TASK(result), &error);
 	LoginInteraction* interaction = NULL;
 	g_autoptr(GCancellable) prompt_cancellable = NULL;
 
-	if (!g_task_propagate_boolean(G_TASK(result), &error))
+	if (opened == NULL)
 	{
 		if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR,
 		                    CERTIFICATE_PKCS11_ERROR_TOKEN_REMOVED))
 			xcc_session_invalidate(session, "token_removed");
 
+		operation_fail(operation, g_steal_pointer(&error));
+		return;
+	}
+
+	if (!operation_still_authorised(operation, &error))
+	{
 		operation_fail(operation, g_steal_pointer(&error));
 		return;
 	}
@@ -745,48 +757,32 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 		g_ptr_array_add(session->login_waiters, operation_ref(operation));
 		goto attach_waiter;
 	}
-	/* Lazy login state is shared with workers and read under device_lock. */
-	g_mutex_lock(&session->device_lock);
-
-	/* Another operation's cancelled authentication may have closed the device since it opened. */
-	if (session->device.module == NULL)
+	/* A completed login invalidates earlier snapshots; refresh them on a worker. */
+	if (opened->needs_login && operation->open_login_generation != session->login_generation)
 	{
-		g_mutex_unlock(&session->device_lock);
 		open_operation(operation);
 		return;
 	}
 
-	needs_login = !session->device.logged_in &&
-	              (session->candidate->token->login_required ||
-	               session->device.private_key == CK_INVALID_HANDLE);
-
-	if (needs_login)
+	if (opened->needs_login)
 	{
 		if (session->login_waiters == NULL)
 			session->login_waiters = g_ptr_array_new_with_free_func(operation_unref);
 
 		g_ptr_array_add(session->login_waiters, operation_ref(operation));
 
-		if (session->login_in_progress)
-		{
-			wait_for_login = TRUE;
-		}
-		else
-		{
-			session->login_in_progress = TRUE;
-			/* The session's cancellable keeps one request from cancelling other login waiters. */
-			session->login_cancellable = g_cancellable_new();
-			interaction = g_new0(LoginInteraction, 1);
-			interaction->refs = 1;
-			interaction->tokens = operation->tokens;
-			interaction->session = g_object_ref(session);
-			interaction->cancellable = g_object_ref(session->login_cancellable);
-			prompt_cancellable = g_object_ref(session->login_cancellable);
-		}
+		session->login_in_progress = TRUE;
+		/* The session's cancellable keeps one request from cancelling other login waiters. */
+		session->login_cancellable = g_cancellable_new();
+		interaction = g_new0(LoginInteraction, 1);
+		interaction->refs = 1;
+		interaction->tokens = operation->tokens;
+		interaction->session = g_object_ref(session);
+		interaction->cancellable = g_object_ref(session->login_cancellable);
+		prompt_cancellable = g_object_ref(session->login_cancellable);
 	}
-	g_mutex_unlock(&session->device_lock);
 
-	if (!needs_login)
+	if (!opened->needs_login)
 	{
 		run_operation(operation);
 		return;
@@ -797,7 +793,7 @@ attach_waiter:
 		operation->login_cancel_id = g_cancellable_connect(
 		    operation->cancellable, G_CALLBACK(on_waiter_cancelled), operation, NULL);
 
-	if (wait_for_login || interaction == NULL)
+	if (interaction == NULL)
 		return;
 
 	/* The prompt and on_pin_done() each own a reference until their callbacks finish. */
@@ -812,6 +808,7 @@ static void open_operation(Operation* operation)
 {
 	g_autoptr(GTask) task = g_task_new(NULL, operation->cancellable, on_opened, operation);
 
+	operation->open_login_generation = operation->session->login_generation;
 	g_task_set_task_data(task, operation_ref(operation), operation_unref);
 	g_task_run_in_thread(task, open_thread);
 }
@@ -827,6 +824,14 @@ void certificate_broker_perform(CertificateTokens* tokens, XccSession* session,
 	g_autoptr(GError) error = NULL;
 	CertificateMechanism mechanism;
 	g_autoptr(GBytes) payload = NULL;
+
+	if (g_atomic_int_get(&session->grant_pending))
+	{
+		g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+		                    "Acquisition is pending");
+		done(NULL, error, user_data);
+		return;
+	}
 
 	if (!session->granted || session->candidate == NULL)
 	{
@@ -909,30 +914,9 @@ void certificate_broker_perform(CertificateTokens* tokens, XccSession* session,
 	operation->done = done;
 	operation->user_data = user_data;
 
-	/* Charge failed attempts too, with the budget check and increment under device_lock. */
+	/* Charge failed attempts too; the coordinator owns the budget. */
 	if (decrypt)
-	{
-		gboolean spent = FALSE;
-
-		g_mutex_lock(&session->device_lock);
-		spent = session->decrypt_count >= CERTIFICATE_MAX_DECRYPTS_PER_GRANT;
-		if (!spent)
-			session->decrypt_count++;
-		g_mutex_unlock(&session->device_lock);
-
-		if (spent)
-		{
-			certificate_log_operation(CERTIFICATE_REASON_OPERATION_REFUSED, session->id, operation_id,
-			                          mechanism.name);
-			operation_fail(operation,
-			               g_error_new(CERTIFICATE_PKCS11_ERROR,
-			                           CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED,
-			                           "Grant decryption limit reached (%d); acquire a new grant",
-			                           CERTIFICATE_MAX_DECRYPTS_PER_GRANT));
-			operation_unref(operation);
-			return;
-		}
-	}
+		session->decrypt_count++;
 
 	certificate_log_operation(CERTIFICATE_REASON_REQUEST_RECEIVED, session->id, operation_id,
 	                          mechanism.name);

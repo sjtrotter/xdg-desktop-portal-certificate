@@ -84,6 +84,7 @@ XccRequest* xcc_request_new(XccContext*, XccSession*, XccResultKind, XccDone, vo
 XccErrorCode xcc_request_validate(XccRequest*);
 XccCandidate* xcc_candidate_snapshot(CertificateCandidate*);
 void xcc_acquire_start(void*);
+void xcc_acquire_rollback(XccRequest*);
 void xcc_sign_start(void*);
 void xcc_acquire_token_event(XccContext*, CertificateToken*, gboolean);
 void xcc_ui_legacy_init(XccContext*);

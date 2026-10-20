@@ -27,7 +27,7 @@ typedef struct
 	guint warnings, ordered_completions;
 	guint user_logins, context_logins, signatures, logouts;
 	guint already_logged_in, settle_login_after;
-	guint sessions_opened, sessions_closed, open_sessions, key_generation;
+	guint sessions_opened, sessions_closed, open_sessions, key_generation, session_queries;
 	gboolean token_logged_in, hide_private_key, public_session;
 	TokenSession handles[32];
 	CK_RV login_result;
@@ -36,6 +36,11 @@ typedef struct
 	GMutex lock;
 	GCond cond;
 	gboolean hold_enumeration, enumerating, hold_login, logging_in, hold_open, opening;
+	gboolean hold_sign, signing;
+	gboolean hold_session_info, querying_session;
+	GCancellable* observed_open;
+	gint opened_callbacks, budget_refusals;
+	guint expirations;
 	gboolean real_watch;
 	GString* deliveries;
 } Fixture;
@@ -54,6 +59,32 @@ gboolean __wrap_certificate_tokens_open_session(CertificateTokens*, const Certif
 void __wrap_certificate_tokens_refresh_flags(CertificateTokens*, CertificateToken*);
 gint64 __real_g_get_monotonic_time(void);
 gint64 __wrap_g_get_monotonic_time(void);
+gboolean __real_g_task_propagate_boolean(GTask*, GError**);
+gboolean __wrap_g_task_propagate_boolean(GTask*, GError**);
+gpointer __real_g_task_propagate_pointer(GTask*, GError**);
+gpointer __wrap_g_task_propagate_pointer(GTask*, GError**);
+
+/* Observe on_opened before it reads device state, including while the token is stalled. */
+static void observe_opened(GTask* task)
+{
+	g_mutex_lock(&active->lock);
+	if (active->observed_open != NULL &&
+	    g_task_get_cancellable(task) == active->observed_open)
+		g_atomic_int_inc(&active->opened_callbacks);
+	g_mutex_unlock(&active->lock);
+}
+gboolean __wrap_g_task_propagate_boolean(GTask* task, GError** error)
+{
+	gboolean ok = __real_g_task_propagate_boolean(task, error);
+	observe_opened(task);
+	return ok;
+}
+gpointer __wrap_g_task_propagate_pointer(GTask* task, GError** error)
+{
+	gpointer result = __real_g_task_propagate_pointer(task, error);
+	observe_opened(task);
+	return result;
+}
 
 gint64 __wrap_g_get_monotonic_time(void)
 {
@@ -194,6 +225,10 @@ static CK_RV sign(CK_SESSION_HANDLE h, CK_BYTE_PTR data, CK_ULONG length, CK_BYT
 {
 	Fixture* f = active;
 	g_mutex_lock(&f->lock);
+	f->signing = TRUE;
+	g_cond_broadcast(&f->cond);
+	while (f->hold_sign)
+		g_cond_wait(&f->cond, &f->lock);
 	g_assert_true(f->token_logged_in);
 	g_assert_true(f->handles[h].initialized);
 	if (f->always_auth)
@@ -234,6 +269,12 @@ static CK_RV close_device(CK_SESSION_HANDLE h)
 static CK_RV session_info(CK_SESSION_HANDLE h, CK_SESSION_INFO_PTR info)
 {
 	g_mutex_lock(&active->lock);
+	active->session_queries++;
+	active->querying_session = TRUE;
+	g_cond_broadcast(&active->cond);
+	gint64 deadline = __real_g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+	while (active->hold_session_info)
+		g_assert_true(g_cond_wait_until(&active->cond, &active->lock, deadline));
 	g_assert_true(active->handles[h].open);
 	*info = (CK_SESSION_INFO){ .slotID = 1, .flags = CKF_SERIAL_SESSION,
 	                          .state = active->token_logged_in && !active->public_session
@@ -392,8 +433,8 @@ static void done(XccRequest* request, const XccResult* result, void* data)
 #define WAIT(condition)                                                                            \
 	G_STMT_START                                                                                   \
 	{                                                                                              \
-		gint64 deadline = __real_g_get_monotonic_time() + 10 * G_USEC_PER_SEC;                     \
-		while (!(condition) && __real_g_get_monotonic_time() < deadline)                           \
+		gint64 wait_end = __real_g_get_monotonic_time() + 10 * G_USEC_PER_SEC;                     \
+		while (!(condition) && __real_g_get_monotonic_time() < wait_end)                           \
 		{                                                                                          \
 			g_main_context_iteration(NULL, FALSE);                                                 \
 			g_usleep(1000);                                                                        \
@@ -443,7 +484,8 @@ static void teardown(Fixture* f, gconstpointer data)
 {
 	certificate_broker_set_open_gate(NULL, NULL);
 	g_mutex_lock(&f->lock);
-	f->hold_enumeration = f->hold_login = f->hold_open = FALSE;
+	f->hold_enumeration = f->hold_login = f->hold_open = f->hold_sign =
+	    f->hold_session_info = FALSE;
 	g_cond_broadcast(&f->cond);
 	g_mutex_unlock(&f->lock);
 	if (!f->shutdown)
@@ -674,6 +716,7 @@ typedef struct
 	Fixture* f;
 	gboolean ready;
 	guint count;
+	gboolean settled;
 } WaitersBarrier;
 static void waiters_ready(void* data)
 {
@@ -682,8 +725,13 @@ static void waiters_ready(void* data)
 static gboolean observe_waiters(void* data)
 {
 	WaitersBarrier* b = data;
-	if (b->f->session->login_waiters == NULL ||
-	    b->f->session->login_waiters->len != b->count)
+	if (b->settled)
+	{
+		if (b->f->session->login_in_progress)
+			return G_SOURCE_CONTINUE;
+	}
+	else if (b->f->session->login_waiters == NULL ||
+	         b->f->session->login_waiters->len != b->count)
 		return G_SOURCE_CONTINUE;
 	XccDispatch d = xcc_dispatch_glib(NULL);
 	d.post(d.user, waiters_ready, b);
@@ -717,7 +765,7 @@ static void test_shared_waiters(Fixture* f, gconstpointer data)
 	xcc_request_unref(second);
 }
 
-static XccSession* second_grant(Fixture* f)
+static XccSession* new_session(Fixture* f)
 {
 	XccSessionSpec spec = {.struct_size = sizeof(spec),
 	                       .abi_version = XCC_ABI_VERSION,
@@ -728,6 +776,12 @@ static XccSession* second_grant(Fixture* f)
 	XccSession* session = xcc_session_new(f->context, &spec, &error);
 	g_assert_nonnull(session);
 	g_assert_cmpint(error.code, ==, XCC_OK);
+	return session;
+}
+
+static XccSession* second_grant(Fixture* f)
+{
+	XccSession* session = new_session(f);
 	XccAcquireSpec consent = acquire_spec();
 	Done d = {.f = f};
 	XccRequest* r = xcc_acquire_async(session, &consent, done, &d);
@@ -882,9 +936,576 @@ static void hold_opened(gpointer data)
 	g_mutex_unlock(&b->f->lock);
 }
 
+static gboolean signing(Fixture* f)
+{
+	g_mutex_lock(&f->lock);
+	gboolean value = f->signing;
+	g_mutex_unlock(&f->lock);
+	return value;
+}
+
+static gboolean querying_session(Fixture* f)
+{
+	g_mutex_lock(&f->lock);
+	gboolean value = f->querying_session;
+	g_mutex_unlock(&f->lock);
+	return value;
+}
+
+static void coordinator_ready(void* data)
+{
+	g_atomic_int_set((gint*)data, TRUE);
+}
+
+static void test_open_after_successful_login(Fixture* f, gconstpointer data)
+{
+	gboolean stalled = GPOINTER_TO_INT(data) != 0;
+	grant(f);
+	f->hide_private_key = TRUE;
+	Done a = {.f = f}, b = {.f = f}, c = {.f = f};
+	XccRequest* first = sign_request(f, &a);
+	WAIT(f->pin_shows == 1);
+	OpenBarrier opened = {.f = f};
+	certificate_broker_set_open_gate(hold_opened, &opened);
+	XccRequest* second = sign_request(f, &b);
+	WAIT(g_atomic_int_get(&opened.entered));
+	submit_pin(f, f->pin_id);
+	WAIT(a.calls == 1);
+	g_assert_cmpint(a.error, ==, XCC_OK);
+	g_assert_cmpuint(b.calls, ==, 0);
+	XccRequest* third = NULL;
+	if (stalled)
+	{
+		g_mutex_lock(&f->lock);
+		f->hold_session_info = TRUE;
+		f->querying_session = FALSE;
+		g_mutex_unlock(&f->lock);
+		third = sign_request(f, &c);
+		WAIT(querying_session(f));
+	}
+	/* Deliver the login-needed snapshot after the shared login has completed. */
+	g_mutex_lock(&f->lock);
+	f->observed_open = second->cancellable;
+	opened.released = TRUE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	if (stalled)
+	{
+		WAIT(g_atomic_int_get(&f->opened_callbacks) != 0);
+		gint ready = FALSE;
+		xcc_context_post(f->context, coordinator_ready, &ready);
+		WAIT(g_atomic_int_get(&ready));
+		g_assert_cmpuint(b.calls, ==, 0);
+		g_assert_cmpuint(c.calls, ==, 0);
+		g_assert_cmpuint(f->pin_shows, ==, 1);
+		g_mutex_lock(&f->lock);
+		f->hold_session_info = FALSE;
+		g_cond_broadcast(&f->cond);
+		g_mutex_unlock(&f->lock);
+	}
+	WAIT(b.calls == 1 || f->pin_shows > 1);
+	g_assert_cmpuint(f->pin_shows, ==, 1);
+	g_assert_cmpuint(b.calls, ==, 1);
+	g_assert_cmpint(b.error, ==, XCC_OK);
+	if (stalled)
+	{
+		WAIT(c.calls == 1);
+		g_assert_cmpint(c.error, ==, XCC_OK);
+	}
+	g_assert_cmpuint(a.calls, ==, 1);
+	g_assert_cmpuint(f->user_logins, ==, 1);
+	g_assert_cmpuint(f->signatures, ==, stalled ? 3 : 2);
+	g_assert_cmpuint(f->sessions_opened, ==, 1);
+	g_assert_cmpuint(f->sessions_closed, ==, 0);
+	g_assert_cmpuint(f->logouts, ==, 0);
+	g_mutex_lock(&f->lock);
+	f->observed_open = NULL;
+	g_mutex_unlock(&f->lock);
+	xcc_request_unref(first);
+	xcc_request_unref(second);
+	if (third != NULL)
+		xcc_request_unref(third);
+}
+
+static void test_concurrent_signs(Fixture* f, gconstpointer data)
+{
+	grant(f);
+	f->submit = TRUE;
+	sign_successfully(f, f->session);
+	guint queries = f->session_queries;
+	OpenBarrier opened = {.f = f};
+	certificate_broker_set_open_gate(hold_opened, &opened);
+	Done a = {.f = f}, b = {.f = f};
+	XccRequest* first = sign_request(f, &a);
+	WAIT(g_atomic_int_get(&opened.entered));
+
+	/* Deliver the first open while the second holds device_lock in C_GetSessionInfo. */
+	g_mutex_lock(&f->lock);
+	f->hold_session_info = TRUE;
+	f->querying_session = FALSE;
+	g_mutex_unlock(&f->lock);
+	XccRequest* second = sign_request(f, &b);
+	WAIT(querying_session(f));
+	g_mutex_lock(&f->lock);
+	f->observed_open = first->cancellable;
+	opened.released = TRUE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	WAIT(g_atomic_int_get(&f->opened_callbacks) != 0);
+	gint ready = FALSE;
+	xcc_context_post(f->context, coordinator_ready, &ready);
+	WAIT(g_atomic_int_get(&ready));
+	g_assert_cmpuint(a.calls, ==, 0);
+	g_assert_cmpuint(b.calls, ==, 0);
+
+	g_mutex_lock(&f->lock);
+	f->observed_open = NULL;
+	f->hold_session_info = FALSE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	WAIT(a.calls == 1 && b.calls == 1);
+	g_assert_cmpint(a.error, ==, XCC_OK);
+	g_assert_cmpint(b.error, ==, XCC_OK);
+	g_assert_cmpuint(f->signatures, ==, 3);
+	g_assert_cmpuint(f->user_logins, ==, 1);
+	g_assert_cmpuint(f->sessions_opened, ==, 1);
+	/* Each sign needs one open query and one pre-sign query. */
+	g_assert_cmpuint(f->session_queries, ==, queries + 4);
+	xcc_request_unref(first);
+	xcc_request_unref(second);
+}
+
+static void expired(XccSession* session, const char* reason, gpointer data)
+{
+	Fixture* f = data;
+	assert_desktop(f);
+	g_assert_true(session == f->session);
+	g_assert_cmpstr(reason, ==, "expired");
+	f->expirations++;
+}
+
+static void expire_grant(void* data)
+{
+	Fixture* f = data;
+	g_atomic_int_set(&f->clock_offset, 301 + CERTIFICATE_EXPIRY_GRACE_SECONDS);
+	GSource* expiry = g_main_context_find_source_by_id(f->context->coordinator,
+	                                                f->session->expiry_source);
+	g_assert_nonnull(expiry);
+	g_source_set_ready_time(expiry, 0);
+}
+
+static void budget_refused(GBytes* result, const GError* error, gpointer data)
+{
+	Fixture* f = data;
+	g_assert_null(result);
+	g_assert_error(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_NOT_SUPPORTED);
+	g_atomic_int_inc(&f->budget_refusals);
+}
+
+static void check_decrypt_budget(void* data)
+{
+	Fixture* f = data;
+	certificate_broker_perform(f->context->tokens, f->session, TRUE, "stalled-budget",
+	                           "RSA_PKCS1_V1_5", NULL, NULL, NULL, NULL, NULL,
+	                           budget_refused, f);
+}
+
+static void test_stalled_token(Fixture* f, gconstpointer data)
+{
+	gboolean context_login = GPOINTER_TO_INT(data) != 0;
+	grant(f);
+	g_autoptr(XccSession) other = new_session(f);
+	f->submit = TRUE;
+	sign_successfully(f, f->session);
+	xcc_session_set_invalidated_callback(f->session, expired, f);
+
+	/* Delay one open completion until another operation holds device_lock inside the token. */
+	OpenBarrier opened = {.f = f};
+	certificate_broker_set_open_gate(hold_opened, &opened);
+	Done queued = {.f = f}, stalled = {.f = f};
+	XccRequest* pending = sign_request(f, &queued);
+	WAIT(g_atomic_int_get(&opened.entered));
+	g_mutex_lock(&f->lock);
+	f->signing = f->logging_in = FALSE;
+	f->hold_sign = !context_login;
+	f->always_auth = f->pause_context = context_login;
+	g_mutex_unlock(&f->lock);
+	XccRequest* running = sign_request(f, &stalled);
+	if (context_login)
+	{
+		WAIT(f->context_pin_shows == 1);
+		g_mutex_lock(&f->lock);
+		f->hold_login = TRUE;
+		g_mutex_unlock(&f->lock);
+		submit_pin(f, f->pin_id);
+		WAIT(logging_in(f));
+	}
+	else
+		WAIT(signing(f));
+	g_mutex_lock(&f->lock);
+	f->observed_open = pending->cancellable;
+	opened.released = TRUE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	WAIT(g_atomic_int_get(&f->opened_callbacks) != 0);
+
+	xcc_request_cancel(pending, XCC_CANCEL_USER);
+	WAIT(g_cancellable_is_cancelled(pending->cancellable));
+	xcc_context_post(f->context, check_decrypt_budget, f);
+	WAIT(g_atomic_int_get(&f->budget_refusals) == 1);
+	f->choose = FALSE;
+	Done cancelled = {.f = f};
+	XccAcquireSpec spec = acquire_spec();
+	XccRequest* chooser = xcc_acquire_async(other, &spec, done, &cancelled);
+	WAIT(f->chooser_shows == 2);
+	xcc_request_cancel(chooser, XCC_CANCEL_USER);
+	WAIT(cancelled.calls == 1);
+	g_assert_cmpint(cancelled.error, ==, XCC_ERROR_CANCELLED);
+	xcc_session_close(other);
+	xcc_context_post(f->context, expire_grant, f);
+	WAIT(f->expirations == 1);
+	g_assert_true(xcc_session_is_closed(f->session));
+	g_assert_cmpuint(stalled.calls, ==, 0);
+	g_assert_cmpuint(queued.calls, ==, 0);
+
+	g_mutex_lock(&f->lock);
+	guint queries = f->session_queries;
+	f->hold_sign = f->hold_login = FALSE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	WAIT(stalled.calls == 1 && queued.calls == 1);
+	g_assert_cmpint(queued.error, ==, XCC_ERROR_CANCELLED);
+	g_assert_cmpint(stalled.error, ==, XCC_ERROR_DEVICE);
+	g_assert_cmpuint(f->signatures, ==, context_login ? 1 : 2);
+	g_assert_cmpuint(f->sessions_opened, ==, 1);
+	g_assert_cmpuint(f->session_queries, ==, queries);
+	xcc_request_unref(chooser);
+	xcc_request_unref(pending);
+	xcc_request_unref(running);
+}
+
+static void test_acquire_during_sign(Fixture* f, gconstpointer data)
+{
+	grant(f);
+	g_autoptr(CertificateCandidate) original = certificate_candidate_ref(f->candidate);
+	gint64 expiry = f->session->expires_at;
+	guint expiry_source = f->session->expiry_source;
+	f->submit = f->hold_sign = TRUE;
+	Done signed_result = {.f = f}, repeated = {.f = f};
+	XccRequest* running = sign_request(f, &signed_result);
+	WAIT(signing(f));
+
+	CertificateCandidate* replacement = certificate_test_candidate("no-eku-rsa.pem", TRUE, FALSE);
+	replacement->token->login_required = TRUE;
+	replacement->cka_id = g_byte_array_new();
+	g_byte_array_append(replacement->cka_id, (const guint8*)"other-key", 9);
+	g_mutex_lock(&f->lock);
+	certificate_candidate_unref(f->candidate);
+	f->candidate = replacement;
+	g_mutex_unlock(&f->lock);
+	XccAcquireSpec spec = acquire_spec();
+	spec.lifetime_present = TRUE;
+	spec.lifetime_seconds = 3600;
+	XccRequest* duplicate = xcc_acquire_async(f->session, &spec, done, &repeated);
+	WAIT(repeated.calls == 1 || f->chooser_shows > 1);
+	g_assert_cmpuint(repeated.calls, ==, 1);
+	g_assert_cmpint(repeated.error, ==, XCC_ERROR_INVALID_REQUEST);
+	g_assert_cmpuint(f->chooser_shows, ==, 1);
+	g_assert_false(duplicate->result.candidate_present);
+	g_assert_null(duplicate->candidate);
+	g_assert_true(f->session->candidate == original);
+	g_assert_cmpint(f->session->expires_at, ==, expiry);
+	g_assert_cmpuint(f->session->expiry_source, ==, expiry_source);
+	g_assert_cmpuint(signed_result.calls, ==, 0);
+
+	g_mutex_lock(&f->lock);
+	f->hold_sign = FALSE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	WAIT(signed_result.calls == 1);
+	g_assert_cmpint(signed_result.error, ==, XCC_OK);
+	g_assert_cmpuint(f->signatures, ==, 1);
+	g_assert_cmpuint(f->sessions_opened, ==, 1);
+	xcc_request_unref(duplicate);
+	xcc_request_unref(running);
+}
+
+static gboolean enumerating(Fixture* f)
+{
+	g_mutex_lock(&f->lock);
+	gboolean value = f->enumerating;
+	g_mutex_unlock(&f->lock);
+	return value;
+}
+
+static void test_overlapping_acquire(Fixture* f, gconstpointer data)
+{
+	gboolean discovery = GPOINTER_TO_INT(data) != 0;
+	f->choose = FALSE;
+	f->hold_enumeration = discovery;
+	Done first_result = {.f = f}, second_result = {.f = f};
+	XccRequest* first = acquire(f, &first_result);
+	if (discovery)
+		WAIT(enumerating(f));
+	else
+		WAIT(f->chooser_shows == 1);
+	XccRequest* second = acquire(f, &second_result);
+	WAIT(second_result.calls == 1 || f->chooser_shows > 1);
+	g_assert_cmpuint(second_result.calls, ==, 1);
+	g_assert_cmpint(second_result.error, ==, XCC_ERROR_INVALID_REQUEST);
+	g_assert_cmpuint(f->chooser_shows, ==, discovery ? 0 : 1);
+	g_assert_cmpuint(first_result.calls, ==, 0);
+	xcc_request_cancel(first, XCC_CANCEL_USER);
+	g_mutex_lock(&f->lock);
+	f->hold_enumeration = FALSE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	WAIT(first_result.calls == 1);
+	g_assert_cmpint(first_result.error, ==, XCC_ERROR_CANCELLED);
+	f->choose = TRUE;
+	grant(f);
+	xcc_request_unref(first);
+	xcc_request_unref(second);
+}
+
+static void test_acquire_after_expiry(Fixture* f, gconstpointer data)
+{
+	grant(f);
+	gint64 expiry = f->session->expires_at;
+	g_atomic_int_set(&f->clock_offset, 301);
+	Done d = {.f = f};
+	XccRequest* r = acquire(f, &d);
+	WAIT(d.calls == 1);
+	g_assert_cmpint(d.error, ==, XCC_ERROR_INVALID_REQUEST);
+	g_assert_cmpuint(f->chooser_shows, ==, 1);
+	g_assert_cmpint(f->session->expires_at, ==, expiry);
+	xcc_request_unref(r);
+}
+
+typedef struct
+{
+	Fixture* f;
+	XccRequest* request;
+	XccErrorCode error;
+	gboolean ready;
+} CompletionBarrier;
+
+static void completion_queued(void* data)
+{
+	CompletionBarrier* b = data;
+	g_assert_true(b->request->answered);
+	g_assert_cmpint(b->request->result.error, ==, b->error);
+	g_mutex_lock(&b->f->lock);
+	b->ready = TRUE;
+	g_cond_broadcast(&b->f->cond);
+	g_mutex_unlock(&b->f->lock);
+}
+
+/* Wait for the coordinator without delivering queued desktop callbacks. */
+static void wait_for_completion(Fixture* f, XccRequest* request, XccErrorCode error)
+{
+	CompletionBarrier b = {.f = f, .request = request, .error = error};
+	xcc_context_post(f->context, completion_queued, &b);
+	g_mutex_lock(&f->lock);
+	gint64 deadline = __real_g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+	while (!b.ready)
+		g_assert_true(g_cond_wait_until(&f->cond, &f->lock, deadline));
+	g_mutex_unlock(&f->lock);
+}
+
+typedef struct
+{
+	Done acquired, following;
+	XccRequest* next;
+	guint expiry_source;
+} AcquireFollowup;
+
+static void retry_cancelled_acquire(XccRequest* request, const XccResult* result, void* data)
+{
+	AcquireFollowup* followup = data;
+	Fixture* f = followup->acquired.f;
+	done(request, result, &followup->acquired);
+	g_assert_cmpint(result->error, ==, XCC_ERROR_CANCELLED);
+	g_assert_cmpuint(xcc_error_wire_response(result->error), ==, 1);
+	g_assert_false(result->candidate_present);
+	g_assert_null(result->candidate);
+	g_assert_false(result->signature_present);
+	g_assert_false(result->mechanisms_present);
+	g_assert_false(xcc_session_is_closed(f->session));
+	g_assert_false(f->session->granted);
+	g_assert_null(f->session->candidate);
+	g_assert_false(f->session->may_sign);
+	g_assert_false(f->session->may_decrypt);
+	g_assert_cmpuint(f->session->lifetime, ==, 0);
+	g_assert_cmpint(f->session->expires_at, ==, 0);
+	g_assert_cmpuint(f->session->expiry_source, ==, 0);
+	g_assert_null(g_main_context_find_source_by_id(f->context->coordinator,
+	                                             followup->expiry_source));
+	followup->next = acquire(f, &followup->following);
+}
+
+static void test_cancel_committed_acquire(Fixture* f, gconstpointer data)
+{
+	gboolean logged_in = GPOINTER_TO_INT(data) != 0;
+	g_autoptr(XccSession) other = NULL;
+	if (logged_in)
+	{
+		f->submit = TRUE;
+		other = second_grant(f);
+		sign_successfully(f, other);
+	}
+	f->choose = FALSE;
+	AcquireFollowup followup = {.acquired = {.f = f}, .following = {.f = f}};
+	XccAcquireSpec spec = acquire_spec();
+	XccRequest* request = xcc_acquire_async(f->session, &spec, retry_cancelled_acquire, &followup);
+	WAIT(f->chooser_shows == (logged_in ? 2 : 1));
+	xcc_choose(f->context, f->chooser_id, f->revision, f->choice);
+	wait_for_completion(f, request, XCC_OK);
+	g_assert_true(f->session->granted);
+	g_assert_cmpuint(f->session->expiry_source, !=, 0);
+	followup.expiry_source = f->session->expiry_source;
+	g_assert_cmpuint(followup.acquired.calls, ==, 0);
+	g_assert_cmpuint(f->closes, ==, logged_in ? 2 : 0);
+	f->choose = f->submit = TRUE;
+	xcc_request_cancel(request, XCC_CANCEL_USER);
+	WAIT(followup.following.calls == 1);
+	g_assert_cmpuint(followup.acquired.calls, ==, 1);
+	g_assert_cmpint(followup.following.error, ==, XCC_OK);
+	g_assert_cmpuint(f->chooser_shows, ==, logged_in ? 3 : 2);
+	g_assert_cmpuint(f->sessions_opened, ==, logged_in ? 1 : 0);
+	g_assert_cmpuint(f->sessions_closed, ==, 0);
+	g_assert_cmpuint(f->user_logins, ==, logged_in ? 1 : 0);
+	g_assert_cmpuint(f->logouts, ==, 0);
+	/* A repeated Close for the old request must leave the retry's grant intact. */
+	xcc_request_cancel(request, XCC_CANCEL_USER);
+	sign_successfully(f, f->session);
+	if (other != NULL)
+	{
+		sign_successfully(f, other);
+		g_assert_cmpuint(f->user_logins, ==, 1);
+		xcc_session_close(other);
+	}
+	xcc_request_unref(followup.next);
+	xcc_request_unref(request);
+}
+
+static void sign_after_acquire(XccRequest* request, const XccResult* result, void* data)
+{
+	AcquireFollowup* followup = data;
+	done(request, result, &followup->acquired);
+	g_assert_cmpint(result->error, ==, XCC_OK);
+	followup->next = sign_request(followup->acquired.f, &followup->following);
+}
+
+static void test_sign_before_acquire_delivery(Fixture* f, gconstpointer data)
+{
+	f->choose = FALSE;
+	f->submit = TRUE;
+	AcquireFollowup followup = {.acquired = {.f = f}, .following = {.f = f}};
+	XccAcquireSpec spec = acquire_spec();
+	XccRequest* request = xcc_acquire_async(f->session, &spec, sign_after_acquire, &followup);
+	WAIT(f->chooser_shows == 1);
+	xcc_choose(f->context, f->chooser_id, f->revision, f->choice);
+	wait_for_completion(f, request, XCC_OK);
+	Done premature = {.f = f};
+	XccRequest* sign = sign_request(f, &premature);
+	wait_for_completion(f, sign, XCC_ERROR_INVALID_REQUEST);
+	g_assert_cmpuint(f->sessions_opened, ==, 0);
+	g_assert_cmpuint(f->user_logins, ==, 0);
+	WAIT(followup.following.calls == 1 && premature.calls == 1);
+	g_assert_cmpint(premature.error, ==, XCC_ERROR_INVALID_REQUEST);
+	g_assert_cmpint(followup.following.error, ==, XCC_OK);
+	g_assert_cmpuint(f->signatures, ==, 1);
+	xcc_request_unref(followup.next);
+	xcc_request_unref(sign);
+	xcc_request_unref(request);
+}
+
+static void test_cancel_delivered_acquire(Fixture* f, gconstpointer data)
+{
+	Done acquired = {.f = f};
+	XccRequest* request = acquire(f, &acquired);
+	WAIT(acquired.calls == 1);
+	g_assert_cmpint(acquired.error, ==, XCC_OK);
+	gint64 expiry = f->session->expires_at;
+	guint expiry_source = f->session->expiry_source;
+	f->submit = f->hold_sign = TRUE;
+	Done signed_result = {.f = f};
+	XccRequest* sign = sign_request(f, &signed_result);
+	WAIT(signing(f));
+	xcc_request_cancel(request, XCC_CANCEL_USER);
+	Done barrier = {.f = f};
+	XccRequest* query = xcc_get_capabilities_async(f->context, done, &barrier);
+	WAIT(barrier.calls == 1);
+	g_assert_true(f->session->granted);
+	g_assert_true(f->session->candidate == f->candidate);
+	g_assert_cmpint(f->session->expires_at, ==, expiry);
+	g_assert_cmpuint(f->session->expiry_source, ==, expiry_source);
+	g_assert_cmpuint(f->logouts, ==, 0);
+	g_mutex_lock(&f->lock);
+	f->hold_sign = FALSE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	WAIT(signed_result.calls == 1);
+	g_assert_cmpint(signed_result.error, ==, XCC_OK);
+	g_assert_cmpuint(acquired.calls, ==, 1);
+	xcc_request_unref(query);
+	xcc_request_unref(sign);
+	xcc_request_unref(request);
+}
+
+static void test_cancel_rejected_acquire(Fixture* f, gconstpointer data)
+{
+	grant(f);
+	gint64 expiry = f->session->expires_at;
+	guint expiry_source = f->session->expiry_source;
+	Done rejected = {.f = f};
+	XccRequest* request = acquire(f, &rejected);
+	wait_for_completion(f, request, XCC_ERROR_INVALID_REQUEST);
+	xcc_request_cancel(request, XCC_CANCEL_USER);
+	WAIT(rejected.calls == 1);
+	g_assert_cmpint(rejected.error, ==, XCC_ERROR_CANCELLED);
+	g_assert_true(f->session->granted);
+	g_assert_true(f->session->candidate == f->candidate);
+	g_assert_cmpint(f->session->expires_at, ==, expiry);
+	g_assert_cmpuint(f->session->expiry_source, ==, expiry_source);
+	f->submit = TRUE;
+	sign_successfully(f, f->session);
+	g_assert_cmpuint(f->chooser_shows, ==, 1);
+	xcc_request_unref(request);
+}
+
+static void test_close_committed_acquire(Fixture* f, gconstpointer data)
+{
+	gboolean shutdown = GPOINTER_TO_INT(data) != 0;
+	f->choose = FALSE;
+	Done acquired = {.f = f};
+	XccRequest* request = acquire(f, &acquired);
+	WAIT(f->chooser_shows == 1);
+	xcc_choose(f->context, f->chooser_id, f->revision, f->choice);
+	wait_for_completion(f, request, XCC_OK);
+	if (shutdown)
+		xcc_context_shutdown_async(f->context, shutdown_done, f);
+	else
+		xcc_session_close(f->session);
+	wait_for_completion(f, request, XCC_OK);
+	WAIT(acquired.calls == 1);
+	g_assert_cmpint(acquired.error, ==, shutdown ? XCC_ERROR_BACKEND_GONE
+	                                           : XCC_ERROR_NO_SUCH_SESSION);
+	g_assert_true(xcc_session_is_closed(f->session));
+	g_assert_false(f->session->granted);
+	g_assert_null(f->session->candidate);
+	g_assert_cmpuint(f->session->expiry_source, ==, 0);
+	g_assert_cmpuint(f->sessions_opened, ==, 0);
+	if (shutdown)
+		WAIT(f->shutdown);
+	xcc_request_unref(request);
+}
+
 static void test_join_cancelled_login(Fixture* f, gconstpointer data)
 {
-	gboolean ui_cancel = GPOINTER_TO_INT(data) != 0;
+	gboolean ui_cancel = GPOINTER_TO_INT(data) == 1;
+	gboolean after_close = GPOINTER_TO_INT(data) == 2;
 	grant(f);
 	Done a = {.f = f}, b = {.f = f};
 	XccRequest* first = sign_request(f, &a);
@@ -903,19 +1524,33 @@ static void test_join_cancelled_login(Fixture* f, gconstpointer data)
 	WAIT(f->hides == 1);
 	if (!ui_cancel)
 		WAIT(a.calls == 1);
+	if (after_close)
+	{
+		g_mutex_lock(&f->lock);
+		f->hold_login = FALSE;
+		g_cond_broadcast(&f->cond);
+		g_mutex_unlock(&f->lock);
+		WaitersBarrier settled = {.f = f, .settled = TRUE};
+		xcc_context_post(f->context, start_waiters_barrier, &settled);
+		WAIT(settled.ready);
+		g_assert_cmpuint(sessions_closed(f), ==, 1);
+	}
 	g_mutex_lock(&f->lock);
 	opened.released = TRUE;
 	g_cond_broadcast(&f->cond);
 	g_mutex_unlock(&f->lock);
-	WaitersBarrier barrier = {.f = f, .count = ui_cancel ? 2 : 1};
-	xcc_context_post(f->context, start_waiters_barrier, &barrier);
-	WAIT(barrier.ready);
-	g_assert_cmpuint(b.calls, ==, 0);
-	g_assert_cmpuint(f->pin_shows, ==, 1);
-	g_mutex_lock(&f->lock);
-	f->hold_login = FALSE;
-	g_cond_broadcast(&f->cond);
-	g_mutex_unlock(&f->lock);
+	if (!after_close)
+	{
+		WaitersBarrier barrier = {.f = f, .count = ui_cancel ? 2 : 1};
+		xcc_context_post(f->context, start_waiters_barrier, &barrier);
+		WAIT(barrier.ready);
+		g_assert_cmpuint(b.calls, ==, 0);
+		g_assert_cmpuint(f->pin_shows, ==, 1);
+		g_mutex_lock(&f->lock);
+		f->hold_login = FALSE;
+		g_cond_broadcast(&f->cond);
+		g_mutex_unlock(&f->lock);
+	}
 	WAIT(f->pin_shows == 2 || b.calls == 1);
 	g_assert_cmpuint(b.calls, ==, 0);
 	submit_pin(f, f->pin_id);
@@ -1209,8 +1844,31 @@ int main(int argc, char** argv)
 		g_test_add(name, Fixture, &login_states[i], setup_scripted, test_login_state, teardown);
 	}
 	TEST("context-cancel-preserves-token-login", test_context_cancel_preserves_login);
+	TEST("open-snapshot-after-successful-login", test_open_after_successful_login);
+	g_test_add("/core-api/stale-login-snapshot-stalled-refresh", Fixture, GINT_TO_POINTER(1),
+	           setup_scripted, test_open_after_successful_login, teardown);
+	TEST("concurrent-signs-slow-session-info", test_concurrent_signs);
+	TEST("stalled-sign-cancel-expiry", test_stalled_token);
+	g_test_add("/core-api/stalled-context-login-cancel-expiry", Fixture, GINT_TO_POINTER(1),
+	           setup_scripted, test_stalled_token, teardown);
+	TEST("acquire-during-sign", test_acquire_during_sign);
+	TEST("overlapping-acquire-chooser", test_overlapping_acquire);
+	g_test_add("/core-api/overlapping-acquire-discovery", Fixture, GINT_TO_POINTER(1),
+	           setup_scripted, test_overlapping_acquire, teardown);
+	TEST("acquire-after-expiry", test_acquire_after_expiry);
+	TEST("cancel-after-acquire-commit", test_cancel_committed_acquire);
+	g_test_add("/core-api/cancel-after-acquire-commit-with-token-login", Fixture, GINT_TO_POINTER(1),
+	           setup_scripted, test_cancel_committed_acquire, teardown);
+	TEST("sign-before-acquire-delivery", test_sign_before_acquire_delivery);
+	TEST("cancel-delivered-acquire", test_cancel_delivered_acquire);
+	TEST("cancel-rejected-acquire", test_cancel_rejected_acquire);
+	TEST("close-after-acquire-commit", test_close_committed_acquire);
+	g_test_add("/core-api/shutdown-after-acquire-commit", Fixture, GINT_TO_POINTER(1),
+	           setup_scripted, test_close_committed_acquire, teardown);
 	TEST("join-after-cancelled-login", test_join_cancelled_login);
 	g_test_add("/core-api/join-after-dismissed-login", Fixture, GINT_TO_POINTER(1),
+	           setup_scripted, test_join_cancelled_login, teardown);
+	g_test_add("/core-api/open-snapshot-after-cancelled-login", Fixture, GINT_TO_POINTER(2),
 	           setup_scripted, test_join_cancelled_login, teardown);
 	TEST("login-after-session-close", test_login_after_close);
 	TEST("login-with-closed-grant", test_login_with_closed_grant);

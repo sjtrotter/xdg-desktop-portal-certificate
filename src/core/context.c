@@ -256,6 +256,13 @@ static void completion_ack(void* data)
 	xcc_context_check_shutdown(c);
 	xcc_request_unref(r);
 }
+static void completion(void* data);
+static void rollback_acquisition(void* data)
+{
+	XccRequest* r = data;
+	xcc_acquire_rollback(r);
+	r->context->dispatch.post(r->context->dispatch.user, completion, r);
+}
 static void completion(void* data)
 {
 	XccRequest* r = data;
@@ -271,6 +278,16 @@ static void completion(void* data)
 		r->result.candidate = NULL;
 		r->result.signature =
 			(XccBytes){.struct_size = sizeof(XccBytes), .abi_version = XCC_ABI_VERSION};
+	}
+	if (r->result.kind == XCC_RESULT_ACQUIRE && r->candidate != NULL)
+	{
+		if (r->result.error != XCC_OK)
+		{
+			/* Restore the session on the coordinator before the caller can retry. */
+			xcc_context_post(r->context, rollback_acquisition, r);
+			return;
+		}
+		g_atomic_int_set(&r->session->grant_pending, FALSE);
 	}
 	if (r->done != NULL)
 		r->done(r, &r->result, r->user);
