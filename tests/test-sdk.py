@@ -195,6 +195,10 @@ def stage(build, dest):
     library = libraries[0]
     pcs = list(dest.rglob('xdp-certificate-core-0.pc'))
     assert len(pcs) == 1, pcs
+    private = re.search(r'^Requires\.private:\s*(.*)$', pcs[0].read_text(), re.MULTILINE)
+    assert private, pcs[0].read_text()
+    for name in ('glib-2.0', 'gio-2.0'):
+        assert re.search(r'\b' + re.escape(name) + r'\s*>=\s*2\.80\b', private[1]), private[1]
     env = dict(os.environ, PKG_CONFIG_PATH=str(pcs[0].parent),
                PKG_CONFIG_SYSROOT_DIR=str(dest))
     includes = list(dest.rglob('xdp-certificate-core-0/xdp-certificate'))

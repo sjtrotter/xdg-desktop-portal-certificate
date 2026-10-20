@@ -45,13 +45,26 @@ const char* certificate_chooser_purpose_detail(const CertificateChooserRequest* 
 
 char* certificate_chooser_format_lifetime(guint32 seconds)
 {
-	if (seconds < 120)
-		return g_strdup_printf("%u seconds", seconds);
+	if (seconds != 0 && seconds % 3600 == 0)
+	{
+		guint hours = seconds / 3600;
+		return g_strdup_printf("%u %s", hours, hours == 1 ? "hour" : "hours");
+	}
 
-	if (seconds < 7200)
-		return g_strdup_printf("%u minutes", (seconds + 59) / 60);
+	if (seconds >= 60)
+	{
+		guint minutes = seconds / 60;
+		guint remainder = seconds % 60;
+		g_autofree char* text =
+		    g_strdup_printf("%u %s", minutes, minutes == 1 ? "minute" : "minutes");
 
-	return g_strdup_printf("%u hours", (seconds + 3599) / 3600);
+		if (remainder == 0)
+			return g_steal_pointer(&text);
+		return g_strdup_printf("%s and %u %s", text, remainder,
+		                       remainder == 1 ? "second" : "seconds");
+	}
+
+	return g_strdup_printf("%u %s", seconds, seconds == 1 ? "second" : "seconds");
 }
 
 char* certificate_chooser_display_name(const CertificateCallerIdentity* caller)

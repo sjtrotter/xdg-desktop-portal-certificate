@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 Stephen J. Trotter <stephen.j.trotter@gmail.com>
 
-# The frontend lives in xdg-desktop-portal's experimental/integration branch; see docs/UPSTREAMING.md.
+# The frontend lives in xdg-desktop-portal's experimental/certificate branch; see docs/UPSTREAMING.md.
 
 project(
   'xdg-desktop-portal-certificate',
@@ -43,10 +43,10 @@ dbus_interfaces_dir = datadir / 'dbus-1' / 'interfaces'
 
 portal_dir = datadir / 'xdg-desktop-portal' / 'portals'
 
-glib_dep = dependency('glib-2.0', version: '>= 2.66')
-gobject_dep = dependency('gobject-2.0', version: '>= 2.66')
-gio_dep = dependency('gio-2.0', version: '>= 2.66')
-gio_unix_dep = dependency('gio-unix-2.0', version: '>= 2.66')
+glib_dep = dependency('glib-2.0', version: '>= 2.80')
+gobject_dep = dependency('gobject-2.0', version: '>= 2.80')
+gio_dep = dependency('gio-2.0', version: '>= 2.80')
+gio_unix_dep = dependency('gio-unix-2.0', version: '>= 2.80')
 
 # Module loading does not scope access; see docs/decisions/0006-failure-modes-of-naive-p11kit-forwarding.md.
 p11kit_dep = dependency('p11-kit-1', version: '>= 0.23')
@@ -54,7 +54,7 @@ gnutls_dep = dependency('gnutls', version: '>= 3.6')
 # Prefer -Dservice=false for the SDK alone; retain the original auto_features shortcut.
 service_enabled = get_option('service') and not get_option('auto_features').disabled()
 if service_enabled
-  gtk_dep = dependency('gtk4', version: '>= 4.10')
+  gtk_dep = dependency('gtk4', version: '>= 4.14')
   adw_dep = dependency('libadwaita-1', version: '>= 1.4')
 
   # gcr-4 enables the system PIN prompter; see docs/SECURITY.md for its trust boundary.
@@ -136,7 +136,7 @@ if service_enabled
       'impl interface': 'org.freedesktop.impl.portal.experimental.Certificate1',
       'object path': '/org/freedesktop/portal/desktop',
       'portal file': portal_dir / 'certificate.portal',
-      'frontend': 'xdg-desktop-portal, branch experimental/integration; needs XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1',
+      'frontend': 'xdg-desktop-portal, branch experimental/certificate; needs XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1',
       'public interface (frontend)': 'org.freedesktop.portal.experimental.Certificate1',
       'public object path (frontend)': '/org/freedesktop/portal/desktop',
       'core contract': 'credential selection + brokered Sign',

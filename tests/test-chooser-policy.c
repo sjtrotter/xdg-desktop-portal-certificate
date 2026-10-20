@@ -85,6 +85,10 @@ static void test_empty_insertion_and_ids(gconstpointer data)
 	g_assert_cmpstr(fake.view.reason_label, ==, "The application says");
 	g_assert_cmpstr(fake.view.duration, ==, "5 minutes");
 	g_assert_cmpstr(fake.view.operation_scope, ==, "It allows signing only.");
+	g_assert_cmpstr(fake.view.identity_detail, ==,
+	                "Unsandboxed application. The name above was derived from the "
+	                "running process. Its identity has not been verified.");
+	g_assert_null(fake.view.later_prompt);
 	g_assert_false(fake.view.generic_purpose);
 	g_assert_cmpuint(fake.view.display_flags, ==, 0);
 	g_assert_cmpstr(fake.view.parent_window, ==, "x11:123");
@@ -152,6 +156,26 @@ static void test_removal_and_cancel(void)
 	g_assert_cmpuint(result.calls, ==, 1);
 	g_assert_null(result.chosen);
 	g_assert_cmpuint(fake.closes, ==, 1);
+	fake_chooser_provider_clear(&fake);
+}
+
+static void test_unknown_identity_wording(void)
+{
+	FakeChooserProvider fake;
+	Result result = { 0 };
+	g_autoptr(GPtrArray) empty = g_ptr_array_new();
+	CertificateCallerIdentity caller = { .level = CERTIFICATE_IDENTITY_UNKNOWN };
+	CertificateChooserRequest request = { .caller = &caller };
+
+	fake_chooser_provider_init(&fake);
+	certificate_chooser_set_provider(&fake.provider);
+	g_assert_nonnull(certificate_chooser_show(NULL, NULL, empty, &request, NULL, on_done, &result));
+	g_assert_cmpstr(fake.view.identity_detail, ==,
+	                "This application could not be identified. Only continue if you "
+	                "know which application made this request.");
+	g_assert_null(fake.view.later_prompt);
+	fake_chooser_provider_cancel(&fake);
+	g_assert_cmpuint(result.calls, ==, 1);
 	fake_chooser_provider_clear(&fake);
 }
 
@@ -281,6 +305,7 @@ int main(int argc, char** argv)
 	                     test_empty_insertion_and_ids);
 	g_test_add_func("/chooser-policy/removal-cancel", test_removal_and_cancel);
 	g_test_add_func("/chooser-policy/structured-fields", test_structured_fields);
+	g_test_add_func("/chooser-policy/unknown-identity-wording", test_unknown_identity_wording);
 	g_test_add_func("/chooser-policy/request-cancel", test_request_cancel);
 	g_test_add_func("/chooser-policy/inline-cancel-late-reply", test_inline_cancel_and_late_reply);
 	return g_test_run();

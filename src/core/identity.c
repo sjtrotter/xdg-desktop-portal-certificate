@@ -66,7 +66,7 @@ const char* certificate_purpose_display(CertificatePurpose purpose)
 		case CERTIFICATE_PURPOSE_SIGNING:
 			return "sign a document or a piece of data";
 		case CERTIFICATE_PURPOSE_EMAIL:
-			return "sign or read secure email";
+			return "sign email";
 		case CERTIFICATE_PURPOSE_SSH:
 			return "authenticate an SSH connection";
 		default:
@@ -85,9 +85,8 @@ const char* certificate_purpose_detail(CertificatePurpose purpose)
 			return "The application will be able to have data signed with this key "
 			       "until the grant expires. It cannot read the private key.";
 		case CERTIFICATE_PURPOSE_EMAIL:
-			return "The application will be able to sign, and where permitted "
-			       "decrypt, mail until the grant expires. It cannot read the "
-			       "private key.";
+			return "The application will be able to sign email until the grant "
+			       "expires. It cannot read the private key.";
 		case CERTIFICATE_PURPOSE_SSH:
 			return "The application will be able to authenticate SSH connections as "
 			       "you until the grant expires. It cannot read the private key.";

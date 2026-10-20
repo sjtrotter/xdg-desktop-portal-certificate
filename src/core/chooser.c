@@ -253,11 +253,11 @@ static const char* identity_detail(CertificateIdentityLevel level)
 		case CERTIFICATE_IDENTITY_VERIFIED_SANDBOXED:
 			return "Sandboxed application, identity verified by the system";
 		case CERTIFICATE_IDENTITY_DERIVED_HOST:
-			return "Unsandboxed application. The name below was derived from the "
-			       "running process and is a useful label, not proof.";
+			return "Unsandboxed application. The name above was derived from the "
+			       "running process. Its identity has not been verified.";
 		default:
 			return "This application could not be identified. Only continue if you "
-			       "know what asked.";
+			       "know which application made this request.";
 	}
 }
 
@@ -398,7 +398,6 @@ CertificateChooser* certificate_chooser_show(const char* parent_window,
 	    : request->may_sign    ? "It allows signing only." : "It allows no operations.";
 	view->lifetime_seconds = request->lifetime_seconds;
 	view->duration = own_text(text, certificate_chooser_format_lifetime(request->lifetime_seconds));
-	view->later_prompt = "You will be asked for your PIN the first time the key is used.";
 	view->reason_label = "The application says";
 	view->untrusted_reason = own_text(text, certificate_sanitize_untrusted_text(request->reason, 160));
 	view->parent_window = own_text(text, g_strdup(parent_window));

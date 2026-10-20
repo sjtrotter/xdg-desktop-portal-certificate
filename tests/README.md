@@ -64,7 +64,7 @@ signature and encipherment usage, using certtool output rather than mocked parsi
 
 ## Frontend conformance and remaining coverage
 
-On `experimental/integration`, `tests/templates/certificate.py` supplies a python-dbusmock
+On `experimental/certificate`, `tests/templates/certificate.py` supplies a python-dbusmock
 backend and `tests/test_certificate.py` runs with host and Flatpak identities. It covers happy
 paths, cancellation in both directions, invalid options, result clamping and owner-only
 `GrantInvalidated`. Current test counts and results belong to that branch. `impl-dbus` tests

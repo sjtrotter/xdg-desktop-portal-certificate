@@ -52,6 +52,29 @@ static void test_answer(gconstpointer data)
 	g_assert_cmpuint(replies, ==, 1);
 }
 
+static void on_memory_unavailable(gpointer user_data, PinPrompt* prompt, const XccPinView* view)
+{
+	guint* updates = user_data;
+
+	(*updates)++;
+	g_assert_cmpstr(view->status, ==, "Could not allocate memory for the PIN.");
+	g_assert_false(view->busy);
+}
+
+static void test_memory_unavailable(void)
+{
+	guint updates = 0;
+	CertificateToken token = { 0 };
+	PinPrompt prompt = {
+		.token = &token,
+		.provider = { .user_data = &updates, .pin_update = on_memory_unavailable },
+	};
+
+	g_assert_false(certificate_pin_prompt_hold(&prompt, NULL, 0));
+	g_assert_cmpuint(updates, ==, 1);
+	g_assert_null(prompt.secret);
+}
+
 int main(int argc, char** argv)
 {
 	static const Failure failures[] = {
@@ -62,6 +85,7 @@ int main(int argc, char** argv)
 	};
 
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_func("/pin-bridge/memory-unavailable", test_memory_unavailable);
 	for (guint i = 0; i < G_N_ELEMENTS(failures); i++)
 	{
 		g_autofree char* path = g_strdup_printf("/pin-bridge/%s", failures[i].name);

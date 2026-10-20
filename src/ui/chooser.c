@@ -374,8 +374,8 @@ static void gtk_chooser_show(gpointer user_data, XccUiId id, const XccChooserVie
 
 	{
 		g_autofree char* text = g_strdup_printf(
-		    "%s\n\nThis grant lasts %s. %s %s",
-		    view->purpose_detail, view->duration, view->operation_scope, view->later_prompt);
+		    "%s\n\nThis grant lasts %s. %s",
+		    view->purpose_detail, view->duration, view->operation_scope);
 		GtkWidget* label = gtk_label_new(text);
 
 		gtk_label_set_xalign(GTK_LABEL(label), 0.0f);

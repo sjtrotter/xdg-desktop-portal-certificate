@@ -355,3 +355,5 @@ test('sdk-link-args', python,
 exe = executable('test-sdk-stride', 'test-sdk-stride.c',
   include_directories: include_directories('..' / 'src'), install: false)
 test('sdk-stride', exe, suite: 'sdk')
+
+test('tools', python, args: files('test-tools.py'), env: test_env)

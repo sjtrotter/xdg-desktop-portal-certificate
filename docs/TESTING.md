@@ -97,7 +97,7 @@ The private-bus test checks backend selection, public-interface export and acqui
 Build the backend. `tools/dev-stack.sh` uses GTK on the private bus and works without gcr-4.
 
 Build the frontend from
-[experimental/integration](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/integration).
+[experimental/certificate](https://github.com/sjtrotter/xdg-desktop-portal/tree/experimental/certificate).
 It needs a configured backend and `Certificate1` in
 `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL` at startup. Development scripts preserve an existing
 comma-separated list and append `Certificate1` if missing, including under `--live`.
@@ -182,11 +182,11 @@ For manual calls, keep the stack running:
 $ tools/dev-stack.sh --keep --no-e2e
 ```
 
-In another shell, set `DBUS_SESSION_BUS_ADDRESS` to the printed value and use
-`tools/trigger-certificate.sh` (`version`, `introspect`, `capabilities`, `session`,
-`acquire PATH`, `sign PATH`, `release PATH`, `monitor`, `all`). Its `sign` example sends
-three bytes with `SHA256`, so it demonstrates validation failure; use the end-to-end client
-for a signature that can verify.
+In another shell, set `DBUS_SESSION_BUS_ADDRESS` to the printed value.
+`tools/trigger-certificate.sh` supports synchronous inspection: `version`, `introspect`,
+`capabilities` and `all`. Run `tools/certificate-e2e.py` for session creation, acquisition,
+signing and release on one connection. Separate `gdbus call` processes cannot share a session;
+the frontend closes it when its owner's connection ends.
 
 ## 2. Software token
 
@@ -444,7 +444,10 @@ $ tools/module-smoke.sh --phase 0        # just the "no chooser" proof
 ```
 
 0. Token-only `p11tool --list-all-certs` and `pkcs11-tool --list-objects` must leave
-   `grant-created` counts unchanged and return no objects. `portal_template_intent()` in
+   `chooser-shown` counts unchanged and return no objects. The harness checks both consumer
+   exit statuses: `pkcs11-tool` must exit 0; `p11tool` must exit 0 or exit 2 with an exact
+   `No matching objects found` line. Other failures, including timeouts, fail the phase.
+   `portal_template_intent()` in
    `src/module/objects.c` and `/module/objects/credential-search` in `tests/test-module.c`
    define the intent gate. The recorded 2026-09-05 live run found server-chain lookups reaching
    this module before a client-certificate challenge; scope depends on GnuTLS configuration
@@ -465,9 +468,9 @@ Python/OpenSSL accepts the peer leaf as a trust anchor where GnuTLS's server doe
 Expected output includes:
 
 ```
-=== 0  a search that names no object must not ask for one ===
-grants before=0 after=0
-module-smoke: neither search acquired a credential
+=== 0  unnamed searches do not acquire credentials ===
+choosers before=0 after=0
+module-smoke: enumerations opened no chooser and returned no objects
 ...
 handshake completed
 server said: PASS Portal Test User (RSA)
@@ -1144,7 +1147,7 @@ and `operation=<operation_id>` for correlation with the frontend journal. An abs
 
 | Symptom | Check |
 |---|---|
-| Experimental Certificate interface absent | Frontend branch `experimental/integration`, configured impl backend and startup `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1`; introspect the desktop path |
+| Experimental Certificate interface absent | Frontend branch `experimental/certificate`, configured impl backend and startup `XDG_DESKTOP_PORTAL_ENABLE_EXPERIMENTAL=Certificate1`; introspect the desktop path |
 | No frontend Certificate routing log | `.portal` interface, `XDG_DESKTOP_PORTAL_DIR` and `portals.conf` |
 | Backend disconnected without replying | Crash; hardening disables dumps. Use `--debug-allow-core` only for development debugging, using a disposable fixture |
 | Wrong window theme | Compare `--verbose` `colour-scheme` with `gsettings get org.gnome.desktop.interface color-scheme`; inspect `follow_colour_scheme()` if they disagree |

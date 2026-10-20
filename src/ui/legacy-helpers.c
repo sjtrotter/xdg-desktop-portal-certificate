@@ -85,7 +85,7 @@ gboolean certificate_pin_prompt_hold(PinPrompt* prompt, XccSecret* secret, size_
 	g_clear_pointer(&prompt->secret, xcc_secret_free);
 	if (secret == NULL || !xcc_secret_set_length(secret, length))
 	{
-		const char* status = secret == NULL ? "The PIN could not be held in locked memory."
+		const char* status = secret == NULL ? "Could not allocate memory for the PIN."
 							 : length == 0	? "Enter the PIN for this token."
 											: "PIN exceeds the supported length.";
 		XccPinView view = {.struct_size = sizeof(view),
