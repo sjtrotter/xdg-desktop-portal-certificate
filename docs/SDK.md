@@ -36,6 +36,16 @@ plain text, retain the identity assurance supplied by the frontend, and honour w
 parenting and one-use activation tokens. Desktop adapters still own D-Bus authorization,
 request/session exports and frontend-owner generation changes.
 
+Each session accepts one successful acquisition. On an open session, `xcc_acquire_async`
+completes with `XCC_ERROR_INVALID_REQUEST` if a grant exists or another acquisition
+is pending. A failed or cancelled first acquisition can be retried after completion on
+the same open session. If cancellation suppresses a committed grant's result, the
+core releases that grant before delivering the cancellation. The grant cannot be
+used before successful completion delivery; Sign returns `XCC_ERROR_INVALID_REQUEST`
+while that delivery is pending. Cancellation after successful delivery retains the grant.
+Create a new session to select another credential or obtain a new grant after expiry.
+The credential, permissions and expiry remain fixed for the granted session.
+
 `XccDispatch.post` must be thread safe: always enqueue, including calls from its receiver
 thread, in FIFO order onto one desktop/UI thread. It must never invoke inline or drop a
 closure. UI callbacks, completions and invalidations run there. Call the public API from

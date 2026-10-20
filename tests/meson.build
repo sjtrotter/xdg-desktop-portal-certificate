@@ -278,6 +278,8 @@ exe = executable(
     '-Wl,--wrap=certificate_tokens_open_session',
     '-Wl,--wrap=certificate_tokens_refresh_flags',
     '-Wl,--wrap=g_get_monotonic_time',
+    '-Wl,--wrap=g_task_propagate_boolean',
+    '-Wl,--wrap=g_task_propagate_pointer',
   ],
   install: false,
 )

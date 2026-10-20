@@ -31,6 +31,8 @@ struct _XccSession
 	gpointer invalidated_data;
 
 	gboolean granted;
+	/* Atomic: desktop delivery makes a new grant available to operations. */
+	gint grant_pending;
 	CertificateCandidate* candidate;
 	CertificatePurpose purpose;
 	gboolean may_sign;
@@ -49,6 +51,7 @@ struct _XccSession
 
 	/* The session owns one shared PIN prompt; cancel it only after the last login waiter leaves. */
 	gboolean login_in_progress;
+	guint64 login_generation;
 	GPtrArray* login_waiters;
 	GCancellable* login_cancellable;
 };

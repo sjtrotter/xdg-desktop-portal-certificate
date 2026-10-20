@@ -86,10 +86,8 @@ void xcc_session_grant(XccSession* session, CertificateCandidate* candidate,
 	session->may_sign = may_sign;
 	session->may_decrypt = may_decrypt;
 
-	/* Device rebinding and budget updates share device_lock with operation workers. */
-	g_mutex_lock(&session->device_lock);
+	/* Grant budgets belong to the coordinator. */
 	session->decrypt_count = 0;
-	g_mutex_unlock(&session->device_lock);
 
 	session->lifetime = lifetime;
 	/* Monotonic expiry prevents wall-clock adjustments from extending grants. */

@@ -28,6 +28,7 @@ static void finish_acquire(XccRequest* transaction, CertificateCandidate* candid
 	}
 
 	/* The interface exposes Sign only, so no grant permits decryption. */
+	g_atomic_int_set(&session->grant_pending, TRUE);
 	xcc_session_grant(session, candidate, transaction->purpose,
 					  transaction->may_sign && candidate->can_sign, FALSE, transaction->lifetime);
 
@@ -38,6 +39,26 @@ static void finish_acquire(XccRequest* transaction, CertificateCandidate* candid
 	transaction->candidate = xcc_candidate_snapshot(candidate);
 	transaction->result.may_sign = transaction->may_sign;
 	xcc_request_complete(transaction, XCC_OK);
+}
+
+void xcc_acquire_rollback(XccRequest* transaction)
+{
+	XccSession* session = transaction->session;
+
+	/* Operations cannot use this grant before successful desktop delivery. */
+	g_assert(g_atomic_int_get(&session->grant_pending));
+	if (session->expiry_source != 0)
+	{
+		xcc_source_remove(session->expiry_source);
+		session->expiry_source = 0;
+	}
+	session->granted = FALSE;
+	g_clear_pointer(&session->candidate, certificate_candidate_unref);
+	session->purpose = 0;
+	session->may_sign = session->may_decrypt = FALSE;
+	session->decrypt_count = session->lifetime = session->expires_at = 0;
+	g_atomic_int_set(&session->grant_pending, FALSE);
+	g_clear_pointer(&transaction->candidate, xcc_candidate_unref);
 }
 
 /* Response 1 is reserved for user cancellation; frontend loss requires a diagnostic failure. */
@@ -308,6 +329,21 @@ void xcc_acquire_start(void* data)
 	{
 		xcc_request_complete(r, error);
 		return;
+	}
+	if (r->session->granted)
+	{
+		xcc_request_complete(r, XCC_ERROR_INVALID_REQUEST);
+		return;
+	}
+	for (guint i = 0; i < r->context->requests->len; i++)
+	{
+		XccRequest* pending = g_ptr_array_index(r->context->requests, i);
+		if (pending != r && pending->session == r->session &&
+		    pending->result.kind == XCC_RESULT_ACQUIRE && !pending->answered)
+		{
+			xcc_request_complete(r, XCC_ERROR_INVALID_REQUEST);
+			return;
+		}
 	}
 	r->caller.app_display_name = certificate_app_display_name(r->caller.app_id);
 	certificate_log_decision(CERTIFICATE_REASON_DISCOVERY_STARTED, r->caller.app_id,
