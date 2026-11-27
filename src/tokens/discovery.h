@@ -37,6 +37,8 @@ typedef struct
 	gboolean pin_count_low;
 	gboolean pin_final_try;
 	gboolean pin_locked;
+	/** OpenSC 0.27 PIV keeps reporting retry warnings after a successful login. */
+	gboolean stale_retry_flags;
 
 	/* Slots are locations; reopen only after resolving the stable identity fields. */
 	CK_FUNCTION_LIST* module;
@@ -54,6 +56,9 @@ char* certificate_token_identity(const CertificateToken* token);
 
 /** Serial-less presence matching uses location and names; it must never rebind grants. */
 gboolean certificate_token_same_presence(const CertificateToken* a, const CertificateToken* b);
+
+/** Record successful user authentication or CKR_PIN_INCORRECT for retry warnings. */
+void certificate_token_record_login_result(CertificateToken* token, gboolean succeeded);
 
 
 typedef struct

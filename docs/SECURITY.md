@@ -300,6 +300,14 @@ starts the reader and Cancel spends no attempt. Repeated Continue replies cannot
 
 Retry warnings use `CKF_USER_PIN_COUNT_LOW`, `CKF_USER_PIN_FINAL_TRY` and
 `CKF_USER_PIN_LOCKED`. Flags are reread before each prompt and after successful or refused login; remaining counts are never invented.
+OpenSC 0.27.1's PIV driver keeps reporting the retry count from before a successful login
+([OpenSC#3893](https://github.com/OpenSC/OpenSC/issues/3893), fixed after 0.27.1 by
+[OpenSC#3924](https://github.com/OpenSC/OpenSC/pull/3924)). For tokens with manufacturer
+`piv_II` from a module whose `C_GetInfo` reports `OpenSC Project` at version 0.27 or older, a
+successful user or context-specific login clears count-low and final-try for that token across
+this process's sessions, until a refused PIN restores module reporting. `C_GetInfo` carries only
+major.minor, so OpenSC builds from master after the fix are treated the same way. Locked
+always follows the module, and other modules' flags are used as reported.
 The specification allows tokens to report flags false and does not specify update timing
 [[S13](SOURCES.md)]. Typed PIN prompts show the final-try warning from the start of the input
 round, including after a refusal refreshes the flags. Unlock submits directly. GTK places a
@@ -518,12 +526,16 @@ the caller; it strips them from impl calls. Public signing therefore logs `opera
 in the backend. Direct impl tests or SDK callers can supply an id for backend logs; that
 does not establish correlation for public calls. Use the session handle to join those logs.
 PIN grant logs carry the same session handle.
+`pin-prompted` and `pin-incorrect` include `flags=none` or a comma-separated list of
+`count_low`, `final_try` and `locked`, in that order. These are the prompt token's
+current flags. `pin-flags-refresh-missed` records `detail=no-matching-token`,
+`session=(none)` and the unchanged flags when no token matches during refresh.
 `grant-invalidated` records the invalidation reason, including `token_removed` or `expired`;
 explicit session close records `closed-by-portal`.
 [`src/redact.c`](../src/redact.c) escapes control characters and caps each id at 128 input
 bytes, followed by `...` when truncated.
 Allowed fields are counts, stable reason codes, purposes, supplied identity and level, ids,
-mechanism names, token presence and timings. Full
+mechanism names, token presence, PIN flags and timings. Full
 serials, subjects, PINs, URIs, labels, key ids, signed data, plaintext and `reason` contents are
 excluded. Library error text is truncated before embedded URIs, which can contain `pin-value`.
 Structured logging entry points restrict fields without a free-form format string. Verbose mode
