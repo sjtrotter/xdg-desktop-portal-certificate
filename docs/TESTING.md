@@ -1134,11 +1134,12 @@ consent-granted       the user picked one
 chooser-cancelled     the user did not
 grant-created         a grant a user answered a window for
 pin-prompt-selected   detail=gtk | system; entry owner
-pin-prompted          detail=on-screen | protected-path
+pin-prompted          detail=on-screen | protected-path; flags=none | count_low,final_try,...
 pin-prompt-failed     detail=system-prompter[-unreachable]; prompter failure
 pin-prompt-dismissed  detail=system-prompter; prompter dismissal
 pin-prompt-round-completed-twice  gcr completed one round twice; the second was ignored
-pin-incorrect         an attempt was spent
+pin-incorrect         an attempt was spent; flags after refresh
+pin-flags-refresh-missed  detail=no-matching-token; flags unchanged
 pin-locked            terminal
 pin-timeout           a submitted C_Login did not return; the prompt came down
 colour-scheme         detail=dark | light | forced | no-schema (--verbose only)

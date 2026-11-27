@@ -132,6 +132,31 @@ static void test_logged_fields_are_escaped(void)
 	g_test_assert_expected_messages();
 }
 
+static void test_pin_flags(gconstpointer user_data)
+{
+	guint flags = GPOINTER_TO_UINT(user_data);
+	static const char* const names[] = {
+		"none", "count_low", "final_try", "count_low,final_try",
+		"locked", "count_low,locked", "final_try,locked", "count_low,final_try,locked",
+	};
+	g_autofree char* expected = g_strdup_printf(
+	    "pin-incorrect session=/test/session detail=retry-offered flags=%s", names[flags]);
+
+	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE, expected);
+	certificate_log_pin(CERTIFICATE_REASON_PIN_INCORRECT, "/test/session", "retry-offered",
+	                    flags & 1, flags & 2, flags & 4);
+	g_test_assert_expected_messages();
+}
+
+static void test_pin_log_fields_are_escaped(void)
+{
+	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
+	                      "pin-prompted session=/test/\\x0aforged detail=on-\\x0dscreen flags=none");
+	certificate_log_pin(CERTIFICATE_REASON_PIN_PROMPTED, "/test/\nforged", "on-\rscreen",
+	                    FALSE, FALSE, FALSE);
+	g_test_assert_expected_messages();
+}
+
 static void test_verbose_log_domains(gconstpointer user_data)
 {
 	const char* requested = user_data;
@@ -239,6 +264,13 @@ int main(int argc, char** argv)
 	g_test_add_func("/redact/untrusted-text-invalid-utf8", test_invalid_utf8_does_not_escape);
 	g_test_add_func("/redact/logging-is-structural", test_logging_entry_points_are_structural);
 	g_test_add_func("/redact/logged-fields-escaped", test_logged_fields_are_escaped);
+	for (guint flags = 0; flags < 8; flags++)
+	{
+		g_autofree char* path = g_strdup_printf("/redact/pin-flags/%u", flags);
+
+		g_test_add_data_func(path, GUINT_TO_POINTER(flags), test_pin_flags);
+	}
+	g_test_add_func("/redact/pin-log-fields-escaped", test_pin_log_fields_are_escaped);
 	g_test_add_data_func("/redact/verbose-log-domains", NULL, test_verbose_log_domains);
 	g_test_add_data_func("/redact/user-debug-domains", "Gcr Gdk", test_verbose_log_domains);
 	g_test_add_data_func("/redact/user-all-domains", "all", test_verbose_log_domains);

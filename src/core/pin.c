@@ -257,11 +257,13 @@ static void login_thread(GTask* task, gpointer source, gpointer task_data,
 	/* C_Login may block indefinitely and must run on a worker. */
 	ok = data->prompt->login(pin, data->prompt->login_data, &error);
 	g_clear_pointer(&data->secret, xcc_secret_free);
-	/* Refusal may set FINAL_TRY; success may clear it. Trust the module in both cases. */
-	if (data->prompt->refresh != NULL &&
-	    (ok || g_error_matches(error, CERTIFICATE_PKCS11_ERROR,
-	                           CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT)))
-		data->prompt->refresh(data->prompt->token, data->prompt->login_data);
+	if (ok || g_error_matches(error, CERTIFICATE_PKCS11_ERROR,
+	                         CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT))
+	{
+		certificate_token_record_login_result(data->prompt->token, ok);
+		if (data->prompt->refresh != NULL)
+			data->prompt->refresh(data->prompt->token, data->prompt->login_data);
+	}
 
 	if (ok)
 	{
@@ -415,7 +417,9 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 	if (g_error_matches(error, CERTIFICATE_PKCS11_ERROR, CERTIFICATE_PKCS11_ERROR_PIN_INCORRECT))
 	{
-		certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, prompt->session_id, "retry-offered");
+		certificate_log_pin(CERTIFICATE_REASON_PIN_INCORRECT, prompt->session_id, "retry-offered",
+		                    prompt->token->pin_count_low, prompt->token->pin_final_try,
+		                    prompt->token->pin_locked);
 
 		if (prompt->token->pin_locked)
 		{
@@ -433,7 +437,9 @@ static void on_login_done(GObject* source, GAsyncResult* result, gpointer user_d
 
 		if (prompt->attempts >= PIN_MAX_ATTEMPTS)
 		{
-			certificate_log_grant(CERTIFICATE_REASON_PIN_INCORRECT, prompt->session_id, "attempt-cap");
+			certificate_log_pin(CERTIFICATE_REASON_PIN_INCORRECT, prompt->session_id, "attempt-cap",
+			                    prompt->token->pin_count_low, prompt->token->pin_final_try,
+			                    prompt->token->pin_locked);
 			certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_INCORRECT);
 			return;
 		}
@@ -593,8 +599,10 @@ static void pin_prompt_show(PinPrompt* prompt)
 	}
 	view = pin_view(prompt, XCC_PIN_STATUS_NONE);
 
-	certificate_log_grant(CERTIFICATE_REASON_PIN_PROMPTED, prompt->session_id,
-	                      prompt->protected_path ? "protected-path" : "on-screen");
+	certificate_log_pin(CERTIFICATE_REASON_PIN_PROMPTED, prompt->session_id,
+	                    prompt->protected_path ? "protected-path" : "on-screen",
+	                    prompt->token->pin_count_low, prompt->token->pin_final_try,
+	                    prompt->token->pin_locked);
 
 	prompt->provider.pin_show(prompt->provider.user_data, prompt, &view);
 }

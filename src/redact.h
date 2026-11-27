@@ -19,6 +19,7 @@
 #define CERTIFICATE_REASON_CONSENT_GRANTED "consent-granted"
 #define CERTIFICATE_REASON_PIN_PROMPTED "pin-prompted"
 #define CERTIFICATE_REASON_PIN_INCORRECT "pin-incorrect"
+#define CERTIFICATE_REASON_PIN_FLAGS_REFRESH_MISSED "pin-flags-refresh-missed"
 #define CERTIFICATE_REASON_PIN_LOCKED "pin-locked"
 /* A timed-out C_Login cannot be withdrawn; see --login-timeout. */
 #define CERTIFICATE_REASON_PIN_TIMEOUT "pin-timeout"
@@ -39,6 +40,9 @@ void certificate_log_decision(const char* reason_code, const char* app_id, const
                             const char* purpose, gboolean granted);
 
 void certificate_log_grant(const char* reason_code, const char* grant_id, const char* detail_code);
+
+void certificate_log_pin(const char* reason_code, const char* grant_id, const char* detail_code,
+                         gboolean count_low, gboolean final_try, gboolean locked);
 
 void certificate_log_operation(const char* reason_code, const char* grant_id,
                              const char* operation_id, const char* mechanism);

@@ -100,6 +100,92 @@ gboolean certificate_token_same_presence(const CertificateToken* a, const Certif
 	       g_strcmp0(a->manufacturer, b->manufacturer) == 0;
 }
 
+/* Retry-warning state survives token stores and sessions in this process. */
+static GMutex pin_flags_lock;
+static GList* pin_flags_suppressed;
+
+static GList* find_suppressed_pin_flags(const CertificateToken* token)
+{
+	for (GList* entry = pin_flags_suppressed; entry != NULL; entry = entry->next)
+	{
+		if (certificate_token_same_presence(entry->data, token))
+			return entry;
+	}
+	return NULL;
+}
+
+void certificate_token_record_login_result(CertificateToken* token, gboolean succeeded)
+{
+	GList* entry;
+
+	/* A refusal through any module ends suppression; only affected modules start it. */
+	if (succeeded && !token->stale_retry_flags)
+		return;
+
+	g_mutex_lock(&pin_flags_lock);
+	entry = find_suppressed_pin_flags(token);
+	if (succeeded)
+	{
+		token->pin_count_low = FALSE;
+		token->pin_final_try = FALSE;
+		if (entry == NULL)
+		{
+			CertificateToken* identity = certificate_token_new();
+
+			identity->label = g_strdup(token->label);
+			identity->manufacturer = g_strdup(token->manufacturer);
+			identity->model = g_strdup(token->model);
+			identity->serial = g_strdup(token->serial);
+			identity->module = token->module;
+			identity->slot = token->slot;
+			identity->stale_retry_flags = TRUE;
+			pin_flags_suppressed = g_list_prepend(pin_flags_suppressed, identity);
+		}
+	}
+	else if (entry != NULL)
+	{
+		certificate_token_unref(entry->data);
+		pin_flags_suppressed = g_list_delete_link(pin_flags_suppressed, entry);
+	}
+	g_mutex_unlock(&pin_flags_lock);
+}
+
+/*
+ * OpenSC 0.27.1 PIV caches retries after a successful VERIFY (card-piv.c:6070-6095,6146-6180),
+ * fixed by OpenSC e03b707e8 after 0.27.1. C_GetInfo reports only major.minor, so every 0.27
+ * build is treated as affected.
+ */
+static gboolean has_stale_retry_flags(CK_FUNCTION_LIST* module, const CK_TOKEN_INFO* token_info)
+{
+	CK_INFO info;
+	g_autofree char* library = NULL;
+	g_autofree char* manufacturer = NULL;
+
+	memset(&info, 0, sizeof(info));
+	if (module->C_GetInfo == NULL || module->C_GetInfo(&info) != CKR_OK)
+		return FALSE;
+
+	library = certificate_pkcs11_string(info.manufacturerID, sizeof(info.manufacturerID));
+	manufacturer =
+	    certificate_pkcs11_string(token_info->manufacturerID, sizeof(token_info->manufacturerID));
+	return g_strcmp0(library, "OpenSC Project") == 0 && info.libraryVersion.major == 0 &&
+	       info.libraryVersion.minor <= 27 && g_strcmp0(manufacturer, "piv_II") == 0;
+}
+
+static void suppress_pin_flags(CertificateToken* token)
+{
+	if (!token->stale_retry_flags)
+		return;
+
+	g_mutex_lock(&pin_flags_lock);
+	if (find_suppressed_pin_flags(token) != NULL)
+	{
+		token->pin_count_low = FALSE;
+		token->pin_final_try = FALSE;
+	}
+	g_mutex_unlock(&pin_flags_lock);
+}
+
 char* certificate_token_identity(const CertificateToken* token)
 {
 	return g_strdup_printf("%s\x1f%s\x1f%s\x1f%s", token->manufacturer != NULL ? token->manufacturer : "",
@@ -661,6 +747,8 @@ static CertificateToken* token_from_slot(CertificateTokens* tokens, CK_FUNCTION_
 	token->pin_count_low = (token_info.flags & CKF_USER_PIN_COUNT_LOW) != 0;
 	token->pin_final_try = (token_info.flags & CKF_USER_PIN_FINAL_TRY) != 0;
 	token->pin_locked = (token_info.flags & CKF_USER_PIN_LOCKED) != 0;
+	token->stale_retry_flags = has_stale_retry_flags(module, &token_info);
+	suppress_pin_flags(token);
 
 	return token;
 }
@@ -1130,6 +1218,7 @@ void certificate_tokens_refresh_flags(CertificateTokens* tokens, CertificateToke
 			token->pin_count_low = present->pin_count_low;
 			token->pin_final_try = present->pin_final_try;
 			token->pin_locked = present->pin_locked;
+			token->stale_retry_flags = present->stale_retry_flags;
 
 			g_mutex_unlock(&tokens->lock);
 			return;
@@ -1137,6 +1226,8 @@ void certificate_tokens_refresh_flags(CertificateTokens* tokens, CertificateToke
 	}
 
 	g_mutex_unlock(&tokens->lock);
+	certificate_log_pin(CERTIFICATE_REASON_PIN_FLAGS_REFRESH_MISSED, NULL, "no-matching-token",
+	                    token->pin_count_low, token->pin_final_try, token->pin_locked);
 }
 
 void certificate_tokens_capabilities(CertificateTokens* tokens, GStrv* mechanisms_out,

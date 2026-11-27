@@ -215,7 +215,7 @@ static void test_happy_path(Fixture* fixture, gconstpointer user_data)
 	g_assert_cmpstr(certificate_pin_prompt_name(), ==, "system");
 	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
 	                      "pin-prompted session=/org/freedesktop/portal/desktop/session/t/logging "
-	                      "detail=on-screen");
+	                      "detail=on-screen flags=none");
 	g_test_expect_message(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
 	                      "login-ok session=/org/freedesktop/portal/desktop/session/t/logging "
 	                      "detail=pin-accepted");

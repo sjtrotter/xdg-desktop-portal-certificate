@@ -92,6 +92,20 @@ void certificate_log_grant(const char* reason_code, const char* grant_id, const 
 	g_message("%s session=%s detail=%s", reason_code, safe_grant, safe_detail);
 }
 
+void certificate_log_pin(const char* reason_code, const char* grant_id, const char* detail_code,
+                         gboolean count_low, gboolean final_try, gboolean locked)
+{
+	static const char* const flags[] = {
+		"none", "count_low", "final_try", "count_low,final_try",
+		"locked", "count_low,locked", "final_try,locked", "count_low,final_try,locked",
+	};
+	g_autofree char* safe_grant = field(grant_id);
+	g_autofree char* safe_detail = field(detail_code);
+	guint flag_index = (count_low ? 1 : 0) | (final_try ? 2 : 0) | (locked ? 4 : 0);
+
+	g_message("%s session=%s detail=%s flags=%s", reason_code, safe_grant, safe_detail, flags[flag_index]);
+}
+
 void certificate_log_operation(const char* reason_code, const char* grant_id,
                                const char* operation_id, const char* mechanism)
 {
