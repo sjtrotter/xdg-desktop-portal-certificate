@@ -31,6 +31,8 @@ static void snapshot(FakeChooserProvider* fake, const XccChooserView* view)
 	COPY(untrusted_reason);
 	COPY(parent_window);
 	COPY(activation_token);
+	COPY(session_id);
+	COPY(operation_id);
 #undef COPY
 	fake->candidates = g_new0(XccChooserCandidateView, view->n_candidates);
 	for (gsize i = 0; i < view->n_candidates; i++)

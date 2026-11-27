@@ -11,6 +11,13 @@ extern "C"
 
 	typedef enum
 	{
+		XCC_UI_REPLY_STALE, /* Ignored; no login started. */
+		XCC_UI_REPLY_ACCEPTED, /* Applied. */
+		XCC_UI_REPLY_ACCEPTED_PENDING /* Queued; may become stale before execution. */
+	} XccUiReply;
+
+	typedef enum
+	{
 		XCC_VALIDITY_VALID,
 		XCC_VALIDITY_EXPIRED,
 		XCC_VALIDITY_NOT_YET_VALID,
@@ -72,6 +79,8 @@ extern "C"
 		XCC_ALIGNAS(8) bool generic_purpose; /* Generic disclosure; purpose still governs permissions. */
 		uint32_t display_flags;
 		bool tokens_reading;
+		XCC_ALIGNAS(8) const char* session_id;
+		const char* operation_id;
 	} XccChooserView;
 
 	/* Original padded sizeof: round the last original member's end to the
@@ -87,6 +96,20 @@ extern "C"
 		return view != NULL && view->abi_version == XCC_ABI_VERSION &&
 			view->struct_size >= offsetof(XccChooserView, tokens_reading) + sizeof(view->tokens_reading) &&
 			view->tokens_reading;
+	}
+
+	static inline const char* xcc_chooser_view_session_id(const XccChooserView* view)
+	{
+		return view != NULL && view->abi_version == XCC_ABI_VERSION &&
+			view->struct_size >= offsetof(XccChooserView, session_id) + sizeof(view->session_id)
+			? view->session_id : NULL;
+	}
+
+	static inline const char* xcc_chooser_view_operation_id(const XccChooserView* view)
+	{
+		return view != NULL && view->abi_version == XCC_ABI_VERSION &&
+			view->struct_size >= offsetof(XccChooserView, operation_id) + sizeof(view->operation_id)
+			? view->operation_id : NULL;
 	}
 
 	/* Rows have a uniform byte stride supplied by the producer, allowing fields to
@@ -137,9 +160,25 @@ extern "C"
 		bool generic_purpose;
 		uint32_t status_code; /* XccPinStatus; non-NONE requests fresh input. */
 		uint32_t display_flags;
+		XCC_ALIGNAS(8) const char* session_id;
+		const char* operation_id;
 	} XccPinView;
 #define XCC_PIN_VIEW_V1_SIZE \
 	XCC_PADDED_SIZE(offsetof(XccPinView, status) + sizeof(const char*), XCC_MAX_ALIGNOF(uint32_t, const char*))
+
+	static inline const char* xcc_pin_view_session_id(const XccPinView* view)
+	{
+		return view != NULL && view->abi_version == XCC_ABI_VERSION &&
+			view->struct_size >= offsetof(XccPinView, session_id) + sizeof(view->session_id)
+			? view->session_id : NULL;
+	}
+
+	static inline const char* xcc_pin_view_operation_id(const XccPinView* view)
+	{
+		return view != NULL && view->abi_version == XCC_ABI_VERSION &&
+			view->struct_size >= offsetof(XccPinView, operation_id) + sizeof(view->operation_id)
+			? view->operation_id : NULL;
+	}
 
 	typedef enum
 	{
@@ -168,11 +207,11 @@ struct XccUiV1
 	void (*hide)(void*, XccUiId);
 	void (*close)(void*, XccUiId);
 };
-XCC_API void xcc_choose(XccContext*, XccUiId, uint64_t revision, uint64_t candidate_id);
-/* Acknowledge once the provider can receive warnings; stale/duplicate IDs are ignored. */
-XCC_API void xcc_pin_ready(XccContext*, XccUiId);
-XCC_API void xcc_pin_submit(XccContext*, XccUiId, XccSecret*); /* consumes, even for stale IDs */
-XCC_API void xcc_warning_reply(XccContext*, XccUiId, uint64_t warning_id, bool accepted);
+XCC_API XccUiReply xcc_choose(XccContext*, XccUiId, uint64_t revision, uint64_t candidate_id);
+/* Acknowledge once the provider can receive warnings. */
+XCC_API XccUiReply xcc_pin_ready(XccContext*, XccUiId);
+XCC_API XccUiReply xcc_pin_submit(XccContext*, XccUiId, XccSecret*); /* consumes, even for stale IDs */
+XCC_API XccUiReply xcc_warning_reply(XccContext*, XccUiId, uint64_t warning_id, bool accepted);
 XCC_API void xcc_ui_cancel(XccContext*, XccUiId);
 XCC_API void xcc_ui_failed(XccContext*, XccUiId, XccErrorCode);
 #ifdef __cplusplus

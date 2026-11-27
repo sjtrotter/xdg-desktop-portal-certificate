@@ -27,6 +27,7 @@ void xcc_context_unref(XccContext* c)
 	g_main_loop_unref(c->loop);
 	g_main_context_unref(c->coordinator);
 	g_mutex_clear(&c->queue_lock);
+	g_mutex_clear(&c->interactions_lock);
 	g_free(c);
 }
 typedef struct
@@ -166,6 +167,7 @@ XccContext* xcc_context_new_for_tokens(const XccConfig* config, const XccUiV1* u
 	XccContext* c = g_new0(XccContext, 1);
 	c->refs = 1;
 	g_mutex_init(&c->queue_lock);
+	g_mutex_init(&c->interactions_lock);
 	c->config = *config;
 	c->dispatch = *dispatch;
 	c->tokens = tokens;

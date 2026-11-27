@@ -279,10 +279,11 @@ static gboolean prompt_context_pin(gpointer user_data)
 	Operation* operation = authentication->operation;
 	XccSession* session = operation->session;
 
-	certificate_pin_login_full_kind(
+	certificate_pin_login_operation(
 		session->candidate->token, session->id, operation->parent_window, operation->caller_display,
 		operation->purpose_display, do_context_login, refresh_context_flags, NULL, authentication,
-		NULL, operation->cancellable, on_context_pin_done, authentication, TRUE);
+		NULL, operation->cancellable, on_context_pin_done, authentication, TRUE,
+		operation->operation_id);
 	return G_SOURCE_REMOVE;
 }
 
@@ -646,17 +647,27 @@ static gboolean waiter_cancelled_idle(gpointer user_data)
 	XccSession* session = operation->session;
 	g_autoptr(GCancellable) close_the_window = NULL;
 	gboolean was_waiting = FALSE;
+	gboolean was_owner = FALSE;
 
 	operation->login_cancel_idle = 0;
 
 	if (session->login_waiters != NULL)
 	{
 		/* The idle reference keeps the operation alive after removal from the waiter list. */
+		was_owner = session->login_waiters->len != 0 &&
+			g_ptr_array_index(session->login_waiters, 0) == operation;
 		was_waiting = g_ptr_array_remove(session->login_waiters, operation);
 
 		if (was_waiting && session->login_waiters->len == 0 &&
 		    session->login_cancellable != NULL)
 			close_the_window = g_object_ref(session->login_cancellable);
+	}
+
+	if (was_waiting && was_owner && session->login_waiters->len != 0)
+	{
+		Operation* next = g_ptr_array_index(session->login_waiters, 0);
+		certificate_pin_handover(session->login_cancellable, session->id, next->operation_id,
+		                         next->parent_window, next->caller_display, next->purpose_display);
 	}
 
 	if (was_waiting)
@@ -801,11 +812,11 @@ attach_waiter:
 		return;
 
 	/* The prompt and on_pin_done() each own a reference until their callbacks finish. */
-	certificate_pin_login_full(session->candidate->token, session->id, operation->parent_window,
+	certificate_pin_login_operation(session->candidate->token, session->id, operation->parent_window,
 	                           operation->caller_display, operation->purpose_display, do_login,
 	                           do_refresh_flags, NULL, interaction,
 	                           login_interaction_unref, prompt_cancellable, on_pin_done,
-	                           login_interaction_ref(interaction));
+	                           login_interaction_ref(interaction), FALSE, operation->operation_id);
 }
 
 static void open_operation(Operation* operation)

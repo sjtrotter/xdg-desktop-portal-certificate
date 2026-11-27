@@ -26,7 +26,14 @@ typedef struct
 	XccUiId chooser_id, pin_id;
 	uint64_t revision, choice;
 	gboolean choose, submit, shutdown, always_auth, empty, confirm, pause_context;
-	gboolean generic_purpose;
+	gboolean generic_purpose, skip_ready, expect_retry_show;
+	XccUiReply ready_reply;
+	XccPinStatus pin_status;
+	gboolean pin_busy, pin_final_try;
+	char* chooser_session;
+	char* chooser_operation;
+	char* pin_session;
+	char* pin_operation;
 	uint64_t warning_id;
 	guint warnings, ordered_completions;
 	guint user_logins, context_logins, signatures, logouts;
@@ -361,6 +368,10 @@ static void choose(void* data, XccUiId id, const XccChooserView* view)
 	Fixture* f = data;
 	assert_desktop(f);
 	f->chooser_shows++;
+	g_free(f->chooser_session);
+	g_free(f->chooser_operation);
+	f->chooser_session = g_strdup(view->session_id);
+	f->chooser_operation = g_strdup(view->operation_id);
 	f->chooser_id = id;
 	f->revision = view->revision;
 	f->tokens_reading = xcc_chooser_view_tokens_reading(view);
@@ -393,7 +404,7 @@ static void chooser_update(void* data, XccUiId id, const XccChooserView* view)
 	f->revision = view->revision;
 	f->choice = view->n_candidates != 0 ? view->candidates[0].id : 0;
 }
-static void submit_pin(Fixture* f, XccUiId id)
+static XccUiReply submit_pin(Fixture* f, XccUiId id)
 {
 	XccSecret* secret = xcc_secret_new();
 	g_assert_nonnull(secret);
@@ -402,7 +413,7 @@ static void submit_pin(Fixture* f, XccUiId id)
 	g_assert_cmpuint(capacity, >, 6);
 	memcpy(storage, "123456", 6);
 	g_assert_true(xcc_secret_set_length(secret, 6));
-	xcc_pin_submit(f->context, id, secret);
+	return xcc_pin_submit(f->context, id, secret);
 }
 static void pin_show(void* data, XccUiId id, const XccPinView* view)
 {
@@ -410,11 +421,20 @@ static void pin_show(void* data, XccUiId id, const XccPinView* view)
 	assert_desktop(f);
 	f->pin_shows++;
 	f->pin_id = id;
-	g_assert_cmpuint(view->status_code, ==, XCC_PIN_STATUS_NONE);
+	g_free(f->pin_session);
+	g_free(f->pin_operation);
+	f->pin_session = g_strdup(view->session_id);
+	f->pin_operation = g_strdup(view->operation_id);
+	g_assert_cmpuint(view->status_code, ==, f->expect_retry_show
+	    ? XCC_PIN_STATUS_INCORRECT : XCC_PIN_STATUS_NONE);
+	f->pin_status = view->status_code;
+	f->pin_busy = view->busy;
+	f->pin_final_try = view->final_try;
 	g_assert_cmpint(view->generic_purpose, ==, f->generic_purpose);
 	g_assert_cmpstr(view->purpose_display, ==, f->generic_purpose
 	    ? "use a certificate" : "prove who you are to a server");
-	xcc_pin_ready(f->context, id);
+	if (!f->skip_ready)
+		f->ready_reply = xcc_pin_ready(f->context, id);
 	g_string_append_c(f->deliveries, 'P');
 	if (view->context_specific)
 	{
@@ -429,6 +449,11 @@ static void pin_update(void* data, XccUiId id, const XccPinView* view)
 	Fixture* f = data;
 	assert_desktop(f);
 	f->updates++;
+	f->pin_status = view->status_code;
+	f->pin_busy = view->busy;
+	f->pin_final_try = view->final_try;
+	g_assert_cmpstr(view->session_id, ==, f->pin_session);
+	g_assert_cmpstr(view->operation_id, ==, f->pin_operation);
 }
 static void warning(void* data, XccUiId id, const XccWarning* view)
 {
@@ -553,6 +578,10 @@ static void teardown(Fixture* f, gconstpointer data)
 	g_mutex_clear(&f->lock);
 	g_cond_clear(&f->cond);
 	g_string_free(f->deliveries, TRUE);
+	g_free(f->chooser_session);
+	g_free(f->chooser_operation);
+	g_free(f->pin_session);
+	g_free(f->pin_operation);
 	active = NULL;
 }
 static XccAcquireSpec acquire_spec(void)
@@ -569,18 +598,23 @@ static XccRequest* acquire(Fixture* f, Done* d)
 	XccAcquireSpec spec = acquire_spec();
 	return xcc_acquire_async(f->session, &spec, done, d);
 }
-static XccRequest* sign_on_session(XccSession* session, Done* d)
+static XccRequest* sign_operation(XccSession* session, const char* operation_id, Done* d)
 {
 	static const uint8_t digest[32] = {0};
 	XccSignSpec spec = {.struct_size = sizeof(spec),
 						.abi_version = XCC_ABI_VERSION,
 						.principal = {sizeof(XccPrincipal), XCC_ABI_VERSION, 7, "org.example.Core",
 									  CERTIFICATE_IDENTITY_VERIFIED_SANDBOXED, TRUE},
+						.operation_id = operation_id,
 						.mechanism = "RSA_PKCS1_V1_5",
 						.hash_present = TRUE,
 						.hash = "SHA256",
 						.data = {sizeof(XccBytes), XCC_ABI_VERSION, digest, sizeof(digest)}};
 	return xcc_sign_async(session, &spec, done, d);
+}
+static XccRequest* sign_on_session(XccSession* session, Done* d)
+{
+	return sign_operation(session, NULL, d);
 }
 static XccRequest* sign_request(Fixture* f, Done* d)
 {
@@ -598,7 +632,8 @@ static void test_acquire(Fixture* f, gconstpointer data)
 {
 	grant(f);
 	g_assert_cmpstr(f->deliveries->str, ==, "CXD");
-	xcc_choose(f->context, f->chooser_id, f->revision, f->choice);
+	g_assert_cmpint(xcc_choose(f->context, f->chooser_id, f->revision, f->choice), ==,
+	                XCC_UI_REPLY_STALE);
 	xcc_ui_cancel(f->context, f->chooser_id);
 	/* A later FIFO completion also proves the stale replies were processed without a second
 	 * completion. */
@@ -1894,12 +1929,18 @@ static void test_protected_final_try(Fixture* f, gconstpointer data)
 	Done d = {.f = f};
 	XccRequest* r = sign_request(f, &d);
 	WAIT(f->warnings == 1);
-	xcc_warning_reply(f->context, f->pin_id, f->warning_id + 1, TRUE);
+	g_assert_cmpint(f->ready_reply, ==, XCC_UI_REPLY_ACCEPTED_PENDING);
+	g_assert_cmpint(xcc_pin_ready(f->context, f->pin_id), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpint(xcc_warning_reply(f->context, f->pin_id, f->warning_id + 1, TRUE), ==,
+	                XCC_UI_REPLY_STALE);
 	Done barrier = {.f = f};
 	XccRequest* query = xcc_get_capabilities_async(f->context, done, &barrier);
 	WAIT(barrier.calls == 1);
 	g_assert_cmpuint(f->user_logins, ==, 0);
-	xcc_warning_reply(f->context, f->pin_id, f->warning_id, TRUE);
+	g_assert_cmpint(xcc_warning_reply(f->context, f->pin_id, f->warning_id, TRUE), ==,
+	                XCC_UI_REPLY_ACCEPTED_PENDING);
+	g_assert_cmpint(xcc_warning_reply(f->context, f->pin_id, f->warning_id, TRUE), ==,
+	                XCC_UI_REPLY_STALE);
 	WAIT(d.calls == 1);
 	g_assert_cmpint(d.error, ==, XCC_OK);
 	g_assert_cmpuint(f->user_logins, ==, 1);
@@ -2065,6 +2106,271 @@ static void test_shutdown_with_login(Fixture* f, gconstpointer data)
 	g_assert_cmpint(late.error, ==, XCC_ERROR_BACKEND_GONE);
 	xcc_request_unref(query);
 }
+static void test_reply_results(Fixture* f, gconstpointer data)
+{
+	f->choose = FALSE;
+	Done consent = {.f = f};
+	XccRequest* acquisition = acquire(f, &consent);
+	WAIT(f->chooser_shows == 1);
+	g_assert_cmpint(xcc_choose(f->context, UINT64_MAX, f->revision, f->choice), ==,
+	                XCC_UI_REPLY_STALE);
+	g_assert_cmpint(xcc_choose(f->context, f->chooser_id, f->revision + 1, f->choice), ==,
+	                XCC_UI_REPLY_STALE);
+	g_assert_cmpint(xcc_choose(f->context, f->chooser_id, f->revision, f->choice + 1), ==,
+	                XCC_UI_REPLY_STALE);
+	g_assert_cmpint(xcc_pin_ready(f->context, f->chooser_id), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpint(submit_pin(f, f->chooser_id), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpint(xcc_warning_reply(f->context, f->chooser_id, 1, TRUE), ==,
+	                XCC_UI_REPLY_STALE);
+	g_assert_cmpuint(consent.calls, ==, 0);
+	g_assert_cmpint(xcc_choose(f->context, f->chooser_id, f->revision, f->choice), ==,
+	                XCC_UI_REPLY_ACCEPTED_PENDING);
+	g_assert_cmpint(xcc_choose(f->context, f->chooser_id, f->revision, f->choice), ==,
+	                XCC_UI_REPLY_STALE);
+	WAIT(consent.calls == 1);
+	g_assert_cmpint(consent.error, ==, XCC_OK);
+
+	f->skip_ready = TRUE;
+	f->hold_login = TRUE;
+	Done signature = {.f = f};
+	XccRequest* request = sign_request(f, &signature);
+	WAIT(f->pin_shows == 1);
+	g_assert_cmpint(xcc_pin_ready(f->context, UINT64_MAX), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpint(submit_pin(f, UINT64_MAX), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpint(submit_pin(f, f->pin_id), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpuint(f->user_logins, ==, 0);
+	g_assert_cmpint(xcc_choose(f->context, f->pin_id, 1, 1), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpint(xcc_warning_reply(f->context, f->pin_id, 1, TRUE), ==,
+	                XCC_UI_REPLY_STALE);
+	g_assert_cmpint(xcc_pin_ready(f->context, f->pin_id), ==, XCC_UI_REPLY_ACCEPTED_PENDING);
+	g_assert_cmpint(xcc_pin_ready(f->context, f->pin_id), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpint(submit_pin(f, f->pin_id), ==, XCC_UI_REPLY_ACCEPTED_PENDING);
+	WAIT(logging_in(f));
+	g_assert_cmpint(submit_pin(f, f->pin_id), ==, XCC_UI_REPLY_STALE);
+	g_mutex_lock(&f->lock);
+	f->hold_login = FALSE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	WAIT(signature.calls == 1);
+	g_assert_cmpint(signature.error, ==, XCC_OK);
+	g_assert_cmpint(submit_pin(f, f->pin_id), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpint(xcc_pin_ready(f->context, f->pin_id), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpuint(f->user_logins, ==, 1);
+	xcc_request_unref(acquisition);
+	xcc_request_unref(request);
+}
+
+static void test_operation_provenance(Fixture* f, gconstpointer data)
+{
+	XccAcquireSpec spec = acquire_spec();
+	char operation[] = "/request/acquire#1";
+	spec.operation_id = operation;
+	Done a = {.f = f}, b = {.f = f};
+	XccRequest* first = xcc_acquire_async(f->session, &spec, done, &a);
+	operation[1] = 'X';
+	WAIT(a.calls == 1);
+	g_assert_cmpint(a.error, ==, XCC_OK);
+	g_assert_cmpstr(f->chooser_session, ==, "core-api-test");
+	g_assert_cmpstr(f->chooser_operation, ==, "/request/acquire#1");
+	XccSession* other = new_session(f);
+	/* An original SDK producer must not expose the appended operation field. */
+	spec.struct_size = XCC_ACQUIRE_SPEC_V1_SIZE;
+	spec.operation_id = (const char*)1;
+	XccRequest* second = xcc_acquire_async(other, &spec, done, &b);
+	WAIT(b.calls == 1);
+	g_assert_cmpint(b.error, ==, XCC_OK);
+	g_assert_cmpstr(f->chooser_session, ==, "core-api-second-grant");
+	g_assert_null(f->chooser_operation);
+
+	Done sa = {.f = f}, sb = {.f = f};
+	XccRequest* sign_a = sign_operation(f->session, "/request/sign#1", &sa);
+	WAIT(f->pin_shows == 1);
+	g_assert_cmpstr(f->pin_session, ==, "core-api-test");
+	g_assert_cmpstr(f->pin_operation, ==, "/request/sign#1");
+	char sign_id[] = "/request/sign#2";
+	XccRequest* sign_b = sign_operation(other, sign_id, &sb);
+	sign_id[1] = 'X';
+	xcc_request_cancel(sign_a, XCC_CANCEL_USER);
+	WAIT(sa.calls == 1 && f->pin_shows == 2);
+	g_assert_cmpstr(f->pin_session, ==, "core-api-second-grant");
+	g_assert_cmpstr(f->pin_operation, ==, "/request/sign#2");
+	xcc_request_cancel(sign_b, XCC_CANCEL_USER);
+	WAIT(sb.calls == 1);
+	g_assert_cmpint(sa.error, ==, XCC_ERROR_CANCELLED);
+	g_assert_cmpint(sb.error, ==, XCC_ERROR_CANCELLED);
+	g_assert_cmpuint(f->user_logins, ==, 0);
+	xcc_request_unref(first);
+	xcc_request_unref(second);
+	xcc_request_unref(sign_a);
+	xcc_request_unref(sign_b);
+	xcc_session_close(other);
+	xcc_session_unref(other);
+}
+
+static void test_waiter_handover(Fixture* f, gconstpointer data)
+{
+	grant(f);
+	f->login_result = CKR_PIN_INCORRECT;
+	f->candidate->token->pin_final_try = TRUE;
+	Done a = {.f = f}, b = {.f = f};
+	XccRequest* first = sign_operation(f->session, "/request/first#1", &a);
+	WAIT(f->pin_shows == 1);
+	XccUiId old_id = f->pin_id;
+	XccRequest* second = sign_operation(f->session, "/request/second#1", &b);
+	WaitersBarrier barrier = {.f = f, .count = 2};
+	xcc_context_post(f->context, start_waiters_barrier, &barrier);
+	WAIT(barrier.ready);
+	guint updates = f->updates;
+	g_assert_cmpint(submit_pin(f, old_id), ==, XCC_UI_REPLY_ACCEPTED_PENDING);
+	WAIT(f->updates >= updates + 3 && f->pin_status == XCC_PIN_STATUS_INCORRECT);
+	g_assert_cmpuint(f->user_logins, ==, 1);
+	f->expect_retry_show = TRUE;
+	xcc_request_cancel(first, XCC_CANCEL_USER);
+	WAIT(a.calls == 1 && f->pin_shows == 2);
+	g_assert_cmpint(a.error, ==, XCC_ERROR_CANCELLED);
+	g_assert_cmpuint(b.calls, ==, 0);
+	g_assert_cmpuint(f->pin_id, !=, old_id);
+	g_assert_cmpstr(f->pin_operation, ==, "/request/second#1");
+	g_assert_cmpint(f->pin_status, ==, XCC_PIN_STATUS_INCORRECT);
+	g_assert_true(f->pin_final_try);
+	g_assert_cmpuint(f->hides, ==, 1);
+	g_assert_cmpint(submit_pin(f, old_id), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpint(xcc_pin_ready(f->context, old_id), ==, XCC_UI_REPLY_STALE);
+	if (GPOINTER_TO_INT(data) != 0)
+	{
+		xcc_request_cancel(second, XCC_CANCEL_USER);
+		WAIT(b.calls == 1);
+		g_assert_cmpint(b.error, ==, XCC_ERROR_CANCELLED);
+		g_assert_cmpint(submit_pin(f, f->pin_id), ==, XCC_UI_REPLY_STALE);
+		g_assert_cmpuint(f->user_logins, ==, 1);
+	}
+	else
+	{
+		updates = f->updates;
+		g_assert_cmpint(submit_pin(f, f->pin_id), ==, XCC_UI_REPLY_ACCEPTED_PENDING);
+		WAIT(f->updates >= updates + 3 && f->pin_status == XCC_PIN_STATUS_INCORRECT);
+		g_assert_cmpint(submit_pin(f, f->pin_id), ==, XCC_UI_REPLY_ACCEPTED_PENDING);
+		WAIT(b.calls == 1);
+		g_assert_cmpint(b.error, ==, XCC_ERROR_PIN_INCORRECT);
+		g_assert_cmpuint(f->user_logins, ==, 3);
+	}
+	g_assert_cmpuint(f->signatures, ==, 0);
+	xcc_request_unref(first);
+	xcc_request_unref(second);
+}
+
+static void test_inflight_handover(Fixture* f, gconstpointer data)
+{
+	grant(f);
+	f->hold_login = TRUE;
+	Done a = {.f = f}, b = {.f = f};
+	XccRequest* first = sign_operation(f->session, "/request/first#1", &a);
+	WAIT(f->pin_shows == 1);
+	XccUiId old_id = f->pin_id;
+	XccRequest* second = sign_operation(f->session, "/request/second#1", &b);
+	WaitersBarrier joined = {.f = f, .count = 2};
+	xcc_context_post(f->context, start_waiters_barrier, &joined);
+	WAIT(joined.ready);
+	g_assert_cmpint(submit_pin(f, old_id), ==, XCC_UI_REPLY_ACCEPTED_PENDING);
+	WAIT(logging_in(f));
+	xcc_request_cancel(first, XCC_CANCEL_USER);
+	WAIT(a.calls == 1 && f->pin_shows == 2);
+	g_assert_cmpint(a.error, ==, XCC_ERROR_CANCELLED);
+	g_assert_cmpuint(b.calls, ==, 0);
+	g_assert_true(f->pin_busy);
+	g_assert_cmpstr(f->pin_operation, ==, "/request/second#1");
+	g_assert_cmpint(submit_pin(f, old_id), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpint(submit_pin(f, f->pin_id), ==, XCC_UI_REPLY_STALE);
+	if (GPOINTER_TO_INT(data) != 0)
+	{
+		xcc_request_cancel(second, XCC_CANCEL_USER);
+		WAIT(b.calls == 1 && f->hides == 2);
+		g_assert_cmpint(b.error, ==, XCC_ERROR_CANCELLED);
+		g_assert_cmpint(submit_pin(f, f->pin_id), ==, XCC_UI_REPLY_STALE);
+		g_assert_cmpint(xcc_warning_reply(f->context, f->pin_id, 1, TRUE), ==,
+		                XCC_UI_REPLY_STALE);
+	}
+	g_mutex_lock(&f->lock);
+	f->hold_login = FALSE;
+	g_cond_broadcast(&f->cond);
+	g_mutex_unlock(&f->lock);
+	WaitersBarrier settled = {.f = f, .settled = TRUE};
+	xcc_context_post(f->context, start_waiters_barrier, &settled);
+	WAIT(settled.ready && b.calls == 1);
+	g_assert_cmpuint(f->user_logins, ==, 1);
+	g_assert_cmpuint(f->signatures, ==, GPOINTER_TO_INT(data) != 0 ? 0 : 1);
+	if (GPOINTER_TO_INT(data) == 0)
+		g_assert_cmpint(b.error, ==, XCC_OK);
+	xcc_request_unref(first);
+	xcc_request_unref(second);
+}
+
+static void test_queued_handover(Fixture* f, gconstpointer data)
+{
+	grant(f);
+	XccSession* other = second_grant(f);
+	Done blocker = {.f = f}, a = {.f = f}, b = {.f = f};
+	XccRequest* active_request = sign_operation(other, "/request/blocker#1", &blocker);
+	WAIT(f->pin_shows == 1);
+	XccRequest* first = sign_operation(f->session, "/request/first#1", &a);
+	WaitersBarrier queued = {.f = f, .count = 1};
+	xcc_context_post(f->context, start_waiters_barrier, &queued);
+	WAIT(queued.ready);
+	XccRequest* second = sign_operation(f->session, "/request/second#1", &b);
+	WaitersBarrier joined = {.f = f, .count = 2};
+	xcc_context_post(f->context, start_waiters_barrier, &joined);
+	WAIT(joined.ready);
+	xcc_request_cancel(first, XCC_CANCEL_USER);
+	WAIT(a.calls == 1);
+	g_assert_cmpuint(f->pin_shows, ==, 1);
+	g_assert_cmpuint(f->hides, ==, 0);
+	g_assert_cmpstr(f->pin_operation, ==, "/request/blocker#1");
+	xcc_request_cancel(active_request, XCC_CANCEL_USER);
+	WAIT(blocker.calls == 1 && f->pin_shows == 2);
+	g_assert_cmpstr(f->pin_session, ==, "core-api-test");
+	g_assert_cmpstr(f->pin_operation, ==, "/request/second#1");
+	xcc_request_cancel(second, XCC_CANCEL_USER);
+	WAIT(b.calls == 1);
+	g_assert_cmpint(a.error, ==, XCC_ERROR_CANCELLED);
+	g_assert_cmpint(b.error, ==, XCC_ERROR_CANCELLED);
+	g_assert_cmpuint(f->user_logins, ==, 0);
+	xcc_request_unref(active_request);
+	xcc_request_unref(first);
+	xcc_request_unref(second);
+	xcc_session_close(other);
+	xcc_session_unref(other);
+}
+
+static void test_warning_handover(Fixture* f, gconstpointer data)
+{
+	f->candidate->token->protected_authentication_path = TRUE;
+	f->candidate->token->pin_final_try = TRUE;
+	grant(f);
+	Done a = {.f = f}, b = {.f = f};
+	XccRequest* first = sign_operation(f->session, "/request/first#1", &a);
+	WAIT(f->warnings == 1);
+	XccUiId old_id = f->pin_id;
+	uint64_t old_warning = f->warning_id;
+	XccRequest* second = sign_operation(f->session, "/request/second#1", &b);
+	WaitersBarrier joined = {.f = f, .count = 2};
+	xcc_context_post(f->context, start_waiters_barrier, &joined);
+	WAIT(joined.ready);
+	xcc_request_cancel(first, XCC_CANCEL_USER);
+	WAIT(a.calls == 1 && f->warnings == 2);
+	g_assert_cmpuint(f->pin_shows, ==, 2);
+	g_assert_cmpstr(f->pin_operation, ==, "/request/second#1");
+	g_assert_cmpint(xcc_warning_reply(f->context, old_id, old_warning, TRUE), ==,
+	                XCC_UI_REPLY_STALE);
+	g_assert_cmpuint(f->user_logins, ==, 0);
+	g_assert_cmpint(xcc_warning_reply(f->context, f->pin_id, f->warning_id, TRUE), ==,
+	                XCC_UI_REPLY_ACCEPTED_PENDING);
+	WAIT(b.calls == 1);
+	g_assert_cmpint(b.error, ==, XCC_OK);
+	g_assert_cmpuint(f->user_logins, ==, 1);
+	xcc_request_unref(first);
+	xcc_request_unref(second);
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
@@ -2080,6 +2386,16 @@ int main(int argc, char** argv)
 	TEST("cancel-during-pin", test_cancel_pin);
 	TEST("cancel-submitted-pin", test_cancel_submitted);
 	TEST("shared-login-waiters", test_shared_waiters);
+	TEST("reply-results", test_reply_results);
+	TEST("operation-provenance", test_operation_provenance);
+	TEST("waiter-handover-attempt-cap", test_waiter_handover);
+	TEST("waiter-handover-inflight", test_inflight_handover);
+	g_test_add("/core-api/waiter-handover-inflight-cancel-last", Fixture, GINT_TO_POINTER(1),
+	           setup_scripted, test_inflight_handover, teardown);
+	TEST("waiter-handover-queued", test_queued_handover);
+	TEST("waiter-handover-warning", test_warning_handover);
+	g_test_add("/core-api/waiter-handover-cancel-last", Fixture, GINT_TO_POINTER(1),
+	           setup_scripted, test_waiter_handover, teardown);
 	TEST("two-grants-one-token", test_two_grants);
 	TEST("token-logout-reprompts", test_token_logout);
 	for (guint i = 0; i < G_N_ELEMENTS(sign_removals); i++)

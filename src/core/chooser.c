@@ -36,6 +36,7 @@ struct CertificateChooser
 	gulong cancel_id;
 	guint cancel_idle;
 	gboolean finished;
+	gboolean reply_pending;
 	int error;
 };
 
@@ -51,7 +52,7 @@ const CertificateChooserProvider* certificate_chooser_get_provider(void)
 	return &chooser_provider;
 }
 
-gboolean xcc_legacy_choose(XccUiId, guint64, guint64);
+gboolean xcc_legacy_choose(XccUiId, guint64, guint64, XccUiReply*);
 
 void certificate_chooser_set_provider(const CertificateChooserProvider* provider)
 {
@@ -151,6 +152,9 @@ typedef struct
 static gboolean reply_idle(gpointer data)
 {
 	Reply* reply = data;
+	Chooser* chooser = choosers != NULL ? g_hash_table_lookup(choosers, &reply->id) : NULL;
+	if (chooser != NULL)
+		chooser->reply_pending = FALSE;
 
 	if (reply->candidate_id != 0)
 		certificate_chooser_choose(reply->id, reply->revision, reply->candidate_id);
@@ -167,34 +171,44 @@ static void defer_reply(XccUiId id, guint64 revision, guint64 candidate_id)
 	xcc_idle_add(NULL, reply_idle, reply, g_free);
 }
 
-void certificate_chooser_choose(XccUiId id, guint64 revision, guint64 candidate_id)
+XccUiReply certificate_chooser_reply(XccUiId id, guint64 revision, guint64 candidate_id)
 {
-	if (xcc_legacy_choose(id, revision, candidate_id))
-		return;
+	XccUiReply result;
+	if (xcc_legacy_choose(id, revision, candidate_id, &result))
+		return result;
 	Chooser* chooser = choosers != NULL ? g_hash_table_lookup(choosers, &id) : NULL;
 
-	if (chooser == NULL || revision != chooser->view.revision || candidate_id == 0)
-		return;
-	if (provider_depth != 0)
-	{
-		defer_reply(id, revision, candidate_id);
-		return;
-	}
+	if (chooser == NULL || chooser->finished || chooser->reply_pending ||
+	    g_cancellable_is_cancelled(chooser->cancellable) ||
+	    revision != chooser->view.revision || candidate_id == 0)
+		return XCC_UI_REPLY_STALE;
 	for (guint i = 0; i < chooser->choices->len; i++)
 	{
 		Choice* choice = g_ptr_array_index(chooser->choices, i);
 
 		if (choice->id == candidate_id)
 		{
+			if (provider_depth != 0)
+			{
+				chooser->reply_pending = TRUE;
+				defer_reply(id, revision, candidate_id);
+				return XCC_UI_REPLY_ACCEPTED_PENDING;
+			}
 			chooser_finish(chooser, choice->candidate);
-			return;
+			return XCC_UI_REPLY_ACCEPTED;
 		}
 	}
+	return XCC_UI_REPLY_STALE;
+}
+
+void certificate_chooser_choose(XccUiId id, guint64 revision, guint64 candidate_id)
+{
+	certificate_chooser_reply(id, revision, candidate_id);
 }
 
 void certificate_chooser_cancel(XccUiId id)
 {
-	if (xcc_legacy_choose(id, 0, 0))
+	if (xcc_legacy_choose(id, 0, 0, NULL))
 		return;
 	Chooser* chooser = choosers != NULL ? g_hash_table_lookup(choosers, &id) : NULL;
 
@@ -415,6 +429,8 @@ CertificateChooser* certificate_chooser_show(const char* parent_window,
 	view->untrusted_reason = own_text(text, certificate_sanitize_untrusted_text(request->reason, 160));
 	view->parent_window = own_text(text, g_strdup(parent_window));
 	view->activation_token = own_text(text, g_strdup(activation_token));
+	view->session_id = own_text(text, g_strdup(request->session_id));
+	view->operation_id = own_text(text, g_strdup(request->operation_id));
 	replace_candidates(chooser, candidates, request->tokens_present);
 
 	if (choosers == NULL)

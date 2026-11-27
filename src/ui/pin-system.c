@@ -39,8 +39,10 @@ typedef struct
 	guint dismiss_idle;
 
 	gboolean passive_confirm;
+	gboolean password_pending;
 
 	XccPinView view; /* Snapshot retained while system prompt open is pending. */
+	char* status;
 } SystemPinPrompt;
 
 /* Close the prompt to cancel; gcr 4.4 can complete cancellable rounds twice. */
@@ -76,7 +78,22 @@ static void system_pin_free(gpointer data)
 		g_signal_handler_disconnect(ui->gcr, ui->close_id);
 
 	g_clear_object(&ui->gcr);
+	g_free(ui->status);
 	g_free(ui);
+}
+
+static void save_view(SystemPinPrompt* ui, const XccPinView* view)
+{
+	g_free(ui->status);
+	ui->status = g_strdup(view->status);
+	/* Retain only presentation state; the incoming view's strings are borrowed. */
+	ui->view = (XccPinView){
+		.busy = view->busy,
+		.count_low = view->count_low,
+		.final_try = view->final_try,
+		.locked = view->locked,
+		.status = ui->status,
+	};
 }
 
 gboolean certificate_pin_provider_system_available(void)
@@ -140,6 +157,17 @@ static char* caller_window_handle(const char* parent_window)
 	return NULL;
 }
 
+static void set_prompt_warning(PinPrompt* prompt)
+{
+	SystemPinPrompt* ui = system_pin(prompt);
+	const char* hint = certificate_pin_prompt_retry_hint(&ui->view);
+	const char* status = ui->view.status;
+	g_autofree char* warning = status != NULL && hint != NULL
+	    ? g_strdup_printf("%s %s", status, hint) : g_strdup(status != NULL ? status : hint);
+
+	gcr_prompt_set_warning(ui->gcr, warning);
+}
+
 /* Sanitize desktop and token metadata before sending it to the trusted system prompt. */
 static void set_prompt_text(PinPrompt* prompt)
 {
@@ -169,7 +197,7 @@ static void set_prompt_text(PinPrompt* prompt)
 		g_string_append_printf(description, "\n%s", certificate_pin_prompt_protected_note());
 
 	gcr_prompt_set_description(ui->gcr, description->str);
-	gcr_prompt_set_warning(ui->gcr, certificate_pin_prompt_retry_hint(&ui->view));
+	set_prompt_warning(prompt);
 
 	/* An empty choice-label suppresses PIN persistence options. */
 	gcr_prompt_set_choice_label(ui->gcr, NULL);
@@ -287,6 +315,7 @@ static void on_password(GObject* source, GAsyncResult* result, gpointer user_dat
 	if (!round_claim(result))
 		return;
 
+	system_pin(prompt)->password_pending = FALSE;
 	handle_password(prompt, source, result);
 	certificate_pin_prompt_unref(prompt);
 }
@@ -295,9 +324,11 @@ static void ask_for_password(PinPrompt* prompt)
 {
 	SystemPinPrompt* ui = system_pin(prompt);
 
-	if (ui->gcr == NULL || ui->closed || prompt->finished)
+	if (ui->gcr == NULL || ui->closed || ui->password_pending || prompt->finished || ui->view.busy ||
+	    ui->view.locked || prompt->busy || prompt->login_in_flight)
 		return;
 
+	ui->password_pending = TRUE;
 	gcr_prompt_password_async(ui->gcr, NULL, on_password, certificate_pin_prompt_ref(prompt));
 }
 
@@ -404,7 +435,7 @@ static void system_pin_show(gpointer user_data, PinPrompt* prompt, const XccPinV
 	SystemPinPrompt* ui = g_new0(SystemPinPrompt, 1);
 
 	ui->prompt = prompt;
-	ui->view = *view;
+	save_view(ui, view);
 	prompt->impl_data = ui;
 	prompt->impl_data_free = system_pin_free;
 
@@ -417,19 +448,23 @@ static void system_pin_show(gpointer user_data, PinPrompt* prompt, const XccPinV
 static void system_pin_update(gpointer user_data, PinPrompt* prompt, const XccPinView* view)
 {
 	SystemPinPrompt* ui = system_pin(prompt);
-	const char* hint = certificate_pin_prompt_retry_hint(view);
-	const char* status = view->status;
-	g_autofree char* warning = NULL;
 
-	if (status == NULL || ui->gcr == NULL || ui->closed)
+	/* Updates may precede open completion; the latest view must win. */
+	save_view(ui, view);
+	if (ui->gcr == NULL || ui->closed)
 		return;
 
 	/* Reuse the open prompt for retries and display only token-reported state flags. */
-	warning = hint != NULL ? g_strdup_printf("%s %s", status, hint) : g_strdup(status);
-	gcr_prompt_set_warning(ui->gcr, warning);
-	gcr_prompt_set_continue_label(ui->gcr, "Unlock");
+	set_prompt_warning(prompt);
+	if (ui->password_pending)
+		return;
 
-	ask_for_password(prompt);
+	if (view->status != NULL)
+	{
+		gcr_prompt_set_continue_label(ui->gcr, "Unlock");
+
+		ask_for_password(prompt);
+	}
 }
 
 static void system_pin_warning(gpointer user_data, PinPrompt* prompt, const char* message)
