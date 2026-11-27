@@ -30,6 +30,16 @@ typedef struct
 	CertificateToken* token;
 } LoginProbe;
 
+/* A second gtk_init_check() returns TRUE even when the first found no display. */
+static gboolean has_display(void)
+{
+	static int result = -1;
+
+	if (result < 0)
+		result = gtk_init_check();
+	return result;
+}
+
 /* Hold the synthetic C_Login until the test releases it. */
 static gboolean probe_login(const char* pin, gpointer user_data, GError** error)
 {
@@ -104,7 +114,7 @@ static void test_empty_return_is_a_retry(void)
 	g_autoptr(GCancellable) cancellable = g_cancellable_new();
 
 	g_setenv("GTK_A11Y", "test", TRUE);
-	if (!gtk_init_check())
+	if (!has_display())
 	{
 		g_test_skip("no display: the PIN window cannot be opened");
 		return;
@@ -153,7 +163,7 @@ static void test_cancel_during_login(void)
 	g_autoptr(GCancellable) cancellable = g_cancellable_new();
 	gint64 deadline;
 
-	if (!gtk_init_check())
+	if (!has_display())
 	{
 		g_test_skip("no display: the PIN window cannot be opened");
 		return;
@@ -214,7 +224,7 @@ static void test_cancel_before_prompt(void)
 	LoginProbe probe = { 0 };
 	g_autoptr(GCancellable) cancellable = g_cancellable_new();
 
-	if (!gtk_init_check())
+	if (!has_display())
 	{
 		g_test_skip("no display: the PIN window cannot be opened");
 		return;
@@ -353,7 +363,7 @@ static void test_cancelled_login_is_abandoned(void)
 	GtkWidget* entry = NULL;
 	gint64 deadline;
 
-	if (!gtk_init_check())
+	if (!has_display())
 	{
 		g_test_skip("no display: the PIN window cannot be opened");
 		return;
@@ -415,7 +425,7 @@ static void test_successful_login_is_not_abandoned(void)
 	GtkWidget* entry = NULL;
 	gint64 deadline;
 
-	if (!gtk_init_check())
+	if (!has_display())
 	{
 		g_test_skip("no display: the PIN window cannot be opened");
 		return;
@@ -655,7 +665,7 @@ static void test_one_waiter_cancels_alone(void)
 	guint8 digest[32];
 	gint64 deadline;
 
-	if (!gtk_init_check())
+	if (!has_display())
 	{
 		g_test_skip("no display: the PIN window cannot be opened");
 		return;
@@ -771,7 +781,7 @@ static void test_broker_cancelled_login_is_abandoned(void)
 	guint8 digest[32];
 	gint64 deadline;
 
-	if (!gtk_init_check())
+	if (!has_display())
 	{
 		g_test_skip("no display: the PIN window cannot be opened");
 		return;
