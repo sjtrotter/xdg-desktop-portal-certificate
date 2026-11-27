@@ -914,9 +914,18 @@ static void test_frontend_vanishing_answers_pending_calls(Fixture* fixture,
                                                           gconstpointer user_data)
 {
 	Call call = { NULL, NULL, FALSE };
+	FakeChooserProvider fake;
+	g_autoptr(GError) error = NULL;
 	g_autoptr(GVariant) results = NULL;
 	g_autofree char* code = NULL;
 	guint32 response = 0;
+
+	/* A chooser that never answers keeps the call pending until the frontend leaves. */
+	certificate_impl_free(fixture->impl);
+	fake_chooser_provider_init(&fake);
+	certificate_chooser_set_provider(&fake.provider);
+	fixture->impl = certificate_impl_new(fixture->backend, fixture->tokens, &error);
+	g_assert_no_error(error);
 
 	g_assert_cmpuint(create_session(fixture, SESSION_PATH, APP_A), ==, 0);
 
@@ -948,6 +957,10 @@ static void test_frontend_vanishing_answers_pending_calls(Fixture* fixture,
 	g_assert_cmpstr(code, ==, "owner_gone");
 
 	g_variant_unref(call.reply);
+	certificate_impl_free(fixture->impl);
+	fixture->impl = NULL;
+	fake_chooser_provider_clear(&fake);
+	certificate_chooser_set_provider(certificate_chooser_provider_gtk());
 }
 
 static void test_close_mid_flight(Fixture* fixture, gconstpointer user_data)

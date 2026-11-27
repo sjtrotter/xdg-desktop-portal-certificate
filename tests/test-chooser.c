@@ -251,9 +251,18 @@ typedef enum
 	CHOOSER_CHOOSE_READING_COMPLETED
 } ChooserCompletion;
 
+/* A second gtk_init_check() returns TRUE even when the first found no display. */
+static gboolean has_display(void)
+{
+	static int result = -1;
+
+	if (result < 0)
+		result = gtk_init_check();
+	return result;
+}
+
 static void test_completion_log_fields(gconstpointer data)
 {
-	static int has_display = -1;
 	ChooserCompletion completion = GPOINTER_TO_INT(data);
 	gboolean granted = completion != CHOOSER_CANCEL;
 	g_autoptr(GPtrArray) candidates =
@@ -270,10 +279,7 @@ static void test_completion_log_fields(gconstpointer data)
 	g_autoptr(GtkWindow) window = NULL;
 	g_autofree char* expected = NULL;
 
-	if (has_display < 0)
-		has_display = gtk_init_check();
-
-	if (!has_display)
+	if (!has_display())
 	{
 		g_free(caller.app_id);
 		g_test_skip("no display: the chooser window cannot be opened");
@@ -433,7 +439,7 @@ static void test_empty_and_updates(gconstpointer data)
 	GtkWidget* detail;
 	CertificateCandidate* candidate;
 
-	if (!gtk_init_check())
+	if (!has_display())
 	{
 		g_test_skip("no display: the chooser window cannot be opened");
 		return;
