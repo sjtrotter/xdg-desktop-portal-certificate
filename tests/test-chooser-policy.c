@@ -110,8 +110,9 @@ static void test_empty_insertion_and_ids(gconstpointer data)
 	g_ptr_array_add(refreshed, candidate_with_key("one"));
 	certificate_chooser_update(chooser, refreshed, TRUE);
 	g_assert_cmpuint(fake.view.candidates[0].id, ==, candidate_id);
-	certificate_chooser_choose(id, revision, candidate_id);
-	certificate_chooser_choose(id, fake.view.revision, candidate_id + 1);
+	g_assert_cmpint(certificate_chooser_reply(id, revision, candidate_id), ==, XCC_UI_REPLY_STALE);
+	g_assert_cmpint(certificate_chooser_reply(id, fake.view.revision, candidate_id + 1), ==,
+	                XCC_UI_REPLY_STALE);
 	g_assert_cmpuint(result.calls, ==, 0);
 	g_assert_cmpuint(fake.closes, ==, 0);
 	fake_chooser_provider_choose(&fake, 0);
@@ -359,9 +360,81 @@ static void test_inline_cancel_and_late_reply(void)
 	fake_chooser_provider_clear(&fake);
 }
 
+typedef struct
+{
+	XccUiId id;
+	uint64_t revision, candidate;
+	guint closes;
+} InlineChoice;
+
+static void inline_show(gpointer data, XccUiId id, const XccChooserView* view)
+{
+	InlineChoice* choice = data;
+	choice->id = id;
+	choice->revision = view->revision;
+	choice->candidate = view->candidates[0].id;
+	g_assert_cmpint(certificate_chooser_reply(id, view->revision + 1, choice->candidate), ==,
+	                XCC_UI_REPLY_STALE);
+	g_assert_cmpint(certificate_chooser_reply(id, view->revision, choice->candidate + 1), ==,
+	                XCC_UI_REPLY_STALE);
+	g_assert_cmpint(certificate_chooser_reply(id, view->revision, choice->candidate), ==,
+	                XCC_UI_REPLY_ACCEPTED_PENDING);
+	g_assert_cmpint(certificate_chooser_reply(id, view->revision, choice->candidate), ==,
+	                XCC_UI_REPLY_STALE);
+}
+
+static void inline_update(gpointer data, XccUiId id, const XccChooserView* view)
+{
+	((InlineChoice*)data)->revision = view->revision;
+}
+
+static void inline_close(gpointer data, XccUiId id)
+{
+	((InlineChoice*)data)->closes++;
+}
+
+static void test_deferred_choice(gconstpointer data)
+{
+	InlineChoice choice = {0};
+	Result result = {0};
+	CertificateChooserProvider provider = {.user_data = &choice, .chooser_show = inline_show,
+	    .chooser_update = inline_update, .close = inline_close};
+	char app_id[] = "org.example.App";
+	CertificateCallerIdentity caller = {.app_id = app_id};
+	CertificateChooserRequest request = {.caller = &caller,
+	    .purpose = CERTIFICATE_PURPOSE_CLIENT_AUTH, .lifetime_seconds = 300};
+	g_autoptr(GPtrArray) candidates = g_ptr_array_new_with_free_func(
+	    (GDestroyNotify)certificate_candidate_unref);
+	g_ptr_array_add(candidates, candidate_with_key("one"));
+	certificate_chooser_set_provider(&provider);
+	CertificateChooser* chooser = certificate_chooser_show(NULL, NULL, candidates, &request,
+	    NULL, on_done, &result);
+	g_assert_cmpuint(result.calls, ==, 0);
+	if (GPOINTER_TO_INT(data) != 0)
+		certificate_chooser_set_tokens_reading(chooser, TRUE);
+	while (g_main_context_iteration(NULL, FALSE))
+		;
+	if (GPOINTER_TO_INT(data) != 0)
+	{
+		g_assert_cmpuint(result.calls, ==, 0);
+		g_assert_cmpint(certificate_chooser_reply(choice.id, choice.revision, choice.candidate), ==,
+		                XCC_UI_REPLY_ACCEPTED);
+	}
+	g_assert_cmpuint(result.calls, ==, 1);
+	g_assert_nonnull(result.chosen);
+	g_assert_cmpuint(choice.closes, ==, 1);
+	g_assert_cmpint(certificate_chooser_reply(choice.id, choice.revision, choice.candidate), ==,
+	                XCC_UI_REPLY_STALE);
+	certificate_candidate_unref(result.chosen);
+	certificate_chooser_set_provider(NULL);
+}
+
 int main(int argc, char** argv)
 {
 	g_test_init(&argc, &argv, NULL);
+	g_test_add_data_func("/chooser-policy/deferred-choice", NULL, test_deferred_choice);
+	g_test_add_data_func("/chooser-policy/deferred-choice-revision-changed", GINT_TO_POINTER(1),
+	                     test_deferred_choice);
 	certificate_ui_set_has_display(FALSE);
 	g_test_add_data_func("/chooser-policy/empty-insert", GINT_TO_POINTER(FALSE),
 	                     test_empty_insertion_and_ids);

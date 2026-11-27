@@ -9,6 +9,7 @@
 #include <gio/gio.h>
 #include <glib.h>
 
+#include "ui.h"
 #include "../certificate.h"
 #include "../tokens/discovery.h"
 
@@ -27,6 +28,8 @@ typedef struct
 	const char* request_handle;
 	gboolean tokens_present;
 	gboolean generic_purpose;
+	const char* session_id;
+	const char* operation_id;
 } CertificateChooserRequest;
 
 typedef struct
@@ -53,6 +56,8 @@ void certificate_chooser_update(CertificateChooser* chooser, GPtrArray* candidat
 
 /* Reading changes advance the revision and preserve the current candidates. */
 void certificate_chooser_set_tokens_reading(CertificateChooser* chooser, gboolean reading);
+
+XccUiReply certificate_chooser_reply(XccUiId id, guint64 revision, guint64 candidate_id);
 
 gboolean certificate_chooser_available(void);
 

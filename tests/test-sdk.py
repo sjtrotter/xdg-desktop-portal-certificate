@@ -89,7 +89,9 @@ UI_LAYOUTS = (
     XCC_ALIGNAS(8) bool generic_purpose;
     uint32_t display_flags;
     bool tokens_reading;
-''', ('generic_purpose', 'display_flags', 'tokens_reading'), 'XCC_CHOOSER_VIEW_V1_SIZE'),
+    XCC_ALIGNAS(8) const char *session_id;
+    const char *operation_id;
+''', ('generic_purpose', 'display_flags', 'tokens_reading', 'session_id', 'operation_id'), 'XCC_CHOOSER_VIEW_V1_SIZE'),
     ('XccPinView', 'Pin', '''
     uint32_t struct_size, abi_version;
     const char *token_label, *reader, *caller_display, *purpose_display, *parent_window;
@@ -101,7 +103,9 @@ UI_LAYOUTS = (
     XCC_ALIGNAS(8) uint32_t purpose;
     bool generic_purpose;
     uint32_t status_code, display_flags;
-''', ('purpose', 'generic_purpose', 'status_code', 'display_flags'), 'XCC_PIN_VIEW_V1_SIZE'),
+    XCC_ALIGNAS(8) const char *session_id;
+    const char *operation_id;
+''', ('purpose', 'generic_purpose', 'status_code', 'display_flags', 'session_id', 'operation_id'), 'XCC_PIN_VIEW_V1_SIZE'),
     ('XccWarning', 'Warning', '''
     uint32_t struct_size, abi_version;
     XccWarningCode code;
@@ -111,8 +115,44 @@ UI_LAYOUTS = (
 )
 
 
+ACQUIRE_PREFIX = """
+typedef struct {
+    uint32_t struct_size, abi_version;
+    XccPrincipal principal;
+    XccPurpose purpose;
+    bool generic_purpose_present, generic_purpose;
+    const char *parent_window, *activation_token, *reason;
+    bool lifetime_present;
+    uint32_t lifetime_seconds;
+    bool sign_present, sign;
+    bool interaction_present, interaction_forbidden;
+    bool issuers_present;
+    const XccBytes *issuers;
+    size_t n_issuers;
+    bool key_usage_present, eku_oids_present, key_algorithms_present;
+    const char *const *key_usage, *const *eku_oids, *const *key_algorithms;
+    bool token_label_present, piv_slot_present;
+    const char *token_label, *piv_slot;
+} AcquirePrefix;
+"""
+
+
 def ui_layout_assertions(assertion):
-    source = ''
+    source = ACQUIRE_PREFIX
+    source += (f'{assertion}(XCC_ACQUIRE_SPEC_V1_SIZE == sizeof(AcquirePrefix), '
+               '"acquire minimum");\n'
+               f'{assertion}(offsetof(XccAcquireSpec, operation_id) == '
+               'XCC_PADDED_SIZE(sizeof(AcquirePrefix), 8), "acquire extension");\n')
+    for field in ('struct_size', 'abi_version', 'principal', 'purpose',
+                  'generic_purpose_present', 'generic_purpose', 'parent_window',
+                  'activation_token', 'reason', 'lifetime_present', 'lifetime_seconds',
+                  'sign_present', 'sign', 'interaction_present', 'interaction_forbidden',
+                  'issuers_present', 'issuers', 'n_issuers', 'key_usage_present',
+                  'eku_oids_present', 'key_algorithms_present', 'key_usage', 'eku_oids',
+                  'key_algorithms', 'token_label_present', 'piv_slot_present', 'token_label',
+                  'piv_slot'):
+        source += (f'{assertion}(offsetof(XccAcquireSpec, {field}) == '
+                   f'offsetof(AcquirePrefix, {field}), "acquire prefix: {field}");\n')
     for struct, name, prefix, fields, extension, appended, minimum in UI_LAYOUTS:
         source += f'typedef struct {{{prefix}}} {name}Prefix;\n'
         for field in fields:
@@ -133,6 +173,8 @@ def ui_layout_assertions(assertion):
     source += (f'{assertion}(XCC_PIN_STATUS_NONE == 0 && XCC_PIN_STATUS_INCORRECT == 1 && '
                'XCC_PIN_STATUS_REQUIRED == 2 && XCC_PIN_STATUS_TOO_LONG == 3 && '
                'XCC_PIN_STATUS_MEMORY_UNAVAILABLE == 4, "PIN status values");\n')
+    source += (f'{assertion}(XCC_UI_REPLY_STALE == 0 && XCC_UI_REPLY_ACCEPTED == 1 && '
+               'XCC_UI_REPLY_ACCEPTED_PENDING == 2, "reply values");\n')
     return source
 
 

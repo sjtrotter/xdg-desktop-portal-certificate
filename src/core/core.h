@@ -141,12 +141,15 @@ extern "C"
 		bool token_label_present, piv_slot_present;
 		const char* token_label;
 		const char* piv_slot;
+		XCC_ALIGNAS(8) const char* operation_id; /* Opaque request path plus instance, or NULL. */
 	} XccAcquireSpec;
+#define XCC_ACQUIRE_SPEC_V1_SIZE \
+	XCC_PADDED_SIZE(offsetof(XccAcquireSpec, piv_slot) + sizeof(const char*), XCC_MAX_ALIGNOF(uint64_t, const char*))
 	/* Uniform producer stride permits larger rows. The producer owns the backing
 	 * allocation; a malformed size/version/offset returns NULL. */
 	static inline const XccBytes* xcc_acquire_spec_issuer(const XccAcquireSpec* spec, size_t index)
 	{
-		if (spec == NULL || spec->struct_size < sizeof(*spec) ||
+		if (spec == NULL || spec->struct_size < XCC_ACQUIRE_SPEC_V1_SIZE ||
 			spec->abi_version != XCC_ABI_VERSION || spec->issuers == NULL ||
 			index >= spec->n_issuers)
 			return NULL;

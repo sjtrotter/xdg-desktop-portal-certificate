@@ -38,6 +38,8 @@ static void pin_show(void* data, XccUiId id, const XccPinView* view)
 	p->token->pin_final_try = view->final_try;
 	p->token->pin_count_low = view->count_low;
 	p->token->pin_locked = view->locked;
+	p->session_id = g_strdup(view->session_id);
+	p->operation_id = g_strdup(view->operation_id);
 	p->parent_window = g_strdup(view->parent_window);
 	p->caller_display = g_strdup(view->caller_display);
 	p->purpose_display = g_strdup(view->purpose_display);
@@ -121,13 +123,13 @@ void xcc_ui_legacy_restore(XccContext* c)
 
 	legacy_context = NULL;
 }
-gboolean xcc_legacy_choose(XccUiId id, guint64 revision, guint64 candidate)
+gboolean xcc_legacy_choose(XccUiId id, guint64 revision, guint64 candidate, XccUiReply* result)
 {
 	XccContext* c = legacy_context;
 	if (c == NULL || g_main_context_is_owner(c->coordinator))
 		return FALSE;
-	if (candidate != 0)
-		xcc_choose(c, id, revision, candidate);
+	if (result != NULL)
+		*result = xcc_choose(c, id, revision, candidate);
 	else
 		xcc_ui_cancel(c, id);
 	return TRUE;

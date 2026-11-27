@@ -65,6 +65,20 @@ void certificate_pin_login_full_kind(CertificateToken* token, const char* sessio
 									 CertificatePinDone done, gpointer user_data,
 									 gboolean context_specific);
 
+void certificate_pin_login_operation(CertificateToken* token, const char* session_id,
+                                     const char* parent_window, const char* caller_display,
+                                     const char* purpose_display, CertificatePinLoginFunc login,
+                                     CertificatePinRefreshFunc refresh,
+                                     CertificatePinAbandonFunc abandon, gpointer login_data,
+                                     GDestroyNotify login_data_free, GCancellable* cancellable,
+                                     CertificatePinDone done, gpointer user_data,
+                                     gboolean context_specific, const char* operation_id);
+
+/* Coordinator only; preserve the shared prompt's round and worker state. */
+void certificate_pin_handover(GCancellable* cancellable, const char* session_id,
+                              const char* operation_id, const char* parent_window,
+                              const char* caller_display, const char* purpose_display);
+
 /** Default 60 seconds; 0 disables. On timeout the prompt closes with
  *  CERTIFICATE_PIN_TIMED_OUT and a login that returns later is abandoned. The
  *  module call is not interrupted, so the caller is answered when it returns. */

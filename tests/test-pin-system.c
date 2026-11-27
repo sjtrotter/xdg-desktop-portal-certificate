@@ -1366,7 +1366,7 @@ static void bridge_start_login(void* data)
 	certificate_pin_login(b->script.token, NULL, "Bridge test", "prove who you are", script_login,
 						  NULL, NULL, &b->script, NULL, bridge_policy_done, b);
 }
-static void bridge_start(BridgeLogin* b)
+static void bridge_init(BridgeLogin* b)
 {
 	const char* modules[] = {NULL};
 	XccConfig config = {
@@ -1377,6 +1377,10 @@ static void bridge_start(BridgeLogin* b)
 	b->context = xcc_context_new(&config, NULL, &dispatch, &error);
 	g_assert_cmpint(error.code, ==, XCC_OK);
 	g_assert_nonnull(b->context);
+}
+static void bridge_start(BridgeLogin* b)
+{
+	bridge_init(b);
 	g_assert_true(xcc_context_post(b->context, bridge_start_login, b));
 }
 static void bridge_shutdown_done(XccContext* context, void* data)
@@ -1406,6 +1410,241 @@ static void bridge_barrier_done(XccRequest* request, const XccResult* result, vo
 	g_assert_cmpint(result->error, ==, XCC_OK);
 	*(gboolean*)data = TRUE;
 }
+
+typedef struct _HandoverLogin HandoverLogin;
+typedef struct
+{
+	HandoverLogin* login;
+	guint index;
+	GCancellable* cancellable;
+	ContextResult result;
+	gboolean done;
+} HandoverOperation;
+struct _HandoverLogin
+{
+	XccSession* session;
+	CertificateToken* token;
+	HandoverOperation operations[2];
+	GMutex lock;
+	GCond cond;
+	gint attempts, entered;
+	gboolean released, joined, retry_delivered;
+	gboolean open_on_busy_clear;
+};
+static HandoverLogin* handover_login;
+
+static CK_RV handover_session_info(CK_SESSION_HANDLE handle, CK_SESSION_INFO_PTR info)
+{
+	*info = (CK_SESSION_INFO){ .state = CKS_RO_PUBLIC_SESSION, .flags = CKF_SERIAL_SESSION };
+	return CKR_OK;
+}
+
+static CK_RV handover_token_login(CK_SESSION_HANDLE handle, CK_USER_TYPE user,
+                                  CK_UTF8CHAR_PTR pin, CK_ULONG length)
+{
+	HandoverLogin* login = handover_login;
+
+	g_assert_cmpuint(user, ==, CKU_USER);
+	g_assert_cmpmem(pin, length, "0000", 4);
+	g_atomic_int_inc(&login->attempts);
+	g_mutex_lock(&login->lock);
+	g_atomic_int_set(&login->entered, TRUE);
+	while (!login->released)
+		g_cond_wait(&login->cond, &login->lock);
+	g_mutex_unlock(&login->lock);
+	login->token->pin_count_low = TRUE;
+	login->token->pin_final_try = TRUE;
+	return CKR_PIN_INCORRECT;
+}
+
+/* Observe retry delivery after the real provider has consumed the borrowed view. */
+static void handover_pin_update(gpointer data, PinPrompt* prompt, const XccPinView* view)
+{
+	HandoverLogin* login = data;
+
+	certificate_pin_provider_system()->pin_update(NULL, prompt, view);
+	if (login->open_on_busy_clear && view->final_try && view->status == NULL && !view->busy)
+	{
+		/* Resume after busy-clear, before the separate INCORRECT update. */
+		g_assert_false(login->retry_delivered);
+		provider_resume(&provider_open);
+		login->open_on_busy_clear = FALSE;
+	}
+	if (view->final_try && view->status != NULL && !view->busy)
+		login->retry_delivered = TRUE;
+}
+
+static void handover_done_delivered(void* data)
+{
+	((HandoverOperation*) data)->done = TRUE;
+}
+
+static void handover_done(GBytes* result, const GError* error, gpointer data)
+{
+	HandoverOperation* operation = data;
+	XccDispatch dispatch = xcc_dispatch_glib(NULL);
+
+	context_result(result, error, &operation->result);
+	dispatch.post(dispatch.user, handover_done_delivered, operation);
+}
+
+static void handover_joined_delivered(void* data)
+{
+	((HandoverLogin*) data)->joined = TRUE;
+}
+
+static gboolean handover_wait_joined(gpointer data)
+{
+	HandoverLogin* login = data;
+	XccDispatch dispatch = xcc_dispatch_glib(NULL);
+
+	if (login->session->login_waiters == NULL || login->session->login_waiters->len != 2)
+		return G_SOURCE_CONTINUE;
+	dispatch.post(dispatch.user, handover_joined_delivered, login);
+	return G_SOURCE_REMOVE;
+}
+
+static void handover_start_operation(void* data)
+{
+	HandoverOperation* operation = data;
+	g_autoptr(GBytes) digest = g_bytes_new_static("01234567890123456789012345678901", 32);
+	g_autoptr(GVariant) parameters =
+	    g_variant_parse(G_VARIANT_TYPE_VARDICT, "{'hash': <'SHA256'>}", NULL, NULL, NULL);
+
+	certificate_broker_perform(NULL, operation->login->session, FALSE,
+	                           operation->index == 0 ? "/request/first#1" : "/request/second#1",
+	                           "RSA_PKCS1_V1_5", parameters, digest, NULL,
+	                           operation->index == 0 ? "First application" : "Second application",
+	                           operation->cancellable, handover_done, operation);
+	if (operation->index == 1)
+	{
+		GSource* source = g_timeout_source_new(10);
+
+		g_source_set_callback(source, handover_wait_joined, operation->login, NULL);
+		g_source_attach(source, g_main_context_get_thread_default());
+		g_source_unref(source);
+	}
+}
+
+static void test_handover_final_try_during_open(Fixture* fixture, gconstpointer user_data)
+{
+	g_autoptr(CertificateCandidate) candidate =
+	    certificate_test_candidate("client-auth-rsa.pem", TRUE, FALSE);
+	g_autoptr(XccSession) session =
+	    xcc_session_new_legacy("/org/freedesktop/portal/desktop/session/t/handover", NULL, NULL);
+	g_autoptr(GCancellable) first = g_cancellable_new();
+	g_autoptr(GCancellable) second = g_cancellable_new();
+	g_autofree char* warning = NULL;
+	g_autofree char* description = NULL;
+	BridgeLogin bridge = { 0 };
+	HandoverLogin login = {
+		.session = session,
+		.open_on_busy_clear = GPOINTER_TO_INT(user_data) == 2,
+	};
+	CK_FUNCTION_LIST module = {
+		.C_GetSessionInfo = handover_session_info,
+		.C_Login = handover_token_login,
+		.C_Logout = context_close,
+		.C_CloseSession = context_close,
+	};
+	CertificatePinProvider provider = *certificate_pin_provider_system();
+
+	g_clear_pointer(&candidate->token, certificate_token_unref);
+	candidate->token = make_token();
+	login.token = candidate->token;
+	xcc_session_grant(session, candidate, CERTIFICATE_PURPOSE_CLIENT_AUTH, TRUE, FALSE, 300);
+	session->device.module = &module;
+	session->device.session = 1;
+	session->device.private_key = 1;
+	session->device.candidate = certificate_candidate_ref(candidate);
+	login.operations[0] = (HandoverOperation){ .login = &login, .cancellable = first };
+	login.operations[1] = (HandoverOperation){ .login = &login, .index = 1, .cancellable = second };
+	g_mutex_init(&login.lock);
+	g_cond_init(&login.cond);
+	handover_login = &login;
+	provider.user_data = &login;
+	provider.pin_update = handover_pin_update;
+	certificate_pin_set_provider(&provider);
+	bridge_init(&bridge);
+	provider_open = (ProviderGate){ .hold = TRUE };
+	certificate_test_prompter_set_delay(300);
+	certificate_test_prompter_expect_password("0000");
+	certificate_test_prompter_expect_password(NULL);
+
+	g_assert_true(xcc_context_post(bridge.context, handover_start_operation, &login.operations[0]));
+	BRIDGE_WAIT(provider_open.pending);
+	/* Join the second waiter before allowing the first PIN to reach C_Login. */
+	g_assert_true(xcc_context_post(bridge.context, handover_start_operation, &login.operations[1]));
+	BRIDGE_WAIT(login.joined);
+	provider_resume(&provider_open);
+	BRIDGE_WAIT(g_atomic_int_get(&login.entered));
+	provider_open = (ProviderGate){ .hold = TRUE };
+	g_cancellable_cancel(first);
+	BRIDGE_WAIT(login.operations[0].done && provider_open.pending);
+	g_assert_error(login.operations[0].result.error, CERTIFICATE_PKCS11_ERROR,
+	               CERTIFICATE_PKCS11_ERROR_CANCELLED);
+	g_assert_false(login.operations[1].done);
+	g_assert_cmpuint(certificate_test_prompter_prompts_created(), ==, 2);
+	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 1);
+	g_assert_cmpint(g_atomic_int_get(&login.attempts), ==, 1);
+
+	if (GPOINTER_TO_INT(user_data) == 1)
+	{
+		/* Opening while C_Login is blocked must not request another password. */
+		provider_resume(&provider_open);
+		settle(100);
+		g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 1);
+	}
+	g_mutex_lock(&login.lock);
+	login.released = TRUE;
+	g_cond_broadcast(&login.cond);
+	g_mutex_unlock(&login.lock);
+	BRIDGE_WAIT(login.retry_delivered);
+	g_assert_false(login.open_on_busy_clear);
+	if (GPOINTER_TO_INT(user_data) == 2)
+	{
+		g_assert_false(provider_open.pending);
+		g_assert_cmpuint(provider_open.completed, ==, 1);
+	}
+	if (provider_open.pending)
+		provider_resume(&provider_open);
+	wait_for_password_round(2, 10000);
+	/* The prompter records properties at password_async, before answering. The
+	 * retry's borrowed status string has already been freed by the UI dispatcher. */
+	warning = certificate_test_prompter_last_warning();
+	g_assert_nonnull(warning);
+	/* Opening between updates starts input before the INCORRECT status arrives. */
+	if (GPOINTER_TO_INT(user_data) != 2)
+		g_assert_nonnull(strstr(warning, "not accepted"));
+	g_assert_nonnull(strstr(warning, "last attempt"));
+	description = certificate_test_prompter_last_description();
+	g_assert_nonnull(strstr(description, "Second application"));
+	g_assert_cmpint(g_atomic_int_get(&login.attempts), ==, 1);
+	g_assert_cmpuint(certificate_test_prompter_confirm_rounds(), ==, 0);
+	BRIDGE_WAIT(login.operations[1].done);
+	g_assert_error(login.operations[1].result.error, CERTIFICATE_PKCS11_ERROR,
+	               CERTIFICATE_PKCS11_ERROR_CANCELLED);
+	g_assert_cmpint(g_atomic_int_get(&login.attempts), ==, 1);
+	g_assert_cmpuint(certificate_test_prompter_password_rounds(), ==, 2);
+	for (guint i = 0; i < G_N_ELEMENTS(login.operations); i++)
+	{
+		g_assert_cmpuint(login.operations[i].result.calls, ==, 1);
+		g_assert_null(login.operations[i].result.signature);
+		g_clear_error(&login.operations[i].result.error);
+	}
+	xcc_context_shutdown_async(bridge.context, bridge_shutdown_done, &bridge);
+	BRIDGE_WAIT(bridge.shutdown);
+	g_assert_cmpint(g_atomic_int_get(&bridge.context->ui_handles), ==, 0);
+	xcc_context_unref(bridge.context);
+	certificate_pin_set_provider(certificate_pin_provider_system());
+	certificate_device_close(&session->device);
+	xcc_session_close(session);
+	handover_login = NULL;
+	g_cond_clear(&login.cond);
+	g_mutex_clear(&login.lock);
+	certificate_test_prompter_set_delay(40);
+}
+
 static void test_bridge_protected_final_try(Fixture* fixture, gconstpointer user_data)
 {
 	const char* answers[] = {"ok"};
@@ -1530,6 +1769,11 @@ int main(int argc, char** argv)
 	           fixture_tear_down);
 	ADD("/pin-system/auto-picks-the-prompter", test_auto_picks_the_prompter);
 	ADD("/pin-system/bridge-protected-final-try-async-open", test_bridge_protected_final_try);
+	ADD("/pin-system/handover-final-try-during-open", test_handover_final_try_during_open);
+	g_test_add("/pin-system/handover-open-during-login", Fixture, GINT_TO_POINTER(1),
+	           fixture_set_up, test_handover_final_try_during_open, fixture_tear_down);
+	g_test_add("/pin-system/handover-open-between-retry-updates", Fixture, GINT_TO_POINTER(2),
+	           fixture_set_up, test_handover_final_try_during_open, fixture_tear_down);
 	ADD("/pin-system/bridge-shutdown-pending-close", test_bridge_shutdown_pending_close);
 	ADD("/pin-system/happy-path", test_happy_path);
 	ADD("/pin-system/caller-window-is-passed", test_caller_window_is_passed);

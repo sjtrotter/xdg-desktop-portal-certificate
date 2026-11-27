@@ -196,6 +196,8 @@ static GtkWidget* label_row(const char* title, const char* value)
 	return box;
 }
 
+static void gtk_pin_busy(PinPrompt* prompt, gboolean busy);
+
 static void gtk_pin_show(gpointer user_data, PinPrompt* prompt, const XccPinView* view)
 {
 	GtkPinPrompt* ui = g_new0(GtkPinPrompt, 1);
@@ -337,6 +339,7 @@ static void gtk_pin_show(gpointer user_data, PinPrompt* prompt, const XccPinView
 	g_signal_connect(window, "close-request", G_CALLBACK(on_close_request), prompt);
 	g_signal_connect_after(window, "map", G_CALLBACK(announce_retry_hint), prompt);
 
+	gtk_pin_busy(prompt, view->busy);
 	certificate_external_window_present(GTK_WINDOW(window), prompt->parent_window, NULL);
 
 	if (ui->entry != NULL)
@@ -379,13 +382,10 @@ static void gtk_pin_retry(PinPrompt* prompt, const char* status)
 
 static void gtk_pin_update(gpointer user_data, PinPrompt* prompt, const XccPinView* view)
 {
+	gtk_pin_busy(prompt, view->busy);
+	update_retry_hint(prompt, view);
 	if (view->status != NULL)
-	{
 		gtk_pin_retry(prompt, view->status);
-		update_retry_hint(prompt, view);
-	}
-	else
-		gtk_pin_busy(prompt, view->busy);
 }
 
 static void gtk_pin_warning(gpointer user_data, PinPrompt* prompt, const char* message)

@@ -233,6 +233,8 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 	request.lifetime_seconds = transaction->lifetime;
 	request.reason = transaction->reason;
 	request.generic_purpose = transaction->generic_purpose;
+	request.session_id = transaction->session->id;
+	request.operation_id = transaction->operation_id;
 
 	transaction->chooser = certificate_chooser_show(
 		transaction->parent_window, transaction->activation_token, matching, &request,
@@ -256,7 +258,8 @@ XccRequest* xcc_acquire_async(XccSession* session, const XccAcquireSpec* spec, X
 {
 	g_return_val_if_fail(session != NULL && session->context != NULL, NULL);
 	XccRequest* r = xcc_request_new(session->context, session, XCC_RESULT_ACQUIRE, done, user);
-	if (spec == NULL || spec->struct_size < sizeof(*spec) || spec->abi_version != XCC_ABI_VERSION ||
+	if (spec == NULL || spec->struct_size < XCC_ACQUIRE_SPEC_V1_SIZE ||
+		spec->abi_version != XCC_ABI_VERSION ||
 		spec->principal.struct_size < sizeof(XccPrincipal) ||
 		spec->principal.abi_version != XCC_ABI_VERSION)
 	{
@@ -276,6 +279,8 @@ XccRequest* xcc_acquire_async(XccSession* session, const XccAcquireSpec* spec, X
 		r->parent_window = g_strdup(spec->parent_window);
 		r->activation_token = g_strdup(spec->activation_token);
 		r->reason = g_strdup(spec->reason);
+		if (spec->struct_size >= offsetof(XccAcquireSpec, operation_id) + sizeof(spec->operation_id))
+			r->operation_id = g_strdup(spec->operation_id);
 		r->lifetime = spec->lifetime_present ? MIN(spec->lifetime_seconds, 3600u) : 300;
 		r->may_sign = !spec->sign_present || spec->sign;
 		r->interaction_forbidden = spec->interaction_present && spec->interaction_forbidden;

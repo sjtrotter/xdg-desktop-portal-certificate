@@ -26,6 +26,7 @@ struct _PinPrompt
 
 	CertificateToken* token;
 	char* session_id;
+	char* operation_id;
 	char* parent_window;
 	char* caller_display;
 	char* purpose_display;
@@ -48,7 +49,10 @@ struct _PinPrompt
 	/** Protected authentication uses NULL PIN, has no field and cannot retry through this UI. */
 	gboolean protected_path;
 
+	gboolean shown;
 	gboolean finished;
+	XccPinStatus status;
+	gboolean pin_count_low, pin_final_try, pin_locked;
 	gboolean busy;
 
 	/* Workers retain login_data through completion, including cancellation before presentation. */

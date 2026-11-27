@@ -30,6 +30,60 @@ int main(void)
 	CHECK(!xcc_chooser_view_tokens_reading(&reading));
 	CHECK(!xcc_chooser_view_tokens_reading(NULL));
 
+	XccChooserView chooser_provenance = {.struct_size = sizeof(chooser_provenance),
+	    .abi_version = XCC_ABI_VERSION, .session_id = "session", .operation_id = "operation"};
+	CHECK(xcc_chooser_view_session_id(&chooser_provenance) == chooser_provenance.session_id);
+	chooser_provenance.struct_size = offsetof(XccChooserView, session_id);
+	CHECK(xcc_chooser_view_session_id(&chooser_provenance) == NULL);
+	chooser_provenance.struct_size += sizeof(chooser_provenance.session_id);
+	CHECK(xcc_chooser_view_session_id(&chooser_provenance) == chooser_provenance.session_id);
+	chooser_provenance.struct_size = XCC_CHOOSER_VIEW_V1_SIZE;
+	CHECK(xcc_chooser_view_session_id(&chooser_provenance) == NULL);
+	chooser_provenance.struct_size = sizeof(chooser_provenance);
+	chooser_provenance.abi_version++;
+	CHECK(xcc_chooser_view_session_id(&chooser_provenance) == NULL);
+	chooser_provenance.abi_version = XCC_ABI_VERSION;
+	CHECK(xcc_chooser_view_session_id(NULL) == NULL);
+	CHECK(xcc_chooser_view_operation_id(&chooser_provenance) == chooser_provenance.operation_id);
+	chooser_provenance.struct_size = offsetof(XccChooserView, operation_id);
+	CHECK(xcc_chooser_view_operation_id(&chooser_provenance) == NULL);
+	chooser_provenance.struct_size += sizeof(chooser_provenance.operation_id);
+	CHECK(xcc_chooser_view_operation_id(&chooser_provenance) == chooser_provenance.operation_id);
+	chooser_provenance.struct_size = XCC_CHOOSER_VIEW_V1_SIZE;
+	CHECK(xcc_chooser_view_operation_id(&chooser_provenance) == NULL);
+	chooser_provenance.struct_size = sizeof(chooser_provenance);
+	chooser_provenance.abi_version++;
+	CHECK(xcc_chooser_view_operation_id(&chooser_provenance) == NULL);
+	chooser_provenance.abi_version = XCC_ABI_VERSION;
+	CHECK(xcc_chooser_view_operation_id(NULL) == NULL);
+
+	XccPinView pin_provenance = {.struct_size = sizeof(pin_provenance),
+	    .abi_version = XCC_ABI_VERSION, .session_id = "session", .operation_id = "operation"};
+	CHECK(xcc_pin_view_session_id(&pin_provenance) == pin_provenance.session_id);
+	pin_provenance.struct_size = offsetof(XccPinView, session_id);
+	CHECK(xcc_pin_view_session_id(&pin_provenance) == NULL);
+	pin_provenance.struct_size += sizeof(pin_provenance.session_id);
+	CHECK(xcc_pin_view_session_id(&pin_provenance) == pin_provenance.session_id);
+	pin_provenance.struct_size = XCC_PIN_VIEW_V1_SIZE;
+	CHECK(xcc_pin_view_session_id(&pin_provenance) == NULL);
+	pin_provenance.struct_size = sizeof(pin_provenance);
+	pin_provenance.abi_version++;
+	CHECK(xcc_pin_view_session_id(&pin_provenance) == NULL);
+	pin_provenance.abi_version = XCC_ABI_VERSION;
+	CHECK(xcc_pin_view_session_id(NULL) == NULL);
+	CHECK(xcc_pin_view_operation_id(&pin_provenance) == pin_provenance.operation_id);
+	pin_provenance.struct_size = offsetof(XccPinView, operation_id);
+	CHECK(xcc_pin_view_operation_id(&pin_provenance) == NULL);
+	pin_provenance.struct_size += sizeof(pin_provenance.operation_id);
+	CHECK(xcc_pin_view_operation_id(&pin_provenance) == pin_provenance.operation_id);
+	pin_provenance.struct_size = XCC_PIN_VIEW_V1_SIZE;
+	CHECK(xcc_pin_view_operation_id(&pin_provenance) == NULL);
+	pin_provenance.struct_size = sizeof(pin_provenance);
+	pin_provenance.abi_version++;
+	CHECK(xcc_pin_view_operation_id(&pin_provenance) == NULL);
+	pin_provenance.abi_version = XCC_ABI_VERSION;
+	CHECK(xcc_pin_view_operation_id(NULL) == NULL);
+
 	struct ExtendedRow
 	{
 		XccChooserCandidateView row;
@@ -103,10 +157,14 @@ int main(void)
 		issuers[i].bytes.struct_size = sizeof(issuers[i]);
 		issuers[i].bytes.abi_version = XCC_ABI_VERSION;
 	}
-	XccAcquireSpec spec = {.struct_size = sizeof(spec),
+	XccAcquireSpec spec = {.struct_size = XCC_ACQUIRE_SPEC_V1_SIZE,
 						   .abi_version = XCC_ABI_VERSION,
 						   .issuers = &issuers[0].bytes,
 						   .n_issuers = 2};
+	CHECK(xcc_acquire_spec_issuer(&spec, 1) == &issuers[1].bytes);
+	spec.struct_size = XCC_ACQUIRE_SPEC_V1_SIZE - 1;
+	CHECK(xcc_acquire_spec_issuer(&spec, 1) == NULL);
+	spec.struct_size = sizeof(spec);
 	CHECK(xcc_acquire_spec_issuer(&spec, 1) == &issuers[1].bytes);
 	CHECK(xcc_acquire_spec_issuer(&spec, 2) == NULL);
 	CHECK(xcc_acquire_spec_issuer(NULL, 0) == NULL);

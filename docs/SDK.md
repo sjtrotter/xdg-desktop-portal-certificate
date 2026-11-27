@@ -73,6 +73,64 @@ crash reports, and same-user debuggers can read live PINs. Accepting that exposu
 process-wide hardening, or moving PIN collection and card operations to a separate hardened
 service remains an open desktop-review question; see [SECURITY.md](SECURITY.md#memory-and-process-hardening).
 
+`xcc_choose`, `xcc_pin_ready`, `xcc_pin_submit` and `xcc_warning_reply` return
+`XccUiReply`: `XCC_UI_REPLY_STALE` (0) rejects an ignored reply,
+`XCC_UI_REPLY_ACCEPTED` (1) means applied, and `XCC_UI_REPLY_ACCEPTED_PENDING` (2)
+means validated and queued for revalidation. Existing C/C++ callers may ignore the
+result. Unknown or closed IDs, wrong interaction kinds, stale chooser revisions or
+candidate IDs, duplicate replies, busy PIN prompts, submission before readiness,
+cancelled prompts and wrong warning IDs return stale without starting login.
+`xcc_pin_submit` consumes its secret on every return path.
+
+Desktop replies remain queued to the coordinator and return accepted-pending;
+they do not wait for workers or a parked coordinator. Pending is acceptance of the
+queued reply, not a guarantee that it will still apply: cancellation, closure or
+a newer chooser revision before execution can make it stale. Inline private
+chooser-provider replies deferred until callback return have the same meaning.
+Duplicates are rejected while a reply is pending. Coordinator replies that apply
+immediately return accepted. For a stale chooser choice, use the revision from
+the latest chooser view; there is no revision output parameter. Keep updating that
+revision on every view. PIN readiness still precedes typed submission; protected-path
+readiness starts login or raises the final-try warning. Only the current warning ID
+can confirm that warning.
+
+`XccAcquireSpec` appends optional `const char *operation_id`; its original minimum
+size is `XCC_ACQUIRE_SPEC_V1_SIZE`. The issuer walker also accepts that original
+prefix. `XccSignSpec.operation_id` already exists and now also identifies its PIN
+interaction. Both IDs are copied before the entry point returns. Supply an opaque
+string identifying one operation, such as the frontend Request path plus its
+instance number; use a distinct ID when a Request path is reused. NULL preserves
+legacy callers without operation provenance.
+
+`XccChooserView` and `XccPinView` append `const char *session_id` followed by
+`const char *operation_id`, with the session field aligned to eight bytes.
+These are borrowed correlation strings, not display text or PKCS#11 handles.
+The session ID is the originating session's `XccSessionSpec.log_id`; callers
+needing distinct session instances must supply distinct log IDs. The operation ID
+comes from the acquisition or sign spec. Each dispatched snapshot owns its copies.
+Before reading either field, check the ABI version and
+`view->struct_size >= offsetof(Type, field) + sizeof(view->field)`; an absent field
+means no provenance. The inline `xcc_chooser_view_session_id()`,
+`xcc_chooser_view_operation_id()`, `xcc_pin_view_session_id()` and
+`xcc_pin_view_operation_id()` helpers perform these checks and return NULL for
+absent fields. Original view minimum sizes, ABI version, SONAME and exported
+symbols are unchanged.
+
+Cancel one operation with `xcc_request_cancel()` on the request returned by its
+acquisition or sign entry point. This also works during discovery or while queued
+for PIN presentation. A shared ordinary-login waiter detaches independently; the
+login remains alive for other waiters. If the displayed waiter cancels and its
+successor has different provenance, the core sends hide and close for the old UI
+ID, then show with a new UI ID and the successor's session, operation and window
+metadata. Queued prompts change provenance before their first show. The same
+prompt, attempt count, retry status, token flags and any submitted login survive.
+The new presentation must acknowledge readiness, and a pending final-try warning
+is issued again under the new ID. Replies to the retired ID are stale. Legacy
+waiters with identical NULL operation provenance retain their existing presentation.
+Cancelling the last waiter ends the prompt as before; an already submitted login
+still drains and abandons late success. `xcc_ui_cancel()` continues to cancel the
+entire interaction and all its waiters.
+
 Every public struct starts with `uint32_t struct_size, abi_version`; initialize inputs
 (including nested principals and byte spans) with their size and `XCC_ABI_VERSION`, the
 single core ABI constant. Error outputs receive these fields from the core. Check sizes

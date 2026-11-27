@@ -84,6 +84,7 @@ static void pin_prompt_free(PinPrompt* prompt)
 	g_clear_pointer(&prompt->secret, xcc_secret_free);
 	g_clear_pointer(&prompt->token, certificate_token_unref);
 	g_free(prompt->session_id);
+	g_free(prompt->operation_id);
 	g_free(prompt->parent_window);
 	g_free(prompt->caller_display);
 	g_free(prompt->purpose_display);
@@ -289,8 +290,15 @@ static const char* pin_status_text(XccPinStatus status)
 	}
 }
 
-static XccPinView pin_view(const PinPrompt* prompt, XccPinStatus status)
+static XccPinView pin_view(PinPrompt* prompt, XccPinStatus status)
 {
+	/* Reuse published flags while a worker may refresh the token. */
+	if (!prompt->login_in_flight)
+	{
+		prompt->pin_count_low = prompt->token->pin_count_low;
+		prompt->pin_final_try = prompt->token->pin_final_try;
+		prompt->pin_locked = prompt->token->pin_locked;
+	}
 	/* The private legacy PIN entry point takes core-owned purpose wording.
 	 * Resolve it here so desktop consumers never have to inspect English. */
 	uint32_t purpose = XCC_PURPOSE_CLIENT_AUTH;
@@ -314,12 +322,14 @@ static XccPinView pin_view(const PinPrompt* prompt, XccPinStatus status)
 		.caller_display = prompt->caller_display,
 		.purpose_display = prompt->purpose_display,
 		.parent_window = prompt->parent_window,
+		.session_id = prompt->session_id,
+		.operation_id = prompt->operation_id,
 		.context_specific = prompt->context_specific,
 		.protected_path = prompt->protected_path,
 		.busy = prompt->busy,
-		.count_low = prompt->token->pin_count_low,
-		.final_try = prompt->token->pin_final_try,
-		.locked = prompt->token->pin_locked,
+		.count_low = prompt->pin_count_low,
+		.final_try = prompt->pin_final_try,
+		.locked = prompt->pin_locked,
 		.status = pin_status_text(status),
 		.purpose = purpose,
 		.generic_purpose = generic,
@@ -330,6 +340,8 @@ static XccPinView pin_view(const PinPrompt* prompt, XccPinStatus status)
 
 static void pin_update(PinPrompt* prompt, XccPinStatus status)
 {
+	if (status != XCC_PIN_STATUS_NONE)
+		prompt->status = status;
 	XccPinView view = pin_view(prompt, status);
 
 	prompt->provider.pin_update(prompt->provider.user_data, prompt, &view);
@@ -338,6 +350,8 @@ static void pin_update(PinPrompt* prompt, XccPinStatus status)
 static void set_busy(PinPrompt* prompt, gboolean busy)
 {
 	prompt->busy = busy;
+	if (busy)
+		prompt->status = XCC_PIN_STATUS_NONE;
 
 	pin_update(prompt, XCC_PIN_STATUS_NONE);
 }
@@ -549,6 +563,9 @@ void certificate_pin_prompt_submit(PinPrompt* prompt)
 	data->secret = g_steal_pointer(&prompt->secret);
 
 	prompt->attempts++;
+	prompt->pin_count_low = prompt->token->pin_count_low;
+	prompt->pin_final_try = prompt->token->pin_final_try;
+	prompt->pin_locked = prompt->token->pin_locked;
 	prompt->login_in_flight = TRUE;
 	set_busy(prompt, TRUE);
 
@@ -586,16 +603,17 @@ static void pin_prompt_show(PinPrompt* prompt)
 {
 	XccPinView view;
 
-	if (prompt->token->pin_locked)
+	view = pin_view(prompt, prompt->status);
+	if (view.locked)
 	{
 		certificate_pin_prompt_answer(prompt, CERTIFICATE_PIN_LOCKED);
 		return;
 	}
-	view = pin_view(prompt, XCC_PIN_STATUS_NONE);
 
 	certificate_log_grant(CERTIFICATE_REASON_PIN_PROMPTED, prompt->session_id,
 	                      prompt->protected_path ? "protected-path" : "on-screen");
 
+	prompt->shown = TRUE;
 	prompt->provider.pin_show(prompt->provider.user_data, prompt, &view);
 }
 
@@ -653,14 +671,58 @@ static void pin_prompt_start(PinPrompt* prompt)
 	g_task_run_in_thread(task, refresh_thread);
 }
 
-void certificate_pin_login_full_kind(CertificateToken* token, const char* session_id,
+void certificate_pin_handover(GCancellable* cancellable, const char* session_id,
+                              const char* operation_id, const char* parent_window,
+                              const char* caller_display, const char* purpose_display)
+{
+	PinPrompt* prompt = pin_active;
+	if (prompt == NULL || prompt->cancellable != cancellable)
+	{
+		prompt = NULL;
+		for (GList* link = pin_queue.head; link != NULL; link = link->next)
+		{
+			PinPrompt* queued = link->data;
+			if (queued->cancellable == cancellable)
+			{
+				prompt = queued;
+				break;
+			}
+		}
+	}
+	if (prompt == NULL || prompt->finished || prompt->cancel_deferred ||
+	    g_cancellable_is_cancelled(cancellable) ||
+	    (g_strcmp0(prompt->session_id, session_id) == 0 &&
+	     g_strcmp0(prompt->operation_id, operation_id) == 0))
+		return;
+
+	g_free(prompt->session_id);
+	prompt->session_id = g_strdup(session_id);
+	g_free(prompt->operation_id);
+	prompt->operation_id = g_strdup(operation_id);
+	g_free(prompt->parent_window);
+	prompt->parent_window = g_strdup(parent_window);
+	g_free(prompt->caller_display);
+	prompt->caller_display = g_strdup(caller_display);
+	g_free(prompt->purpose_display);
+	prompt->purpose_display = g_strdup(purpose_display);
+	g_clear_pointer(&prompt->secret, xcc_secret_free);
+	if (prompt->shown)
+	{
+		prompt->provider.hide(prompt->provider.user_data, prompt);
+		prompt->provider.close(prompt->provider.user_data, prompt);
+		prompt->warning_pending = FALSE;
+		pin_prompt_show(prompt);
+	}
+}
+
+void certificate_pin_login_operation(CertificateToken* token, const char* session_id,
 									 const char* parent_window, const char* caller_display,
 									 const char* purpose_display, CertificatePinLoginFunc login,
 									 CertificatePinRefreshFunc refresh,
 									 CertificatePinAbandonFunc abandon, gpointer login_data,
 									 GDestroyNotify login_data_free, GCancellable* cancellable,
 									 CertificatePinDone done, gpointer user_data,
-									 gboolean context_specific)
+									 gboolean context_specific, const char* operation_id)
 {
 	PinPrompt* prompt = NULL;
 	CertificatePinProvider provider = pin_provider;
@@ -683,6 +745,7 @@ void certificate_pin_login_full_kind(CertificateToken* token, const char* sessio
 	prompt->provider = provider;
 	prompt->token = certificate_token_ref(token);
 	prompt->session_id = g_strdup(session_id);
+	prompt->operation_id = g_strdup(operation_id);
 	prompt->protected_path = token->protected_authentication_path;
 	prompt->parent_window = g_strdup(parent_window);
 	prompt->caller_display = g_strdup(caller_display);
@@ -707,6 +770,21 @@ void certificate_pin_login_full_kind(CertificateToken* token, const char* sessio
 	}
 
 	pin_prompt_start(prompt);
+}
+
+void certificate_pin_login_full_kind(CertificateToken* token, const char* session_id,
+                                     const char* parent_window, const char* caller_display,
+                                     const char* purpose_display, CertificatePinLoginFunc login,
+                                     CertificatePinRefreshFunc refresh,
+                                     CertificatePinAbandonFunc abandon, gpointer login_data,
+                                     GDestroyNotify login_data_free, GCancellable* cancellable,
+                                     CertificatePinDone done, gpointer user_data,
+                                     gboolean context_specific)
+{
+	certificate_pin_login_operation(token, session_id, parent_window, caller_display,
+	                                purpose_display, login, refresh, abandon, login_data,
+	                                login_data_free, cancellable, done, user_data,
+	                                context_specific, NULL);
 }
 
 void certificate_pin_login(CertificateToken* token, const char* parent_window,

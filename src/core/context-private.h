@@ -22,6 +22,7 @@ struct XccContext
 	gint posts;
 	gint ui_pending, ui_handles;
 	GMutex queue_lock;
+	GMutex interactions_lock;
 	CertificateChooserProvider previous_chooser;
 	CertificatePinProvider previous_pin;
 	XccConfig config;
@@ -89,7 +90,7 @@ void xcc_sign_start(void*);
 void xcc_acquire_token_event(XccContext*, CertificateToken*, gboolean);
 void xcc_ui_legacy_init(XccContext*);
 void xcc_ui_legacy_restore(XccContext*);
-gboolean xcc_legacy_choose(XccUiId, guint64, guint64);
+gboolean xcc_legacy_choose(XccUiId, guint64, guint64, XccUiReply*);
 void xcc_ui_install(XccContext*);
 void xcc_ui_uninstall(XccContext*);
 void xcc_session_close_internal(XccSession*);
