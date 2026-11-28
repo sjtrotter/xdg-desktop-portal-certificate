@@ -1,21 +1,35 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
+#define _GNU_SOURCE 1
 #include "handler-impl.h"
 
 #include <errno.h>
-#include <sys/random.h>
+#include <fcntl.h>
+#include <gio/gunixfdlist.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/random.h>
+#include <sys/stat.h>
+#include <sys/vfs.h>
+#include <unistd.h>
 
 #include "core/adapter.h"
+#include "core/secret.h"
 #include "core/session-private.h"
+#include "sign-options.h"
 #include "step-provider.h"
 #include "tokens/filter.h"
 #include "xdp-handler-dbus.h"
 
 #define CHOOSER_TIMEOUT_MS (300u * 1000u)
+#define PIN_TIMEOUT_MS (120u * 1000u)
+#define SECRETMEM_MAGIC 0x5345434d
 
 typedef enum
 {
-	STEP_CHOOSER
+	STEP_CHOOSER,
+	STEP_PIN,
+	STEP_PIN_PAD,
+	STEP_CONFIRM
 } StepKind;
 
 typedef struct
@@ -28,7 +42,7 @@ typedef struct
 	char* core_id;
 	char* owner;
 	guint64 generation, instance, session_instance;
-	guint64 token, revision, step_revision;
+	guint64 token, step_token, revision, step_revision, warning_id;
 	XccUiId ui_id;
 	StepKind kind;
 	GVariant* view;
@@ -48,7 +62,7 @@ struct CertificateHandler
 	GMutex token_lock;
 	GHashTable* tokens; /* Borrowed operation, indexed by its live token. */
 	guint64 next_instance;
-	guint chooser_timeout_ms;
+	guint chooser_timeout_ms, pin_timeout_ms;
 };
 
 static GVariant* results_with_instance(GVariant* results, guint64 instance)
@@ -155,8 +169,7 @@ static gboolean mint_token(Operation* operation)
 			return FALSE;
 		}
 	} while (token == 0 || g_hash_table_contains(handler->tokens, &token));
-	operation->token = token;
-	operation->kind = STEP_CHOOSER;
+	operation->token = operation->step_token = token;
 	operation->step_revision = operation->revision;
 	g_hash_table_insert(handler->tokens, &operation->token, operation);
 	g_mutex_unlock(&handler->token_lock);
@@ -167,6 +180,7 @@ static gboolean issue_step(gpointer data)
 {
 	Operation* operation = data;
 	CertificateHandler* handler = operation->handler;
+	static const char* const names[] = {"chooser", "pin", "pin_pad", "confirm"};
 	GVariantBuilder builder;
 	operation->issue_source = 0;
 	if (operation->ended || operation->pending == NULL || operation->view == NULL)
@@ -178,12 +192,13 @@ static gboolean issue_step(gpointer data)
 	}
 	if (operation->timeout_source != 0)
 		g_source_remove(operation->timeout_source);
-	operation->timeout_source = g_timeout_add(handler->chooser_timeout_ms, on_timeout, operation);
+	guint timeout =
+		operation->kind == STEP_CHOOSER ? handler->chooser_timeout_ms : handler->pin_timeout_ms;
+	operation->timeout_source = g_timeout_add(timeout, on_timeout, operation);
 	guint64 deadline =
-		(g_get_monotonic_time() + (gint64)handler->chooser_timeout_ms * 1000 + G_USEC_PER_SEC - 1) /
-		G_USEC_PER_SEC;
+		(g_get_monotonic_time() + (gint64)timeout * 1000 + G_USEC_PER_SEC - 1) / G_USEC_PER_SEC;
 	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-	g_variant_builder_add(&builder, "{sv}", "step", g_variant_new_string("chooser"));
+	g_variant_builder_add(&builder, "{sv}", "step", g_variant_new_string(names[operation->kind]));
 	g_variant_builder_add(&builder, "{sv}", "token", g_variant_new_uint64(operation->token));
 	g_variant_builder_add(&builder, "{sv}", "deadline", g_variant_new_uint64(deadline));
 	g_variant_builder_add(&builder, "{sv}", "view", operation->view);
@@ -279,6 +294,7 @@ void certificate_handler_chooser(CertificateHandler* handler, XccUiId id,
 	if (operation == NULL || operation->ended ||
 		g_strcmp0(operation->session->id, view->session_id) != 0)
 		return;
+	operation->kind = STEP_CHOOSER;
 	operation->ui_id = id;
 	operation->revision = view->revision;
 	g_clear_pointer(&operation->view, g_variant_unref);
@@ -291,7 +307,89 @@ void certificate_handler_chooser(CertificateHandler* handler, XccUiId id,
 						   operation->view));
 }
 
-void certificate_handler_ui_closed(CertificateHandler* handler, XccUiId id)
+static GVariant* pin_view(const XccPinView* view)
+{
+	GVariantBuilder builder;
+	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
+#define TEXT(field)                                                                                \
+	g_variant_builder_add(&builder, "{sv}", #field,                                                \
+						  g_variant_new_string(view->field != NULL ? view->field : ""))
+#define BOOL(field)                                                                                \
+	g_variant_builder_add(&builder, "{sv}", #field, g_variant_new_boolean(view->field))
+#define UINT(field)                                                                                \
+	g_variant_builder_add(&builder, "{sv}", #field, g_variant_new_uint32(view->field))
+	TEXT(token_label);
+	TEXT(reader);
+	TEXT(caller_display);
+	TEXT(purpose_display);
+	BOOL(context_specific);
+	BOOL(protected_path);
+	BOOL(busy);
+	BOOL(count_low);
+	BOOL(final_try);
+	BOOL(locked);
+	TEXT(status);
+	UINT(status_code);
+	UINT(purpose);
+	BOOL(generic_purpose);
+	UINT(display_flags);
+	TEXT(session_id);
+	TEXT(operation_id);
+#undef TEXT
+#undef BOOL
+#undef UINT
+	return g_variant_builder_end(&builder);
+}
+
+void certificate_handler_pin(CertificateHandler* handler, XccUiId id, const XccPinView* view,
+							 gboolean show)
+{
+	Operation* operation = g_hash_table_lookup(handler->core_ids, view->operation_id);
+	if (operation == NULL || operation->ended ||
+		g_strcmp0(operation->session->id, view->session_id) != 0)
+		return;
+	gboolean new_interaction = operation->ui_id != id;
+	operation->ui_id = id;
+	g_clear_pointer(&operation->view, g_variant_unref);
+	operation->view = g_variant_ref_sink(pin_view(view));
+	if (operation->pending != NULL &&
+		(show || new_interaction || view->status_code != XCC_PIN_STATUS_NONE))
+	{
+		operation->kind = view->protected_path ? STEP_PIN_PAD : STEP_PIN;
+		schedule_step(operation);
+	}
+	else if (operation->step_out)
+		emit(handler, operation->owner, "OperationUpdated",
+			 g_variant_new("(ott@a{sv})", operation->handle, operation->instance,
+						   operation->step_token, operation->view));
+}
+
+void certificate_handler_warning(CertificateHandler* handler, XccUiId id, const XccWarning* view)
+{
+	GHashTableIter iter;
+	gpointer value;
+	g_hash_table_iter_init(&iter, handler->operations);
+	while (g_hash_table_iter_next(&iter, NULL, &value))
+	{
+		Operation* operation = value;
+		if (operation->ui_id != id || operation->pending == NULL)
+			continue;
+		operation->kind = STEP_CONFIRM;
+		operation->warning_id = view->warning_id;
+		GVariantDict dict;
+		g_variant_dict_init(&dict, operation->view);
+		g_variant_dict_insert(&dict, "warning_id", "t", view->warning_id);
+		g_variant_dict_insert(&dict, "code", "u", view->code);
+		g_variant_dict_insert(&dict, "message", "s", view->message != NULL ? view->message : "");
+		g_clear_pointer(&operation->view, g_variant_unref);
+		operation->view = g_variant_ref_sink(g_variant_dict_end(&dict));
+		schedule_step(operation);
+		return;
+	}
+}
+
+void certificate_handler_ui_closed(CertificateHandler* handler, XccUiId id,
+								   gboolean login_timed_out)
 {
 	GHashTableIter iter;
 	gpointer value;
@@ -301,25 +399,37 @@ void certificate_handler_ui_closed(CertificateHandler* handler, XccUiId id)
 		Operation* operation = value;
 		if (operation->ui_id == id)
 		{
+			if (login_timed_out)
+			{
+				/* End only the handler operation; core waiters and cleanup still await login. */
+				finish(operation, xcc_error_wire_response(XCC_ERROR_LOGIN_TIMEOUT),
+				       reason_results(xcc_error_wire_name(XCC_ERROR_LOGIN_TIMEOUT)), TRUE);
+				return;
+			}
 			drop_token(operation);
 			if (operation->issue_source != 0)
 				g_source_remove(operation->issue_source);
 			operation->issue_source = 0;
 		}
 	}
-	/* Core completion supplies the terminal response after hide/close. */
+	/* Core completion supplies the terminal response for other hide/close paths. */
 }
 
 static void core_done(XccRequest* request, const XccResult* result, void* data)
 {
 	Operation* operation = data;
-	if (!operation->ended && result->error == XCC_OK)
-		operation->session->handler_granted = TRUE;
-	GVariant* results = result->error == XCC_OK
-							? certificate_impl_acquire_results(
-								  (CertificateCandidate*)xcc_candidate_internal(result->candidate),
-								  result->may_sign)
-							: reason_results(xcc_error_wire_name(result->error));
+	GVariant* results;
+	if (result->error != XCC_OK)
+		results = reason_results(xcc_error_wire_name(result->error));
+	else if (result->kind == XCC_RESULT_SIGN)
+		results = certificate_sign_results(result);
+	else
+	{
+		if (!operation->ended)
+			operation->session->handler_granted = TRUE;
+		results = certificate_impl_acquire_results(
+			(CertificateCandidate*)xcc_candidate_internal(result->candidate), result->may_sign);
+	}
 	finish(operation, xcc_error_wire_response(result->error), results, TRUE);
 	xcc_request_unref(operation->core);
 	g_clear_object(&operation->session);
@@ -336,21 +446,21 @@ static gboolean take(GVariant* options, const char* key, const GVariantType* typ
 	return *value == NULL || g_variant_is_of_type(*value, type);
 }
 
-static void acquire(CertificateHandler* handler, GDBusMethodInvocation* invocation,
-					const char* handle, const char* session_handle, GVariant* options)
+static Operation* register_operation(CertificateHandler* handler, GDBusMethodInvocation* invocation,
+									 const char* handle, const char* session_handle)
 {
 	Operation* live = g_hash_table_lookup(handler->operations, handle);
 	if (live != NULL)
 	{
 		answer(invocation, 2, reason_results("invalid_request"), live->instance);
-		return;
+		return NULL;
 	}
 	guint64 instance = ++handler->next_instance;
 	CertificateImplSession* session = certificate_impl_find_session(handler->impl, session_handle);
 	if (session == NULL || !session->handler || xcc_session_is_closed(session->core))
 	{
 		answer(invocation, 2, reason_results("no_such_session"), instance);
-		return;
+		return NULL;
 	}
 	Operation* operation = g_new0(Operation, 1);
 	operation->handler = handler;
@@ -364,6 +474,34 @@ static void acquire(CertificateHandler* handler, GDBusMethodInvocation* invocati
 	operation->pending = g_object_ref(invocation);
 	g_hash_table_insert(handler->operations, operation->handle, operation);
 	g_hash_table_insert(handler->core_ids, operation->core_id, operation);
+
+	return operation;
+}
+
+static void sign(CertificateHandler* handler, GDBusMethodInvocation* invocation, const char* handle,
+				 const char* session_handle, GVariant* options)
+{
+	Operation* operation = register_operation(handler, invocation, handle, session_handle);
+	if (operation == NULL)
+		return;
+	CertificateSignOptions parsed = {0};
+	gboolean valid = certificate_sign_options_parse(options, &parsed);
+	parsed.spec.principal = (XccPrincipal){sizeof(XccPrincipal),		 XCC_ABI_VERSION,
+										   operation->generation,		 operation->session->app_id,
+										   CERTIFICATE_IDENTITY_UNKNOWN, FALSE};
+	parsed.spec.operation_id = operation->core_id;
+	operation->core = xcc_sign_async_parsed(operation->session->core, valid ? &parsed.spec : NULL,
+											parsed.valid_parameters, core_done, operation);
+	certificate_sign_options_clear(&parsed);
+}
+
+static void acquire(CertificateHandler* handler, GDBusMethodInvocation* invocation,
+					const char* handle, const char* session_handle, GVariant* options)
+{
+	Operation* operation = register_operation(handler, invocation, handle, session_handle);
+	if (operation == NULL)
+		return;
+	CertificateImplSession* session = operation->session;
 
 	g_autoptr(GVariant) purpose = NULL;
 	g_autoptr(GVariant) level = NULL;
@@ -468,13 +606,13 @@ static void acquire(CertificateHandler* handler, GDBusMethodInvocation* invocati
 		finish(operation, 2, reason_results(failure), TRUE);
 }
 
-static void choose(CertificateHandler* handler, GDBusMethodInvocation* invocation,
-				   const char* handle, guint64 token, guint64 candidate)
+/* Caller holds token_lock through validation, consumption and the core reply. */
+static Operation* lookup_token(CertificateHandler* handler, GDBusMethodInvocation* invocation,
+							   const char* handle, guint64 token, StepKind kind)
 {
 	const char* owner = g_dbus_method_invocation_get_sender(invocation);
-	g_mutex_lock(&handler->token_lock);
 	Operation* operation = g_hash_table_lookup(handler->tokens, &token);
-	gboolean valid = operation != NULL && !operation->ended && operation->kind == STEP_CHOOSER &&
+	gboolean valid = operation != NULL && !operation->ended && operation->kind == kind &&
 					 g_str_equal(operation->handle, handle) &&
 					 g_str_equal(operation->owner, owner) &&
 					 operation->generation == certificate_impl_generation(handler->impl) &&
@@ -482,25 +620,183 @@ static void choose(CertificateHandler* handler, GDBusMethodInvocation* invocatio
 					 certificate_impl_find_session(handler->impl, operation->session->id) ==
 						 operation->session &&
 					 !xcc_session_is_closed(operation->session->core);
-	if (valid)
-	{
-		g_hash_table_remove(handler->tokens, &token);
-		operation->token = 0;
-	}
-	g_mutex_unlock(&handler->token_lock);
-	if (!valid)
-	{
-		Operation* live = g_hash_table_lookup(handler->operations, handle);
-		answer(invocation, 2, reason_results("stale_step"), live != NULL ? live->instance : 0);
-		return;
-	}
+	return valid ? operation : NULL;
+}
+
+static void stale_step(CertificateHandler* handler, GDBusMethodInvocation* invocation,
+					   const char* handle)
+{
+	Operation* live = g_hash_table_lookup(handler->operations, handle);
+	answer(invocation, 2, reason_results("stale_step"), live != NULL ? live->instance : 0);
+}
+
+static void consume_token(Operation* operation)
+{
+	g_hash_table_remove(operation->handler->tokens, &operation->token);
+	operation->token = 0;
+}
+
+static void await_reply(Operation* operation, GDBusMethodInvocation* invocation)
+{
 	if (operation->timeout_source != 0)
 		g_source_remove(operation->timeout_source);
 	operation->timeout_source = 0;
 	operation->pending = g_object_ref(invocation);
-	if (xcc_choose(handler->context, operation->ui_id, operation->step_revision, candidate) ==
-		XCC_UI_REPLY_STALE)
+}
+
+static void choose(CertificateHandler* handler, GDBusMethodInvocation* invocation,
+				   const char* handle, guint64 token, guint64 candidate)
+{
+	g_mutex_lock(&handler->token_lock);
+	Operation* operation = lookup_token(handler, invocation, handle, token, STEP_CHOOSER);
+	if (operation == NULL)
+	{
+		g_mutex_unlock(&handler->token_lock);
+		stale_step(handler, invocation, handle);
+		return;
+	}
+	consume_token(operation);
+	XccUiReply reply =
+		xcc_choose(handler->context, operation->ui_id, operation->step_revision, candidate);
+	g_mutex_unlock(&handler->token_lock);
+	await_reply(operation, invocation);
+	if (reply == XCC_UI_REPLY_STALE)
 		schedule_step(operation);
+}
+
+static void wipe_memfd(int fd, gsize size)
+{
+	static const guint8 zeros[511];
+	gsize offset = 0;
+	while (offset < size)
+	{
+		ssize_t count = pwrite(fd, zeros + offset, size - offset, offset);
+		if (count < 0 && errno == EINTR)
+			continue;
+		if (count <= 0)
+		{
+			g_message("pin-transport-wipe detail=pwrite-failed");
+			return;
+		}
+		offset += count;
+	}
+}
+
+static XccSecret* read_pin(GDBusMethodInvocation* invocation, gint index)
+{
+	GDBusMessage* message = g_dbus_method_invocation_get_message(invocation);
+	GUnixFDList* list = g_dbus_message_get_unix_fd_list(message);
+	if (list == NULL || g_unix_fd_list_get_length(list) != 1 || index != 0)
+		return NULL;
+	int fd = g_unix_fd_list_get(list, index, NULL);
+	if (fd < 0)
+		return NULL;
+	XccSecret* secret = NULL;
+	struct stat stat;
+	struct statfs fs;
+	void* mapping = MAP_FAILED;
+	gsize size = 0;
+	/* The core does not record ulMaxPinLen; its existing transport bound is 511. */
+	if (fstat(fd, &stat) != 0 || !S_ISREG(stat.st_mode) || stat.st_size < 1 || stat.st_size > 511 ||
+		fstatfs(fd, &fs) != 0)
+		goto out;
+	size = stat.st_size;
+	gboolean secretmem = fs.f_type == SECRETMEM_MAGIC;
+	if (!secretmem)
+	{
+		int seals = fcntl(fd, F_GET_SEALS);
+		int required = F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL;
+		if (seals < 0 || (seals & required) != required)
+			goto out;
+	}
+	secret = xcc_secret_new();
+	if (secret == NULL)
+		goto out;
+	guint8* buffer = xcc_secret_data(secret, NULL);
+	if (secretmem)
+	{
+		mapping = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+		if (mapping == MAP_FAILED)
+			goto invalid;
+		memcpy(buffer, mapping, size);
+		if (mprotect(mapping, size, PROT_READ | PROT_WRITE) == 0)
+			explicit_bzero(mapping, size);
+		else
+			g_message("pin-transport-wipe detail=secretmem-read-only");
+		munmap(mapping, size);
+		mapping = MAP_FAILED;
+	}
+	else
+	{
+		gsize offset = 0;
+		while (offset < size)
+		{
+			ssize_t count = pread(fd, buffer + offset, size - offset, offset);
+			if (count < 0 && errno == EINTR)
+				continue;
+			if (count <= 0)
+			{
+				wipe_memfd(fd, size);
+				goto invalid;
+			}
+			offset += count;
+		}
+		wipe_memfd(fd, size);
+	}
+	if (xcc_secret_set_length(secret, size))
+		goto out;
+invalid:
+	xcc_secret_free(secret);
+	secret = NULL;
+out:
+	if (mapping != MAP_FAILED)
+		munmap(mapping, size);
+	close(fd);
+	return secret;
+}
+
+static void pin_reply(CertificateHandler* handler, GDBusMethodInvocation* invocation,
+					  const char* handle, guint64 token, StepKind kind, gint fd_index,
+					  gboolean accepted)
+{
+	g_mutex_lock(&handler->token_lock);
+	Operation* operation = lookup_token(handler, invocation, handle, token, kind);
+	if (operation == NULL)
+	{
+		g_mutex_unlock(&handler->token_lock);
+		stale_step(handler, invocation, handle);
+		return;
+	}
+	XccSecret* secret = kind == STEP_PIN ? read_pin(invocation, fd_index) : NULL;
+	if (kind == STEP_PIN && secret == NULL)
+	{
+		g_mutex_unlock(&handler->token_lock);
+		answer(invocation, 2, reason_results("invalid_pin"), operation->instance);
+		return;
+	}
+	consume_token(operation);
+	XccUiReply reply;
+	if (kind == STEP_PIN)
+	{
+		/* A returned PIN proves presentation. Ready may already hold on a retry. */
+		xcc_pin_ready(handler->context, operation->ui_id);
+		reply = xcc_pin_submit(handler->context, operation->ui_id, secret);
+	}
+	else if (kind == STEP_PIN_PAD)
+		reply = xcc_pin_ready(handler->context, operation->ui_id);
+	else
+		reply =
+			xcc_warning_reply(handler->context, operation->ui_id, operation->warning_id, accepted);
+	if (reply == XCC_UI_REPLY_STALE)
+	{
+		operation->token = token;
+		g_hash_table_insert(handler->tokens, &operation->token, operation);
+	}
+	g_mutex_unlock(&handler->token_lock);
+	if (reply == XCC_UI_REPLY_STALE)
+		stale_step(handler, invocation, handle);
+	else
+		await_reply(operation, invocation);
 }
 
 static void create_session(CertificateHandler* handler, GDBusMethodInvocation* invocation,
@@ -578,12 +874,15 @@ static void method_call(GDBusConnection* connection, const char* sender, const c
 					  &options);
 		create_session(handler, invocation, handle, session, app, identity, options);
 	}
-	else if (g_str_equal(method, "Acquire"))
+	else if (g_str_equal(method, "Acquire") || g_str_equal(method, "Sign"))
 	{
 		const char *handle, *session;
 		g_autoptr(GVariant) options = NULL;
 		g_variant_get(parameters, "(&o&o@a{sv})", &handle, &session, &options);
-		acquire(handler, invocation, handle, session, options);
+		if (g_str_equal(method, "Sign"))
+			sign(handler, invocation, handle, session, options);
+		else
+			acquire(handler, invocation, handle, session, options);
 	}
 	else if (g_str_equal(method, "Choose"))
 	{
@@ -591,6 +890,31 @@ static void method_call(GDBusConnection* connection, const char* sender, const c
 		guint64 token, candidate;
 		g_variant_get(parameters, "(&ott)", &handle, &token, &candidate);
 		choose(handler, invocation, handle, token, candidate);
+	}
+	else if (g_str_equal(method, "Ready") || g_str_equal(method, "SubmitPin") ||
+			 g_str_equal(method, "Confirm"))
+	{
+		const char* handle;
+		guint64 token;
+		gint fd_index = -1;
+		gboolean accepted = FALSE;
+		StepKind kind;
+		if (g_str_equal(method, "SubmitPin"))
+		{
+			g_variant_get(parameters, "(&oth)", &handle, &token, &fd_index);
+			kind = STEP_PIN;
+		}
+		else if (g_str_equal(method, "Confirm"))
+		{
+			g_variant_get(parameters, "(&otb)", &handle, &token, &accepted);
+			kind = STEP_CONFIRM;
+		}
+		else
+		{
+			g_variant_get(parameters, "(&ot)", &handle, &token);
+			kind = STEP_PIN_PAD;
+		}
+		pin_reply(handler, invocation, handle, token, kind, fd_index, accepted);
 	}
 	else if (g_str_equal(method, "Cancel"))
 	{
@@ -626,6 +950,7 @@ CertificateHandler* certificate_handler_new(CertificateImpl* impl, GDBusConnecti
 	handler->context = certificate_impl_context(impl);
 	handler->connection = g_object_ref(connection);
 	handler->chooser_timeout_ms = CHOOSER_TIMEOUT_MS;
+	handler->pin_timeout_ms = PIN_TIMEOUT_MS;
 	handler->operations = g_hash_table_new(g_str_hash, g_str_equal);
 	handler->core_ids = g_hash_table_new(g_str_hash, g_str_equal);
 	handler->tokens = g_hash_table_new(g_int64_hash, g_int64_equal);
@@ -689,6 +1014,12 @@ void certificate_handler_set_chooser_timeout_for_tests(CertificateHandler* handl
 {
 	g_return_if_fail(milliseconds > 0);
 	handler->chooser_timeout_ms = milliseconds;
+}
+
+void certificate_handler_set_pin_timeout_for_tests(CertificateHandler* handler, guint milliseconds)
+{
+	g_return_if_fail(milliseconds > 0);
+	handler->pin_timeout_ms = milliseconds;
 }
 
 void certificate_handler_free(CertificateHandler* handler)

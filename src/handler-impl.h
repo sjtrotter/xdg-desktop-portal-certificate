@@ -14,7 +14,10 @@ void certificate_handler_session_closed(CertificateHandler*, CertificateImplSess
 void certificate_handler_session_invalidated(CertificateHandler*, CertificateImplSession*,
 											 const char*);
 void certificate_handler_chooser(CertificateHandler*, XccUiId, const XccChooserView*);
-void certificate_handler_ui_closed(CertificateHandler*, XccUiId);
-/* Test hook; production callers use the 300 second default. */
+void certificate_handler_pin(CertificateHandler*, XccUiId, const XccPinView*, gboolean show);
+void certificate_handler_warning(CertificateHandler*, XccUiId, const XccWarning*);
+void certificate_handler_ui_closed(CertificateHandler*, XccUiId, gboolean login_timed_out);
+/* Test hooks; production defaults are chooser 300 seconds and PIN steps 120 seconds. */
 void certificate_handler_set_chooser_timeout_for_tests(CertificateHandler*, guint milliseconds);
+void certificate_handler_set_pin_timeout_for_tests(CertificateHandler*, guint milliseconds);
 #endif

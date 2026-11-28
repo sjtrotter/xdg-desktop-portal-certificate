@@ -32,6 +32,7 @@ typedef struct
 	XccUiId id;
 	UiCall call;
 	gboolean handler;
+	gboolean login_timed_out;
 	XccChooserView chooser;
 	XccPinView pin;
 	XccWarning warning;
@@ -49,6 +50,7 @@ static void ui_deliver(void* data)
 	Message* m = data;
 	XccUiV1* ui = &m->c->ui;
 	m->c->delivering_handler = m->handler;
+	m->c->delivering_login_timeout = m->login_timed_out;
 	switch (m->call)
 	{
 	case CHOOSER_SHOW:
@@ -74,6 +76,7 @@ static void ui_deliver(void* data)
 		break;
 	}
 	m->c->delivering_handler = FALSE;
+	m->c->delivering_login_timeout = FALSE;
 	g_ptr_array_unref(m->text);
 	g_free(m->rows);
 	g_atomic_int_add(&m->c->ui_pending, -1);
@@ -268,7 +271,13 @@ static void hide(void* data, PinPrompt* p)
 	{
 		i->inactive = TRUE;
 		if (i->shown)
-			post(message(c, i, HIDE));
+		{
+			Message* m = message(c, i, HIDE);
+			/* Snapshot policy state here: the worker may finish before delivery. */
+			m->login_timed_out = p->cancel_deferred &&
+			                    p->deferred_outcome == CERTIFICATE_PIN_TIMED_OUT;
+			post(m);
+		}
 	}
 	g_mutex_unlock(&c->interactions_lock);
 }

@@ -172,6 +172,7 @@ if service_enabled
       '-Wl,--wrap=p11_kit_module_get_name',
       '-Wl,--wrap=p11_kit_module_get_filename',
       '-Wl,--wrap=certificate_handler_chooser',
+      '-Wl,--wrap=xcc_pin_submit',
     ],
     install: false,
   )

@@ -30,7 +30,7 @@ static void pin_show(void* data, XccUiId id, const XccPinView* view)
 {
 	CertificateStepProvider* provider = data;
 	if (provider->context->delivering_handler)
-		xcc_ui_failed(provider->context, id, XCC_ERROR_NOT_SUPPORTED);
+		certificate_handler_pin(provider->handler, id, view, TRUE);
 	else
 		provider->legacy.pin_show(provider->legacy.user, id, view);
 }
@@ -38,14 +38,18 @@ static void pin_show(void* data, XccUiId id, const XccPinView* view)
 static void pin_update(void* data, XccUiId id, const XccPinView* view)
 {
 	CertificateStepProvider* provider = data;
-	if (!provider->context->delivering_handler)
+	if (provider->context->delivering_handler)
+		certificate_handler_pin(provider->handler, id, view, FALSE);
+	else
 		provider->legacy.pin_update(provider->legacy.user, id, view);
 }
 
 static void warning(void* data, XccUiId id, const XccWarning* view)
 {
 	CertificateStepProvider* provider = data;
-	if (!provider->context->delivering_handler)
+	if (provider->context->delivering_handler)
+		certificate_handler_warning(provider->handler, id, view);
+	else
 		provider->legacy.warning(provider->legacy.user, id, view);
 }
 
@@ -53,7 +57,8 @@ static void hide(void* data, XccUiId id)
 {
 	CertificateStepProvider* provider = data;
 	if (provider->context->delivering_handler)
-		certificate_handler_ui_closed(provider->handler, id);
+		certificate_handler_ui_closed(provider->handler, id,
+		                              provider->context->delivering_login_timeout);
 	else
 		provider->legacy.hide(provider->legacy.user, id);
 }
@@ -62,7 +67,7 @@ static void close_ui(void* data, XccUiId id)
 {
 	CertificateStepProvider* provider = data;
 	if (provider->context->delivering_handler)
-		certificate_handler_ui_closed(provider->handler, id);
+		certificate_handler_ui_closed(provider->handler, id, FALSE);
 	else
 		provider->legacy.close(provider->legacy.user, id);
 }

@@ -59,7 +59,7 @@ if service_enabled
   )
   impl_dbus_sources += handler_dbus_sources
   certificate_adapter_sources = files('certificate-impl.c', 'request-impl.c', 'session-impl.c',
-                                      'handler-impl.c', 'step-provider.c')
+                                      'handler-impl.c', 'step-provider.c', 'sign-options.c')
   certificate_test_sources += certificate_adapter_sources + impl_dbus_sources
 endif
 certificate_core = static_library(
