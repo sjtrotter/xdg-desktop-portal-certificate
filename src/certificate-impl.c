@@ -11,6 +11,7 @@
 
 #include "certificate-impl.h"
 #include "handler-impl.h"
+#include "sign-options.h"
 
 #include <string.h>
 
@@ -682,12 +683,7 @@ static void core_done(XccRequest* request, const XccResult* result, void* data)
 								result->may_sign));
 		return;
 	}
-	GVariantBuilder builder;
-	g_variant_builder_init(&builder, G_VARIANT_TYPE_VARDICT);
-	g_variant_builder_add(&builder, "{sv}", "signature",
-						  g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, result->signature.data,
-													result->signature.size, 1));
-	transaction_respond(transaction, kind, 0, g_variant_builder_end(&builder));
+	transaction_respond(transaction, kind, 0, certificate_sign_results(result));
 }
 static void request_cancelled(GCancellable* cancellable, void* data)
 {
@@ -934,15 +930,10 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	Transaction* transaction = NULL;
 	CertificateImplSession* session = NULL;
 	const char* code = NULL;
-	g_autofree char* mechanism = NULL;
 	g_autofree char* operation_id = NULL;
-	g_autoptr(GVariant) parameters = NULL;
-	g_autoptr(GVariant) payload = NULL;
-	g_autoptr(GBytes) data = NULL;
 	g_autoptr(GError) error = NULL;
 	gboolean bad = FALSE;
-	gsize size = 0;
-	gconstpointer bytes = NULL;
+	CertificateSignOptions parsed = {0};
 
 	if (reject_stranger(impl, invocation))
 		return TRUE;
@@ -963,32 +954,13 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	transaction->parent_window = g_strdup(arg_parent_window);
 
 	option_take_string(arg_options, "operation_id", &operation_id, &bad);
-	if (!option_take_string(arg_options, "mechanism", &mechanism, &bad) || bad)
+	if (bad || !certificate_sign_options_parse(arg_options, &parsed))
 	{
+		certificate_sign_options_clear(&parsed);
 		transaction_respond(transaction, TRANSACTION_OPERATION, CERTIFICATE_RESPONSE_OTHER,
 		                    error_results("invalid_request"));
 		return TRUE;
 	}
-
-	parameters = option_take_vardict(arg_options, "parameters", &bad);
-	if (bad)
-	{
-		transaction_respond(transaction, TRANSACTION_OPERATION, CERTIFICATE_RESPONSE_OTHER,
-		                    error_results("invalid_request"));
-		return TRUE;
-	}
-
-	payload = g_variant_lookup_value(arg_options, "data", G_VARIANT_TYPE_BYTESTRING);
-
-	if (payload == NULL)
-	{
-		transaction_respond(transaction, TRANSACTION_OPERATION, CERTIFICATE_RESPONSE_OTHER,
-		                    error_results("invalid_request"));
-		return TRUE;
-	}
-
-	bytes = g_variant_get_fixed_array(payload, &size, 1);
-	data = g_bytes_new(bytes, size);
 
 	transaction->request = certificate_impl_request_new(
 	    g_dbus_method_invocation_get_sender(invocation), arg_app_id, arg_handle);
@@ -998,6 +970,7 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 	if (!certificate_impl_request_export(transaction->request, impl->connection, &error))
 	{
 		g_warning("Request export failed: %s", error->message);
+		certificate_sign_options_clear(&parsed);
 		transaction_respond(transaction, TRANSACTION_OPERATION, CERTIFICATE_RESPONSE_OTHER,
 		                    error_results("invalid_request"));
 		return TRUE;
@@ -1005,37 +978,13 @@ static gboolean handle_key_operation(CertificateImpl* impl,
 
 	transaction_register(transaction);
 
-	XccSignSpec spec = {.struct_size = sizeof(spec),
-						.abi_version = XCC_ABI_VERSION,
-						.principal = {sizeof(XccPrincipal), XCC_ABI_VERSION, impl->owner_generation,
-									  arg_app_id, CERTIFICATE_IDENTITY_UNKNOWN, FALSE},
-						.parent_window = arg_parent_window,
-						.operation_id = operation_id,
-						.mechanism = mechanism,
-						.data = {sizeof(XccBytes), XCC_ABI_VERSION, bytes, size}};
-	g_autofree char* hash = NULL;
-	g_autofree char* mgf = NULL;
-	g_autofree char* encoding = NULL;
-	static const char* const keys[] = {"hash", "mgf", "salt_length", "signature_encoding", NULL};
-	if (parameters != NULL)
-	{
-		if (!vardict_keys_known(parameters, keys))
-			bad = TRUE;
-		spec.hash_present = option_take_string(parameters, "hash", &hash, &bad);
-		spec.hash = hash;
-		if (g_strcmp0(mechanism, "RSA_PSS") == 0)
-		{
-			spec.mgf_present = option_take_string(parameters, "mgf", &mgf, &bad);
-			spec.mgf = mgf;
-		}
-		spec.encoding_present =
-			option_take_string(parameters, "signature_encoding", &encoding, &bad);
-		spec.signature_encoding = encoding;
-		if (g_strcmp0(mechanism, "RSA_PSS") == 0)
-			spec.salt_length_present =
-				option_take_uint32(parameters, "salt_length", &spec.salt_length, &bad);
-	}
-	transaction->core = xcc_sign_async_parsed(session->core, &spec, !bad, core_done, transaction);
+	parsed.spec.principal = (XccPrincipal){sizeof(XccPrincipal), XCC_ABI_VERSION,
+		impl->owner_generation, arg_app_id, CERTIFICATE_IDENTITY_UNKNOWN, FALSE};
+	parsed.spec.parent_window = arg_parent_window;
+	parsed.spec.operation_id = operation_id;
+	transaction->core = xcc_sign_async_parsed(session->core, &parsed.spec,
+		parsed.valid_parameters, core_done, transaction);
+	certificate_sign_options_clear(&parsed);
 	bind_request(transaction);
 
 	return TRUE;

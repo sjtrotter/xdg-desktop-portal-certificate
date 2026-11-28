@@ -131,14 +131,61 @@
         Sign:
         @handle: Public Request path
         @session_handle: Handler session path
-        @options: Signing options, reserved for slice 2b
+        @options: Signing mechanism, parameters and input digest
         @response: Numeric response
         @results: Result vardict
 
-        Currently returns response 2, ``reason=unsupported``.
-        Results include ``instance`` (``t``), the service operation instance (zero
-        when no operation is known), and ``reason`` (``s``) on failure. Response
-        0 is success or a step, 1 is cancellation, and 2 is failure.
+        Registers a new operation instance before calling the core. Options match
+        impl Sign: required ``mechanism`` (``s``) and ``data`` (``ay``), optional
+        ``parameters`` (``a{sv}``). Parameter keys are ``hash`` (``s``), ``mgf``
+        (``s``, RSA_PSS only), ``salt_length`` (``u``, RSA_PSS only) and
+        ``signature_encoding`` (``s``). Unknown parameter keys fail validation;
+        unknown top-level options are ignored. ``operation_id`` is ignored;
+        the service uses handle plus instance for core provenance.
+
+        Results always include ``instance`` (``t``). Response 0 returns either
+        ``signature`` (``ay``, identical to impl Sign) or a step with ``step``
+        (``s``: pin, pin_pad or confirm), ``token`` (``t``), ``deadline`` (``t``,
+        absolute CLOCK_MONOTONIC seconds rounded up) and ``view`` (``a{sv}``).
+        Response 1 is cancellation; response 2 includes ``reason`` (``s``), using
+        impl Sign reason codes (pin_locked, token_removed and device_error; an
+        exhausted PIN prompt and a login timeout are device_error). Each issued PIN, pin-pad or confirmation
+        step expires after 120 seconds with OperationEnded(2, reason=timeout).
+        Accepted submissions use the core's separate login timeout.
+
+        A queued Sign remains pending without a step or deadline until its prompt
+        is shown. Concurrent Signs on one session share ordinary token login.
+        Cancelling the step holder retires its token; the core hands the prompt
+        to the next waiter, which receives a fresh step in its pending Sign reply.
+        The core preserves retry flags and the attempt cap. Context-specific
+        authentication issues a separate PIN interaction for every Sign.
+
+        PIN @view keys serialize XccPinView; missing text is an empty string and
+        display text is sanitized by the core. No parent_window is transported:
+
+        * ``token_label`` (``s``): token display label.
+        * ``reader`` (``s``): reader display name.
+        * ``caller_display`` (``s``): application display name.
+        * ``purpose_display`` (``s``): operation purpose disclosure.
+        * ``context_specific`` (``b``): CKA_ALWAYS_AUTHENTICATE login.
+        * ``protected_path`` (``b``): reader collects the PIN.
+        * ``busy`` (``b``): a login worker is running.
+        * ``count_low`` (``b``): token reports few retries remain.
+        * ``final_try`` (``b``): token reports the final attempt, including on
+          the first step. Typed input needs no separate confirmation step.
+        * ``locked`` (``b``): token reports the PIN locked.
+        * ``status`` (``s``): formatted retry or input status.
+        * ``status_code`` (``u``): 0 none/busy update, 1 incorrect, 2 required,
+          3 too long, 4 memory unavailable. Nonzero requests fresh input.
+        * ``purpose`` (``u``): purpose enum as on Acquire.
+        * ``generic_purpose`` (``b``): use generic purpose disclosure.
+        * ``display_flags`` (``u``): placeholder flags as on Acquire.
+        * ``session_id`` (``s``): core session identifier.
+        * ``operation_id`` (``s``): service handle plus instance.
+
+        Confirmation views include the PIN view and ``warning_id`` (``t``),
+        ``code`` (``u``, 0 final try), and ``message`` (``s``, core warning text).
+        The confirmation token is bound to that warning ID.
     -->
     <method name="Sign">
       <arg type="o" name="handle" direction="in"/>
@@ -180,10 +227,12 @@
         @response: Numeric response
         @results: Result vardict
 
-        Currently returns response 2, ``reason=unsupported``.
-        Results include ``instance`` (``t``), the service operation instance (zero
-        when no operation is known), and ``reason`` (``s``) on failure. Response
-        0 is success or a step, 1 is cancellation, and 2 is failure.
+        Consumes only a pin_pad token and acknowledges that the dialog is shown.
+        Starts reader login immediately unless the token reports final try; then
+        returns a fresh confirm step. Otherwise waits for signature or failure.
+        Incorrect PIN on a protected path is terminal; no retry is offered.
+        Replayed or wrong-kind tokens answer response 2, reason=stale_step.
+        Results and views are as on Sign.
     -->
     <method name="Ready">
       <arg type="o" name="handle" direction="in"/>
@@ -200,10 +249,24 @@
         @response: Numeric response
         @results: Result vardict
 
-        Currently returns response 2, ``reason=unsupported``. No PIN is read.
-        Results include ``instance`` (``t``), the service operation instance (zero
-        when no operation is known), and ``reason`` (``s``) on failure. Response
-        0 is success or a step, 1 is cancellation, and 2 is failure.
+        Accepts only a pin token. The invocation message must carry exactly one
+        Unix fd, indexed by @pin (zero). Requires S_ISREG and size 1..511 (also
+        bounded by token ulMaxPinLen if recorded by the core). Secretmem is mapped
+        shared read-only, copied into XccSecret, wiped if writable and unmapped.
+        Other fds must support F_GET_SEALS and include F_SEAL_SHRINK, F_SEAL_GROW
+        and F_SEAL_SEAL. They are read with pread, never mmap, then overwritten
+        with zeros using pwrite. Wipe failure is logged and does not reject a
+        copied PIN. Embedded NUL is rejected. No PIN bytes enter a GVariant.
+
+        Binding, fd type, size, seals, copying and secret validation all happen
+        before token removal. Invalid transport answers response 2,
+        ``reason=invalid_pin``. Unknown, replayed or wrong-kind tokens, and replies
+        the core reports stale, answer response 2, ``reason=stale_step``. These
+        answers affect only that call: the live step and its deadline continue,
+        and no attempt is spent. Accepted input acknowledges presentation and
+        submits to the core, awaiting a signature, fresh pin step after an
+        incorrect PIN, or terminal failure. Each retry has a new token and the
+        core's refreshed status and retry flags. Results are as on Sign.
     -->
     <method name="SubmitPin">
       <annotation name="org.gtk.GDBus.C.UnixFD" value="true"/>
@@ -222,10 +285,11 @@
         @response: Numeric response
         @results: Result vardict
 
-        Currently returns response 2, ``reason=unsupported``.
-        Results include ``instance`` (``t``), the service operation instance (zero
-        when no operation is known), and ``reason`` (``s``) on failure. Response
-        0 is success or a step, 1 is cancellation, and 2 is failure.
+        Consumes only a confirm token and replies to its bound core warning ID.
+        Accepted confirmation waits for signature or failure. Declining ends the
+        operation with response 1 and spends no PIN attempt. Wrong-kind or stale
+        tokens answer response 2, reason=stale_step, leaving the live step valid.
+        Results and views are as on Sign.
     -->
     <method name="Confirm">
       <arg type="o" name="handle" direction="in"/>
@@ -256,8 +320,7 @@
         Reports ``purposes`` (``as``: client_auth, signing, email, ssh),
         ``operations`` (``as``: sign), ``mechanisms`` (``as``: available signing
         mechanisms), and ``protected_authentication_path`` (``b``: a token has a
-        PIN pad). Service display availability is excluded. Sign is declared but
-        returns unsupported until slice 2b.
+        PIN pad). Service display availability is excluded.
     -->
     <method name="GetCapabilities">
       <arg type="s" name="app_id" direction="in"/>
@@ -270,10 +333,12 @@
         @handle: Operation Request path
         @instance: Operation instance
         @token: Current live step token
-        @view: Latest chooser view; keys as on Acquire
+        @view: Latest chooser or PIN view; keys as on Acquire or Sign
 
         Updates a displayed step without replacing its token. Pre-step updates
-        are coalesced into the newest view in the step reply.
+        are coalesced into the newest view in the step reply. During a pending
+        PIN reply, busy updates name the most recently issued token so the
+        frontend can update the same dialog; that token remains consumed.
     -->
     <signal name="OperationUpdated">
       <arg type="o" name="handle"/>
@@ -287,7 +352,7 @@
         @handle: Operation Request path
         @instance: Operation instance
         @response: Terminal response: 0 success, 1 cancellation, 2 failure
-        @results: Terminal result keys and instance as on Acquire
+        @results: Terminal result keys and instance as on Acquire or Sign
 
         Ends an operation while a step is outstanding. Timeout is response 2,
         ``reason=timeout``; session loss and core failures carry their reason.

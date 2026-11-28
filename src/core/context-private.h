@@ -21,6 +21,8 @@ struct XccContext
 	gint refs;
 	gint posts;
 	gboolean delivering_handler; /* Dispatcher thread, during a UI callback. */
+	/* Private timeout cause captured by the coordinator for the current hide callback. */
+	gboolean delivering_login_timeout;
 	gint ui_pending, ui_handles;
 	GMutex queue_lock;
 	GMutex interactions_lock;

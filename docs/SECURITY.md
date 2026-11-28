@@ -35,7 +35,7 @@ experimental export conditions.
 | Prompt selection is explicit and logged | `certificate_pin_set_prompt_kind()` in `src/ui/pin-backends.c`, `src/ui/pin-gtk.c`, `src/ui/pin-system.c`; `--pin-prompt=auto|gtk|system`, `pin-prompt-selected detail=...`; `test-pin-system.c` and `tools/ui-smoke.sh --pin-prompt=system` |
 | Only `main()` selects the system prompter by default | `pin_prompt_kind` defaults to `gtk` for library and test use |
 | No remember-PIN control | GTK has no control; system path uses `gcr_prompt_set_choice_label(NULL)` [[S56](SOURCES.md)]. `test-pin-system.c` checks empty choice label and `password-new=false` |
-| Login timeout hides the prompt and abandons late success | `on_login_timeout()`, `CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT`; 60 s default, `--login-timeout 0` disables; `/pin-system/login-timeout`. The caller still waits for the module to return |
+| Login timeout hides the prompt and abandons late success | `on_login_timeout()`, `CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT`; 60 s default, `--login-timeout 0` disables; `/pin-system/login-timeout`. The legacy impl caller still waits for the module to return |
 | Owned PIN pages are aligned, locked where possible, non-dumpable and wiped | `XccSecret` in `src/core/secret.c`: `mlock()`, `MADV_DONTDUMP`, `explicit_bzero()`. Wipe precedes completion; lock failure warns once without refusing login |
 | Worker owns the submitted PIN page | `src/core/pin.c` transfers `XccSecret` without copying; `test-cancellation.c` checks the worker's PIN after window cancellation |
 | Shared user-login request cancellation completes that request while worker cleanup continues; cancelling the last waiter also hides the prompt | `waiter_cancelled_idle()` in `src/broker/operations.c`; PIN-dialog cancellation and login timeout still await worker return in `src/core/pin.c`; `test-core-api.c`, `test-cancellation.c`, with ASan in sanitizer builds |
@@ -192,11 +192,18 @@ PIN interaction.
 
 ## PIN handling
 
-Neither Certificate interface transports PINs. PINs must never enter their GVariants, error
-messages, URIs or logs. The frontend never receives them. Backend-owned buffers exist only
-through login and are wiped on every exit path, including success, failure, cancellation, timeout
-and window destruction. No emitted URI contains `pin-value` or `pin-source`; received URI text
-is truncated before logging.
+The public and legacy impl Certificate interfaces do not transport PINs. The handler's
+`SubmitPin` takes a descriptor holding the PIN. PIN bytes never enter GVariants, error
+messages, URIs or logs. The frontend relays the descriptor unread, so PIN bytes stay out of
+message bodies, bus buffers and frontend GVariant storage. The current owner of
+`org.freedesktop.portal.Desktop` can still read it, and through the handler flow that owner
+can obtain both PINs and signatures. Same-UID attackers remain outside the threat model.
+Reopening relay descriptors through `/proc` and descriptor delivery to bus monitors have not
+been checked. The service validates descriptor type, size and seals before consuming a step,
+copies the PIN into `XccSecret`, wipes the descriptor when it can and closes its copy on every
+path. Backend-owned buffers exist only through login and are wiped on every exit path,
+including success, failure, cancellation, timeout and window destruction. No emitted URI
+contains `pin-value` or `pin-source`; received URI text is truncated before logging.
 
 ### PIN entry and transport
 
@@ -329,6 +336,12 @@ the prompt. PIN-dialog cancellation and login timeout still await worker return.
 `--login-timeout` (60 s, `0` disables) hides the prompt, logs `pin-timeout` and records
 `CERTIFICATE_PKCS11_ERROR_LOGIN_TIMEOUT`. Late success is abandoned by closing that grant's
 device session on a worker. An attempt already submitted to the token is still spent.
+
+The handler frontend is notified at the login timeout: a pending submission receives
+response `2` with reason `device_error`, or an outstanding step receives `OperationEnded`
+with that outcome. Later core completion cannot end that handler operation again. The core
+still awaits the worker, preserves the shared waiters' outcomes and abandons late success;
+the legacy impl caller continues to await worker return.
 
 ## Grant scoping
 
