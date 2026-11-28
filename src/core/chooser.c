@@ -5,6 +5,7 @@
  */
 
 #include "chooser.h"
+#include "ui-routing.h"
 #include "sources.h"
 
 #include "../redact.h"
@@ -37,6 +38,7 @@ struct CertificateChooser
 	guint cancel_idle;
 	gboolean finished;
 	gboolean reply_pending;
+	gboolean handler_ui;
 	int error;
 };
 
@@ -67,10 +69,20 @@ void certificate_chooser_set_provider(const CertificateChooserProvider* provider
 	chooser_provider = *provider;
 }
 
-gboolean certificate_chooser_available(void)
+gboolean certificate_chooser_available_for(GCancellable* cancellable)
 {
 	return chooser_provider.chooser_show != NULL &&
-	       (!chooser_provider.needs_display || certificate_ui_has_display());
+	       (xcc_cancellable_is_handler(cancellable) ||
+	        !chooser_provider.needs_display || certificate_ui_has_display());
+}
+gboolean certificate_chooser_available(void)
+{
+	return certificate_chooser_available_for(NULL);
+}
+gboolean certificate_chooser_is_handler(XccUiId id)
+{
+	Chooser* chooser = choosers != NULL ? g_hash_table_lookup(choosers, &id) : NULL;
+	return chooser != NULL && chooser->handler_ui;
 }
 
 static void choice_free(gpointer data)
@@ -354,6 +366,16 @@ void certificate_chooser_update(CertificateChooser* chooser, GPtrArray* candidat
 	provider_depth--;
 }
 
+void certificate_chooser_refresh(XccUiId id)
+{
+	Chooser* chooser = choosers != NULL ? g_hash_table_lookup(choosers, &id) : NULL;
+	if (chooser == NULL || chooser->finished)
+		return;
+	provider_depth++;
+	chooser->provider.chooser_update(chooser->provider.user_data, id, &chooser->view);
+	provider_depth--;
+}
+
 void certificate_chooser_set_tokens_reading(CertificateChooser* chooser, gboolean reading)
 {
 	if (chooser->finished || chooser->view.tokens_reading == reading)
@@ -377,7 +399,7 @@ CertificateChooser* certificate_chooser_show(const char* parent_window,
 	XccChooserView* view;
 	GPtrArray* text;
 
-	if (!certificate_chooser_available())
+	if (!certificate_chooser_available_for(cancellable))
 	{
 		CertificateChooserResult result = {NULL, 0};
 
@@ -387,6 +409,7 @@ CertificateChooser* certificate_chooser_show(const char* parent_window,
 
 	chooser = g_new0(Chooser, 1);
 	chooser->refs = 1;
+	chooser->handler_ui = xcc_cancellable_is_handler(cancellable);
 	chooser->coordinator = g_main_context_ref_thread_default();
 	chooser->id = ++next_ui_id;
 	chooser->provider = chooser_provider;

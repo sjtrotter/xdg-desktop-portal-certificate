@@ -5,6 +5,7 @@
  */
 
 #include "operations.h"
+#include "../core/ui-routing.h"
 #include "../core/sources.h"
 
 #include <string.h>
@@ -789,6 +790,7 @@ static void on_opened(GObject* source, GAsyncResult* result, gpointer user_data)
 		session->login_in_progress = TRUE;
 		/* The session's cancellable keeps one request from cancelling other login waiters. */
 		session->login_cancellable = g_cancellable_new();
+		xcc_cancellable_set_handler(session->login_cancellable, g_atomic_int_get(&session->handler_ui));
 		interaction = g_new0(LoginInteraction, 1);
 		interaction->refs = 1;
 		interaction->tokens = operation->tokens;

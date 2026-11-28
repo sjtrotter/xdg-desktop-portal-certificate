@@ -23,6 +23,7 @@
 
 #include "certificate.h"
 #include "certificate-impl.h"
+#include "handler-impl.h"
 #include "config.h"
 #include "redact.h"
 #include "tokens/discovery.h"
@@ -33,6 +34,7 @@
 
 static GMainLoop* loop = NULL;
 static CertificateImpl* impl = NULL;
+static CertificateHandler* handler = NULL;
 static CertificateTokens* tokens = NULL;
 
 static gboolean opt_replace = FALSE;
@@ -187,7 +189,9 @@ static void on_bus_acquired(GDBusConnection* connection, const char* name, gpoin
 	g_autoptr(GError) error = NULL;
 
 	impl = certificate_impl_new(connection, tokens, &error);
-	if (impl == NULL)
+	if (impl != NULL)
+		handler = certificate_handler_new(impl, connection, &error);
+	if (impl == NULL || handler == NULL)
 	{
 		g_warning("Backend interface export failed: %s", error->message);
 		g_main_loop_quit(loop);
@@ -498,7 +502,7 @@ int main(int argc, char** argv)
 
 	on_bus_acquired(connection, CERTIFICATE_IMPL_BUS_NAME, NULL);
 
-	if (impl != NULL)
+	if (impl != NULL && handler != NULL)
 		g_main_loop_run(loop);
 	else
 		status = CERTIFICATE_EXIT_INTERNAL;
@@ -508,6 +512,7 @@ int main(int argc, char** argv)
 	/* Flush invalidations before exiting so the frontend receives them. */
 	g_dbus_connection_flush_sync(connection, NULL, NULL);
 
+	certificate_handler_free(handler);
 	certificate_impl_free(impl);
 	g_bus_unown_name(owner_id);
 	g_main_loop_unref(loop);

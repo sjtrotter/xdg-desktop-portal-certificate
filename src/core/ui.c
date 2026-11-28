@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "context-private.h"
 #include "pin-internal.h"
+#include "ui-routing.h"
 #include <string.h>
 
 typedef struct
 {
 	XccUiId id;
-	gboolean pin, shown, ready;
+	gboolean pin, shown, ready, handler;
 	/* ready_requested includes a queued acknowledgement. */
 	gboolean ready_requested, pending, inactive, busy, protected_path, warning_pending;
 	uint64_t revision;
@@ -30,6 +31,7 @@ typedef struct
 	XccContext* c;
 	XccUiId id;
 	UiCall call;
+	gboolean handler;
 	XccChooserView chooser;
 	XccPinView pin;
 	XccWarning warning;
@@ -46,6 +48,7 @@ static void ui_deliver(void* data)
 {
 	Message* m = data;
 	XccUiV1* ui = &m->c->ui;
+	m->c->delivering_handler = m->handler;
 	switch (m->call)
 	{
 	case CHOOSER_SHOW:
@@ -70,6 +73,7 @@ static void ui_deliver(void* data)
 		ui->close(ui->user, m->id);
 		break;
 	}
+	m->c->delivering_handler = FALSE;
 	g_ptr_array_unref(m->text);
 	g_free(m->rows);
 	g_atomic_int_add(&m->c->ui_pending, -1);
@@ -82,6 +86,7 @@ static Message* message(XccContext* c, Interaction* i, UiCall call)
 	m->c = xcc_context_ref(c);
 	m->id = i->id;
 	m->call = call;
+	m->handler = i->handler;
 	m->text = g_ptr_array_new_with_free_func(g_free);
 	return m;
 }
@@ -117,6 +122,7 @@ static void chooser_message(XccContext* c, XccUiId id, const XccChooserView* vie
 {
 	g_mutex_lock(&c->interactions_lock);
 	Interaction* i = interaction(c, id, NULL, TRUE);
+	i->handler = certificate_chooser_is_handler(id);
 	i->revision = view->revision;
 	if (i->candidates == NULL)
 		i->candidates = g_array_new(FALSE, FALSE, sizeof(uint64_t));
@@ -198,6 +204,7 @@ static void pin_message(XccContext* c, PinPrompt* prompt, const XccPinView* view
 {
 	g_mutex_lock(&c->interactions_lock);
 	Interaction* i = interaction(c, 0, prompt, TRUE);
+	i->handler = xcc_cancellable_is_handler(prompt->cancellable);
 	i->busy = view->busy;
 	i->protected_path = view->protected_path;
 	if (!view->busy)
@@ -382,9 +389,16 @@ static void reply(void* data)
 	{
 		g_mutex_lock(&r->c->interactions_lock);
 		Interaction* i = g_hash_table_lookup(r->c->interactions, &r->id);
+		XccUiId refresh = 0;
 		if (i != NULL)
+		{
 			i->pending = FALSE;
+			if (r->kind == 0 && i->handler)
+				refresh = i->chooser_id;
+		}
 		g_mutex_unlock(&r->c->interactions_lock);
+		if (refresh != 0)
+			certificate_chooser_refresh(refresh);
 	}
 	free_reply(r);
 }

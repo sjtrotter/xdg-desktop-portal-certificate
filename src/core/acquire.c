@@ -202,7 +202,7 @@ static void on_enumerated(GObject* source, GAsyncResult* result, gpointer user_d
 		return;
 	}
 
-	if (!certificate_chooser_available())
+	if (!certificate_chooser_available_for(transaction->cancellable))
 	{
 		xcc_request_complete(transaction, XCC_ERROR_NO_DISPLAY);
 		return;

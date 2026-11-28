@@ -60,6 +60,9 @@ void certificate_chooser_set_tokens_reading(CertificateChooser* chooser, gboolea
 XccUiReply certificate_chooser_reply(XccUiId id, guint64 revision, guint64 candidate_id);
 
 gboolean certificate_chooser_available(void);
+gboolean certificate_chooser_available_for(GCancellable*);
+gboolean certificate_chooser_is_handler(XccUiId);
+void certificate_chooser_refresh(XccUiId);
 
 /* Display helpers sanitize and cap external fields. */
 
