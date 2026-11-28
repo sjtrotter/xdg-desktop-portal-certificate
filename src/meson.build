@@ -52,7 +52,14 @@ if service_enabled
     ],
     interface_prefix: 'org.freedesktop.impl.portal.', namespace: 'XdpImpl',
   )
-  certificate_adapter_sources = files('certificate-impl.c', 'request-impl.c', 'session-impl.c')
+  handler_dbus_sources = gnome.gdbus_codegen(
+    'xdp-handler-dbus',
+    sources: '../data/org.freedesktop.handler.portal.experimental.Certificate1.xml',
+    interface_prefix: 'org.freedesktop.handler.portal.', namespace: 'XdpHandler',
+  )
+  impl_dbus_sources += handler_dbus_sources
+  certificate_adapter_sources = files('certificate-impl.c', 'request-impl.c', 'session-impl.c',
+                                      'handler-impl.c', 'step-provider.c')
   certificate_test_sources += certificate_adapter_sources + impl_dbus_sources
 endif
 certificate_core = static_library(
@@ -64,7 +71,7 @@ certificate_core_dep = declare_dependency(
   link_with: certificate_core,
   include_directories: [config_inc, include_directories('.')],
   dependencies: certificate_deps,
-  sources: service_enabled ? impl_dbus_sources[1] : [],
+  sources: service_enabled ? [impl_dbus_sources[1], handler_dbus_sources[1]] : [],
 )
 
 if service_enabled
@@ -87,7 +94,7 @@ if service_enabled
   )
   certificate_service_dep = declare_dependency(
     link_with: [certificate_service, certificate_core],
-    sources: impl_dbus_sources[1],
+    sources: [impl_dbus_sources[1], handler_dbus_sources[1]],
     include_directories: [config_inc, include_directories('.')],
     dependencies: certificate_deps + certificate_ui_deps,
   )

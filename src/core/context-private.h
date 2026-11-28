@@ -20,6 +20,7 @@ struct XccContext
 {
 	gint refs;
 	gint posts;
+	gboolean delivering_handler; /* Dispatcher thread, during a UI callback. */
 	gint ui_pending, ui_handles;
 	GMutex queue_lock;
 	GMutex interactions_lock;

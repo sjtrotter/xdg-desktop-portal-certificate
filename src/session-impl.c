@@ -96,7 +96,15 @@ static void on_core_invalidated(XccSession* core, const char* reason, gpointer u
 	certificate_log_grant(CERTIFICATE_REASON_GRANT_INVALIDATED, session->id, reason);
 	g_signal_emit(session, signals[SIGNAL_INVALIDATED], 0, reason);
 	if (session->exported)
-		xdp_impl_session_emit_closed(XDP_IMPL_SESSION(session));
+	{
+		if (session->handler)
+			g_dbus_connection_emit_signal(
+				g_dbus_interface_skeleton_get_connection(G_DBUS_INTERFACE_SKELETON(session)),
+				session->owner, session->id, "org.freedesktop.impl.portal.Session", "Closed",
+				NULL, NULL);
+		else
+			xdp_impl_session_emit_closed(XDP_IMPL_SESSION(session));
+	}
 }
 
 CertificateImplSession* certificate_impl_session_new(const char* session_handle,

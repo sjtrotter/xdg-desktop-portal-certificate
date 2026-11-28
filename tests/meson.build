@@ -161,6 +161,22 @@ if service_enabled
     install: false,
   )
 
+  exe = executable(
+    'test-handler-dbus', ['test-handler-dbus.c'] + fixture_util,
+    dependencies: [certificate_core_dep],
+    include_directories: [config_inc, include_directories('..' / 'src'), include_directories('.')],
+    c_args: test_args + certificate_log_args,
+    link_args: [
+      '-Wl,--wrap=p11_kit_modules_load_and_initialize',
+      '-Wl,--wrap=p11_kit_modules_finalize_and_release',
+      '-Wl,--wrap=p11_kit_module_get_name',
+      '-Wl,--wrap=p11_kit_module_get_filename',
+      '-Wl,--wrap=certificate_handler_chooser',
+    ],
+    install: false,
+  )
+  test('handler-dbus', exe, protocol: 'tap', env: test_env, timeout: 120)
+
   service_test_cases = {
     'impl-dbus': 'test-impl-dbus.c',
     'cancellation': 'test-cancellation.c',

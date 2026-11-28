@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "context-private.h"
+#include "ui-routing.h"
 #include "dispatch-glib.h"
 #include "../redact.h"
 #include "../broker/operations.h"
@@ -242,6 +243,7 @@ XccRequest* xcc_request_new(XccContext* c, XccSession* s, XccResultKind kind, Xc
 	r->context = xcc_context_ref(c);
 	r->session = s != NULL ? g_object_ref(s) : NULL;
 	r->cancellable = g_cancellable_new();
+	xcc_cancellable_set_handler(r->cancellable, s != NULL && g_atomic_int_get(&s->handler_ui));
 	r->done = done;
 	r->user = user;
 	r->result.struct_size = sizeof(r->result);

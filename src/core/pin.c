@@ -11,6 +11,7 @@
 #include "../certificate.h"
 #include "../redact.h"
 #include "pin-internal.h"
+#include "ui-routing.h"
 
 static gboolean ui_has_display = FALSE;
 
@@ -728,7 +729,8 @@ void certificate_pin_login_operation(CertificateToken* token, const char* sessio
 	CertificatePinProvider provider = pin_provider;
 
 	/* Never read PINs from stdin; providers declare whether they require a local display. */
-	if (provider.pin_show == NULL || (provider.needs_display && !certificate_ui_has_display()))
+	if (provider.pin_show == NULL || (provider.needs_display && !xcc_cancellable_is_handler(cancellable) &&
+	    !certificate_ui_has_display()))
 	{
 		done(CERTIFICATE_PIN_NO_DISPLAY, user_data);
 

@@ -16,6 +16,12 @@
 /** Backend trust and ownership boundaries are documented in docs/IMPL-INTERFACE.md. */
 
 typedef struct CertificateImpl CertificateImpl;
+typedef struct CertificateHandler CertificateHandler;
+XccContext* certificate_impl_context(CertificateImpl*);
+guint64 certificate_impl_generation(CertificateImpl*);
+CertificateImplSession* certificate_impl_find_session(CertificateImpl*, const char*);
+void certificate_impl_add_session(CertificateImpl*, CertificateImplSession*);
+void certificate_impl_set_handler(CertificateImpl*, CertificateHandler*);
 
 CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTokens* tokens,
                                       GError** error);

@@ -24,6 +24,7 @@ struct _XccSession
 	char* app_id;
 	CertificateIdentityLevel identity_level;
 	gboolean identity_seen;
+	gint handler_ui; /* Set before the first request. */
 	char* id; /* Redacted logging context; no path interpretation. */
 	gboolean closed;
 	gboolean invalidating;

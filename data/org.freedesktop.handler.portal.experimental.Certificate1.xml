@@ -1,0 +1,319 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
+<node name="/" xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+  <!--
+      org.freedesktop.handler.portal.experimental.Certificate1:
+      @short_description: Card service driven by the certificate portal frontend
+
+      Every method requires the current owner of org.freedesktop.portal.Desktop.
+      All signals are unicast to that frontend connection. Instance numbers are
+      monotonic for the service lifetime; reused paths receive new instances.
+  -->
+  <interface name="org.freedesktop.handler.portal.experimental.Certificate1">
+    <!--
+        CreateSession:
+        @handle: Request path identifying creation
+        @session_handle: Session object path
+        @app_id: Frontend-established app ID
+        @identity: Caller identity; currently empty, unknown keys fail with invalid_request
+        @options: Reserved extensible options, currently unused
+        @response: Numeric response
+        @results: Result vardict
+
+        Creates an empty grant session and exports org.freedesktop.impl.portal.Session
+        at @session_handle. Both interfaces share the path space; an open session
+        prevents reuse. Sessions are usable only through their creating interface.
+        The impl CreateSession consumes no identity keys today. Results contain
+        the session ``instance`` (``t``), and ``reason`` (``s``) on failure.
+    -->
+    <method name="CreateSession">
+      <arg type="o" name="handle" direction="in"/>
+      <arg type="o" name="session_handle" direction="in"/>
+      <arg type="s" name="app_id" direction="in"/>
+      <arg type="a{sv}" name="identity" direction="in"/>
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type="u" name="response" direction="out"/>
+      <arg type="a{sv}" name="results" direction="out"/>
+    </method>
+
+    <!--
+        Acquire:
+        @handle: Public Request path identifying the operation
+        @session_handle: Handler-created session path
+        @options: Acquisition constraints and identity level
+        @response: Numeric response
+        @results: Result vardict
+
+        Registers the operation before discovery. A live @handle cannot be reused.
+        Options match impl AcquireCredential: ``purpose`` (``s``),
+        ``app_identity_level`` (``s``), ``certificate_filter`` (``a{sv}``),
+        ``operation_policy`` (``a{sv}``, only ``sign`` (``b``)),
+        ``interaction_mode`` (``s``), ``activation_token`` (``s``), ``reason``
+        (``s``), and ``lifetime`` (``u``). The app ID comes from the session.
+        Results include ``instance`` (``t``), the service operation instance (zero
+        when no operation is known), and ``reason`` (``s``) on failure. Response
+        0 is success or a step, 1 is cancellation, and 2 is failure.
+        A chooser step returns ``step`` (``s``, ``chooser``), ``token`` (``t``,
+        nonzero and single use), ``deadline`` (``t``, absolute CLOCK_MONOTONIC
+        seconds, rounded up), ``instance`` (``t``) and ``view`` (``a{sv}``).
+        The service expires the chooser after 300 seconds.
+
+        Chooser @view keys serialize XccChooserView. Missing text is an empty
+        string; display text is already sanitized by the core:
+
+        * ``revision`` (``t``): inventory revision used by the step.
+        * ``candidates`` (``aa{sv}``): certificate rows, described below.
+        * ``caller_name`` (``s``): application display name.
+        * ``app_id`` (``s``): frontend-established application ID.
+        * ``identity_level`` (``u``): 0 sandboxed, 1 host, 2 unidentified.
+        * ``identity_detail`` (``s``): identity disclosure.
+        * ``purpose`` (``u``): 0 client_auth, 1 signing, 2 email, 3 ssh.
+        * ``purpose_text`` (``s``): purpose heading.
+        * ``purpose_detail`` (``s``): purpose disclosure.
+        * ``may_sign`` (``b``): grant permits signing.
+        * ``may_decrypt`` (``b``): grant permits decryption (currently false).
+        * ``operation_scope`` (``s``): operation disclosure.
+        * ``lifetime_seconds`` (``u``): allowed grant lifetime.
+        * ``duration`` (``s``): formatted lifetime disclosure.
+        * ``later_prompt`` (``s``): later interaction disclosure.
+        * ``reason_label`` (``s``): label for the application's reason.
+        * ``untrusted_reason`` (``s``): sanitized application-supplied reason.
+        * ``tokens_present`` (``b``): security tokens are present.
+        * ``parent_window`` (``s``): parent window identifier, currently empty.
+        * ``activation_token`` (``s``): activation token, consumed on presentation.
+        * ``generic_purpose`` (``b``): show generic purpose disclosure.
+        * ``display_flags`` (``u``): placeholder flags; bit 3 is caller fallback.
+        * ``tokens_reading`` (``b``): inventory refresh is in progress.
+        * ``session_id`` (``s``): core session logging identifier.
+        * ``operation_id`` (``s``): core operation identifier, handle plus instance.
+
+        Each candidate has these keys:
+
+        * ``id`` (``t``): opaque candidate ID for Choose.
+        * ``subject`` (``s``): subject display text.
+        * ``issuer`` (``s``): issuer display text.
+        * ``token`` (``s``): token display label.
+        * ``reader`` (``s``): reader display name.
+        * ``expiry`` (``s``): formatted expiry.
+        * ``detail`` (``s``): certificate summary.
+        * ``fingerprint`` (``s``): certificate fingerprint.
+        * ``invalid`` (``b``): certificate is outside its validity interval.
+        * ``not_before`` (``x``): Unix seconds, nonpositive means unknown.
+        * ``not_after`` (``x``): Unix seconds, nonpositive means unknown.
+        * ``validity`` (``u``): 0 valid, 1 expired, 2 not yet valid, 3 unknown.
+        * ``key_type`` (``s``): key algorithm, empty when unknown.
+        * ``key_size`` (``u``): key size in bits.
+        * ``display_flags`` (``u``): placeholder flags; bits 0, 1 and 2 are
+          subject, issuer and token fallbacks respectively.
+        Credential success results match impl AcquireCredential:
+
+        * ``certificate_der`` (``ay``): selected leaf certificate in DER.
+        * ``chain_der`` (``aay``): additional certificates, currently empty.
+        * ``chain_status`` (``s``): currently ``leaf_only``.
+        * ``token_display`` (``a{sv}``): ``label``, ``manufacturer``, ``model``,
+          ``reader`` (all ``s``) and ``protected_authentication_path`` (``b``).
+          These are the original token metadata; serial numbers are excluded.
+        * ``key_type`` (``s``), ``key_size`` (``u``), ``key_curve`` (``s``, optional):
+          selected key algorithm, size in bits and curve name.
+        * ``supported_mechanisms`` (``as``): usable signature mechanisms.
+        * ``permitted_operations`` (``as``): permitted operations, currently sign.
+        * ``may_prompt_later`` (``b``): private-key use can require a PIN.
+    -->
+    <method name="Acquire">
+      <arg type="o" name="handle" direction="in"/>
+      <arg type="o" name="session_handle" direction="in"/>
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type="u" name="response" direction="out"/>
+      <arg type="a{sv}" name="results" direction="out"/>
+    </method>
+
+    <!--
+        Sign:
+        @handle: Public Request path
+        @session_handle: Handler session path
+        @options: Signing options, reserved for slice 2b
+        @response: Numeric response
+        @results: Result vardict
+
+        Currently returns response 2, ``reason=unsupported``.
+        Results include ``instance`` (``t``), the service operation instance (zero
+        when no operation is known), and ``reason`` (``s``) on failure. Response
+        0 is success or a step, 1 is cancellation, and 2 is failure.
+    -->
+    <method name="Sign">
+      <arg type="o" name="handle" direction="in"/>
+      <arg type="o" name="session_handle" direction="in"/>
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type="u" name="response" direction="out"/>
+      <arg type="a{sv}" name="results" direction="out"/>
+    </method>
+
+    <!--
+        Choose:
+        @handle: Live operation Request path
+        @token: Chooser step token
+        @candidate_id: Opaque candidate ID from the chooser view
+        @response: Numeric response
+        @results: Result vardict
+
+        Consumes a matching chooser token atomically and waits for the credential.
+        A stale inventory revision returns a fresh chooser step. Unknown, replayed,
+        wrong-operation, wrong-session or wrong-kind tokens return response 2,
+        ``reason=stale_step``, without consuming the live step.
+        Results include ``instance`` (``t``), the service operation instance (zero
+        when no operation is known), and ``reason`` (``s``) on failure. Response
+        0 is success or a step, 1 is cancellation, and 2 is failure.
+        Step and credential results are as documented on Acquire.
+    -->
+    <method name="Choose">
+      <arg type="o" name="handle" direction="in"/>
+      <arg type="t" name="token" direction="in"/>
+      <arg type="t" name="candidate_id" direction="in"/>
+      <arg type="u" name="response" direction="out"/>
+      <arg type="a{sv}" name="results" direction="out"/>
+    </method>
+
+    <!--
+        Ready:
+        @handle: Operation Request path
+        @token: PIN-pad step token
+        @response: Numeric response
+        @results: Result vardict
+
+        Currently returns response 2, ``reason=unsupported``.
+        Results include ``instance`` (``t``), the service operation instance (zero
+        when no operation is known), and ``reason`` (``s``) on failure. Response
+        0 is success or a step, 1 is cancellation, and 2 is failure.
+    -->
+    <method name="Ready">
+      <arg type="o" name="handle" direction="in"/>
+      <arg type="t" name="token" direction="in"/>
+      <arg type="u" name="response" direction="out"/>
+      <arg type="a{sv}" name="results" direction="out"/>
+    </method>
+
+    <!--
+        SubmitPin:
+        @handle: Operation Request path
+        @token: PIN step token
+        @pin: Index of the PIN descriptor in the Unix FD list
+        @response: Numeric response
+        @results: Result vardict
+
+        Currently returns response 2, ``reason=unsupported``. No PIN is read.
+        Results include ``instance`` (``t``), the service operation instance (zero
+        when no operation is known), and ``reason`` (``s``) on failure. Response
+        0 is success or a step, 1 is cancellation, and 2 is failure.
+    -->
+    <method name="SubmitPin">
+      <annotation name="org.gtk.GDBus.C.UnixFD" value="true"/>
+      <arg type="o" name="handle" direction="in"/>
+      <arg type="t" name="token" direction="in"/>
+      <arg type="h" name="pin" direction="in"/>
+      <arg type="u" name="response" direction="out"/>
+      <arg type="a{sv}" name="results" direction="out"/>
+    </method>
+
+    <!--
+        Confirm:
+        @handle: Operation Request path
+        @token: Confirmation step token
+        @accepted: Whether the final-try warning was accepted
+        @response: Numeric response
+        @results: Result vardict
+
+        Currently returns response 2, ``reason=unsupported``.
+        Results include ``instance`` (``t``), the service operation instance (zero
+        when no operation is known), and ``reason`` (``s``) on failure. Response
+        0 is success or a step, 1 is cancellation, and 2 is failure.
+    -->
+    <method name="Confirm">
+      <arg type="o" name="handle" direction="in"/>
+      <arg type="t" name="token" direction="in"/>
+      <arg type="b" name="accepted" direction="in"/>
+      <arg type="u" name="response" direction="out"/>
+      <arg type="a{sv}" name="results" direction="out"/>
+    </method>
+
+    <!--
+        Cancel:
+        @handle: Operation Request path
+
+        Cancels discovery or an outstanding step exactly once. Unknown or ended
+        handles succeed. Pending calls answer cancellation; an outstanding step
+        ends with OperationEnded(1). There are no result arguments.
+    -->
+    <method name="Cancel">
+      <arg type="o" name="handle" direction="in"/>
+    </method>
+
+    <!--
+        GetCapabilities:
+        @app_id: Frontend-established app ID
+        @options: Reserved extensible options
+        @capabilities: Capability vardict
+
+        Reports ``purposes`` (``as``: client_auth, signing, email, ssh),
+        ``operations`` (``as``: sign), ``mechanisms`` (``as``: available signing
+        mechanisms), and ``protected_authentication_path`` (``b``: a token has a
+        PIN pad). Service display availability is excluded. Sign is declared but
+        returns unsupported until slice 2b.
+    -->
+    <method name="GetCapabilities">
+      <arg type="s" name="app_id" direction="in"/>
+      <arg type="a{sv}" name="options" direction="in"/>
+      <arg type="a{sv}" name="capabilities" direction="out"/>
+    </method>
+
+    <!--
+        OperationUpdated:
+        @handle: Operation Request path
+        @instance: Operation instance
+        @token: Current live step token
+        @view: Latest chooser view; keys as on Acquire
+
+        Updates a displayed step without replacing its token. Pre-step updates
+        are coalesced into the newest view in the step reply.
+    -->
+    <signal name="OperationUpdated">
+      <arg type="o" name="handle"/>
+      <arg type="t" name="instance"/>
+      <arg type="t" name="token"/>
+      <arg type="a{sv}" name="view"/>
+    </signal>
+
+    <!--
+        OperationEnded:
+        @handle: Operation Request path
+        @instance: Operation instance
+        @response: Terminal response: 0 success, 1 cancellation, 2 failure
+        @results: Terminal result keys and instance as on Acquire
+
+        Ends an operation while a step is outstanding. Timeout is response 2,
+        ``reason=timeout``; session loss and core failures carry their reason.
+        No operation ends more than once. Match both handle and instance.
+    -->
+    <signal name="OperationEnded">
+      <arg type="o" name="handle"/>
+      <arg type="t" name="instance"/>
+      <arg type="u" name="response"/>
+      <arg type="a{sv}" name="results"/>
+    </signal>
+
+    <!--
+        SessionInvalidated:
+        @session_handle: Granted session object path
+        @reason: Invalidation reason: expired, token_removed, policy, backend_gone or error
+
+        Emitted for a granted session that can no longer be used. In-flight
+        operations end too. The frontend closes the Session object. Frontend
+        owner loss silently drops sessions and tokens; no event is sent to its
+        replacement.
+    -->
+    <signal name="SessionInvalidated">
+      <arg type="o" name="session_handle"/>
+      <arg type="s" name="reason"/>
+    </signal>
+
+  </interface>
+</node>

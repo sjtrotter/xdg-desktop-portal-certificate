@@ -10,6 +10,7 @@
  */
 
 #include "certificate-impl.h"
+#include "handler-impl.h"
 
 #include <string.h>
 
@@ -37,6 +38,7 @@ struct CertificateImpl
 	GDBusConnection* connection;
 	XdpImplExperimentalCertificate1* skeleton;
 	XccContext* context;
+	CertificateHandler* handler;
 	guint64 owner_generation;
 	gboolean shutdown_complete;
 
@@ -64,6 +66,7 @@ static void set_frontend_owner(CertificateImpl* impl, const char* owner)
 		return;
 
 	xcc_context_set_owner_generation(impl->context, ++impl->owner_generation);
+	certificate_handler_owner_changed(impl->handler);
 
 	/* Grants belong to the frontend connection that created them and cannot pass to a replacement. */
 	invalidate_foreign_sessions(impl, owner);
@@ -218,6 +221,8 @@ static void on_frontend_vanished(GDBusConnection* connection, const char* name, 
 void certificate_impl_session_forget(CertificateImplSession* session)
 {
 	CertificateImpl* impl = certificate_impl_singleton;
+
+	certificate_handler_session_closed(impl != NULL ? impl->handler : NULL, session, "no_such_session");
 
 	/* Session.Close() must also cancel the session's pending windows and operations. */
 	if (impl != NULL)
@@ -488,7 +493,7 @@ static CertificateImplSession* lookup_session(CertificateImpl* impl, const char*
 
 	*code = "no_such_session";
 
-	if (session == NULL || xcc_session_is_closed(session->core))
+	if (session == NULL || session->handler || xcc_session_is_closed(session->core))
 		return NULL;
 
 	/* Bind each session to its app_id to prevent cross-application key use. */
@@ -1090,8 +1095,11 @@ static void on_session_invalidated(CertificateImplSession* session, const char* 
 {
 	CertificateImpl* impl = user_data;
 
-	xdp_impl_experimental_certificate1_emit_session_invalidated(impl->skeleton, session->id,
-	                                                            reason);
+	if (session->handler)
+		certificate_handler_session_invalidated(impl->handler, session, reason);
+	else
+		xdp_impl_experimental_certificate1_emit_session_invalidated(impl->skeleton, session->id,
+		                                                            reason);
 }
 
 CertificateImpl* certificate_impl_new(GDBusConnection* connection, CertificateTokens* tokens,
@@ -1194,4 +1202,26 @@ void certificate_impl_free(CertificateImpl* impl)
 	g_clear_object(&impl->connection);
 	xcc_context_unref(impl->context);
 	g_free(impl);
+}
+
+XccContext* certificate_impl_context(CertificateImpl* impl)
+{
+	return impl->context;
+}
+guint64 certificate_impl_generation(CertificateImpl* impl)
+{
+	return impl->owner_generation;
+}
+CertificateImplSession* certificate_impl_find_session(CertificateImpl* impl, const char* path)
+{
+	return g_hash_table_lookup(impl->sessions, path);
+}
+void certificate_impl_add_session(CertificateImpl* impl, CertificateImplSession* session)
+{
+	g_hash_table_insert(impl->sessions, g_strdup(session->id), session);
+	g_signal_connect(session, "invalidated", G_CALLBACK(on_session_invalidated), impl);
+}
+void certificate_impl_set_handler(CertificateImpl* impl, CertificateHandler* handler)
+{
+	impl->handler = handler;
 }

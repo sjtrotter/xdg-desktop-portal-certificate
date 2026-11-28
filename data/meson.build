@@ -5,6 +5,7 @@
 install_data(
   [
     'org.freedesktop.impl.portal.experimental.Certificate1.xml',
+    'org.freedesktop.handler.portal.experimental.Certificate1.xml',
     'org.freedesktop.impl.portal.Request.xml',
     'org.freedesktop.impl.portal.Session.xml',
   ],
